@@ -226,3 +226,4 @@ repro_*.py
 verify_*.py
 debug_*.py
 dummy/
+output/
