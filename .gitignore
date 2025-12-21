@@ -225,5 +225,11 @@ datalake/
 repro_*.py
 verify_*.py
 debug_*.py
+manual_*.py
+inspect_*.py
+check_*.py
 dummy/
 output/
+
+# macOS
+.DS_Store

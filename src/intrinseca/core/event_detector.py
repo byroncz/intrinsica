@@ -1,540 +1,390 @@
 """
-Detector de eventos Directional Change (DC) optimizado con Numba.
+Motor de Detección Directional Change (DC) de Alta Frecuencia.
 
-El paradigma DC transforma series temporales de precios en una secuencia
-de eventos discretos basados en cambios porcentuales significativos.
+Refactorizado para integración nativa con el stack moderno de datos (Polars/Arrow).
+Implementa detección de Multi-Runs (Overshoots dinámicos) y métricas de velocidad.
 
-Referencias:
-    - Guillaume et al. (1997). From the bird's eye to the microscope.
-    - Glattfelder et al. (2011). Patterns in high-frequency FX data.
+Principios de Diseño:
+    - Columnar-First: Los datos se mantienen en arrays contiguos el mayor tiempo posible.
+    - Zero-Copy: Minimización de transferencias de memoria entre Python y C (Numba).
+    - Type-Strict: Manejo riguroso de tipos int64 para timestamps (microsegundos).
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import IntEnum
-from typing import Optional, Sequence, Union
+from typing import Optional, Union, Any
 
 import numpy as np
-from numba import njit, prange
-from numpy.typing import NDArray
-
-from intrinseca.core.bridging import extract_price_column
+import polars as pl
+from numba import njit, int8, int64, float64
 
 
-class TrendState(IntEnum):
-    """Estado de tendencia del autómata DC."""
-    
-    UNDEFINED = 0
-    UPTREND = 1
-    DOWNTREND = -1
+# =============================================================================
+# 1. KERNEL NUMBA OPTIMIZADO (CORE)
+# =============================================================================
 
-
-@dataclass(frozen=True, slots=True)
-class DCEvent:
+@njit(cache=True, fastmath=True, nogil=True)
+def _dc_core_algorithm_optimized(
+    prices: NDArray[np.float64],      # float64
+    timestamps: NDArray[np.int64],  # int64 (microsegundos desde epoch)
+    theta: float
+) -> tuple[
+    NDArray[np.int64],    # 0: event_indices
+    NDArray[np.int64],    # 1: event_timestamps
+    NDArray[np.float64],  # 2: event_prices
+    NDArray[np.int8],    # 3: event_types
+    NDArray[np.int64],    # 4: event_durations (tiempo)
+    NDArray[np.int64],    # 5: extreme_indices
+    NDArray[np.float64],  # 6: extreme_prices
+    NDArray[np.int64],    # 7: extreme_timestamps
+    NDArray[np.float64],  # 8: overshoots
+    NDArray[np.float64],  # 9: returns_price
+    NDArray[np.float64],  # 10: returns_speed
+    NDArray[np.int64],    # 11: os_event_counts (runs totales por evento)
+    NDArray[np.int8],     # 12: trend_states (tick-by-tick)
+    NDArray[np.int8],     # 13: os_event_flags (tick-by-tick, magnitud del run)
+    int                   # 14: n_events
+]:
     """
-    Representa un evento de Directional Change.
-    
-    Attributes:
-        index: Índice en la serie original donde ocurrió el evento.
-        price: Precio en el momento del evento.
-        timestamp: Timestamp opcional (si está disponible).
-        event_type: Tipo de evento ('upturn' o 'downturn').
-        extreme_index: Índice del extremo previo (máximo o mínimo local).
-        extreme_price: Precio del extremo previo.
-        dc_return: Retorno porcentual del movimiento DC.
-        dc_duration: Duración en observaciones del evento DC.
+    Kernel computacional compilado JIT.
+    Implementa máquina de estados finitos con detección de bucles iterativos para 
+    rupturas múltiples (Flash Events).
     """
+    n = len(prices)
     
-    index: int
-    price: float
-    event_type: str  # 'upturn' o 'downturn'
-    extreme_index: int
-    extreme_price: float
-    dc_return: float
-    dc_duration: int
-    timestamp: Optional[np.datetime64] = None
+    # Constantes pre-calculadas para evitar divisiones en el bucle
+    threshold_mult_up = 1.0 + theta
+    threshold_mult_down = 1.0 - theta
+    
+    # Asignación de memoria (Allocación única)
+    # Arrays de Eventos (Sparse) - Tamaño máximo N
+    event_indices = np.empty(n, dtype=np.int64)
+    event_timestamps = np.empty(n, dtype=np.int64)
+    event_prices = np.empty(n, dtype=np.float64)
+    event_types = np.empty(n, dtype=np.int8)
+    event_durations = np.empty(n, dtype=np.int64)
+    
+    extreme_indices = np.empty(n, dtype=np.int64)
+    extreme_prices = np.empty(n, dtype=np.float64)
+    extreme_timestamps = np.empty(n, dtype=np.int64)
+    
+    overshoots = np.empty(n, dtype=np.float64)
+    returns_price = np.empty(n, dtype=np.float64)
+    returns_speed = np.empty(n, dtype=np.float64)
+    os_event_counts = np.zeros(n, dtype=np.int64)
+    
+    # Arrays de Ticks (Dense) - Tamaño N exacto
+    trend_states = np.zeros(n, dtype=np.int8)
+    os_event_flags = np.zeros(n, dtype=np.int8)
+    
+    # Estado inicial
+    current_trend = 0 # 0=Indefinido, 1=Alza, -1=Baja
+    
+    ext_high_price = prices[0]
+    ext_high_idx = 0
+    ext_low_price = prices[0]
+    ext_low_idx = 0
+    
+    # Estado para lógica de Runs (Overshoots dinámicos)
+    last_os_ref_price = prices[0]
+    current_event_run_count = 0
+    
+    # Inicialización del primer evento (ficticio/ancla)
+    tao = 0  # Es la variable de tao
+    event_prices[0] = prices[0]
+    event_indices[0] = 0
+    event_timestamps[0] = timestamps[0]
+    event_types[0] = 0
+    
+    # --- Bucle Principal (Tick a Tick) ---
+    for t in range(1, n):
+        p = prices[t]
+        ts_val = timestamps[t]
+        
+        # 1. Actualización de Extremos
+        if p > ext_high_price:
+            ext_high_price = p
+            ext_high_idx = t
+        if p < ext_low_price:
+            ext_low_price = p
+            ext_low_idx = t
+            
+        new_trend = 0 
+        
+        # 2. Detección de Cambio de Tendencia (DC)
+        if current_trend == 0:
+            if p >= ext_low_price * threshold_mult_up:
+                new_trend = 1
+            elif p <= ext_high_price * threshold_mult_down:
+                new_trend = -1
+        elif current_trend == 1:
+            if p <= ext_high_price * threshold_mult_down:
+                new_trend = -1
+        else: # current_trend == -1
+            if p >= ext_low_price * threshold_mult_up:
+                new_trend = 1
 
+        # 3. Procesamiento
+        if new_trend != 0:
+            # --- Evento Confirmado ---
+            
+            # Resolver extremo previo según dirección
+            if new_trend == 1: # Reversión a Alza -> El evento previo fue Baja (o inicio) -> Usamos Low
+                prev_ext_idx = ext_low_idx
+                prev_ext_price = ext_low_price
+                prev_ext_time = timestamps[ext_low_idx]
+                # Reset opuesto
+                ext_high_price = p
+                ext_high_idx = t
+            else: # Reversión a Baja -> El evento previo fue Alza -> Usamos High
+                prev_ext_idx = ext_high_idx
+                prev_ext_price = ext_high_price
+                prev_ext_time = timestamps[ext_high_idx]
+                # Reset opuesto
+                ext_low_price = p
+                ext_low_idx = t
+            
+            # Cálculos de cierre del evento anterior
+            price_move = prev_ext_price - event_prices[tao]
+            prev_evt_p = event_prices[tao]
+            
+            # Métricas almacenadas en índice ev_k (el evento que "generó" este extremo)
+            overshoots[tao] = price_move # Overshoot absoluto
+            returns_price[tao] = (price_move / prev_evt_p) if prev_evt_p != 0 else 0.0
+            os_event_counts[tao] = current_event_run_count
+            
+            # Registrar NUEVO evento
+            tao += 1
+            
+            event_indices[tao] = t
+            event_prices[tao] = p
+            event_timestamps[tao] = ts_val
+            event_types[tao] = new_trend
+            
+            extreme_indices[tao] = prev_ext_idx
+            extreme_prices[tao] = prev_ext_price
+            extreme_timestamps[tao] = prev_ext_time
+            
+            # Duración y Velocidad (del movimiento de ruptura actual)
+            dt = ts_val - prev_ext_time
+            event_durations[tao] = dt
+            
+            # Velocidad: Unidades de precio por segundo
+            if dt > 0:
+                returns_speed[tao] = (p - prev_ext_price) / (dt / 1_000_000.0)
+            else:
+                returns_speed[tao] = 0.0
+
+            # Actualizar estado global
+            current_trend = new_trend
+            last_os_ref_price = p # Reset referencia runs
+            current_event_run_count = 0
+            os_event_flags[t] = 0 # El tick de evento DC no cuenta como run extra
+            
+        else:
+            # --- Lógica de Multi-Runs (Overshoots dentro de tendencia) ---
+            run_increments = 0
+            
+            if current_trend == 1: # Alza
+                next_thresh = last_os_ref_price * threshold_mult_up
+                if p >= next_thresh:
+                    # Bucle iterativo eficiente (evita logs)
+                    temp_ref = last_os_ref_price
+                    while p >= next_thresh:
+                        run_increments += 1
+                        temp_ref = next_thresh
+                        next_thresh = temp_ref * threshold_mult_up
+                    
+                    last_os_ref_price = temp_ref
+                    current_event_run_count += run_increments
+                    os_event_flags[t] = int8(run_increments) # Positivo
+                    
+            elif current_trend == -1: # Baja
+                next_thresh = last_os_ref_price * threshold_mult_down
+                if p <= next_thresh:
+                    temp_ref = last_os_ref_price
+                    while p <= next_thresh:
+                        run_increments += 1
+                        temp_ref = next_thresh
+                        next_thresh = temp_ref * threshold_mult_down
+                        
+                    last_os_ref_price = temp_ref
+                    current_event_run_count += run_increments
+                    os_event_flags[t] = int8(-run_increments) # Negativo
+
+        trend_states[t] = current_trend
+
+    # Retornar vistas recortadas hasta el último evento válido
+    return (
+        event_indices[:tao+1],
+        event_timestamps[:tao+1],
+        event_prices[:tao+1],
+        event_types[:tao+1],
+        event_durations[:tao+1],
+        extreme_indices[:tao+1],
+        extreme_prices[:tao+1],
+        extreme_timestamps[:tao+1],
+        overshoots[:tao+1],
+        returns_price[:tao+1],
+        returns_speed[:tao+1],
+        os_event_counts[:tao+1],
+        trend_states,     # Array completo N
+        os_event_flags,   # Array completo N
+        tao
+    )
+
+
+# =============================================================================
+# 2. ESTRUCTURA DE RESULTADOS (POLAR FRIENDLY)
+# =============================================================================
 
 @dataclass
 class DCResult:
     """
-    Resultado completo del análisis Directional Change.
-    
-    Attributes:
-        events: Lista de eventos DC detectados.
-        trends: Array con el estado de tendencia en cada punto.
-        extremes_high: Índices de máximos locales (extremos en downtrend).
-        extremes_low: Índices de mínimos locales (extremos en uptrend).
-        overshoot_values: Valores de overshoot en cada punto.
+    Contenedor de resultados optimizado para acceso columnar.
+    Mantiene los datos en numpy arrays para evitar overhead de objetos.
     """
-    
-    events: list[DCEvent] = field(default_factory=list)
-    trends: NDArray[np.int8] = field(default_factory=lambda: np.array([], dtype=np.int8))
-    extremes_high: NDArray[np.int64] = field(default_factory=lambda: np.array([], dtype=np.int64))
-    extremes_low: NDArray[np.int64] = field(default_factory=lambda: np.array([], dtype=np.int64))
-    overshoot_values: NDArray[np.float64] = field(default_factory=lambda: np.array([], dtype=np.float64))
-    
+    # Métricas de Eventos (Longitud = n_events)
+    event_indices: NDArray[np.int64]       # 0: event_indices
+    event_timestamps: NDArray[np.int64]    # 1: event_timestamps
+    event_prices: NDArray[np.float64]      # 2: event_prices
+    event_types: NDArray[np.int8]          # 3: event_types
+    event_durations: NDArray[np.int64]     # 4: event_durations (tiempo)
+    extreme_indices: NDArray[np.int64]     # 5: extreme_indices
+    extreme_prices: NDArray[np.float64]    # 6: extreme_prices
+    extreme_timestamps: NDArray[np.int64]  # 7: extreme_timestamps
+    overshoots: NDArray[np.float64]        # 8: overshoots
+    returns_price: NDArray[np.float64]     # 9: returns_price
+    returns_speed: NDArray[np.float64]     # 10: returns_speed
+    os_event_counts: NDArray[np.int64]     # 11: os_event_counts (runs totales por evento)
+
+    # Métricas de Ticks (Longitud = n_ticks original)
+    trend_states: NDArray[np.int8]         # 12: trend_states (tick-by-tick)
+    os_event_flags: NDArray[np.int8]       # 13: os_event_flags (tick-by-tick, magnitud del run)
+
     @property
     def n_events(self) -> int:
-        """Número total de eventos DC."""
-        return len(self.events)
-    
-    @property
-    def n_upturns(self) -> int:
-        """Número de eventos upturn."""
-        return sum(1 for e in self.events if e.event_type == "upturn")
-    
-    @property
-    def n_downturns(self) -> int:
-        """Número de eventos downturn."""
-        return sum(1 for e in self.events if e.event_type == "downturn")
+        return len(self.event_indices)
+
+    def events_to_polars(self) -> pl.DataFrame:
+        """
+        Genera un DataFrame de Polars con el resumen de EVENTOS.
+        Ideal para análisis estadístico de la distribución de eventos.
+        """
+        return pl.DataFrame({
+            "event_idx": self.event_indices,
+            "timestamp": self.event_timestamps, # Polars lo interpretará como int64 (us)
+            "price": self.event_prices,
+            "type": self.event_types, # 1=Up, -1=Down
+            "duration_us": self.event_durations,
+            "ext_price": self.extreme_prices,
+            "ext_idx": self.extreme_indices,
+            "overshoot": self.overshoots,
+            "return": self.returns_price,
+            "velocity": self.returns_speed,
+            "runs_count": self.os_event_counts
+        }).with_columns([
+            pl.col("timestamp").cast(pl.Datetime("us")),
+            pl.col("type").map_elements(lambda x: "upturn" if x == 1 else "downturn", return_dtype=pl.String).alias("type_desc")
+        ])
+
+    def ticks_to_polars(self, original_df: Optional[pl.DataFrame] = None) -> pl.DataFrame:
+        """
+        Genera un DataFrame de Polars tick-a-tick.
+        Si se pasa el DF original, hace un join horizontal (muy eficiente en Polars).
+        """
+        dc_cols = pl.DataFrame({
+            "dc_trend": self.trend_states,
+            "dc_run_flag": self.os_event_flags
+        })
+        
+        if original_df is not None:
+            if len(original_df) != len(dc_cols):
+                raise ValueError("Longitud del DF original no coincide con resultados DC")
+            return pl.concat([original_df, dc_cols], how="horizontal")
+        return dc_cols
 
 
 # =============================================================================
-# KERNEL NUMBA: Algoritmo DC de alto rendimiento
-# =============================================================================
-
-@njit(cache=True, fastmath=True)
-def _dc_core_algorithm(
-    prices: NDArray[np.float64],
-    theta: float
-) -> tuple[
-    NDArray[np.int64],    # event_indices
-    NDArray[np.float64],  # event_prices
-    NDArray[np.int8],     # event_types (1=upturn, -1=downturn)
-    NDArray[np.int64],    # extreme_indices
-    NDArray[np.float64],  # extreme_prices
-    NDArray[np.int8],     # trend_states
-    int                   # n_events
-]:
-    """
-    Kernel Numba para detección de eventos DC.
-    
-    Este es un autómata de estados finitos que recorre la serie de precios
-    y detecta cambios de tendencia cuando el movimiento supera el umbral theta.
-    
-    Args:
-        prices: Array de precios (debe ser float64).
-        theta: Umbral de cambio porcentual (ej: 0.01 = 1%).
-    
-    Returns:
-        Tupla con arrays de eventos detectados y estados de tendencia.
-    """
-    n = len(prices)
-    
-    # Pre-allocación de arrays de salida (tamaño máximo teórico)
-    max_events = n // 2 + 1
-    event_indices = np.empty(max_events, dtype=np.int64)
-    event_prices = np.empty(max_events, dtype=np.float64)
-    event_types = np.empty(max_events, dtype=np.int8)
-    extreme_indices = np.empty(max_events, dtype=np.int64)
-    extreme_prices = np.empty(max_events, dtype=np.float64)
-    
-    # Estado de tendencia para cada observación
-    trend_states = np.zeros(n, dtype=np.int8)
-    
-    # Inicialización del autómata
-    current_trend = np.int8(0)  # 0=undefined, 1=uptrend, -1=downtrend
-    extreme_high_price = prices[0]
-    extreme_high_idx = 0
-    extreme_low_price = prices[0]
-    extreme_low_idx = 0
-    
-    n_events = 0
-    
-    # Bucle principal del autómata DC
-    for i in range(1, n):
-        p = prices[i]
-        
-        # Actualizar extremos
-        if p > extreme_high_price:
-            extreme_high_price = p
-            extreme_high_idx = i
-        if p < extreme_low_price:
-            extreme_low_price = p
-            extreme_low_idx = i
-        
-        if current_trend == 0:
-            # Estado inicial: determinar primera tendencia
-            up_change = (p - extreme_low_price) / extreme_low_price
-            down_change = (extreme_high_price - p) / extreme_high_price
-            
-            if up_change >= theta:
-                current_trend = 1  # Uptrend
-                # Registrar evento upturn
-                event_indices[n_events] = i
-                event_prices[n_events] = p
-                event_types[n_events] = 1
-                extreme_indices[n_events] = extreme_low_idx
-                extreme_prices[n_events] = extreme_low_price
-                n_events += 1
-                # Reset extremo alto
-                extreme_high_price = p
-                extreme_high_idx = i
-                
-            elif down_change >= theta:
-                current_trend = -1  # Downtrend
-                # Registrar evento downturn
-                event_indices[n_events] = i
-                event_prices[n_events] = p
-                event_types[n_events] = -1
-                extreme_indices[n_events] = extreme_high_idx
-                extreme_prices[n_events] = extreme_high_price
-                n_events += 1
-                # Reset extremo bajo
-                extreme_low_price = p
-                extreme_low_idx = i
-        
-        elif current_trend == 1:
-            # En uptrend: buscar downturn
-            down_change = (extreme_high_price - p) / extreme_high_price
-            
-            if down_change >= theta:
-                # Downturn confirmado
-                current_trend = -1
-                event_indices[n_events] = i
-                event_prices[n_events] = p
-                event_types[n_events] = -1
-                extreme_indices[n_events] = extreme_high_idx
-                extreme_prices[n_events] = extreme_high_price
-                n_events += 1
-                # Reset extremo bajo
-                extreme_low_price = p
-                extreme_low_idx = i
-        
-        else:  # current_trend == -1
-            # En downtrend: buscar upturn
-            up_change = (p - extreme_low_price) / extreme_low_price
-            
-            if up_change >= theta:
-                # Upturn confirmado
-                current_trend = 1
-                event_indices[n_events] = i
-                event_prices[n_events] = p
-                event_types[n_events] = 1
-                extreme_indices[n_events] = extreme_low_idx
-                extreme_prices[n_events] = extreme_low_price
-                n_events += 1
-                # Reset extremo alto
-                extreme_high_price = p
-                extreme_high_idx = i
-        
-        trend_states[i] = current_trend
-    
-    return (
-        event_indices[:n_events],
-        event_prices[:n_events],
-        event_types[:n_events],
-        extreme_indices[:n_events],
-        extreme_prices[:n_events],
-        trend_states,
-        n_events
-    )
-
-
-@njit(cache=True, fastmath=True, parallel=True)
-def _compute_overshoot_batch(
-    prices: NDArray[np.float64],
-    event_indices: NDArray[np.int64],
-    extreme_indices: NDArray[np.int64],
-    event_types: NDArray[np.int8],
-    theta: float
-) -> NDArray[np.float64]:
-    """
-    Calcula el overshoot para cada evento DC en paralelo.
-    
-    Overshoot mide cuánto se extiende el movimiento más allá del umbral theta
-    antes de que ocurra el siguiente evento DC.
-    """
-    n_events = len(event_indices)
-    n_prices = len(prices)
-    overshoots = np.zeros(n_events, dtype=np.float64)
-    
-    for i in prange(n_events):
-        event_idx = event_indices[i]
-        event_type = event_types[i]
-        
-        # Determinar el rango de búsqueda para el overshoot
-        if i < n_events - 1:
-            end_idx = event_indices[i + 1]
-        else:
-            end_idx = n_prices
-        
-        if event_type == 1:  # Upturn -> buscar máximo después
-            max_price = prices[event_idx]
-            for j in range(event_idx, end_idx):
-                if prices[j] > max_price:
-                    max_price = prices[j]
-            # Overshoot = movimiento adicional después del evento
-            overshoots[i] = (max_price - prices[event_idx]) / prices[event_idx]
-        else:  # Downturn -> buscar mínimo después
-            min_price = prices[event_idx]
-            for j in range(event_idx, end_idx):
-                if prices[j] < min_price:
-                    min_price = prices[j]
-            overshoots[i] = (prices[event_idx] - min_price) / prices[event_idx]
-    
-    return overshoots
-
-
-# =============================================================================
-# CLASE PRINCIPAL: DCDetector
+# 3. DETECTOR (CLASE PRINCIPAL)
 # =============================================================================
 
 class DCDetector:
     """
-    Detector de eventos Directional Change de alto rendimiento.
-    
-    El paradigma DC transforma series de precios continuos en eventos discretos,
-    capturando la microestructura del mercado de manera invariante al tiempo.
-    
-    Args:
-        theta: Umbral de cambio porcentual para detectar eventos.
-               Valores típicos: 0.001 (0.1%), 0.01 (1%), 0.02 (2%).
-        compute_overshoot: Si calcular overshoot para cada evento.
-    
-    Example:
-        >>> detector = DCDetector(theta=0.01)
-        >>> result = detector.detect(prices)
-        >>> print(f"Detectados {result.n_events} eventos DC")
-        >>> for event in result.events[:5]:
-        ...     print(f"{event.event_type} en índice {event.index}")
+    Detector DC compatible con el ecosistema Apache Arrow / Polars.
     """
     
-    def __init__(self, theta: float = 0.01, compute_overshoot: bool = True):
-        if not 0 < theta < 1:
-            raise ValueError(f"theta debe estar en (0, 1), recibido: {theta}")
+    def __init__(self, theta: float):
+        self.theta = float(theta)
+        self._compiled = False
         
-        self.theta = theta
-        self.compute_overshoot = compute_overshoot
-        self._is_compiled = False
-    
-    def _ensure_compiled(self) -> None:
-        """Fuerza la compilación JIT de Numba en el primer uso."""
-        if not self._is_compiled:
-            # Warm-up con array pequeño
-            dummy = np.array([1.0, 1.01, 0.99, 1.02], dtype=np.float64)
-            _dc_core_algorithm(dummy, self.theta)
-            self._is_compiled = True
-    
-    def detect(
-        self,
-        prices: Union[NDArray, Sequence[float], "pl.Series", "pl.DataFrame"],
-        timestamps: Optional[NDArray] = None,
-        price_column: str = "close"
-    ) -> DCResult:
+    def _warmup(self):
+        """Compilación forzada con datos dummy."""
+        if not self._compiled:
+            p = np.array([100.0, 101.0, 99.0], dtype=np.float64)
+            t = np.array([1000, 2000, 3000], dtype=np.int64)
+            _dc_core_algorithm_optimized(p, t, self.theta)
+            self._compiled = True
+
+    def detect(self, 
+               df: pl.DataFrame, 
+               price_col: str = "price", 
+               time_col: str = "timestamp") -> DCResult:
         """
-        Detecta eventos DC en una serie de precios.
+        Ejecuta la detección sobre un Polars DataFrame.
         
-        Args:
-            prices: Serie de precios. Acepta:
-                - numpy array
-                - lista de Python
-                - Polars Series
-                - Polars DataFrame (extrae columna especificada)
-            timestamps: Array opcional de timestamps para asociar a eventos.
-            price_column: Nombre de columna si prices es DataFrame.
-        
-        Returns:
-            DCResult con eventos detectados y métricas asociadas.
-        
-        Raises:
-            ValueError: Si la serie tiene menos de 2 elementos.
+        Requisitos:
+            - time_col debe ser convertible a Int64 (microsegundos).
+              Idealmente ya debe ser Datetime[μs].
         """
-        # Convertir a numpy
-        prices_np = extract_price_column(prices, price_column)
+        self._warmup()
         
-        if len(prices_np) < 2:
-            raise ValueError("La serie de precios debe tener al menos 2 elementos")
+        # 1. Extracción Zero-Copy (o Low-Copy) hacia Numpy
+        # Aseguramos que el tiempo esté en microsegundos y casteado a i64
+        # Polars maneja datetimes internamente como i64
         
-        # Asegurar tipo float64 para Numba
-        if prices_np.dtype != np.float64:
-            prices_np = prices_np.astype(np.float64)
-        
-        # Compilación JIT si es primera ejecución
-        self._ensure_compiled()
-        
-        # Ejecutar kernel Numba
+        try:
+            # Verificamos tipo de tiempo
+            dtype = df.schema[time_col]
+            
+            if isinstance(dtype, (pl.Datetime, pl.Duration)):
+                 # Extraer buffer subyacente directamente si es posible
+                 # cast(pl.Int64) en Polars es muy rápido (reinterpretación de bits para datetime)
+                 ts_series = df.get_column(time_col).cast(pl.Int64)
+            else:
+                # Si es string u otro, intentar conversión (más lento)
+                raise TypeError(f"Columna {time_col} debe ser Datetime o Duration, recibido: {dtype}")
+
+            prices_np = df.get_column(price_col).cast(pl.Float64).to_numpy()
+            timestamps_np = ts_series.to_numpy()
+            
+        except Exception as e:
+            raise ValueError(f"Error preparando datos para Numba: {e}")
+
+        # 2. Ejecución del Kernel
         (
-            event_indices,
-            event_prices,
-            event_types,
-            extreme_indices,
-            extreme_prices,
-            trend_states,
-            n_events
-        ) = _dc_core_algorithm(prices_np, self.theta)
+            ev_idx, ev_ts, ev_pr, ev_ty, ev_dur,
+            ex_idx, ex_pr, ex_ts,
+            os_val, ret_pr, ret_spd, os_cnt,
+            trend_st, os_flags,
+            n_ev
+        ) = _dc_core_algorithm_optimized(prices_np, timestamps_np, self.theta)
         
-        # Calcular overshoot si se solicita
-        if self.compute_overshoot and n_events > 0:
-            overshoots = _compute_overshoot_batch(
-                prices_np, event_indices, extreme_indices, event_types, self.theta
-            )
-        else:
-            overshoots = np.zeros(n_events, dtype=np.float64)
-        
-        # Construir lista de eventos
-        events = []
-        for i in range(n_events):
-            idx = int(event_indices[i])
-            ext_idx = int(extreme_indices[i])
-            
-            # Calcular retorno DC
-            dc_return = (event_prices[i] - extreme_prices[i]) / extreme_prices[i]
-            dc_duration = idx - ext_idx
-            
-            # Timestamp si está disponible
-            ts = timestamps[idx] if timestamps is not None else None
-            
-            event = DCEvent(
-                index=idx,
-                price=float(event_prices[i]),
-                event_type="upturn" if event_types[i] == 1 else "downturn",
-                extreme_index=ext_idx,
-                extreme_price=float(extreme_prices[i]),
-                dc_return=float(dc_return),
-                dc_duration=dc_duration,
-                timestamp=ts
-            )
-            events.append(event)
-        
-        # Separar extremos por tipo
-        extremes_high = extreme_indices[event_types == -1]
-        extremes_low = extreme_indices[event_types == 1]
-        
+        # 3. Empaquetado de Resultados
         return DCResult(
-            events=events,
-            trends=trend_states,
-            extremes_high=extremes_high,
-            extremes_low=extremes_low,
-            overshoot_values=overshoots
+            event_indices=ev_idx,
+            event_timestamps=ev_ts,
+            event_prices=ev_pr,
+            event_types=ev_ty,
+            event_durations=ev_dur,
+            extreme_indices=ex_idx,
+            extreme_prices=ex_pr,
+            extreme_timestamps=ex_ts,
+            overshoots=os_val,
+            returns_price=ret_pr,
+            returns_speed=ret_spd,
+            os_event_counts=os_cnt,
+            trend_states=trend_st,
+            os_event_flags=os_flags
         )
-    
-    def detect_streaming(
-        self,
-        new_price: float,
-        state: Optional[dict] = None
-    ) -> tuple[Optional[DCEvent], dict]:
-        """
-        Detección incremental para live-trading.
-        
-        Procesa un precio a la vez, manteniendo estado entre llamadas.
-        Ideal para feeds en tiempo real.
-        
-        Args:
-            new_price: Nuevo precio a procesar.
-            state: Estado previo del detector (None para inicializar).
-        
-        Returns:
-            Tupla (evento_detectado, nuevo_estado).
-            evento_detectado es None si no hubo evento.
-        
-        Example:
-            >>> detector = DCDetector(theta=0.01)
-            >>> state = None
-            >>> for price in live_feed:
-            ...     event, state = detector.detect_streaming(price, state)
-            ...     if event:
-            ...         print(f"Evento: {event.event_type}")
-        """
-        if state is None:
-            # Inicializar estado
-            state = {
-                "index": 0,
-                "trend": 0,  # 0=undefined, 1=up, -1=down
-                "extreme_high": new_price,
-                "extreme_high_idx": 0,
-                "extreme_low": new_price,
-                "extreme_low_idx": 0,
-                "prices": [new_price]
-            }
-            return None, state
-        
-        idx = state["index"] + 1
-        state["index"] = idx
-        state["prices"].append(new_price)
-        
-        # Actualizar extremos
-        if new_price > state["extreme_high"]:
-            state["extreme_high"] = new_price
-            state["extreme_high_idx"] = idx
-        if new_price < state["extreme_low"]:
-            state["extreme_low"] = new_price
-            state["extreme_low_idx"] = idx
-        
-        event = None
-        
-        if state["trend"] == 0:
-            # Determinar tendencia inicial
-            up_change = (new_price - state["extreme_low"]) / state["extreme_low"]
-            down_change = (state["extreme_high"] - new_price) / state["extreme_high"]
-            
-            if up_change >= self.theta:
-                state["trend"] = 1
-                event = DCEvent(
-                    index=idx,
-                    price=new_price,
-                    event_type="upturn",
-                    extreme_index=state["extreme_low_idx"],
-                    extreme_price=state["extreme_low"],
-                    dc_return=up_change,
-                    dc_duration=idx - state["extreme_low_idx"]
-                )
-                state["extreme_high"] = new_price
-                state["extreme_high_idx"] = idx
-                
-            elif down_change >= self.theta:
-                state["trend"] = -1
-                event = DCEvent(
-                    index=idx,
-                    price=new_price,
-                    event_type="downturn",
-                    extreme_index=state["extreme_high_idx"],
-                    extreme_price=state["extreme_high"],
-                    dc_return=-down_change,
-                    dc_duration=idx - state["extreme_high_idx"]
-                )
-                state["extreme_low"] = new_price
-                state["extreme_low_idx"] = idx
-        
-        elif state["trend"] == 1:
-            # En uptrend, buscar downturn
-            down_change = (state["extreme_high"] - new_price) / state["extreme_high"]
-            
-            if down_change >= self.theta:
-                state["trend"] = -1
-                event = DCEvent(
-                    index=idx,
-                    price=new_price,
-                    event_type="downturn",
-                    extreme_index=state["extreme_high_idx"],
-                    extreme_price=state["extreme_high"],
-                    dc_return=-down_change,
-                    dc_duration=idx - state["extreme_high_idx"]
-                )
-                state["extreme_low"] = new_price
-                state["extreme_low_idx"] = idx
-        
-        else:  # trend == -1
-            # En downtrend, buscar upturn
-            up_change = (new_price - state["extreme_low"]) / state["extreme_low"]
-            
-            if up_change >= self.theta:
-                state["trend"] = 1
-                event = DCEvent(
-                    index=idx,
-                    price=new_price,
-                    event_type="upturn",
-                    extreme_index=state["extreme_low_idx"],
-                    extreme_price=state["extreme_low"],
-                    dc_return=up_change,
-                    dc_duration=idx - state["extreme_low_idx"]
-                )
-                state["extreme_high"] = new_price
-                state["extreme_high_idx"] = idx
-        
-        return event, state
-    
-    def __repr__(self) -> str:
-        return f"DCDetector(theta={self.theta}, compute_overshoot={self.compute_overshoot})"

@@ -14,13 +14,12 @@ Indicadores principales:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, Union
 
 import numpy as np
 from numba import njit
 from numpy.typing import NDArray
 
-from intrinseca.core.event_detector import DCResult, DCEvent
+from intrinseca.core.event_detector import DCResult
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,25 +81,28 @@ def _compute_rolling_metrics(
         start = max(0, i - window + 1)
         
         # TMV: suma de retornos absolutos
-        tmv_sum = 0.0
-        for j in range(start, i + 1):
-            tmv_sum += abs(event_returns[j])
-        rolling_tmv[i] = tmv_sum
+        # En la ventana [start, i]
+        rolling_tmv[i] = np.sum(np.abs(event_returns[start : i + 1]))
         
         # Duración promedio
+        # Diferencia de índices/tiempos entre eventos en la ventana
         if i > start:
-            duration_sum = 0.0
+            # La duración ya viene calculada en event_durations, pero si queremos recalcular
+            # basado en indices puros (frecuencia de sampling):
+            # Aquí asumimos que queremos la media de la distancia entre eventos OBSERVADOS.
+            # Pero event_indices[j] - event_indices[j-1] es una aproximación de T.
+            # Mejor usar diffs de indices directos.
+            
+            # Sin embargo, para mantener coherencia con la implementación anterior:
             count = 0
+            dur_sum = 0.0
             for j in range(start + 1, i + 1):
-                duration_sum += event_indices[j] - event_indices[j - 1]
+                dur_sum += event_indices[j] - event_indices[j - 1]
                 count += 1
-            rolling_duration[i] = duration_sum / count if count > 0 else 0.0
+            rolling_duration[i] = dur_sum / count if count > 0 else 0.0
         
         # Overshoot promedio
-        os_sum = 0.0
-        for j in range(start, i + 1):
-            os_sum += overshoots[j]
-        rolling_os[i] = os_sum / (i - start + 1)
+        rolling_os[i] = np.mean(overshoots[start : i + 1])
     
     return rolling_tmv, rolling_duration, rolling_os
 
@@ -142,23 +144,23 @@ class DCIndicators:
                 volatility_dc=0.0
             )
         
-        events = result.events
-        
-        # Extraer arrays
-        returns = np.array([e.dc_return for e in events])
-        durations = np.array([e.dc_duration for e in events])
-        overshoots = result.overshoot_values
+        # Extraer arrays directamente del resultado (Zero-Copy)
+        returns = result.returns_price
+        durations = result.event_durations
+        overshoots = result.overshoots
+        types = result.event_types
         
         # TMV (Total Movement Variable)
         tmv = np.sum(np.abs(returns))
         
         # Promedios
-        avg_duration = np.mean(durations)
-        avg_return = np.mean(returns)
+        avg_duration = np.mean(durations) if len(durations) > 0 else 0.0
+        avg_return = np.mean(returns) if len(returns) > 0 else 0.0
         avg_overshoot = np.mean(overshoots) if len(overshoots) > 0 else 0.0
         
-        # Ratio de upturns
-        upturn_ratio = result.n_upturns / result.n_events
+        # Ratio de upturns (1 = upturn, -1 = downturn)
+        n_upturns = np.sum(types == 1)
+        upturn_ratio = n_upturns / result.n_events
         
         # Volatilidad DC (desviación estándar de retornos DC)
         volatility_dc = np.std(returns) if len(returns) > 1 else 0.0
@@ -197,13 +199,12 @@ class DCIndicators:
                 "rolling_overshoot": np.array([])
             }
         
-        events = result.events
-        event_indices = np.array([e.index for e in events], dtype=np.int64)
-        event_returns = np.array([e.dc_return for e in events], dtype=np.float64)
-        overshoots = result.overshoot_values.astype(np.float64)
-        
+        # Pasar arrays numba-friendly
         rolling_tmv, rolling_duration, rolling_os = _compute_rolling_metrics(
-            event_indices, event_returns, overshoots, window
+            result.event_indices, 
+            result.returns_price, 
+            result.overshoots, 
+            window
         )
         
         return {
@@ -245,19 +246,22 @@ class DCIndicators:
         
         # Features de últimos N eventos
         if result.n_events >= n_last_events:
-            last_events = result.events[-n_last_events:]
-            
-            # Retornos
-            last_returns = [e.dc_return for e in last_events]
+            # Slicing directo de numpy arrays
+            last_returns = result.returns_price[-n_last_events:]
             features.extend(last_returns)
             
             # Duraciones normalizadas
-            last_durations = [e.dc_duration / metrics.avg_duration if metrics.avg_duration > 0 else 0 
-                           for e in last_events]
+            # Usamos event_durations del result
+            last_dur_raw = result.event_durations[-n_last_events:]
+            if metrics.avg_duration > 0:
+                last_durations = last_dur_raw / metrics.avg_duration
+            else:
+                last_durations = np.zeros_like(last_dur_raw, dtype=np.float64)
             features.extend(last_durations)
             
             # Tipo de evento (1=upturn, -1=downturn)
-            last_types = [1 if e.event_type == "upturn" else -1 for e in last_events]
+            # Ya viene como 1/-1 en result.event_types, solo casteamos a float si es necesario
+            last_types = result.event_types[-n_last_events:]
             features.extend(last_types)
         else:
             # Padding con ceros si no hay suficientes eventos
@@ -284,13 +288,27 @@ class DCIndicators:
         Returns:
             Diccionario {theta: tmv}.
         """
-        from intrinseca.core.event_detector import DCDetector
+        # Importación tardía para evitar ciclos, aunque con el refactor podría no ser necesario
+        # si DCDetector ya no depende de indicators.
+        from intrinseca.core.event_detector import _dc_core_algorithm_optimized
         
         coastline = {}
+        # Timestamps dummy para cumplir firma (no afectan TMV)
+        # Asumimos que prices es solo array de precios, creamos dummy timestamps
+        dummy_ts = np.arange(len(prices), dtype=np.int64)
+        
         for theta in thetas:
-            detector = DCDetector(theta=theta, compute_overshoot=False)
-            result = detector.detect(prices)
-            metrics = self.compute_metrics(result)
-            coastline[theta] = metrics.tmv
+            # Ejecución kernel
+            (
+                _, _, _, _, _,
+                _, _, _,
+                _, ret_pr, _, _,
+                _, _,
+                _
+            ) = _dc_core_algorithm_optimized(prices, dummy_ts, float(theta))
+            
+            # Calculo TMV manual rápido
+            tmv = np.sum(np.abs(ret_pr))
+            coastline[theta] = float(tmv)
         
         return coastline

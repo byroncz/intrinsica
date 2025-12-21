@@ -79,23 +79,56 @@ def plot_dc_events(
     x = np.arange(len(prices))
     
     # Fondo coloreado por tendencia
-    if show_trend_background and len(result.trends) > 0:
-        trends = result.trends
-        for i in range(1, len(trends)):
-            if trends[i] == 1:  # Uptrend
-                ax.axvspan(i-1, i, alpha=0.1, color=upturn_color, linewidth=0)
-            elif trends[i] == -1:  # Downtrend
-                ax.axvspan(i-1, i, alpha=0.1, color=downturn_color, linewidth=0)
+    # trend_states: 1 (Alza), -1 (Baja), 0 (Indefinido)
+    if show_trend_background and len(result.trend_states) > 0:
+        trends = result.trend_states
+        # Identificar cambios de tendencia para pintar bloques
+        # Optimizacion: no pintar iterando 1 a 1 si es muy grande.
+        # Pero para plots estáticos, iterar cambios es aceptable.
+        
+        # Encontrar donde cambia el estado
+        diffs = np.diff(trends)
+        changes = np.where(diffs != 0)[0] + 1
+        
+        # Agregamos inicio y fin
+        boundaries = [0] + list(changes) + [len(trends)]
+        
+        for i in range(len(boundaries) - 1):
+            start = boundaries[i]
+            end = boundaries[i+1]
+            trend_val = trends[start]
+            
+            if trend_val == 1:
+                ax.axvspan(start, end, alpha=0.1, color=upturn_color, linewidth=0)
+            elif trend_val == -1:
+                ax.axvspan(start, end, alpha=0.1, color=downturn_color, linewidth=0)
     
     # Línea de precios
     ax.plot(x, prices, color=price_color, linewidth=1.2, label="Precio", zorder=2)
     
     # Extremos locales
-    if show_extremes:
-        if len(result.extremes_high) > 0:
+    # Extremos están en result.extreme_indices asociadas a cada evento
+    # Upturn (1) -> Evento confirma mínimo (Low). El extremo asociado es un Low.
+    # Downturn (-1) -> Evento confirma máximo (High). El extremo asociado es un High.
+    # filter extremes
+    
+    if show_extremes and result.n_events > 0:
+        # Indices de eventos upturn (generados por un Low previo)
+        upturn_mask = result.event_types == 1
+        downturn_mask = result.event_types == -1
+        
+        # Lows (asociados a Upturns)
+        low_indices = result.extreme_indices[upturn_mask]
+        low_prices = result.extreme_prices[upturn_mask]
+        
+        # Highs (asociados a Downturns)
+        high_indices = result.extreme_indices[downturn_mask]
+        high_prices = result.extreme_prices[downturn_mask]
+        
+        if len(high_indices) > 0:
             ax.scatter(
-                result.extremes_high,
-                prices[result.extremes_high],
+                high_indices,
+                high_prices,
                 color=downturn_color,
                 marker="v",
                 s=60,
@@ -103,10 +136,10 @@ def plot_dc_events(
                 zorder=3,
                 alpha=0.7
             )
-        if len(result.extremes_low) > 0:
+        if len(low_indices) > 0:
             ax.scatter(
-                result.extremes_low,
-                prices[result.extremes_low],
+                low_indices,
+                low_prices,
                 color=upturn_color,
                 marker="^",
                 s=60,
@@ -116,24 +149,33 @@ def plot_dc_events(
             )
     
     # Eventos DC
-    for event in result.events:
-        color = upturn_color if event.event_type == "upturn" else downturn_color
-        ax.axvline(
-            event.index,
-            color=color,
-            linestyle="--",
-            alpha=0.6,
-            linewidth=1
-        )
-        # Línea conectando extremo con evento
-        ax.plot(
-            [event.extreme_index, event.index],
-            [event.extreme_price, event.price],
-            color=color,
-            linewidth=1.5,
-            alpha=0.8,
-            zorder=4
-        )
+    if result.n_events > 0:
+        for i in range(result.n_events):
+            idx = result.event_indices[i]
+            price = result.event_prices[i]
+            etype = result.event_types[i]
+            ext_idx = result.extreme_indices[i]
+            ext_price = result.extreme_prices[i]
+            
+            color = upturn_color if etype == 1 else downturn_color
+            
+            # Linea vertical de evento
+            ax.axvline(
+                idx,
+                color=color,
+                linestyle="--",
+                alpha=0.6,
+                linewidth=1
+            )
+            # Línea conectando extremo con evento
+            ax.plot(
+                [ext_idx, idx],
+                [ext_price, price],
+                color=color,
+                linewidth=1.5,
+                alpha=0.8,
+                zorder=4
+            )
     
     ax.set_xlabel("Observación", fontsize=11)
     ax.set_ylabel("Precio", fontsize=11)
@@ -142,10 +184,14 @@ def plot_dc_events(
     ax.grid(True, alpha=0.3)
     
     # Anotación de estadísticas
+    n_events = result.n_events
+    n_upturns = np.sum(result.event_types == 1)
+    n_downturns = np.sum(result.event_types == -1)
+    
     stats_text = (
-        f"Eventos: {result.n_events}\n"
-        f"Upturns: {result.n_upturns}\n"
-        f"Downturns: {result.n_downturns}"
+        f"Eventos: {n_events}\n"
+        f"Upturns: {n_upturns}\n"
+        f"Downturns: {n_downturns}"
     )
     ax.text(
         0.98, 0.02, stats_text,
@@ -194,12 +240,17 @@ def plot_dc_summary(
     
     # Panel 2: Distribución de retornos
     if result.n_events > 0:
-        returns = [e.dc_return for e in result.events]
-        upturn_returns = [e.dc_return for e in result.events if e.event_type == "upturn"]
-        downturn_returns = [e.dc_return for e in result.events if e.event_type == "downturn"]
+        returns = result.returns_price
+        upturn_returns = returns[result.event_types == 1]
+        downturn_returns = returns[result.event_types == -1]
         
         ax = axes[0, 1]
-        bins = np.linspace(min(returns), max(returns), 25)
+        # Evitar bins vacíos si pocos datos
+        if len(returns) > 1:
+            bins = np.linspace(min(returns), max(returns), 25)
+        else:
+            bins = 10
+            
         ax.hist(upturn_returns, bins=bins, alpha=0.7, label="Upturn", color="#2ecc71")
         ax.hist(downturn_returns, bins=bins, alpha=0.7, label="Downturn", color="#e74c3c")
         ax.set_xlabel("Retorno DC")
@@ -210,7 +261,7 @@ def plot_dc_summary(
     
     # Panel 3: Distribución de duraciones
     if result.n_events > 0:
-        durations = [e.dc_duration for e in result.events]
+        durations = result.event_durations
         
         ax = axes[1, 0]
         ax.hist(durations, bins=30, color="#9b59b6", alpha=0.7, edgecolor="white")
@@ -222,10 +273,9 @@ def plot_dc_summary(
         ax.grid(True, alpha=0.3)
     
     # Panel 4: Overshoot a lo largo del tiempo
-    if len(result.overshoot_values) > 0:
+    if len(result.overshoots) > 0:
         ax = axes[1, 1]
-        event_indices = [e.index for e in result.events]
-        ax.bar(range(len(result.overshoot_values)), result.overshoot_values, 
+        ax.bar(range(len(result.overshoots)), result.overshoots, 
                color="#f39c12", alpha=0.7)
         ax.set_xlabel("Número de evento")
         ax.set_ylabel("Overshoot")
@@ -314,8 +364,8 @@ def plot_event_distribution(
     
     fig, ax = plt.subplots(figsize=figsize)
     
-    upturn_indices = [e.index for e in result.events if e.event_type == "upturn"]
-    downturn_indices = [e.index for e in result.events if e.event_type == "downturn"]
+    upturn_indices = result.event_indices[result.event_types == 1]
+    downturn_indices = result.event_indices[result.event_types == -1]
     
     # Crear "rug plot" de eventos
     ax.eventplot([upturn_indices], colors=["#2ecc71"], lineoffsets=0.5, 

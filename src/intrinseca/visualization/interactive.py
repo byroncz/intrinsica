@@ -89,78 +89,175 @@ def create_interactive_chart(
         col=1 if show_volume else None
     )
     
-    # Eventos upturn
-    upturn_events = [e for e in result.events if e.event_type == "upturn"]
-    if upturn_events:
-        fig.add_trace(
-            go.Scatter(
-                x=[e.index for e in upturn_events],
-                y=[e.price for e in upturn_events],
-                mode="markers",
-                name="Upturn",
-                marker=dict(
-                    symbol="triangle-up",
-                    size=12,
-                    color="#2ecc71",
-                    line=dict(width=1, color="white")
+    if result.n_events > 0:
+        # Eventos upturn
+        upturn_mask = result.event_types == 1
+        upturn_indices = result.event_indices[upturn_mask]
+        upturn_prices = result.event_prices[upturn_mask]
+        
+        if len(upturn_indices) > 0:
+            fig.add_trace(
+                go.Scatter(
+                    x=upturn_indices,
+                    y=upturn_prices,
+                    mode="markers",
+                    name="Upturn",
+                    marker=dict(
+                        symbol="triangle-up",
+                        size=12,
+                        color="#2ecc71",
+                        line=dict(width=1, color="white")
+                    ),
+                    hovertemplate=(
+                        "Upturn<br>"
+                        "Índice: %{x}<br>"
+                        "Precio: %{y:.4f}<br>"
+                        "<extra></extra>"
+                    )
                 ),
-                hovertemplate=(
-                    "Upturn<br>"
-                    "Índice: %{x}<br>"
-                    "Precio: %{y:.4f}<br>"
-                    "<extra></extra>"
-                )
-            ),
-            row=1 if show_volume else None,
-            col=1 if show_volume else None
-        )
-    
-    # Eventos downturn
-    downturn_events = [e for e in result.events if e.event_type == "downturn"]
-    if downturn_events:
-        fig.add_trace(
-            go.Scatter(
-                x=[e.index for e in downturn_events],
-                y=[e.price for e in downturn_events],
-                mode="markers",
-                name="Downturn",
-                marker=dict(
-                    symbol="triangle-down",
-                    size=12,
-                    color="#e74c3c",
-                    line=dict(width=1, color="white")
+                row=1 if show_volume else None,
+                col=1 if show_volume else None
+            )
+        
+        # Eventos downturn
+        downturn_mask = result.event_types == -1
+        downturn_indices = result.event_indices[downturn_mask]
+        downturn_prices = result.event_prices[downturn_mask]
+        
+        if len(downturn_indices) > 0:
+            fig.add_trace(
+                go.Scatter(
+                    x=downturn_indices,
+                    y=downturn_prices,
+                    mode="markers",
+                    name="Downturn",
+                    marker=dict(
+                        symbol="triangle-down",
+                        size=12,
+                        color="#e74c3c",
+                        line=dict(width=1, color="white")
+                    ),
+                    hovertemplate=(
+                        "Downturn<br>"
+                        "Índice: %{x}<br>"
+                        "Precio: %{y:.4f}<br>"
+                        "<extra></extra>"
+                    )
                 ),
-                hovertemplate=(
-                    "Downturn<br>"
-                    "Índice: %{x}<br>"
-                    "Precio: %{y:.4f}<br>"
-                    "<extra></extra>"
+                row=1 if show_volume else None,
+                col=1 if show_volume else None
+            )
+        
+        # Líneas de tendencia DC (conectando extremo a evento)
+        # Aquí sí iteramos porque son líneas individuales (segmentos)
+        # Plotly no soporta "segmentos" de forma eficiente como una sola traza fácilmente
+        # sin trucos de NaNs. Iterar está bien si no son miles de eventos.
+        # Si son muchos, mejor usar arrays intercalando NaNs para hacer una sola traza.
+        
+        if result.n_events < 2000: # Limite razonable para iterar
+            for i in range(result.n_events):
+                idx = result.event_indices[i]
+                price = result.event_prices[i]
+                etype = result.event_types[i]
+                ext_idx = result.extreme_indices[i]
+                ext_price = result.extreme_prices[i]
+                
+                color = "#2ecc71" if etype == 1 else "#e74c3c"
+                fig.add_trace(
+                    go.Scatter(
+                        x=[ext_idx, idx],
+                        y=[ext_price, price],
+                        mode="lines",
+                        line=dict(color=color, width=1, dash="dot"),
+                        showlegend=False,
+                        hoverinfo="skip"
+                    ),
+                    row=1 if show_volume else None,
+                    col=1 if show_volume else None
                 )
-            ),
-            row=1 if show_volume else None,
-            col=1 if show_volume else None
-        )
-    
-    # Líneas de tendencia DC (conectando extremo a evento)
-    for event in result.events:
-        color = "#2ecc71" if event.event_type == "upturn" else "#e74c3c"
-        fig.add_trace(
-            go.Scatter(
-                x=[event.extreme_index, event.index],
-                y=[event.extreme_price, event.price],
-                mode="lines",
-                line=dict(color=color, width=1, dash="dot"),
-                showlegend=False,
-                hoverinfo="skip"
-            ),
-            row=1 if show_volume else None,
-            col=1 if show_volume else None
-        )
+        else:
+             # Versión optimizada con NaNs para muchos eventos
+             # x: [x1, x2, None, x3, x4, None, ...]
+             # y: [y1, y2, None, y3, y4, None, ...]
+             # Separamos upturns y downturns para color
+             
+             # Upturn lines
+             up_mask = result.event_types == 1
+             if np.any(up_mask):
+                 up_ev_idx = result.event_indices[up_mask]
+                 up_ev_pr = result.event_prices[up_mask]
+                 up_ex_idx = result.extreme_indices[up_mask]
+                 up_ex_pr = result.extreme_prices[up_mask]
+                 
+                 # Intercalar
+                 n_up = len(up_ev_idx)
+                 x_vals = np.empty(n_up * 3, dtype=float)
+                 x_vals[0::3] = up_ex_idx
+                 x_vals[1::3] = up_ev_idx
+                 x_vals[2::3] = np.nan
+                 
+                 y_vals = np.empty(n_up * 3, dtype=float)
+                 y_vals[0::3] = up_ex_pr
+                 y_vals[1::3] = up_ev_pr
+                 y_vals[2::3] = np.nan
+                 
+                 fig.add_trace(
+                    go.Scatter(
+                        x=x_vals,
+                        y=y_vals,
+                        mode="lines",
+                        line=dict(color="#2ecc71", width=1, dash="dot"),
+                        name="Trend Lines (Up)",
+                        showlegend=False,
+                        hoverinfo="skip"
+                    ),
+                    row=1 if show_volume else None,
+                    col=1 if show_volume else None
+                )
+             
+             # Downturn lines
+             dn_mask = result.event_types == -1
+             if np.any(dn_mask):
+                 dn_ev_idx = result.event_indices[dn_mask]
+                 dn_ev_pr = result.event_prices[dn_mask]
+                 dn_ex_idx = result.extreme_indices[dn_mask]
+                 dn_ex_pr = result.extreme_prices[dn_mask]
+                 
+                 n_dn = len(dn_ev_idx)
+                 x_vals = np.empty(n_dn * 3, dtype=float)
+                 x_vals[0::3] = dn_ex_idx
+                 x_vals[1::3] = dn_ev_idx
+                 x_vals[2::3] = np.nan
+                 
+                 y_vals = np.empty(n_dn * 3, dtype=float)
+                 y_vals[0::3] = dn_ex_pr
+                 y_vals[1::3] = dn_ev_pr
+                 y_vals[2::3] = np.nan
+                 
+                 fig.add_trace(
+                    go.Scatter(
+                        x=x_vals,
+                        y=y_vals,
+                        mode="lines",
+                        line=dict(color="#e74c3c", width=1, dash="dot"),
+                        name="Trend Lines (Down)",
+                        showlegend=False,
+                        hoverinfo="skip"
+                    ),
+                    row=1 if show_volume else None,
+                    col=1 if show_volume else None
+                )
     
     # Volumen
     if show_volume and volume is not None:
-        colors = ["#2ecc71" if result.trends[i] == 1 else "#e74c3c" 
-                  for i in range(len(volume))]
+        # Colorear volumen según tendencia actual
+        # trends array (tick-by-tick)
+        if len(result.trend_states) == len(volume):
+            colors = ["#2ecc71" if t == 1 else "#e74c3c" if t == -1 else "#95a5a6" 
+                      for t in result.trend_states]
+        else:
+            colors = "#95a5a6"
+
         fig.add_trace(
             go.Bar(
                 x=x,

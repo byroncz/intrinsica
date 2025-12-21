@@ -16,9 +16,9 @@ Con visualización (requiere: pip install intrinseca[plot]):
     >>> plot_dc_events(prices, events)
 """
 
-from intrinseca.core.event_detector import DCDetector, DCEvent, TrendState
+from intrinseca.core.event_detector import DCDetector, DCResult
 from intrinseca.core.indicators import DCIndicators
-from intrinseca.core.bridging import to_numpy, to_polars, extract_price_column
+# from intrinseca.core.bridging import to_numpy, to_polars, extract_price_column
 
 __version__ = "0.1.0"
 __author__ = "Tu Nombre"
@@ -26,13 +26,12 @@ __author__ = "Tu Nombre"
 __all__ = [
     # Clases principales
     "DCDetector",
-    "DCEvent",
-    "TrendState",
+    "DCResult",
     "DCIndicators",
     # Utilidades de bridging
-    "to_numpy",
-    "to_polars",
-    "extract_price_column",
+    # "to_numpy",
+    # "to_polars",
+    # "extract_price_column",
     # Metadata
     "__version__",
 ]
