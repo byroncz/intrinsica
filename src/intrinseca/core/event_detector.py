@@ -172,7 +172,7 @@ def _dc_core_algorithm_optimized(
             
             # Velocidad: Unidades de precio por segundo
             if dt > 0:
-                returns_speed[tao] = (p - prev_ext_price) / (dt / 1_000_000.0)
+                returns_speed[tao] = (p - prev_ext_price) / (dt / 1_000_000_000.0)
             else:
                 returns_speed[tao] = 0.0
 
@@ -274,10 +274,11 @@ class DCResult:
         """
         return pl.DataFrame({
             "event_idx": self.event_indices,
-            "timestamp": self.event_timestamps, # Polars lo interpretará como int64 (us)
+            "time": self.event_timestamps,
             "price": self.event_prices,
-            "type": self.event_types, # 1=Up, -1=Down
-            "duration_us": self.event_durations,
+            "type": self.event_types,
+            "duration_ns": self.event_durations,
+            "ext_time": self.extreme_timestamps,
             "ext_price": self.extreme_prices,
             "ext_idx": self.extreme_indices,
             "overshoot": self.overshoots,
@@ -285,7 +286,7 @@ class DCResult:
             "velocity": self.returns_speed,
             "runs_count": self.os_event_counts
         }).with_columns([
-            pl.col("timestamp").cast(pl.Datetime("us")),
+            pl.col("time").cast(pl.Datetime("ns")).dt.replace_time_zone("UTC"),
             pl.col("type").map_elements(lambda x: "upturn" if x == 1 else "downturn", return_dtype=pl.String).alias("type_desc")
         ])
 
@@ -302,6 +303,9 @@ class DCResult:
         if original_df is not None:
             if len(original_df) != len(dc_cols):
                 raise ValueError("Longitud del DF original no coincide con resultados DC")
+            original_df = original_df.with_columns([
+                pl.col("time").cast(pl.Datetime("ns")).dt.replace_time_zone("UTC")
+            ])
             return pl.concat([original_df, dc_cols], how="horizontal")
         return dc_cols
 

@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Optional
 
 import numpy as np
+import polars as pl
 from numpy.typing import NDArray
 
 if TYPE_CHECKING:
@@ -26,6 +27,188 @@ def _ensure_plotly():
             "plotly no está instalado. "
             "Instala con: pip install intrinseca[interactive]"
         )
+
+
+def create_interactive_chart_from_polars(
+    df_ticks: pl.DataFrame,
+    df_events: pl.DataFrame,
+    title: str = "Análisis DC (Diagnóstico Full Stack)",
+    height: int = 900,  # Aumentamos altura para acomodar dos paneles
+    show_volume: bool = False
+) -> "go.Figure":
+    """
+    Crea Dashboard de Diagnóstico DC con dos paneles sincronizados.
+    
+    Panel Superior (Diagnóstico de Estado):
+    - Colorea cada tick según su Tendencia (Verde Claro/Rosa)
+    - Resalta los Overshoots/Runs (Verde Oscuro/Rojo Oscuro)
+    
+    Panel Inferior (Eventos DC):
+    - Visualización clásica de Eventos y Líneas de Tendencia.
+    """
+    go = _ensure_plotly()
+    from plotly.subplots import make_subplots
+    import numpy as np
+
+    # Validaciones básicas
+    if "time" not in df_ticks.columns or "time" not in df_events.columns:
+        raise ValueError("Se requiere columna 'time' en ambos DataFrames")
+    
+    required_cols = ["dc_trend", "dc_run_flag"]
+    for col in required_cols:
+        if col not in df_ticks.columns:
+            raise ValueError(f"El DataFrame de ticks debe tener la columna '{col}' para este diagnóstico.")
+
+    # 1. Asegurar Orden Cronológico (Siempre)
+    df_ticks = df_ticks.sort("time")
+    df_events = df_events.sort("time")
+
+    # 2. Configuración de Subplots (2 Filas)
+    # Fila 1: Diagnóstico de Estado (Trend/Runs)
+    # Fila 2: Eventos DC (La gráfica anterior)
+    fig = make_subplots(
+        rows=2, cols=1, 
+        shared_xaxes=True, 
+        vertical_spacing=0.05, 
+        row_heights=[0.5, 0.5],
+        subplot_titles=("Diagnóstico de Estado (Ticks)", "Eventos DC Confirmados")
+    )
+
+    # --- PREPARACIÓN DE DATOS ---
+    times = df_ticks["time"].to_numpy()
+    prices = df_ticks["price"].to_numpy()
+    trends = df_ticks["dc_trend"].to_numpy()
+    runs = df_ticks["dc_run_flag"].to_numpy()
+
+    # =========================================================================
+    # PANEL 1 (ARRIBA): DIAGNÓSTICO DE ESTADO (Colores Tick-a-Tick)
+    # =========================================================================
+    
+    # Estrategia de Color:
+    # 1. Base: Gris neutro
+    # 2. Tendencia: Verde Claro (1) o Rosa (-1)
+    # 3. Runs (Prioridad): Verde Oscuro (>0) o Rojo Oscuro (<0)
+    
+    # Usamos un array de strings para colores vectorizados (mucho más rápido)
+    # Inicializamos con gris
+    colors = np.full(len(times), "#bdc3c7", dtype=object) # Grey default
+    
+    # Aplicar Colores de Tendencia
+    # Trend 1 -> Verde Claro (#a3e4d7 - Mint)
+    colors[trends == 1] = "#90ee90" 
+    # Trend -1 -> Rosa (#f5b7b1 - Light Red)
+    colors[trends == -1] = "#ffb6c1"
+    
+    # Aplicar Colores de Runs (Sobrescriben Tendencia)
+    # Run > 0 -> Verde Oscuro (#006400)
+    colors[runs > 0] = "#006400"
+    # Run < 0 -> Rojo Oscuro (#8b0000)
+    colors[runs < 0] = "#8b0000"
+
+    # Graficamos usando Scattergl (WebGL) para rendimiento con +500k puntos
+    # Trace de Línea de base (Gris fina) para continuidad visual
+    fig.add_trace(
+        go.Scattergl(
+            x=times, y=prices, mode="lines", 
+            line=dict(color="#bdc3c7", width=0.5),
+            hoverinfo="skip", name="Conectividad"
+        ),
+        row=1, col=1
+    )
+    
+    # Trace de Puntos Coloreados
+    fig.add_trace(
+        go.Scattergl(
+            x=times, y=prices, mode="markers",
+            marker=dict(
+                size=3, # Puntos pequeños pero visibles
+                color=colors,
+                line=dict(width=0)
+            ),
+            name="Estado del Motor",
+            hovertemplate="<b>Tick Estado</b><br>Precio: %{y:.2f}<br>Trend: %{text}<extra></extra>",
+            text=[f"T:{t} | R:{r}" for t, r in zip(trends, runs)] # Info extra en hover
+        ),
+        row=1, col=1
+    )
+
+    # =========================================================================
+    # PANEL 2 (ABAJO): EVENTOS DC (Lógica Anterior)
+    # =========================================================================
+    
+    min_visible_time = times[0]
+    
+    # Línea de precios limpia
+    fig.add_trace(
+        go.Scattergl( # Usamos GL también aquí para consistencia
+            x=times, y=prices, mode="lines", name="Precio Base",
+            line=dict(color="#3498db", width=1.5),
+            hovertemplate="Fecha: %{x}<br>Precio: %{y:.2f}<extra></extra>"
+        ),
+        row=2, col=1
+    )
+
+    # Marcadores de Eventos
+    for e_type, color, name, symbol in [
+        (1, "#2ecc71", "Upturn (Evt)", "triangle-up"),
+        (-1, "#e74c3c", "Downturn (Evt)", "triangle-down")
+    ]:
+        subset = df_events.filter(pl.col("type") == e_type)
+        if not subset.is_empty():
+            fig.add_trace(
+                go.Scatter(
+                    x=subset["time"].to_numpy(),
+                    y=subset["price"].to_numpy(),
+                    mode="markers", name=name,
+                    marker=dict(symbol=symbol, size=12, color=color, line=dict(width=1, color="white")),
+                    hovertemplate=f"{name}<br>Fecha: %{{x}}<br>Precio: %{{y:.2f}}<extra></extra>"
+                ),
+                row=2, col=1
+            )
+
+    # Líneas de Tendencia (Con Clipping)
+    if not df_events.is_empty() and "ext_time" in df_events.columns:
+        for e_type, color in [(1, "#2ecc71"), (-1, "#e74c3c")]:
+            subset = df_events.filter(
+                (pl.col("type") == e_type) & 
+                (pl.col("ext_time") >= min_visible_time)
+            )
+            
+            if not subset.is_empty():
+                n = len(subset)
+                x_vals = np.empty(n * 3, dtype='datetime64[ns]')
+                y_vals = np.empty(n * 3, dtype=np.float64)
+                
+                x_vals[0::3] = subset["ext_time"].to_numpy()
+                x_vals[1::3] = subset["time"].to_numpy()
+                x_vals[2::3] = np.datetime64('NaT') 
+                
+                y_vals[0::3] = subset["ext_price"].to_numpy()
+                y_vals[1::3] = subset["price"].to_numpy()
+                y_vals[2::3] = np.nan
+
+                fig.add_trace(
+                    go.Scatter(
+                        x=x_vals, y=y_vals, mode="lines",
+                        line=dict(color=color, width=1, dash="dot"),
+                        showlegend=False, hoverinfo="skip"
+                    ),
+                    row=2, col=1
+                )
+
+    # Layout Global
+    fig.update_layout(
+        title=dict(text=title, font=dict(size=16)),
+        height=height, 
+        hovermode="x unified",
+        template="plotly_white",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+    )
+    
+    # Ejes X Sincronizados
+    fig.update_xaxes(title_text="Tiempo (UTC)", row=2, col=1)
+    
+    return fig
 
 
 def create_interactive_chart(

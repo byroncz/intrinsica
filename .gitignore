@@ -228,6 +228,8 @@ debug_*.py
 manual_*.py
 inspect_*.py
 check_*.py
+*_example.py
+*_test.py
 dummy/
 output/
 
