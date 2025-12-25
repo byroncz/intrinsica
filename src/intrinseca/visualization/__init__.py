@@ -10,7 +10,6 @@ Para visualización interactiva:
 Funciones disponibles:
     - plot_dc_events: Gráfico estático de precios con eventos DC
     - plot_dc_summary: Panel resumen con múltiples métricas
-    - create_interactive_chart: Gráfico interactivo Plotly
     - create_interactive_chart_from_polars: Gráfico interactivo desde DataFrames de Polars
 """
 
@@ -22,9 +21,8 @@ from intrinseca.visualization.static_plots import (
 )
 
 from intrinseca.visualization.interactive import (
-    create_interactive_chart,
-    create_interactive_chart_from_polars,
-    create_metrics_dashboard,
+    create_dashboard_app,
+    serve_dashboard
 )
 
 __all__ = [
@@ -33,8 +31,6 @@ __all__ = [
     "plot_coastline",
     "plot_event_distribution",
     "create_interactive_chart",
-    "create_interactive_chart_from_polars",
-    "create_metrics_dashboard",
 ]
 
 

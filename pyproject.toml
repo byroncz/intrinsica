@@ -42,20 +42,20 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Módulo de visualización
-plot = [
-    "matplotlib>=3.7.0",
-    "seaborn>=0.12.0",
-]
-
-# Visualización interactiva (Plotly)
+# Stack de Visualización "Big Data" (HoloViz)
 interactive = [
-    "plotly>=5.15.0",
+    "holoviews>=1.18.0",    # Orquestador de la visualización [cite: 31]
+    "datashader>=0.16.0",   # Motor de rasterizado server-side (sustituye al DOM) 
+    "bokeh>=3.3.0",         # Backend interactivo para el navegador [cite: 37]
+    "dask[dataframe]",      # Procesamiento paralelo para >5M de puntos 
+    "pandas",               # Requerido como puente para Datashader [cite: 45]
+    "colorcet",             # Paletas de color optimizadas
+    "streamlit>=1.30.0"     # Opcional: Para servir el dashboard
 ]
 
 # Todo incluido
 full = [
-    "intrinseca[plot,interactive]",
+    "intrinseca[interactive]",
 ]
 
 # Desarrollo
