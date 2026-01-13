@@ -1,18 +1,13 @@
 """
-Módulo de visualización para análisis Directional Change.
+Módulo de visualización para análisis Directional Change (DC).
 
-Este módulo es OPCIONAL. Requiere instalación con:
-    pip install intrinseca[plot]
-
-Para visualización interactiva:
-    pip install intrinseca[interactive]
-
-Funciones disponibles:
-    - plot_dc_events: Gráfico estático de precios con eventos DC
-    - plot_dc_summary: Panel resumen con múltiples métricas
-    - create_interactive_chart_from_polars: Gráfico interactivo desde DataFrames de Polars
+Este módulo es modular y admite visualizaciones estáticas e interactivas.
+Requiere instalaciones opcionales:
+    pip install intrinseca[plot]         # Para gráficos estáticos
+    pip install intrinseca[interactive]  # Para dashboards interactivos
 """
 
+# Importaciones de Gráficos Estáticos (Matplotlib/Plotly)
 from intrinseca.visualization.static_plots import (
     plot_dc_events,
     plot_dc_summary,
@@ -20,22 +15,25 @@ from intrinseca.visualization.static_plots import (
     plot_event_distribution,
 )
 
+# Importaciones de Gráficos Interactivos (Panel/HoloViews/Datashader)
 from intrinseca.visualization.interactive import (
     create_dashboard_app,
     serve_dashboard
 )
 
+# Definición de la API pública del módulo
 __all__ = [
     "plot_dc_events",
     "plot_dc_summary",
     "plot_coastline",
     "plot_event_distribution",
-    "create_interactive_chart",
+    "create_dashboard_app",
+    "serve_dashboard",
 ]
 
 
 def _check_matplotlib_available() -> bool:
-    """Verifica si matplotlib está instalado."""
+    """Verifica si matplotlib está instalado para gráficos estáticos."""
     try:
         import matplotlib
         return True
@@ -44,9 +42,20 @@ def _check_matplotlib_available() -> bool:
 
 
 def _check_plotly_available() -> bool:
-    """Verifica si plotly está instalado."""
+    """Verifica si plotly está instalado para gráficos enriquecidos."""
     try:
         import plotly
+        return True
+    except ImportError:
+        return False
+
+
+def _check_interactive_available() -> bool:
+    """Verifica si las dependencias interactivas están instaladas."""
+    try:
+        import panel
+        import holoviews
+        import datashader
         return True
     except ImportError:
         return False
