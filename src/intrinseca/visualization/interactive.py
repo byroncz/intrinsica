@@ -8,7 +8,7 @@ from .config import (
     MAIN_PANEL_HEIGHT, SECONDARY_PANEL_HEIGHT
 )
 from .core_plots import _build_hv_plot, _build_intrinsic_panel, _build_physical_panel
-from .hooks import RangeUpdateStream, create_mouseup_sync_hook, _apply_x_zoom_hook
+from .hooks import RangeUpdateStream, create_mouseup_sync_hook, _apply_x_zoom_hook, _apply_integer_xticks_hook
 from .utils import prepare_dual_axis_data
 
 # Inicialización de extensiones
@@ -113,23 +113,27 @@ def create_dual_axis_dashboard(df_ticks, df_events, title="Dual-Axis DC"):
     # 4. Contenedores Panel para ambos gráficos (permiten actualización dinámica)
     from .core_plots import _build_intrinsic_panel, _build_physical_panel
     
-    # Renderizar vistas iniciales
+    # Renderizar vistas iniciales con altura responsiva (50% viewport cada uno)
     init_intrinsic = _render_intrinsic_filtered(pdf_segments, init_n_min, init_n_max)
-    intrinsic_pane = pn.pane.HoloViews(init_intrinsic, sizing_mode="stretch_both")
+    intrinsic_pane = pn.pane.HoloViews(
+        init_intrinsic, sizing_mode="stretch_both", min_height=200
+    )
     
     init_physical = _render_physical_panel(
         df_ticks, df_events, init_n_min, init_n_max,
         fallback_start=init_start, fallback_end=abs_max_t
     )
-    physical_pane = pn.pane.HoloViews(init_physical, sizing_mode="stretch_both")
+    physical_pane = pn.pane.HoloViews(
+        init_physical, sizing_mode="stretch_both", min_height=200
+    )
     physical_pane.loading_indicator = True
     
     # 5. Stream de actualización discreta (mouseup)
     range_stream = RangeUpdateStream()
     mouseup_hook = create_mouseup_sync_hook(range_stream)
     
-    # Aplicar hook al panel intrínseco inicial
-    intrinsic_pane.object = intrinsic_pane.object.opts(hooks=[mouseup_hook])
+    # Aplicar hooks al panel intrínseco inicial (integer ticks + mouseup sync)
+    intrinsic_pane.object = intrinsic_pane.object.opts(hooks=[_apply_integer_xticks_hook, mouseup_hook])
     
     # 6. Callback que actualiza AMBOS paneles cuando cambia el rango
     def on_range_change(event):
@@ -140,7 +144,7 @@ def create_dual_axis_dashboard(df_ticks, df_events, title="Dual-Axis DC"):
         
         # Actualizar Panel A (intrínseco) - filtrado para Y auto-range
         new_intrinsic = _render_intrinsic_filtered(pdf_segments, n_min, n_max)
-        new_intrinsic = new_intrinsic.opts(hooks=[mouseup_hook])
+        new_intrinsic = new_intrinsic.opts(hooks=[_apply_integer_xticks_hook, mouseup_hook])
         intrinsic_pane.object = new_intrinsic
         
         # Actualizar Panel B (físico)
@@ -153,15 +157,21 @@ def create_dual_axis_dashboard(df_ticks, df_events, title="Dual-Axis DC"):
     
     range_stream.param.watch(on_range_change, 'x_range')
     
-    # Divisor visual
-    divider = pn.pane.HTML('<hr style="margin: 10px 0; border: 0; border-top: 1px solid #ddd;">')
+    # Divisor visual minimalista
+    divider = pn.pane.HTML('<hr style="margin: 2px 0; border: 0; border-top: 1px solid #ddd;">')
 
-    return pn.Column(
-        pn.pane.Markdown(f"## {title}"),
-        intrinsic_pane,
+    # Título compacto con altura fija
+    title_pane = pn.pane.Markdown(f"## {title}", styles={'margin': '0', 'padding': '5px 10px'})
+
+    # Container FlexBox: paneles con flex: 1 para ocupar 50-50 del espacio disponible
+    return pn.FlexBox(
+        title_pane,
+        pn.Row(intrinsic_pane, sizing_mode="stretch_both", styles={'flex': '1', 'min-height': '0'}),
         divider,
-        physical_pane,
-        sizing_mode="stretch_both"
+        pn.Row(physical_pane, sizing_mode="stretch_both", styles={'flex': '1', 'min-height': '0'}),
+        flex_direction='column',
+        sizing_mode="stretch_both",
+        styles={'height': '100vh', 'width': '100%', 'overflow': 'hidden'}
     )
 
 
@@ -180,7 +190,8 @@ def _render_intrinsic_filtered(pdf_segments, n_min, n_max):
         # Fallback: mostrar algo si el filtro está vacío
         filtered = pdf_segments.iloc[-10:]
     
-    return _build_intrinsic_panel(filtered, height=MAIN_PANEL_HEIGHT)
+    # Sin altura fija: permite que el contenedor flex controle el tamaño
+    return _build_intrinsic_panel(filtered, height=None)
 
 
 def _render_physical_panel(df_ticks, df_events, n_min, n_max, fallback_start, fallback_end):
@@ -202,13 +213,20 @@ def _render_physical_panel(df_ticks, df_events, n_min, n_max, fallback_start, fa
     
     if n_min >= n_max or n_max <= 0:
         t_start, t_end = fallback_start, fallback_end
+        event_markers = []
     else:
         window_ev = df_events.slice(n_min, n_max - n_min)
         if window_ev.is_empty():
             t_start, t_end = fallback_start, fallback_end
+            event_markers = []
         else:
             t_start = window_ev["time"].min()
             t_end = window_ev["time"].max()
+            # Extraer timestamps y índices de eventos para marcadores
+            event_markers = [
+                (row["time"], n_min + i) 
+                for i, row in enumerate(window_ev.iter_rows(named=True))
+            ]
     
     # Asegurar ventana mínima de 1 hora (evita t_start == t_end)
     min_window = timedelta(hours=1)
@@ -232,4 +250,5 @@ def _render_physical_panel(df_ticks, df_events, n_min, n_max, fallback_start, fa
     from .utils import _prepare_price_data
     pdf_win = _prepare_price_data(df_win)
     
-    return _build_physical_panel(pdf_win, height=SECONDARY_PANEL_HEIGHT)
+    # Sin altura fija: permite que el contenedor flex controle el tamaño
+    return _build_physical_panel(pdf_win, event_markers, height=None)

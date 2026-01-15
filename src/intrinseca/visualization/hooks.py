@@ -1,4 +1,4 @@
-from bokeh.models import BoxZoomTool, WheelZoomTool
+from bokeh.models import BoxZoomTool, WheelZoomTool, SingleIntervalTicker
 from bokeh.events import RangesUpdate
 import param
 
@@ -13,6 +13,25 @@ def _apply_x_zoom_hook(plot, element):
         # Bloquear Zoom de Rueda a horizontal
         if isinstance(tool, WheelZoomTool):
             tool.dimensions = 'width'
+
+
+def _apply_integer_xticks_hook(plot, element):
+    """
+    Fuerza el eje X a mostrar solo marcas en valores enteros.
+    SingleIntervalTicker(interval=1) garantiza ticks exactamente cada 1 unidad.
+    """
+    # Aplicar restricciones de zoom X
+    for tool in plot.state.tools:
+        if isinstance(tool, BoxZoomTool):
+            tool.dimensions = 'width'
+        if isinstance(tool, WheelZoomTool):
+            tool.dimensions = 'width'
+    
+    # Acceder al eje X correctamente vía plot.handles (no plot.state.xaxis que es tuple)
+    xaxis = plot.handles.get('xaxis')
+    if xaxis:
+        xaxis.ticker = SingleIntervalTicker(interval=1)
+        xaxis.minor_tick_line_color = None  # Ocultar marcas menores (fraccionarias)
 
 
 
