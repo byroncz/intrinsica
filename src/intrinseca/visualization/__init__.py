@@ -18,7 +18,14 @@ from intrinseca.visualization.static_plots import (
 # Importaciones de Gráficos Interactivos (Panel/HoloViews/Datashader)
 from intrinseca.visualization.interactive import (
     create_dashboard_app,
+    create_dual_axis_dashboard,
     serve_dashboard
+)
+
+# Configuración del módulo
+from intrinseca.visualization.config import (
+    MAX_WINDOW_HOURS,
+    INITIAL_WINDOW_HOURS,
 )
 
 # Definición de la API pública del módulo
@@ -28,7 +35,10 @@ __all__ = [
     "plot_coastline",
     "plot_event_distribution",
     "create_dashboard_app",
+    "create_dual_axis_dashboard",
     "serve_dashboard",
+    "MAX_WINDOW_HOURS",
+    "INITIAL_WINDOW_HOURS",
 ]
 
 

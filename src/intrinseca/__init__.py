@@ -1,60 +1,63 @@
 """
-Intrinseca: Motor de Transformación Directional Change (DC)
-============================================================
+Módulo de visualización para análisis Directional Change (DC).
 
-Librería de alto rendimiento para análisis de series temporales financieras
-mediante el paradigma de Directional Change.
+Este módulo implementa una arquitectura modular para visualización de alta frecuencia,
+separando los gráficos estáticos de los dashboards interactivos dinámicos.
 
-Uso básico (live-trading):
-    >>> import intrinseca as dc
-    >>> from intrinseca import DCDetector
-    >>> detector = DCDetector(theta=0.01)
-    >>> events = detector.detect(prices)
-
-Con visualización (requiere: pip install intrinseca[plot]):
-    >>> from intrinseca.visualization import plot_dc_events
-    >>> plot_dc_events(prices, events)
+Componentes principales:
+    - Dashboards Interactivos (Panel/HoloViz): Dual-Axis y Estándar.
+    - Gráficos Estáticos (Matplotlib/Plotly): Resúmenes y Distribuciones.
 """
 
-from intrinseca.core.event_detector import DCDetector, DCResult
-from intrinseca.core.indicators import DCIndicators
-# from intrinseca.core.bridging import to_numpy, to_polars, extract_price_column
+# 1. Exportación de Gráficos Estáticos (Capa de Reporte)
+from intrinseca.visualization.static_plots import (
+    plot_dc_events,
+    plot_dc_summary,
+    plot_coastline,
+    plot_event_distribution,
+)
 
-__version__ = "0.1.0"
-__author__ = "Tu Nombre"
+# 2. Exportación de Gráficos Interactivos (Capa de Exploración)
+from intrinseca.visualization.interactive import (
+    create_dashboard_app,
+    create_dual_axis_dashboard,  # Nuevo: Sistema de sincronización n <-> t
+    serve_dashboard
+)
 
+# 3. API Pública del Módulo
 __all__ = [
-    # Clases principales
-    "DCDetector",
-    "DCResult",
-    "DCIndicators",
-    # Utilidades de bridging
-    # "to_numpy",
-    # "to_polars",
-    # "extract_price_column",
-    # Metadata
-    "__version__",
+    # Dashboards
+    "create_dashboard_app",
+    "create_dual_axis_dashboard",
+    "serve_dashboard",
+    
+    # Estáticos
+    "plot_dc_events",
+    "plot_dc_summary",
+    "plot_coastline",
+    "plot_event_distribution",
 ]
 
+# --- Helpers de Verificación de Entorno ---
 
-def get_version() -> str:
-    """Retorna la versión actual de la librería."""
-    return __version__
-
-
-def has_visualization() -> bool:
-    """Verifica si el módulo de visualización está disponible."""
+def _check_interactive_dependencies():
+    """Verifica si el stack de HoloViz está instalado correctamente."""
     try:
-        import matplotlib  # noqa: F401
+        import panel as pn
+        import holoviews as hv
+        import datashader as ds
         return True
-    except ImportError:
+    except ImportError as e:
+        print(f"⚠️ Faltan dependencias interactivas: {e}")
+        print("Instale con: pip install intrinseca[interactive]")
         return False
 
-
-def has_interactive() -> bool:
-    """Verifica si el módulo interactivo (Plotly) está disponible."""
+def _check_static_dependencies():
+    """Verifica dependencias para gráficos estáticos."""
     try:
-        import plotly  # noqa: F401
+        import matplotlib
+        import plotly
         return True
     except ImportError:
+        print("⚠️ Faltan dependencias estáticas. Instale con: pip install intrinseca[plot]")
         return False
