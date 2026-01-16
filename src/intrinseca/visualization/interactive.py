@@ -104,8 +104,8 @@ def create_dual_axis_dashboard(df_ticks, df_events, title="Dual-Axis DC"):
     init_segment_data = pdf_segments[mask]
     
     if not init_segment_data.empty:
-        init_n_min = int(init_segment_data['x0'].min())
-        init_n_max = int(init_segment_data['x0'].max())
+        init_n_min = int(init_segment_data['seq_idx'].min())
+        init_n_max = int(init_segment_data['seq_idx'].max())
     else:
         init_n_max = total_events - 1
         init_n_min = max(0, init_n_max - 100)
@@ -182,8 +182,8 @@ def _render_intrinsic_filtered(pdf_segments, n_min, n_max):
     """
     from .core_plots import _build_intrinsic_panel
     
-    # Filtrar segmentos al rango visible
-    mask = (pdf_segments['x0'] >= n_min) & (pdf_segments['x1'] <= n_max + 1)
+    # Filtrar segmentos al rango visible usando seq_idx
+    mask = (pdf_segments['seq_idx'] >= n_min) & (pdf_segments['seq_idx'] <= n_max)
     filtered = pdf_segments[mask]
     
     if filtered.empty:

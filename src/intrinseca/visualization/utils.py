@@ -46,29 +46,44 @@ def _get_vlines(df: pl.DataFrame):
 
 def prepare_dual_axis_data(df_events: pl.DataFrame):
     """
-    Prepara solo los eventos (Panel A). 
-    Los ticks se procesarán de forma dinámica después.
+    Prepara datos de eventos para Panel A (visualización intrínseca).
     
-    Nota: Usamos row_nr como índice secuencial de eventos (0,1,2,...N)
-    en lugar de event_idx que es el índice del tick donde ocurrió.
+    Genera datos para cajas bi-particionadas según definiciones Tsang:
+    - DC Event N (change): ext_price(N) → price(N) [extremo → confirmación]
+    - Overshoot N: price(N) → next_ext_price [confirmación → extremo siguiente]
+    
+    Columnas generadas:
+    - ext_price: Extremo del evento N (inicio del DC Event N)
+    - price: Confirmación del evento N (fin DC Event N, inicio Overshoot N)
+    - next_ext_price: Extremo del evento N+1 (fin del Overshoot N)
+    
+    Nota: Usamos row_nr como índice secuencial (0,1,2,...N).
     """
     # Añadir índice secuencial de eventos
     df_with_seq = df_events.with_row_index("seq_idx")
     
-    # Panel Intrínseco: Basado en índices secuenciales
+    # Calcular next_ext_price = ext_price del evento N+1 (para Overshoot N)
+    # Usamos shift(-1) para obtener el valor de la fila siguiente
     df_segments = df_with_seq.with_columns([
-        pl.col("price").shift(1).alias("prev_price")
-    ]).fill_null(strategy="backward")
+        pl.col("ext_price").shift(-1).alias("next_ext_price")
+    ])
+    
+    # La última fila no tiene next_ext_price (no hay evento N+1)
+    # Usamos fill_null con forward para el último registro
+    df_segments = df_segments.with_columns([
+        pl.col("next_ext_price").fill_null(strategy="forward")
+    ])
     
     pdf_segments = df_segments.select([
-        pl.col("seq_idx").alias("x0"),
-        pl.col("prev_price").alias("y0"),
-        (pl.col("seq_idx") + 1).alias("x1"),
-        pl.col("price").alias("y1"),
+        pl.col("seq_idx"),
+        pl.col("ext_price"),       # Extremo del evento N (inicio DC Event N)
+        pl.col("price"),           # Confirmación del evento N (fin DC Event N)
+        pl.col("next_ext_price"),  # Extremo del evento N+1 (fin Overshoot N)
         pl.col("type_desc"),
         pl.col("overshoot").cast(pl.Boolean).alias("is_overshoot"),
-        pl.col("time"),  # Preservar para mapeo
-        pl.col("event_idx")  # Preservar para referencia
+        pl.col("time"),            # Tiempo de confirmación
+        pl.col("ext_time"),        # Tiempo del extremo
+        pl.col("event_idx")        # Índice del tick de confirmación
     ]).to_pandas()
     
     return pdf_segments
