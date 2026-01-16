@@ -173,18 +173,65 @@ def _build_intrinsic_panel(pdf_segments, height=400):
     
     return overlay.opts(opts.Rectangles(**base_opts))
 
-def _build_physical_panel(pdf_ticks_win, event_markers=None, height=250):
+def _build_physical_panel(pdf_ticks_win, event_markers=None, event_segments=None, xlim=None, height=250):
     """
     Panel Inferior: Recibe ticks con columna status_cat para colorización.
     
     Args:
         pdf_ticks_win: DataFrame Pandas con time, price, status_cat
         event_markers: Lista de tuplas (timestamp, event_idx) para VLines
+        event_segments: Lista de dicts con datos de eventos para VSpan bands:
+            - ext_time: inicio del DC Event
+            - time: fin del DC Event / inicio del Overshoot
+            - next_ext_time: fin del Overshoot
+            - type_desc: 'upturn' o 'downturn'
+        xlim: Tupla (t_start, t_end) para limitar el eje X
         height: Altura en píxeles, o None para modo responsivo completo
     """
+    # Colores para VSpan bands (consistentes con Panel A)
+    vspan_colors = {
+        'upturn': {'dc_event': '#90ee90', 'overshoot': '#006400'},    # Verde claro / oscuro
+        'downturn': {'dc_event': '#ffb6c1', 'overshoot': '#8b0000'}   # Rosa / Rojo oscuro
+    }
+    
+    # =========================================================================
+    # 1. Crear VSpan bands para DC Events y Overshoots (capa inferior)
+    # =========================================================================
+    vspan_elements = []
+    if event_segments:
+        for seg in event_segments:
+            type_desc = seg.get('type_desc', '').lower()
+            colors = vspan_colors.get(type_desc, {'dc_event': '#bdc3c7', 'overshoot': '#888888'})
+            
+            # Remover timezone de los timestamps
+            def naive(ts):
+                return ts.replace(tzinfo=None) if hasattr(ts, 'tzinfo') and ts.tzinfo else ts
+            
+            ext_time = naive(seg['ext_time'])
+            time = naive(seg['time'])
+            next_ext_time = seg.get('next_ext_time')
+            
+            # DC Event band: ext_time → time
+            if ext_time and time and ext_time < time:
+                dc_vspan = hv.VSpan(ext_time, time).opts(
+                    color=colors['dc_event'], alpha=0.3
+                )
+                vspan_elements.append(dc_vspan)
+            
+            # Overshoot band: time → next_ext_time
+            if next_ext_time:
+                next_ext_time = naive(next_ext_time)
+                if time and next_ext_time and time < next_ext_time:
+                    os_vspan = hv.VSpan(time, next_ext_time).opts(
+                        color=colors['overshoot'], alpha=0.3
+                    )
+                    vspan_elements.append(os_vspan)
+    
+    # =========================================================================
+    # 2. Datashader layer (ticks colorizados)
+    # =========================================================================
     points = hv.Points(pdf_ticks_win, ['time', 'price'], vdims=['status_cat'])
     
-    # Datashader con agregación por categoría DC
     shaded = spread(
         datashade(points, aggregator=ds.count_cat('status_cat'),
                   color_key={'Upward': '#006400', 'Upturn': '#90ee90', 
@@ -193,7 +240,10 @@ def _build_physical_panel(pdf_ticks_win, event_markers=None, height=250):
         px=1
     )
     
-    # Crear overlay de VLines para marcadores de eventos
+    # =========================================================================
+    # 3. Preparar datos para etiquetas de eventos (fondo blanco via Bokeh hook)
+    # =========================================================================
+    label_data = []
     if event_markers:
         max_markers = 30
         num_events = len(event_markers)
@@ -207,35 +257,28 @@ def _build_physical_panel(pdf_ticks_win, event_markers=None, height=250):
             y_min = pdf_ticks_win['price'].min()
             y_max = pdf_ticks_win['price'].max()
             y_range = y_max - y_min
-            y_pos = y_max - 0.05 * y_range  # 2% debajo del máximo (dentro del rango)
+            y_pos = y_max - 0.05 * y_range  # 5% debajo del máximo (dentro del rango)
         else:
             y_pos = 0
         
-        # Crear VLines y etiquetas
-        elements = []
-        for ts, idx in sampled_markers:
+        # Colores por tipo de evento
+        event_colors = {
+            'upturn': '#006400',   # Verde oscuro
+            'downturn': '#8b0000'  # Rojo oscuro
+        }
+        
+        for ts, idx, type_desc in sampled_markers:
             # Remover timezone si existe
             ts_naive = ts.replace(tzinfo=None) if hasattr(ts, 'tzinfo') and ts.tzinfo else ts
-            
-            # Línea vertical
-            vline = hv.VLine(ts_naive).opts(
-                color='gray', line_width=0.8, line_dash='dashed', alpha=0.4
-            )
-            elements.append(vline)
-            
-            # Etiqueta con índice del evento (fondo blanco, borde gris)
-            label = hv.Text(ts_naive, y_pos, f' n={idx} ', fontsize=7).opts(
-                text_color='gray', text_alpha=0.9,
-                bgcolor='white',
-                border_line_color='gray', border_line_alpha=0.7
-            )
-            elements.append(label)
-        
-        if elements:
-            event_overlay = hv.Overlay(elements)
-            layout = shaded * event_overlay
-        else:
-            layout = shaded
+            color = event_colors.get(type_desc.lower() if type_desc else '', '#555555')
+            label_data.append({'x': ts_naive, 'y': y_pos, 'text': f' {idx} ', 'color': color})
+    
+    # =========================================================================
+    # 4. Combinar layers: VSpans (fondo) → Datashader (medio)
+    # =========================================================================
+    if vspan_elements:
+        vspan_overlay = hv.Overlay(vspan_elements)
+        layout = vspan_overlay * shaded
     else:
         layout = shaded
     
@@ -247,17 +290,34 @@ def _build_physical_panel(pdf_ticks_win, event_markers=None, height=250):
         '$x': 'datetime'
     })
     
+    # Crear lista de hooks: siempre incluir 30min ticks, opcionalmente labels
+    from .hooks import create_event_labels_hook
+    hooks_list = [_apply_30min_xticks_hook]
+    if label_data:
+        hooks_list.append(create_event_labels_hook(label_data))
+    
     # Opciones base para RGB
     rgb_opts = dict(
         responsive=True, 
         xlabel="Time (UTC)",
         tools=['xwheel_zoom', 'reset', 'crosshair', panel_b_hover],
-        hooks=[_apply_30min_xticks_hook],
-        show_legend=False  # Ocultar leyenda para evitar obstruir ticks
+        hooks=hooks_list,
+        show_legend=False,  # Ocultar leyenda para evitar obstruir ticks
+        padding=0  # Sin padding para ajustar exactamente al rango de datos
     )
     
     # Altura explícita solo si se especifica
     if height is not None:
         rgb_opts['height'] = height
+    
+    # Limitar eje X si se proporciona xlim
+    if xlim is not None:
+        t_start, t_end = xlim
+        # Remover timezone si existe
+        if hasattr(t_start, 'tzinfo') and t_start.tzinfo:
+            t_start = t_start.replace(tzinfo=None)
+        if hasattr(t_end, 'tzinfo') and t_end.tzinfo:
+            t_end = t_end.replace(tzinfo=None)
+        rgb_opts['xlim'] = (t_start, t_end)
     
     return layout.opts(opts.RGB(**rgb_opts))

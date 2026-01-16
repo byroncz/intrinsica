@@ -122,3 +122,45 @@ def create_mouseup_sync_hook(range_stream: RangeUpdateStream, init_n_min=None, i
         plot.state.on_event(Reset, on_reset)
     
     return _mouseup_hook
+
+
+def create_event_labels_hook(label_data):
+    """
+    Factory que crea un hook para agregar etiquetas de eventos con fondo blanco.
+    
+    Usa bokeh.models.Label directamente porque hv.Text no soporta background.
+    
+    Args:
+        label_data: Lista de dicts con:
+            - 'x' (datetime naive)
+            - 'y' (float) 
+            - 'text' (str)
+            - 'color' (str): color hex para texto y borde
+        
+    Returns:
+        Hook function para usar en hv.opts(hooks=[...])
+    """
+    def _labels_hook(plot, element):
+        from bokeh.models import Label
+        
+        for item in label_data:
+            color = item.get('color', '#555555')
+            label = Label(
+                x=item['x'],
+                y=item['y'],
+                text=item['text'],
+                text_font_size='8pt',
+                text_color=color,
+                text_align='center',
+                text_baseline='middle',
+                background_fill_color='white',
+                background_fill_alpha=0.9,
+                border_line_color=color,
+                border_line_alpha=0.8,
+                border_line_width=1,
+                x_units='data',
+                y_units='data'
+            )
+            plot.state.add_layout(label)
+    
+    return _labels_hook

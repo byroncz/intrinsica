@@ -242,12 +242,14 @@ def _render_physical_panel(df_ticks, df_events, n_min, n_max, fallback_start, fa
     if n_min > n_max or n_max < 0:
         t_start, t_end = fallback_start, fallback_end
         event_markers = []
+        event_segments = []
     else:
         # slice(offset, length): length = n_max - n_min + 1 para incluir ambos extremos
         window_ev = df_events.slice(n_min, n_max - n_min + 1)
         if window_ev.is_empty():
             t_start, t_end = fallback_start, fallback_end
             event_markers = []
+            event_segments = []
         else:
             # t_start: ext_time del primer evento (inicio del DC Event del primero)
             t_start = window_ev["ext_time"].min()
@@ -265,11 +267,36 @@ def _render_physical_panel(df_ticks, df_events, n_min, n_max, fallback_start, fa
                 # No hay evento siguiente, usar time del último visible como aproximación
                 t_end = window_ev["time"].max()
             
-            # Extraer timestamps y índices de eventos para marcadores (confirmaciones)
+            # Extraer timestamps, índices y tipo de eventos para marcadores
             event_markers = [
-                (row["time"], n_min + i) 
+                (row["time"], n_min + i, row["type_desc"]) 
                 for i, row in enumerate(window_ev.iter_rows(named=True))
             ]
+            
+            # ================================================================
+            # Construir event_segments para VSpan bands
+            # Cada segmento contiene: ext_time, time, next_ext_time, type_desc
+            # ================================================================
+            # Agregar columna next_ext_time usando shift(-1)
+            window_with_next = window_ev.with_columns([
+                pl.col("ext_time").shift(-1).alias("next_ext_time")
+            ])
+            
+            # Si el último evento visible tiene un siguiente (n_max + 1), usar su ext_time
+            if n_max + 1 < len(df_events):
+                next_event = df_events.slice(n_max + 1, 1)
+                if not next_event.is_empty():
+                    last_next_ext_time = next_event["ext_time"][0]
+                    # Actualizar el último registro con el next_ext_time correcto
+                    # Convertir a lista, modificar, y usar
+                    segments_list = window_with_next.to_dicts()
+                    if segments_list:
+                        segments_list[-1]["next_ext_time"] = last_next_ext_time
+                    event_segments = segments_list
+                else:
+                    event_segments = window_with_next.to_dicts()
+            else:
+                event_segments = window_with_next.to_dicts()
     
     # Asegurar ventana mínima de 1 hora (evita t_start == t_end)
     min_window = timedelta(hours=1)
@@ -294,4 +321,4 @@ def _render_physical_panel(df_ticks, df_events, n_min, n_max, fallback_start, fa
     pdf_win = _prepare_price_data(df_win)
     
     # Sin altura fija: permite que el contenedor flex controle el tamaño
-    return _build_physical_panel(pdf_win, event_markers, height=None)
+    return _build_physical_panel(pdf_win, event_markers, event_segments=event_segments, xlim=(t_start, t_end), height=None)
