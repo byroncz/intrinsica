@@ -116,7 +116,8 @@ def create_dual_axis_dashboard(df_ticks, df_events, title="Dual-Axis DC"):
     # Renderizar vistas iniciales con altura responsiva (50% viewport cada uno)
     init_intrinsic = _render_intrinsic_filtered(pdf_segments, init_n_min, init_n_max)
     intrinsic_pane = pn.pane.HoloViews(
-        init_intrinsic, sizing_mode="stretch_both", min_height=200
+        init_intrinsic, sizing_mode="stretch_both", min_height=200,
+        linked_axes=False  # Disable auto-linking: Panel A uses int indices, Panel B uses datetime
     )
     
     init_physical = _render_physical_panel(
@@ -124,36 +125,58 @@ def create_dual_axis_dashboard(df_ticks, df_events, title="Dual-Axis DC"):
         fallback_start=init_start, fallback_end=abs_max_t
     )
     physical_pane = pn.pane.HoloViews(
-        init_physical, sizing_mode="stretch_both", min_height=200
+        init_physical, sizing_mode="stretch_both", min_height=200,
+        linked_axes=False  # Disable auto-linking to prevent dtype conflicts
     )
     physical_pane.loading_indicator = True
     
-    # 5. Stream de actualización discreta (mouseup)
+    # 5. Stream de actualización discreta (mouseup) con rango inicial para Reset
     range_stream = RangeUpdateStream()
-    mouseup_hook = create_mouseup_sync_hook(range_stream)
+    mouseup_hook = create_mouseup_sync_hook(range_stream, init_n_min, init_n_max)
     
     # Aplicar hooks al panel intrínseco inicial (integer ticks + mouseup sync)
     intrinsic_pane.object = intrinsic_pane.object.opts(hooks=[_apply_integer_xticks_hook, mouseup_hook])
     
-    # 6. Callback que actualiza AMBOS paneles cuando cambia el rango
+    # 6. Callback con debouncing para evitar race conditions en actualizaciones rápidas
+    import threading
+    pending_update = {'timer': None, 'lock': threading.Lock()}
+    
+    def _do_update(n_min, n_max):
+        """Ejecuta la actualización real de ambos paneles (thread-safe)."""
+        def _apply_updates():
+            # Actualizar Panel A (intrínseco) - filtrado para Y auto-range
+            new_intrinsic = _render_intrinsic_filtered(pdf_segments, n_min, n_max)
+            new_intrinsic = new_intrinsic.opts(hooks=[_apply_integer_xticks_hook, mouseup_hook])
+            intrinsic_pane.object = new_intrinsic
+            
+            # Actualizar Panel B (físico)
+            new_physical = _render_physical_panel(
+                df_ticks, df_events,
+                n_min=n_min, n_max=n_max,
+                fallback_start=init_start, fallback_end=abs_max_t
+            )
+            physical_pane.object = new_physical
+        
+        # Ejecutar en el thread principal de Panel para evitar race conditions
+        pn.state.execute(_apply_updates)
+        
+        with pending_update['lock']:
+            pending_update['timer'] = None
+    
     def on_range_change(event):
         if event.new is None:
             return
         
         n_min, n_max = int(max(0, event.new[0])), int(min(event.new[1], total_events))
         
-        # Actualizar Panel A (intrínseco) - filtrado para Y auto-range
-        new_intrinsic = _render_intrinsic_filtered(pdf_segments, n_min, n_max)
-        new_intrinsic = new_intrinsic.opts(hooks=[_apply_integer_xticks_hook, mouseup_hook])
-        intrinsic_pane.object = new_intrinsic
-        
-        # Actualizar Panel B (físico)
-        new_physical = _render_physical_panel(
-            df_ticks, df_events,
-            n_min=n_min, n_max=n_max,
-            fallback_start=init_start, fallback_end=abs_max_t
-        )
-        physical_pane.object = new_physical
+        with pending_update['lock']:
+            # Cancelar timer pendiente si existe
+            if pending_update['timer'] is not None:
+                pending_update['timer'].cancel()
+            
+            # Programar nueva actualización con 100ms de delay
+            pending_update['timer'] = threading.Timer(0.1, _do_update, args=(n_min, n_max))
+            pending_update['timer'].start()
     
     range_stream.param.watch(on_range_change, 'x_range')
     
@@ -198,6 +221,10 @@ def _render_physical_panel(df_ticks, df_events, n_min, n_max, fallback_start, fa
     """
     Renderiza Panel B (físico) para un rango de eventos dado.
     
+    El rango de tiempo se calcula según definiciones Tsang:
+    - t_start: ext_time del primer evento (inicio DC Event)
+    - t_end: ext_time del evento siguiente al último (fin Overshoot)
+    
     Args:
         df_ticks: DataFrame completo de ticks
         df_events: DataFrame completo de eventos
@@ -208,21 +235,37 @@ def _render_physical_panel(df_ticks, df_events, n_min, n_max, fallback_start, fa
         Objeto HoloViews renderizable
     """
     # Mapear índice secuencial a tiempo físico usando slicing por filas
+    # n_min y n_max son INCLUSIVOS (consistente con Panel A)
     n_min = max(0, n_min)
-    n_max = min(n_max, len(df_events))
+    n_max = min(n_max, len(df_events) - 1)  # -1 porque es inclusivo
     
-    if n_min >= n_max or n_max <= 0:
+    if n_min > n_max or n_max < 0:
         t_start, t_end = fallback_start, fallback_end
         event_markers = []
     else:
-        window_ev = df_events.slice(n_min, n_max - n_min)
+        # slice(offset, length): length = n_max - n_min + 1 para incluir ambos extremos
+        window_ev = df_events.slice(n_min, n_max - n_min + 1)
         if window_ev.is_empty():
             t_start, t_end = fallback_start, fallback_end
             event_markers = []
         else:
-            t_start = window_ev["time"].min()
-            t_end = window_ev["time"].max()
-            # Extraer timestamps y índices de eventos para marcadores
+            # t_start: ext_time del primer evento (inicio del DC Event del primero)
+            t_start = window_ev["ext_time"].min()
+            
+            # t_end: ext_time del evento SIGUIENTE al último visible (fin del Overshoot del último)
+            # n_max es INCLUSIVO, así que el evento siguiente es n_max + 1
+            if n_max + 1 < len(df_events):
+                next_event = df_events.slice(n_max + 1, 1)
+                if not next_event.is_empty():
+                    t_end = next_event["ext_time"][0]
+                else:
+                    # Fallback: usar time del último evento visible
+                    t_end = window_ev["time"].max()
+            else:
+                # No hay evento siguiente, usar time del último visible como aproximación
+                t_end = window_ev["time"].max()
+            
+            # Extraer timestamps y índices de eventos para marcadores (confirmaciones)
             event_markers = [
                 (row["time"], n_min + i) 
                 for i, row in enumerate(window_ev.iter_rows(named=True))

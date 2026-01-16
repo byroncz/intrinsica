@@ -252,7 +252,8 @@ def _build_physical_panel(pdf_ticks_win, event_markers=None, height=250):
         responsive=True, 
         xlabel="Time (UTC)",
         tools=['xwheel_zoom', 'reset', 'crosshair', panel_b_hover],
-        hooks=[_apply_30min_xticks_hook]
+        hooks=[_apply_30min_xticks_hook],
+        show_legend=False  # Ocultar leyenda para evitar obstruir ticks
     )
     
     # Altura explícita solo si se especifica

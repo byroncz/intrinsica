@@ -69,10 +69,8 @@ def prepare_dual_axis_data(df_events: pl.DataFrame):
     ])
     
     # La última fila no tiene next_ext_price (no hay evento N+1)
-    # Usamos fill_null con forward para el último registro
-    df_segments = df_segments.with_columns([
-        pl.col("next_ext_price").fill_null(strategy="forward")
-    ])
+    # Como no se puede completar, la excluimos de la visualización
+    df_segments = df_segments.filter(pl.col("next_ext_price").is_not_null())
     
     pdf_segments = df_segments.select([
         pl.col("seq_idx"),

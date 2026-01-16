@@ -84,12 +84,14 @@ class RangeUpdateStream(param.Parameterized):
         self.x_range = (x_start, x_end)
 
 
-def create_mouseup_sync_hook(range_stream: RangeUpdateStream):
+def create_mouseup_sync_hook(range_stream: RangeUpdateStream, init_n_min=None, init_n_max=None):
     """
     Factory que crea un hook para sincronización en mouseup.
     
     Args:
         range_stream: Instancia de RangeUpdateStream a actualizar
+        init_n_min: Rango X inicial mínimo (para reset)
+        init_n_max: Rango X inicial máximo (para reset)
         
     Returns:
         Hook function para usar en hv.opts(hooks=[...])
@@ -98,7 +100,10 @@ def create_mouseup_sync_hook(range_stream: RangeUpdateStream):
         """
         Hook que registra callback JS para capturar rango al soltar mouse.
         El callback JS envía el rango final al stream Python.
+        También maneja el evento Reset para volver al rango inicial.
         """
+        from bokeh.events import Reset
+        
         # Aplicar restricciones de zoom X
         _apply_x_zoom_hook(plot, element)
         
@@ -107,7 +112,13 @@ def create_mouseup_sync_hook(range_stream: RangeUpdateStream):
             if hasattr(event, 'x0') and hasattr(event, 'x1'):
                 range_stream.update_range(event.x0, event.x1)
         
-        # Registrar evento RangesUpdate (se dispara al finalizar interacción)
+        # Callback para Reset: volver al rango inicial real
+        def on_reset(event):
+            if init_n_min is not None and init_n_max is not None:
+                range_stream.update_range(init_n_min, init_n_max)
+        
+        # Registrar eventos
         plot.state.on_event(RangesUpdate, on_ranges_update)
+        plot.state.on_event(Reset, on_reset)
     
     return _mouseup_hook
