@@ -62,10 +62,11 @@ def prepare_dual_axis_data(df_events: pl.DataFrame):
     # Añadir índice secuencial de eventos
     df_with_seq = df_events.with_row_index("seq_idx")
     
-    # Calcular next_ext_price = ext_price del evento N+1 (para Overshoot N)
+    # Calcular next_ext_price y next_ext_time = ext_price/ext_time del evento N+1 (para Overshoot N)
     # Usamos shift(-1) para obtener el valor de la fila siguiente
     df_segments = df_with_seq.with_columns([
-        pl.col("ext_price").shift(-1).alias("next_ext_price")
+        pl.col("ext_price").shift(-1).alias("next_ext_price"),
+        pl.col("ext_time").shift(-1).alias("next_ext_time")
     ])
     
     # La última fila no tiene next_ext_price (no hay evento N+1)
@@ -77,6 +78,7 @@ def prepare_dual_axis_data(df_events: pl.DataFrame):
         pl.col("ext_price"),       # Extremo del evento N (inicio DC Event N)
         pl.col("price"),           # Confirmación del evento N (fin DC Event N)
         pl.col("next_ext_price"),  # Extremo del evento N+1 (fin Overshoot N)
+        pl.col("next_ext_time"),   # Tiempo del extremo N+1 (fin Overshoot N)
         pl.col("type_desc"),
         pl.col("overshoot").cast(pl.Boolean).alias("is_overshoot"),
         pl.col("time"),            # Tiempo de confirmación

@@ -57,7 +57,8 @@ def _build_intrinsic_panel(pdf_segments, height=400):
     - Downturn: rosa (change) / rojo oscuro (overshoot)
     
     Args:
-        pdf_segments: DataFrame con columnas seq_idx, ext_price, price, next_ext_price, type_desc, time, ext_time
+        pdf_segments: DataFrame con columnas seq_idx, ext_price, price, next_ext_price, 
+                      next_ext_time, type_desc, time, ext_time
         height: Altura en píxeles, o None para modo responsivo completo
     """
     import numpy as np
@@ -96,6 +97,14 @@ def _build_intrinsic_panel(pdf_segments, height=400):
     else:
         change_data['end_time'] = 'N/A'
     
+    # Delta P y Delta T para DC Event
+    change_data['delta_p'] = np.abs(change_data['price'] - change_data['ext_price'])
+    if 'time' in change_data.columns and 'ext_time' in change_data.columns:
+        change_data['delta_t'] = (change_data['time'] - change_data['ext_time']).dt.total_seconds() / 3600  # en horas
+        change_data['delta_t_str'] = change_data['delta_t'].apply(lambda h: f"{h:.2f} h")
+    else:
+        change_data['delta_t_str'] = 'N/A'
+    
     # =========================================================================
     # Overshoot N: price(N) → next_ext_price
     # Representa el movimiento desde confirmación hasta el siguiente extremo
@@ -111,13 +120,23 @@ def _build_intrinsic_panel(pdf_segments, height=400):
     )
     os_data['part'] = 'Overshoot'
     
-    # Tiempo: el Overshoot va desde time (confirmación) hasta el ext_time del siguiente evento
-    # Como no tenemos ext_time(N+1) directamente, mostramos la confirmación como inicio
+    # Tiempo: el Overshoot va desde time (confirmación) hasta next_ext_time (extremo del evento N+1)
     if 'time' in os_data.columns:
         os_data['start_time'] = os_data['time'].dt.strftime('%Y-%m-%d %H:%M:%S')
     else:
         os_data['start_time'] = 'N/A'
-    os_data['end_time'] = '→ siguiente extremo'
+    if 'next_ext_time' in os_data.columns:
+        os_data['end_time'] = os_data['next_ext_time'].dt.strftime('%Y-%m-%d %H:%M:%S')
+    else:
+        os_data['end_time'] = 'N/A'
+    
+    # Delta P y Delta T para Overshoot
+    os_data['delta_p'] = np.abs(os_data['next_ext_price'] - os_data['price'])
+    if 'next_ext_time' in os_data.columns and 'time' in os_data.columns:
+        os_data['delta_t'] = (os_data['next_ext_time'] - os_data['time']).dt.total_seconds() / 3600  # en horas
+        os_data['delta_t_str'] = os_data['delta_t'].apply(lambda h: f"{h:.2f} h")
+    else:
+        os_data['delta_t_str'] = 'N/A'
     
     # Custom HoverTool con formato legible
     custom_hover = HoverTool(tooltips=[
@@ -127,13 +146,15 @@ def _build_intrinsic_panel(pdf_segments, height=400):
         ('Fin', '@end_time'),
         ('Precio Alto', '@y1{0.0,00}'),
         ('Precio Bajo', '@y0{0.0,00}'),
+        ('ΔP', '@delta_p{0.0,00}'),
+        ('ΔT', '@delta_t_str'),
     ])
     
     # Crear rectángulos HoloViews
     change_rects = hv.Rectangles(
         change_data, 
         ['x0', 'y0', 'x1', 'y1'], 
-        ['type_desc', 'part', 'start_time', 'end_time', 'color']
+        ['type_desc', 'part', 'start_time', 'end_time', 'delta_p', 'delta_t_str', 'color']
     ).opts(
         color='color',
         line_width=0.5,
@@ -144,7 +165,7 @@ def _build_intrinsic_panel(pdf_segments, height=400):
     os_rects = hv.Rectangles(
         os_data, 
         ['x0', 'y0', 'x1', 'y1'], 
-        ['type_desc', 'part', 'start_time', 'end_time', 'color']
+        ['type_desc', 'part', 'start_time', 'end_time', 'delta_p', 'delta_t_str', 'color']
     ).opts(
         color='color',
         line_width=0.5,
