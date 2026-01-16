@@ -6,6 +6,12 @@ from bokeh.models import HoverTool
 
 hv.extension('bokeh')
 
+from .config import (
+    DATASHADER_COLOR_KEY, INTRINSIC_BOX_COLORS, VSPAN_COLORS,
+    EVENT_MARKER_COLORS, COLOR_NEUTRAL, COLOR_UPTURN, COLOR_DOWNTURN,
+    TEXT_COLOR_DARK, TEXT_COLOR_LIGHT, TEXT_COLOR_DEFAULT,
+    LINE_COLOR_CHANGE, LINE_COLOR_OVERSHOOT, LINE_COLOR_VLINE
+)
 from .utils import _prepare_price_data, _prepare_event_data, _get_vlines
 from .hooks import _apply_x_zoom_hook, _apply_integer_xticks_hook, _apply_30min_xticks_hook
 
@@ -22,19 +28,18 @@ def _build_hv_plot(df_ticks, df_events, title, theta, height):
     price_dots = hv.Points(pdf, ['time', 'price'], vdims=['status_cat'])
     price_shaded = spread(
         datashade(price_dots, aggregator=ds.count_cat('status_cat'),
-                  color_key={'Upward': '#006400', 'Upturn': '#90ee90', 'Downward': '#8b0000', 
-                             'Downturn': '#ffb6c1', 'Neutral': '#bdc3c7'}),
+                  color_key=DATASHADER_COLOR_KEY),
         px=1
     ).opts(xlabel="Time (UTC)", ylabel="Price", show_legend=False)
 
     # Capas de Eventos
-    up_ticks = hv.Scatter(pdf[pdf['status_cat'] == 'Upward'], ['time'], ['price']).opts(color='#006400', size=2)
-    down_ticks = hv.Scatter(pdf[pdf['status_cat'] == 'Downward'], ['time'], ['price']).opts(color='#8b0000', size=2)
+    up_ticks = hv.Scatter(pdf[pdf['status_cat'] == 'Upward'], ['time'], ['price']).opts(color=COLOR_UPTURN, size=2)
+    down_ticks = hv.Scatter(pdf[pdf['status_cat'] == 'Downward'], ['time'], ['price']).opts(color=COLOR_DOWNTURN, size=2)
     
     # Líneas de tiempo
     mid, noon = _get_vlines(df_ticks)
-    v_lines = hv.Overlay([hv.VLine(t).opts(color='gray', line_width=0.5) for t in mid] + 
-                        [hv.VLine(t).opts(color='gray', line_dash='dotted', line_width=0.5) for t in noon])
+    v_lines = hv.Overlay([hv.VLine(t).opts(color=LINE_COLOR_VLINE, line_width=0.5) for t in mid] + 
+                        [hv.VLine(t).opts(color=LINE_COLOR_VLINE, line_dash='dotted', line_width=0.5) for t in noon])
 
     layout = (price_shaded * up_ticks * down_ticks * v_lines)
 
@@ -44,7 +49,7 @@ def _build_hv_plot(df_ticks, df_events, title, theta, height):
                  hooks=[_apply_x_zoom_hook])
     )
 
-def _build_intrinsic_panel(pdf_segments, height=400):
+def _build_intrinsic_panel(pdf_segments, height=400, ylim=None):
     """
     Panel Superior: Cajas bi-particionadas por evento DC (definiciones Tsang).
     
@@ -60,17 +65,15 @@ def _build_intrinsic_panel(pdf_segments, height=400):
         pdf_segments: DataFrame con columnas seq_idx, ext_price, price, next_ext_price, 
                       next_ext_time, type_desc, time, ext_time
         height: Altura en píxeles, o None para modo responsivo completo
+        ylim: Tupla (y_min, y_max) opcional.
     """
     import numpy as np
     
     # Parámetros de visualización
     box_half_width = 0.35  # Mitad del ancho de la caja
     
-    # Colores por tipo de evento
-    colors = {
-        'upturn': {'change': '#90ee90', 'overshoot': '#006400'},   # Verdes
-        'downturn': {'change': '#ffb6c1', 'overshoot': '#8b0000'}  # Rosas/Rojos
-    }
+    # Colores por tipo de evento (desde config)
+    colors = INTRINSIC_BOX_COLORS
     
     # =========================================================================
     # DC Event N (change): ext_price(N) → price(N)
@@ -83,7 +86,7 @@ def _build_intrinsic_panel(pdf_segments, height=400):
     change_data['y0'] = np.minimum(change_data['ext_price'], change_data['price'])
     change_data['y1'] = np.maximum(change_data['ext_price'], change_data['price'])
     change_data['color'] = change_data['type_desc'].map(
-        lambda t: colors.get(t, {}).get('change', '#bdc3c7')
+        lambda t: colors.get(t, {}).get('change', COLOR_NEUTRAL)
     )
     change_data['part'] = 'DC Event'
     
@@ -116,7 +119,7 @@ def _build_intrinsic_panel(pdf_segments, height=400):
     os_data['y0'] = np.minimum(os_data['price'], os_data['next_ext_price'])
     os_data['y1'] = np.maximum(os_data['price'], os_data['next_ext_price'])
     os_data['color'] = os_data['type_desc'].map(
-        lambda t: colors.get(t, {}).get('overshoot', '#bdc3c7')
+        lambda t: colors.get(t, {}).get('overshoot', COLOR_NEUTRAL)
     )
     os_data['part'] = 'Overshoot'
     
@@ -140,12 +143,12 @@ def _build_intrinsic_panel(pdf_segments, height=400):
     
     # Custom HoverTool con formato legible
     custom_hover = HoverTool(tooltips=[
-        ('Tipo', '@type_desc'),
-        ('Parte', '@part'),
-        ('Inicio', '@start_time'),
-        ('Fin', '@end_time'),
-        ('Precio Alto', '@y1{0.0,00}'),
-        ('Precio Bajo', '@y0{0.0,00}'),
+        # ('Tipo', '@type_desc'),
+        # ('Parte', '@part'),
+        # ('Inicio', '@start_time'),
+        # ('Fin', '@end_time'),
+        # ('Precio Alto', '@y1{0.0,00}'),
+        # ('Precio Bajo', '@y0{0.0,00}'),
         ('ΔP', '@delta_p{0.0,00}'),
         ('ΔT', '@delta_t_str'),
     ])
@@ -157,8 +160,7 @@ def _build_intrinsic_panel(pdf_segments, height=400):
         ['type_desc', 'part', 'start_time', 'end_time', 'delta_p', 'delta_t_str', 'color']
     ).opts(
         color='color',
-        line_width=0.5,
-        line_color='#666666',
+        line_width=0,  # Sin borde
         alpha=0.85
     )
     
@@ -168,18 +170,101 @@ def _build_intrinsic_panel(pdf_segments, height=400):
         ['type_desc', 'part', 'start_time', 'end_time', 'delta_p', 'delta_t_str', 'color']
     ).opts(
         color='color',
-        line_width=0.5,
-        line_color='#444444',
+        line_width=0,  # Sin borde
         alpha=0.95
     )
     
-    # Combinar overlays
-    overlay = change_rects * os_rects
+    # =========================================================================
+    # Etiquetas permanentes de ΔP y ΔT dentro de cada rectángulo
+    # =========================================================================
+    
+    # Preparar datos para etiquetas de DC Event (centradas en el rectángulo)
+    change_labels_data = change_data.copy()
+    change_labels_data['x_center'] = change_labels_data['seq_idx']
+    change_labels_data['y_center'] = (change_labels_data['y0'] + change_labels_data['y1']) / 2
+    change_labels_data['label_text'] = change_labels_data.apply(
+        lambda r: f"ΔP: {r['delta_p']:.2f}\nΔT: {r['delta_t_str']}", axis=1
+    )
+    # Color de texto según tipo (blanco para fondos oscuros, negro para claros)
+    change_labels_data['text_color'] = TEXT_COLOR_DARK  # Texto oscuro para DC Event (fondo claro)
+    
+    # Preparar datos para etiquetas de Overshoot (posicionadas fuera del rectángulo)
+    os_labels_data = os_data.copy()
+    os_labels_data['x_center'] = os_labels_data['seq_idx']
+    # Posición Y: arriba del box para upturn, abajo del box para downturn
+    # Para upturn (overshoot hacia arriba): la etiqueta va ARRIBA del box (y1 + padding)
+    # Para downturn (overshoot hacia abajo): la etiqueta va ABAJO del box (y0 - padding)
+    y_padding_fixed = 15  # Distancia fija en unidades de precio
+    os_labels_data['y_label'] = os_labels_data.apply(
+        lambda r: r['y1'] + y_padding_fixed if r['type_desc'] == 'upturn' else r['y0'] - y_padding_fixed,
+        axis=1
+    )
+    os_labels_data['label_text'] = os_labels_data.apply(
+        lambda r: f"ΔP: {r['delta_p']:.2f}\nΔT: {r['delta_t_str']}", axis=1
+    )
+    # Color de texto: verde oscuro para upturn, rojo oscuro para downturn
+    os_labels_data['text_color'] = os_labels_data['type_desc'].map(
+        lambda t: COLOR_UPTURN if t == 'upturn' else COLOR_DOWNTURN
+    )
+    
+    # Crear Labels HoloViews para DC Events
+    change_labels = hv.Labels(
+        change_labels_data,
+        ['x_center', 'y_center'],
+        'label_text'
+    ).opts(
+        text_font_size='7pt',
+        text_color=TEXT_COLOR_DARK,
+        text_align='center',
+        text_baseline='middle'
+    )
+    
+    # Crear Labels HoloViews para Overshoots (separados por tipo para diferente baseline)
+    # Upturn: etiqueta arriba del box (baseline='bottom' para que el texto quede sobre la línea)
+    os_upturn = os_labels_data[os_labels_data['type_desc'] == 'upturn']
+    os_downturn = os_labels_data[os_labels_data['type_desc'] == 'downturn']
+    
+    os_labels_upturn = hv.Labels(
+        os_upturn,
+        ['x_center', 'y_label'],
+        'label_text'
+    ).opts(
+        text_font_size='7pt',
+        text_color=COLOR_UPTURN,
+        text_align='center',
+        text_baseline='bottom'  # Texto arriba de la posición
+    )
+    
+    # Downturn: etiqueta abajo del box (baseline='top' para que el texto quede bajo la línea)
+    os_labels_downturn = hv.Labels(
+        os_downturn,
+        ['x_center', 'y_label'],
+        'label_text'
+    ).opts(
+        text_font_size='7pt',
+        text_color=COLOR_DOWNTURN,
+        text_align='center',
+        text_baseline='top'  # Texto abajo de la posición
+    )
+    
+    # Combinar overlays: rectángulos primero, luego etiquetas encima
+    overlay = change_rects * os_rects * change_labels * os_labels_upturn * os_labels_downturn
+    
+    # Si no se provee ylim, calcularlo automáticamente con margen para etiquetas
+    if ylim is None:
+        # Calcular límites Y explícitos incluyendo espacio para etiquetas externas
+        # Las etiquetas de OS están a y_padding_fixed (15) fuera del box, más espacio para el texto
+        label_space = y_padding_fixed + 35  # 15 de padding + 35 para el texto (2 líneas)
+        y_min_data = min(change_data['y0'].min(), os_data['y0'].min())
+        y_max_data = max(change_data['y1'].max(), os_data['y1'].max())
+        # Agregar espacio para etiquetas
+        ylim = (y_min_data - label_space, y_max_data + label_space)
     
     # Opciones base (usar custom_hover en lugar de 'hover' genérico)
     base_opts = dict(
         responsive=True,
-        padding=0.02,
+        padding=0,  # Sin padding adicional, usamos ylim explícito
+        ylim=ylim,
         tools=['xbox_select', 'xwheel_zoom', 'reset', custom_hover],
         hooks=[_apply_integer_xticks_hook],
         xlabel='Event Index (n)',
@@ -194,7 +279,7 @@ def _build_intrinsic_panel(pdf_segments, height=400):
     
     return overlay.opts(opts.Rectangles(**base_opts))
 
-def _build_physical_panel(pdf_ticks_win, event_markers=None, event_segments=None, xlim=None, height=250):
+def _build_physical_panel(pdf_ticks_win, event_markers=None, event_segments=None, xlim=None, ylim=None, height=250):
     """
     Panel Inferior: Recibe ticks con columna status_cat para colorización.
     
@@ -207,13 +292,11 @@ def _build_physical_panel(pdf_ticks_win, event_markers=None, event_segments=None
             - next_ext_time: fin del Overshoot
             - type_desc: 'upturn' o 'downturn'
         xlim: Tupla (t_start, t_end) para limitar el eje X
+        ylim: Tupla (y_min, y_max) para limitar el eje Y (sincronizado con Panel A)
         height: Altura en píxeles, o None para modo responsivo completo
     """
-    # Colores para VSpan bands (consistentes con Panel A)
-    vspan_colors = {
-        'upturn': {'dc_event': '#90ee90', 'overshoot': '#006400'},    # Verde claro / oscuro
-        'downturn': {'dc_event': '#ffb6c1', 'overshoot': '#8b0000'}   # Rosa / Rojo oscuro
-    }
+    # Colores para VSpan bands (desde config, consistentes con Panel A)
+    vspan_colors = VSPAN_COLORS
     
     # =========================================================================
     # 1. Crear VSpan bands para DC Events y Overshoots (capa inferior)
@@ -222,7 +305,7 @@ def _build_physical_panel(pdf_ticks_win, event_markers=None, event_segments=None
     if event_segments:
         for seg in event_segments:
             type_desc = seg.get('type_desc', '').lower()
-            colors = vspan_colors.get(type_desc, {'dc_event': '#bdc3c7', 'overshoot': '#888888'})
+            colors = vspan_colors.get(type_desc, {'dc_event': COLOR_NEUTRAL, 'overshoot': COLOR_NEUTRAL})
             
             # Remover timezone de los timestamps
             def naive(ts):
@@ -255,9 +338,7 @@ def _build_physical_panel(pdf_ticks_win, event_markers=None, event_segments=None
     
     shaded = spread(
         datashade(points, aggregator=ds.count_cat('status_cat'),
-                  color_key={'Upward': '#006400', 'Upturn': '#90ee90', 
-                             'Downward': '#8b0000', 'Downturn': '#ffb6c1', 
-                             'Neutral': '#bdc3c7'}),
+                  color_key=DATASHADER_COLOR_KEY),
         px=1
     )
     
@@ -282,16 +363,10 @@ def _build_physical_panel(pdf_ticks_win, event_markers=None, event_segments=None
         else:
             y_pos = 0
         
-        # Colores por tipo de evento
-        event_colors = {
-            'upturn': '#006400',   # Verde oscuro
-            'downturn': '#8b0000'  # Rojo oscuro
-        }
-        
         for ts, idx, type_desc in sampled_markers:
             # Remover timezone si existe
             ts_naive = ts.replace(tzinfo=None) if hasattr(ts, 'tzinfo') and ts.tzinfo else ts
-            color = event_colors.get(type_desc.lower() if type_desc else '', '#555555')
+            color = EVENT_MARKER_COLORS.get(type_desc.lower() if type_desc else '', TEXT_COLOR_DEFAULT)
             label_data.append({'x': ts_naive, 'y': y_pos, 'text': f' {idx} ', 'color': color})
     
     # =========================================================================
@@ -340,5 +415,9 @@ def _build_physical_panel(pdf_ticks_win, event_markers=None, event_segments=None
         if hasattr(t_end, 'tzinfo') and t_end.tzinfo:
             t_end = t_end.replace(tzinfo=None)
         rgb_opts['xlim'] = (t_start, t_end)
+        
+    # Limitar eje Y si se proporciona ylim (Sincronización Panel A <-> Panel B)
+    if ylim is not None:
+        rgb_opts['ylim'] = ylim
     
     return layout.opts(opts.RGB(**rgb_opts))

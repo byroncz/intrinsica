@@ -2,6 +2,11 @@ from bokeh.models import BoxZoomTool, WheelZoomTool, SingleIntervalTicker, Datet
 from bokeh.events import RangesUpdate
 import param
 
+from .config import (
+    TICK_MINOR_COLOR, TEXT_COLOR_DEFAULT,
+    BACKGROUND_LABEL, BACKGROUND_LABEL_ALPHA, BORDER_LABEL_ALPHA
+)
+
 
 def _apply_x_zoom_hook(plot, element):
     """Fuerza a las herramientas de zoom a operar solo en el eje X."""
@@ -40,7 +45,7 @@ def _apply_30min_xticks_hook(plot, element):
             min_interval=30 * 60 * 1000,  # Mínimo 30 minutos
             max_interval=4 * 60 * 60 * 1000  # Máximo 4 horas
         )
-        xaxis.minor_tick_line_color = 'gray'
+        xaxis.minor_tick_line_color = TICK_MINOR_COLOR
         xaxis.minor_tick_line_alpha = 0.5
 
 
@@ -144,7 +149,7 @@ def create_event_labels_hook(label_data):
         from bokeh.models import Label
         
         for item in label_data:
-            color = item.get('color', '#555555')
+            color = item.get('color', TEXT_COLOR_DEFAULT)
             label = Label(
                 x=item['x'],
                 y=item['y'],
@@ -153,10 +158,10 @@ def create_event_labels_hook(label_data):
                 text_color=color,
                 text_align='center',
                 text_baseline='middle',
-                background_fill_color='white',
-                background_fill_alpha=0.9,
+                background_fill_color=BACKGROUND_LABEL,
+                background_fill_alpha=BACKGROUND_LABEL_ALPHA,
                 border_line_color=color,
-                border_line_alpha=0.8,
+                border_line_alpha=BORDER_LABEL_ALPHA,
                 border_line_width=1,
                 x_units='data',
                 y_units='data'

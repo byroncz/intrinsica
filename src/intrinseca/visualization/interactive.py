@@ -77,7 +77,7 @@ def serve_dashboard(app, port=5006):
     pn.serve(app, port=port, threaded=True)
 
 
-def create_dual_axis_dashboard(df_ticks, df_events, title="Dual-Axis DC"):
+def create_dual_axis_dashboard(df_ticks, df_events, title="Dual-Axis DC", event_range=None):
     """
     Dashboard sincronizado de doble eje (intrínseco + físico).
     
@@ -90,6 +90,9 @@ def create_dual_axis_dashboard(df_ticks, df_events, title="Dual-Axis DC"):
         df_ticks: DataFrame Polars con ticks augmentados
         df_events: DataFrame Polars con eventos DC
         title: Título del dashboard
+        event_range: Tupla opcional (n_min, n_max) para especificar la franja 
+                     de eventos a visualizar inicialmente. Si es None, se calcula
+                     automáticamente basándose en INITIAL_WINDOW_HOURS.
     """
     # 1. Límites temporales del dataset
     abs_max_t = df_ticks["time"].max()
@@ -101,21 +104,126 @@ def create_dual_axis_dashboard(df_ticks, df_events, title="Dual-Axis DC"):
     total_events = len(pdf_segments)
     
     # 3. Calcular rango inicial para ambos paneles
-    mask = (pdf_segments['time'] >= init_start) & (pdf_segments['time'] <= abs_max_t)
-    init_segment_data = pdf_segments[mask]
-    
-    if not init_segment_data.empty:
-        init_n_min = int(init_segment_data['seq_idx'].min())
-        init_n_max = int(init_segment_data['seq_idx'].max())
+    if event_range is not None:
+        # Usar rango especificado por el usuario, validando límites
+        init_n_min = max(0, int(event_range[0]))
+        init_n_max = min(int(event_range[1]), total_events - 1)
+        # Validar que el rango sea coherente
+        if init_n_min > init_n_max:
+            init_n_min, init_n_max = init_n_max, init_n_min
     else:
-        init_n_max = total_events - 1
-        init_n_min = max(0, init_n_max - 100)
+        # Comportamiento por defecto: calcular basándose en ventana temporal
+        mask = (pdf_segments['time'] >= init_start) & (pdf_segments['time'] <= abs_max_t)
+        init_segment_data = pdf_segments[mask]
+        
+        if not init_segment_data.empty:
+            init_n_min = int(init_segment_data['seq_idx'].min())
+            init_n_max = int(init_segment_data['seq_idx'].max())
+        else:
+            init_n_max = total_events - 1
+            init_n_min = max(0, init_n_max - 100)
     
     # 4. Contenedores Panel para ambos gráficos (permiten actualización dinámica)
     from .core_plots import _build_intrinsic_panel, _build_physical_panel
     
+    # Función helper para calcular Y-limits unificados
+    def _calculate_shared_ylim(n_min, n_max, t_start=None, t_end=None):
+        """Calcula ylim unificado para Chart A y B basado en datos visibles."""
+        # 1. Rango de precios en Eventos (Chart A)
+        # Filtrar eventos visibles
+        mask_ev = (pdf_segments['seq_idx'] >= n_min) & (pdf_segments['seq_idx'] <= n_max)
+        vis_events = pdf_segments[mask_ev]
+        
+        if vis_events.empty:
+            y_min_ev, y_max_ev = float('inf'), float('-inf')
+        else:
+            # Considerar precios de extremos y confirmaciones para Change y Overshoot
+            p_cols = ['ext_price', 'price', 'next_ext_price']
+            # Usar min/max global de las columnas relevantes
+            # Nota: next_ext_price puede tener NaNs si es el último evento, ignorarlos
+            y_min_ev = min(vis_events[c].min() for c in p_cols if c in vis_events.columns)
+            y_max_ev = max(vis_events[c].max() for c in p_cols if c in vis_events.columns)
+
+        # 2. Rango de precios en Ticks (Chart B)
+        # Si no se pasan tiempos explícitos, derivarlos de los eventos visibles
+        if t_start is None or t_end is None:
+            if not vis_events.empty:
+                t_start = vis_events['ext_time'].min()
+                # Para el final, intentar usar next_ext_time del último, o fallback a time
+                if 'next_ext_time' in vis_events.columns and not vis_events['next_ext_time'].isnull().all():
+                     t_end = vis_events['next_ext_time'].max()
+                else:
+                     t_end = vis_events['time'].max()
+            else:
+                 # Fallback total
+                 t_start, t_end = init_start, abs_max_t
+        
+        # Filtrar ticks en el rango de tiempo
+        # Usar lazy evaluation si fuera muy grande, pero aquí df_ticks es el full dataframe
+        # Hacer un filter rápido de Polars
+        ticks_win = df_ticks.filter(pl.col("time").is_between(t_start, t_end))
+        if ticks_win.is_empty():
+            y_min_tk, y_max_tk = float('inf'), float('-inf')
+        else:
+            y_min_tk = ticks_win['price'].min()
+            y_max_tk = ticks_win['price'].max()
+            
+        # 3. Combinar rangos
+        y_min = min(y_min_ev, y_min_tk)
+        y_max = max(y_max_ev, y_max_tk)
+        
+        if y_min == float('inf') or y_max == float('-inf'):
+            return None # No data
+            
+        # 4. Agregar padding para etiquetas (estimado fijo o proporcional)
+        # En core_plots se usa y_padding_fixed = 15 + texto (~35) = 50 unids aprox? 
+        # Mejor usar un % del rango total para ser agnóstico a la escala del precio, 
+        # pero asegurando un mínimo para las etiquetas de texto fijas.
+        # Definimos un padding generoso para acomodar etiquetas arriba y abajo.
+        
+        y_range = y_max - y_min
+        if y_range == 0:
+            y_range = 10 # Default range si es plano
+            
+        # Padding proporcional (e.g. 10%) + offset fijo para etiquetas
+        # Las etiquetas 'overshoot' consumen espacio vertical fijo en pixels/unidades
+        # Asumiremos un padding del 5-8% arriba y abajo
+        pad = y_range * 0.08
+        
+        # Asegurar espacio mínimo fijo si el rango es muy pequeño (para que quepa el texto)
+        # Esto depende de la escala de precios del activo. 
+        # Si el activo es 4000 (SPX), 15 pts es poco. Si es 1.05 (EURUSD), 15 es enorme.
+        # El código original usaba padding fijo de 15. Asumiremos que es adecuado para este activo.
+        FIXED_LABEL_PAD = 15 + 20 # 15 offset + 20 texto
+        
+        # Usar el mayor entre el proporcional y el fijo (si el rango es muy chico, domina el fijo)
+        final_pad = max(pad, FIXED_LABEL_PAD)
+        
+        return (y_min - final_pad, y_max + final_pad)
+
+    # Calcular ylim inicial
+    # Para el cálculo inicial necesitamos el t_start/t_end físico
+    # Simular la lógica de _render_physical_panel para obtener tiempos
+    # (Simplificado: min ext_time a max next_ext_time de la ventana de eventos)
+    mask_init = (pdf_segments['seq_idx'] >= init_n_min) & (pdf_segments['seq_idx'] <= init_n_max)
+    vis_init = pdf_segments[mask_init]
+    if not vis_init.empty:
+        t_s = vis_init['ext_time'].min()
+        # Intentar obtener el tiempo final real (incluyendo el overshoot del último evento)
+        # Esto requiere mirar el evento N+1 si existe, lógica similar a _render_physical_panel
+        if init_n_max + 1 < total_events:
+            # Buscar el sig evento en el df completo
+            next_row = pdf_segments.iloc[init_n_max + 1]
+            t_e = next_row['ext_time']
+        else:
+            t_e = vis_init['time'].max()
+    else:
+        t_s, t_e = init_start, abs_max_t
+
+    shared_ylim = _calculate_shared_ylim(init_n_min, init_n_max, t_s, t_e)
+
     # Renderizar vistas iniciales con altura responsiva (50% viewport cada uno)
-    init_intrinsic = _render_intrinsic_filtered(pdf_segments, init_n_min, init_n_max)
+    init_intrinsic = _render_intrinsic_filtered(pdf_segments, init_n_min, init_n_max, ylim=shared_ylim)
     intrinsic_pane = pn.pane.HoloViews(
         init_intrinsic, sizing_mode="stretch_both", min_height=200,
         linked_axes=False  # Disable auto-linking: Panel A uses int indices, Panel B uses datetime
@@ -123,7 +231,8 @@ def create_dual_axis_dashboard(df_ticks, df_events, title="Dual-Axis DC"):
     
     init_physical = _render_physical_panel(
         df_ticks, df_events, init_n_min, init_n_max,
-        fallback_start=init_start, fallback_end=abs_max_t
+        fallback_start=init_start, fallback_end=abs_max_t,
+        ylim=shared_ylim
     )
     physical_pane = pn.pane.HoloViews(
         init_physical, sizing_mode="stretch_both", min_height=200,
@@ -145,8 +254,34 @@ def create_dual_axis_dashboard(df_ticks, df_events, title="Dual-Axis DC"):
     def _do_update(n_min, n_max):
         """Ejecuta la actualización real de ambos paneles (thread-safe)."""
         def _apply_updates():
+            # 1. Calcular tiempos físicos correspondientes al nuevo rango de eventos N
+            # Necesario para filtrar ticks y obtener el rango Y completo real
+            # Replicar lógica de tiempos de physical_panel
+            n_min_c = max(0, n_min)
+            n_max_c = min(n_max, total_events - 1)
+            
+            # Obtener t_start y t_end estimados
+            # Usamos un slice ligero
+            # slice(offset, length) -> iloc[start : start + length]
+            # n_max_c - n_min_c + 1 es length.
+            # start + length = n_min_c + (n_max_c - n_min_c + 1) = n_max_c + 1
+            win = pdf_segments.iloc[n_min_c : n_max_c + 1]
+            if win.is_empty():
+                 t_start_upd, t_end_upd = init_start, abs_max_t
+            else:
+                t_start_upd = win['ext_time'].min()
+                # Fin: overshoot del último (inicio evento N+1)
+                if n_max_c + 1 < total_events:
+                     next_r = pdf_segments.iloc[n_max_c + 1]
+                     t_end_upd = next_r['ext_time']
+                else:
+                     t_end_upd = win['time'].max()
+            
+            # 2. Calcular límites Y unificados usando estos tiempos
+            new_ylim = _calculate_shared_ylim(n_min, n_max, t_start_upd, t_end_upd)
+            
             # Actualizar Panel A (intrínseco) - filtrado para Y auto-range
-            new_intrinsic = _render_intrinsic_filtered(pdf_segments, n_min, n_max)
+            new_intrinsic = _render_intrinsic_filtered(pdf_segments, n_min, n_max, ylim=new_ylim)
             new_intrinsic = new_intrinsic.opts(hooks=[_apply_integer_xticks_hook, mouseup_hook])
             intrinsic_pane.object = new_intrinsic
             
@@ -154,7 +289,8 @@ def create_dual_axis_dashboard(df_ticks, df_events, title="Dual-Axis DC"):
             new_physical = _render_physical_panel(
                 df_ticks, df_events,
                 n_min=n_min, n_max=n_max,
-                fallback_start=init_start, fallback_end=abs_max_t
+                fallback_start=init_start, fallback_end=abs_max_t,
+                ylim=new_ylim
             )
             physical_pane.object = new_physical
         
@@ -206,7 +342,7 @@ def create_dual_axis_dashboard(df_ticks, df_events, title="Dual-Axis DC"):
     )
 
 
-def _render_intrinsic_filtered(pdf_segments, n_min, n_max):
+def _render_intrinsic_filtered(pdf_segments, n_min, n_max, ylim=None):
     """
     Renderiza Panel A (intrínseco) filtrado a un rango de eventos.
     El Y-range se calcula solo sobre datos visibles.
@@ -222,10 +358,11 @@ def _render_intrinsic_filtered(pdf_segments, n_min, n_max):
         filtered = pdf_segments.iloc[-10:]
     
     # Sin altura fija: permite que el contenedor flex controle el tamaño
-    return _build_intrinsic_panel(filtered, height=None)
+    # Pasar ylim si existe
+    return _build_intrinsic_panel(filtered, height=None, ylim=ylim)
 
 
-def _render_physical_panel(df_ticks, df_events, n_min, n_max, fallback_start, fallback_end):
+def _render_physical_panel(df_ticks, df_events, n_min, n_max, fallback_start, fallback_end, ylim=None):
     """
     Renderiza Panel B (físico) para un rango de eventos dado.
     
@@ -329,4 +466,7 @@ def _render_physical_panel(df_ticks, df_events, n_min, n_max, fallback_start, fa
     pdf_win = _prepare_price_data(df_win)
     
     # Sin altura fija: permite que el contenedor flex controle el tamaño
-    return _build_physical_panel(pdf_win, event_markers, event_segments=event_segments, xlim=(t_start, t_end), height=None)
+    return _build_physical_panel(
+        pdf_win, event_markers, event_segments=event_segments, 
+        xlim=(t_start, t_end), height=None, ylim=ylim
+    )

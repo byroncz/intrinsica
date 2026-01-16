@@ -12,6 +12,11 @@ from typing import TYPE_CHECKING, Optional, Union
 import numpy as np
 from numpy.typing import NDArray
 
+from .config import (
+    STATIC_COLOR_UPTURN, STATIC_COLOR_DOWNTURN, STATIC_COLOR_PRICE,
+    STATIC_COLOR_DURATION, STATIC_COLOR_OVERSHOOT
+)
+
 if TYPE_CHECKING:
     from intrinseca.core.event_detector import DCResult
     import matplotlib.pyplot as plt
@@ -38,9 +43,9 @@ def plot_dc_events(
     figsize: tuple[int, int] = (14, 7),
     show_extremes: bool = True,
     show_trend_background: bool = True,
-    upturn_color: str = "#2ecc71",
-    downturn_color: str = "#e74c3c",
-    price_color: str = "#3498db",
+    upturn_color: str = STATIC_COLOR_UPTURN,
+    downturn_color: str = STATIC_COLOR_DOWNTURN,
+    price_color: str = STATIC_COLOR_PRICE,
     ax: Optional["Axes"] = None
 ) -> "Figure":
     """
@@ -251,8 +256,8 @@ def plot_dc_summary(
         else:
             bins = 10
             
-        ax.hist(upturn_returns, bins=bins, alpha=0.7, label="Upturn", color="#2ecc71")
-        ax.hist(downturn_returns, bins=bins, alpha=0.7, label="Downturn", color="#e74c3c")
+        ax.hist(upturn_returns, bins=bins, alpha=0.7, label="Upturn", color=STATIC_COLOR_UPTURN)
+        ax.hist(downturn_returns, bins=bins, alpha=0.7, label="Downturn", color=STATIC_COLOR_DOWNTURN)
         ax.set_xlabel("Retorno DC")
         ax.set_ylabel("Frecuencia")
         ax.set_title("Distribución de Retornos DC")
@@ -264,7 +269,7 @@ def plot_dc_summary(
         durations = result.event_durations
         
         ax = axes[1, 0]
-        ax.hist(durations, bins=30, color="#9b59b6", alpha=0.7, edgecolor="white")
+        ax.hist(durations, bins=30, color=STATIC_COLOR_DURATION, alpha=0.7, edgecolor="white")
         ax.axvline(np.mean(durations), color="red", linestyle="--", label=f"Media: {np.mean(durations):.1f}")
         ax.set_xlabel("Duración (observaciones)")
         ax.set_ylabel("Frecuencia")
@@ -276,7 +281,7 @@ def plot_dc_summary(
     if len(result.overshoots) > 0:
         ax = axes[1, 1]
         ax.bar(range(len(result.overshoots)), result.overshoots, 
-               color="#f39c12", alpha=0.7)
+               color=STATIC_COLOR_OVERSHOOT, alpha=0.7)
         ax.set_xlabel("Número de evento")
         ax.set_ylabel("Overshoot")
         ax.set_title("Overshoot por Evento")
@@ -315,7 +320,7 @@ def plot_coastline(
     thetas = sorted(coastline.keys())
     tmvs = [coastline[t] for t in thetas]
     
-    ax.plot(thetas, tmvs, "o-", color="#3498db", markersize=8, linewidth=2)
+    ax.plot(thetas, tmvs, "o-", color=STATIC_COLOR_PRICE, markersize=8, linewidth=2)
     
     if log_scale:
         ax.set_xscale("log")
@@ -333,7 +338,7 @@ def plot_coastline(
         slope, intercept = np.polyfit(log_thetas, log_tmvs, 1)
         
         fit_line = np.exp(intercept) * np.array(thetas) ** slope
-        ax.plot(thetas, fit_line, "--", color="#e74c3c", 
+        ax.plot(thetas, fit_line, "--", color=STATIC_COLOR_DOWNTURN, 
                 label=f"Ajuste: pendiente = {slope:.2f}")
         ax.legend()
     
@@ -368,9 +373,9 @@ def plot_event_distribution(
     downturn_indices = result.event_indices[result.event_types == -1]
     
     # Crear "rug plot" de eventos
-    ax.eventplot([upturn_indices], colors=["#2ecc71"], lineoffsets=0.5, 
+    ax.eventplot([upturn_indices], colors=[STATIC_COLOR_UPTURN], lineoffsets=0.5, 
                  linelengths=0.4, label="Upturn")
-    ax.eventplot([downturn_indices], colors=["#e74c3c"], lineoffsets=-0.5, 
+    ax.eventplot([downturn_indices], colors=[STATIC_COLOR_DOWNTURN], lineoffsets=-0.5, 
                  linelengths=0.4, label="Downturn")
     
     ax.set_yticks([0.5, -0.5])
