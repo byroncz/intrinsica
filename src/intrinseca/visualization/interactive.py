@@ -2,6 +2,7 @@ import panel as pn
 import holoviews as hv
 import polars as pl
 from datetime import datetime, timezone, timedelta
+import math
 
 from .config import (
     MAX_WINDOW_HOURS, INITIAL_WINDOW_HOURS, 
@@ -167,7 +168,14 @@ def create_dual_axis_dashboard(df_ticks, df_events, title="Dual-Axis DC"):
         if event.new is None:
             return
         
-        n_min, n_max = int(max(0, event.new[0])), int(min(event.new[1], total_events))
+        # Redondeo semántico: ceil para n_min, floor para n_max
+        # Esto asegura que solo se incluyan eventos cuyo CENTRO esté dentro de la selección
+        n_min = int(max(0, math.ceil(event.new[0])))
+        n_max = int(min(math.floor(event.new[1]), total_events - 1))
+        
+        # Validar que el rango sea válido (puede ser inválido si la selección es muy pequeña)
+        if n_min > n_max:
+            return
         
         with pending_update['lock']:
             # Cancelar timer pendiente si existe
