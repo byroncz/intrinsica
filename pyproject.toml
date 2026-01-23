@@ -39,6 +39,7 @@ dependencies = [
     "numpy>=1.24.0",
     "numba>=0.58.0",
     "polars>=0.20.0",
+    "fluxica @ file:./libs/fluxica-0.1.0-py3-none-any.whl",
 ]
 
 [project.optional-dependencies]
