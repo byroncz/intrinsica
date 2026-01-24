@@ -23,6 +23,11 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from numpy.typing import NDArray
 
+from rich.console import Console
+from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeElapsedColumn
+from rich.panel import Panel
+from rich import box
+
 from .kernel import segment_events_kernel, warmup_kernel
 from .state import (
     DCState,
@@ -71,6 +76,7 @@ class Engine:
         theta: float,
         silver_base_path: Path,
         keep_state_files: bool = True,
+        verbose: bool = False,
     ):
         """
         Inicializa el motor Silver.
@@ -81,11 +87,15 @@ class Engine:
             keep_state_files: Si True, conserva archivos .arrow históricos (dev/debug).
                               Si False, elimina el .arrow del día anterior después de
                               procesar exitosamente (producción).
+            verbose: Si True, imprime logs detallados por cada día.
+                     Si False (default), usa barra de progreso compacta.
         """
         self.theta = float(theta)
         self.silver_base_path = Path(silver_base_path)
         self.keep_state_files = keep_state_files
+        self.verbose = verbose
         self._compiled = False
+        self._console = Console()
     
     def _warmup(self) -> None:
         """Pre-compila el kernel Numba si aún no se ha hecho."""
@@ -279,10 +289,12 @@ class Engine:
         
         if prev_state_result is not None:
             prev_state_path, prev_state = prev_state_result
-            print(f"  📂 Estado anterior encontrado: {prev_state.n_orphans} huérfanos")
+            if self.verbose:
+                print(f"  📂 Estado anterior encontrado: {prev_state.n_orphans} huérfanos")
         else:
             prev_state = create_empty_state(process_date)
-            print("  🆕 Sin estado anterior, iniciando desde cero")
+            if self.verbose:
+                print("  🆕 Sin estado anterior, iniciando desde cero")
         
         # 3. Stitch huérfanos con datos nuevos
         stitched_prices, stitched_times, stitched_quantities, stitched_directions = \
@@ -291,7 +303,8 @@ class Engine:
                 prices, times, quantities, directions
             )
         
-        print(f"  🔗 Datos combinados: {len(stitched_prices):,} ticks")
+        if self.verbose:
+            print(f"  🔗 Datos combinados: {len(stitched_prices):,} ticks")
         
         # 4. Obtener estado inicial para el kernel
         ext_high, ext_low = prev_state.get_extreme_prices()
@@ -316,7 +329,8 @@ class Engine:
             prev_state.last_os_ref,
         )
         
-        print(f"  ✅ Eventos detectados: {n_events}")
+        if self.verbose:
+            print(f"  ✅ Eventos detectados: {n_events}")
         
         # 6. Identificar huérfanos del día actual
         orphan_prices = stitched_prices[orphan_start_idx:]
@@ -324,7 +338,8 @@ class Engine:
         orphan_quantities = stitched_quantities[orphan_start_idx:]
         orphan_directions = stitched_directions[orphan_start_idx:]
         
-        print(f"  🔚 Ticks huérfanos: {len(orphan_prices)}")
+        if self.verbose:
+            print(f"  🔚 Ticks huérfanos: {len(orphan_prices)}")
         
         # 7. Crear y guardar nuevo estado
         new_state = DCState(
@@ -342,12 +357,14 @@ class Engine:
             process_date.year, process_date.month, process_date.day
         )
         save_state(new_state, state_path)
-        print(f"  💾 Estado guardado: {state_path.name}")
+        if self.verbose:
+            print(f"  💾 Estado guardado: {state_path.name}")
         
         # 8. Construir y guardar datos Silver (si hay eventos)
         if n_events == 0:
-            print("  ⚠️ Sin eventos confirmados para este día")
-            return None
+            if self.verbose:
+                print("  ⚠️ Sin eventos confirmados para este día")
+            return None, 0, len(stitched_prices)
         
         # Construir columnas Arrow anidadas (ahora con búferes separados)
         list_columns = self._build_arrow_lists(
@@ -367,18 +384,20 @@ class Engine:
             ticker, process_date.year, process_date.month, process_date.day
         )
         self._write_parquet(arrow_table, data_path)
-        print(f"  📁 Datos Silver: {data_path}")
+        if self.verbose:
+            print(f"  📁 Datos Silver: {data_path}")
         
         # 10. Limpiar archivo de estado anterior (ya es redundante)
         # Los ticks huérfanos del día anterior ahora están embebidos en el Parquet de hoy
         if not self.keep_state_files and prev_state_path is not None and prev_state_path.exists():
             prev_state_path.unlink()
-            print(f"  🧹 Estado anterior eliminado: {prev_state_path.name}")
+            if self.verbose:
+                print(f"  🧹 Estado anterior eliminado: {prev_state_path.name}")
         
         # 11. Convertir a Polars para retorno
         df_silver = pl.from_arrow(arrow_table)
         
-        return df_silver
+        return df_silver, n_events, len(stitched_prices)
     
     def process_date_range(
         self,
@@ -415,14 +434,52 @@ class Engine:
         
         unique_dates = df_bronze.get_column("_date").unique().sort().to_list()
         
-        print(f"📅 Procesando {len(unique_dates)} días...")
+        # Contadores para resumen
+        total_events = 0
+        total_ticks = 0
         
-        for d in unique_dates:
-            print(f"\n🗓️ Día: {d}")
+        if self.verbose:
+            # Modo verbose: prints tradicionales
+            print(f"📅 Procesando {len(unique_dates)} días...")
             
-            df_day = df_bronze.filter(pl.col("_date") == d).drop("_date")
+            for d in unique_dates:
+                print(f"\n🗓️ Día: {d}")
+                df_day = df_bronze.filter(pl.col("_date") == d).drop("_date")
+                result, n_events, n_ticks = self.process_day(df_day, ticker, d, time_col=time_col)
+                results[d] = result
+                total_events += n_events
+                total_ticks += n_ticks
+        else:
+            # Modo silencioso: barra de progreso compacta
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[bold blue]Bronze → Silver"),
+                BarColumn(bar_width=40),
+                TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+                TextColumn("•"),
+                TextColumn("[cyan]{task.completed}/{task.total} días"),
+                TimeElapsedColumn(),
+                console=self._console,
+                transient=True,  # Desaparece al terminar
+            ) as progress:
+                task = progress.add_task("Procesando...", total=len(unique_dates))
+                
+                for d in unique_dates:
+                    df_day = df_bronze.filter(pl.col("_date") == d).drop("_date")
+                    result, n_events, n_ticks = self.process_day(df_day, ticker, d, time_col=time_col)
+                    results[d] = result
+                    total_events += n_events
+                    total_ticks += n_ticks
+                    progress.advance(task)
             
-            result = self.process_day(df_day, ticker, d, time_col=time_col)
-            results[d] = result
+            # Mostrar resumen compacto
+            days_with_events = sum(1 for r in results.values() if r is not None)
+            summary = (
+                f"[green]✓ {len(unique_dates)} días procesados[/green] • "
+                f"[cyan]{days_with_events} con eventos[/cyan] • "
+                f"[dim]{total_events:,} eventos | {total_ticks:,} ticks[/dim]"
+            )
+            self._console.print(Panel(summary, title=f"Engine θ={self.theta}", border_style="blue", box=box.ROUNDED))
         
         return results
+
