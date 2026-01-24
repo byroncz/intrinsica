@@ -270,8 +270,10 @@ class Engine:
             self.silver_base_path, ticker, self.theta, process_date
         )
         
+        prev_state_path: Optional[Path] = None  # Para limpieza posterior
+        
         if prev_state_result is not None:
-            _, prev_state = prev_state_result
+            prev_state_path, prev_state = prev_state_result
             print(f"  📂 Estado anterior encontrado: {prev_state.n_orphans} huérfanos")
         else:
             prev_state = create_empty_state(process_date)
@@ -362,7 +364,13 @@ class Engine:
         self._write_parquet(arrow_table, data_path)
         print(f"  📁 Datos Silver: {data_path}")
         
-        # 9. Convertir a Polars para retorno
+        # 10. Limpiar archivo de estado anterior (ya es redundante)
+        # Los ticks huérfanos del día anterior ahora están embebidos en el Parquet de hoy
+        if prev_state_path is not None and prev_state_path.exists():
+            prev_state_path.unlink()
+            print(f"  🧹 Estado anterior eliminado: {prev_state_path.name}")
+        
+        # 11. Convertir a Polars para retorno
         df_silver = pl.from_arrow(arrow_table)
         
         return df_silver
