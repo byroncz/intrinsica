@@ -70,6 +70,7 @@ class Engine:
         self,
         theta: float,
         silver_base_path: Path,
+        keep_state_files: bool = True,
     ):
         """
         Inicializa el motor Silver.
@@ -77,9 +78,13 @@ class Engine:
         Args:
             theta: Umbral del algoritmo DC (e.g., 0.005 para 0.5%)
             silver_base_path: Ruta base donde se almacenarán los datos Silver
+            keep_state_files: Si True, conserva archivos .arrow históricos (dev/debug).
+                              Si False, elimina el .arrow del día anterior después de
+                              procesar exitosamente (producción).
         """
         self.theta = float(theta)
         self.silver_base_path = Path(silver_base_path)
+        self.keep_state_files = keep_state_files
         self._compiled = False
     
     def _warmup(self) -> None:
@@ -366,7 +371,7 @@ class Engine:
         
         # 10. Limpiar archivo de estado anterior (ya es redundante)
         # Los ticks huérfanos del día anterior ahora están embebidos en el Parquet de hoy
-        if prev_state_path is not None and prev_state_path.exists():
+        if not self.keep_state_files and prev_state_path is not None and prev_state_path.exists():
             prev_state_path.unlink()
             print(f"  🧹 Estado anterior eliminado: {prev_state_path.name}")
         
