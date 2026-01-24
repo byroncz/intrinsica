@@ -232,7 +232,6 @@ check_*.py
 *_test.py
 dummy/
 output/
-.agent/
 
 # macOS
 .DS_Store
