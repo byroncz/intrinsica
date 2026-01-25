@@ -11,6 +11,11 @@ from intrinseca.core.event_detector import DCDetector, DCResult
 from intrinseca.core.indicators import DCIndicators
 from intrinseca.core.engine import Engine
 from intrinseca.core.state import DCState
+from intrinseca.core.convergence import (
+    ConvergenceResult,
+    ConvergenceReport,
+    compare_dc_events,
+)
 
 __all__ = [
     # Bronze Layer (análisis tick-a-tick)
@@ -20,4 +25,8 @@ __all__ = [
     # Silver Layer (eventos anidados)
     "Engine",
     "DCState",
+    # Convergencia
+    "ConvergenceResult",
+    "ConvergenceReport",
+    "compare_dc_events",
 ]

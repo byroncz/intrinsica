@@ -36,6 +36,11 @@ from .state import (
     find_previous_state,
     save_state,
 )
+from .convergence import (
+    ConvergenceResult,
+    ConvergenceReport,
+    compare_dc_events,
+)
 
 
 class Engine:
@@ -242,16 +247,21 @@ class Engine:
         time_col: str = "time",
         quantity_col: str = "quantity",
         direction_col: str = "direction",
-    ) -> Optional[pl.DataFrame]:
+        analyze_convergence: bool = False,
+        strict_comparison: bool = True,
+        tolerance_ns: int = 0,
+    ) -> tuple[Optional[pl.DataFrame], int, int, Optional[ConvergenceResult]]:
         """
         Procesa un día de datos Bronze y genera salida Silver.
         
         Pipeline completo:
-        1. Cargar estado del día anterior (si existe)
-        2. Stitch huérfanos + ticks nuevos
-        3. Ejecutar kernel Numba
-        4. Construir DataFrame Arrow nested
-        5. Persistir data.parquet + state.arrow
+        1. (Opcional) Cargar datos previos para análisis de convergencia
+        2. Cargar estado del día anterior (si existe)
+        3. Stitch huérfanos + ticks nuevos
+        4. Ejecutar kernel Numba
+        5. Construir DataFrame Arrow nested
+        6. Persistir data.parquet + state.arrow
+        7. (Opcional) Comparar con datos previos y reportar convergencia
         
         Args:
             df_bronze: DataFrame Polars con datos Bronze del día
@@ -261,11 +271,30 @@ class Engine:
             time_col: Nombre de la columna de timestamps
             quantity_col: Nombre de la columna de cantidades
             direction_col: Nombre de la columna de direcciones
+            analyze_convergence: Si True, compara con datos Silver previos
+            strict_comparison: Si True, comparación exacta (0 ns tolerancia)
+            tolerance_ns: Tolerancia en nanosegundos si strict_comparison=False
             
         Returns:
-            DataFrame Polars con eventos Silver, o None si no hay eventos
+            Tuple (df_silver, n_events, n_ticks, convergence_result)
         """
         self._warmup()
+        
+        # 0. (Convergencia) Calcular ruta y cargar datos previos si existen
+        data_path = self._build_data_path(
+            ticker, process_date.year, process_date.month, process_date.day
+        )
+        df_prev: Optional[pl.DataFrame] = None
+        
+        if analyze_convergence and data_path.exists():
+            try:
+                df_prev = pl.read_parquet(data_path, memory_map=True)
+                if self.verbose:
+                    print(f"  📊 Datos previos cargados: {len(df_prev)} eventos para análisis de convergencia")
+            except Exception as e:
+                if self.verbose:
+                    print(f"  ⚠️ Error cargando datos previos: {e}")
+                df_prev = None
         
         # 1. Extraer arrays de Bronze
         prices = df_bronze.get_column(price_col).cast(pl.Float64).to_numpy()
@@ -364,7 +393,7 @@ class Engine:
         if n_events == 0:
             if self.verbose:
                 print("  ⚠️ Sin eventos confirmados para este día")
-            return None, 0, len(stitched_prices)
+            return None, 0, len(stitched_prices), None
         
         # Construir columnas Arrow anidadas (ahora con búferes separados)
         list_columns = self._build_arrow_lists(
@@ -379,10 +408,7 @@ class Engine:
             **list_columns,
         })
         
-        # Guardar Parquet
-        data_path = self._build_data_path(
-            ticker, process_date.year, process_date.month, process_date.day
-        )
+        # Guardar Parquet (data_path ya fue calculado al inicio)
         self._write_parquet(arrow_table, data_path)
         if self.verbose:
             print(f"  📁 Datos Silver: {data_path}")
@@ -397,14 +423,35 @@ class Engine:
         # 11. Convertir a Polars para retorno
         df_silver = pl.from_arrow(arrow_table)
         
-        return df_silver, n_events, len(stitched_prices)
+        # 12. (Convergencia) Comparar con datos previos si se solicitó
+        convergence_result: Optional[ConvergenceResult] = None
+        
+        if analyze_convergence and df_prev is not None:
+            convergence_result = compare_dc_events(
+                df_prev=df_prev,
+                df_new=df_silver,
+                ticker=ticker,
+                theta=self.theta,
+                day=process_date,
+                strict_comparison=strict_comparison,
+                tolerance_ns=tolerance_ns,
+            )
+            
+            if self.verbose:
+                status = "✅ Convergió" if convergence_result.converged else "⚠️ No convergió"
+                print(f"  📊 Convergencia: {status} | Discrepantes: {convergence_result.n_discrepant_events}")
+        
+        return df_silver, n_events, len(stitched_prices), convergence_result
     
     def process_date_range(
         self,
         df_bronze: pl.DataFrame,
         ticker: str,
         time_col: str = "time",
-    ) -> dict[date, Optional[pl.DataFrame]]:
+        analyze_convergence: bool = False,
+        strict_comparison: bool = True,
+        tolerance_ns: int = 0,
+    ) -> tuple[dict[date, Optional[pl.DataFrame]], Optional[ConvergenceReport]]:
         """
         Procesa un rango de datos Bronze particionándolos por día.
         
@@ -415,11 +462,20 @@ class Engine:
             df_bronze: DataFrame con datos de múltiples días
             ticker: Símbolo del instrumento
             time_col: Columna de timestamps
+            analyze_convergence: Si True, compara con datos Silver previos
+            strict_comparison: Si True, comparación exacta (0 ns tolerancia)
+            tolerance_ns: Tolerancia en nanosegundos si strict_comparison=False
             
         Returns:
-            Diccionario {date: DataFrame Silver} para cada día procesado
+            Tuple (results_dict, convergence_report)
+            - results_dict: {date: DataFrame Silver} para cada día procesado
+            - convergence_report: Reporte de convergencia si analyze_convergence=True
         """
         results = {}
+        convergence_report: Optional[ConvergenceReport] = None
+        
+        if analyze_convergence:
+            convergence_report = ConvergenceReport(ticker=ticker, theta=self.theta)
         
         # Asegurar que tenemos datetime
         if df_bronze.schema[time_col] == pl.Int64:
@@ -437,18 +493,38 @@ class Engine:
         # Contadores para resumen
         total_events = 0
         total_ticks = 0
+        early_exit = False
         
         if self.verbose:
             # Modo verbose: prints tradicionales
             print(f"📅 Procesando {len(unique_dates)} días...")
+            if analyze_convergence:
+                print("   📊 Análisis de convergencia activado")
             
             for d in unique_dates:
                 print(f"\n🗓️ Día: {d}")
                 df_day = df_bronze.filter(pl.col("_date") == d).drop("_date")
-                result, n_events, n_ticks = self.process_day(df_day, ticker, d, time_col=time_col)
+                
+                result, n_events, n_ticks, conv_result = self.process_day(
+                    df_day, ticker, d, time_col=time_col,
+                    analyze_convergence=analyze_convergence,
+                    strict_comparison=strict_comparison,
+                    tolerance_ns=tolerance_ns,
+                )
+                
                 results[d] = result
                 total_events += n_events
                 total_ticks += n_ticks
+                
+                # Agregar resultado de convergencia si existe
+                if conv_result is not None and convergence_report is not None:
+                    convergence_report.add_result(conv_result)
+                    
+                    # Early exit: si convergió, detener después de completar esta partición
+                    if conv_result.converged:
+                        print(f"  🛑 Convergencia alcanzada en {d}, deteniendo procesamiento")
+                        early_exit = True
+                        break
         else:
             # Modo silencioso: barra de progreso compacta
             with Progress(
@@ -460,26 +536,66 @@ class Engine:
                 TextColumn("[cyan]{task.completed}/{task.total} días"),
                 TimeElapsedColumn(),
                 console=self._console,
-                transient=True,  # Desaparece al terminar
+                transient=True,
             ) as progress:
                 task = progress.add_task("Procesando...", total=len(unique_dates))
                 
                 for d in unique_dates:
                     df_day = df_bronze.filter(pl.col("_date") == d).drop("_date")
-                    result, n_events, n_ticks = self.process_day(df_day, ticker, d, time_col=time_col)
+                    
+                    result, n_events, n_ticks, conv_result = self.process_day(
+                        df_day, ticker, d, time_col=time_col,
+                        analyze_convergence=analyze_convergence,
+                        strict_comparison=strict_comparison,
+                        tolerance_ns=tolerance_ns,
+                    )
+                    
                     results[d] = result
                     total_events += n_events
                     total_ticks += n_ticks
                     progress.advance(task)
+                    
+                    # Agregar resultado de convergencia si existe
+                    if conv_result is not None and convergence_report is not None:
+                        convergence_report.add_result(conv_result)
+                        
+                        # Early exit
+                        if conv_result.converged:
+                            early_exit = True
+                            break
             
             # Mostrar resumen compacto
             days_with_events = sum(1 for r in results.values() if r is not None)
-            summary = (
-                f"[green]✓ {len(unique_dates)} días procesados[/green] • "
-                f"[cyan]{days_with_events} con eventos[/cyan] • "
-                f"[dim]{total_events:,} eventos | {total_ticks:,} ticks[/dim]"
-            )
+            
+            if analyze_convergence and convergence_report is not None:
+                conv_status = "✅ Convergió" if convergence_report.converged else "⚠️ No convergió"
+                summary = (
+                    f"[green]✓ {len(results)}/{len(unique_dates)} días procesados[/green] • "
+                    f"[cyan]{days_with_events} con eventos[/cyan] • "
+                    f"[dim]{total_events:,} eventos | {total_ticks:,} ticks[/dim]\n"
+                    f"[yellow]📊 Convergencia: {conv_status} | "
+                    f"Discrepantes: {convergence_report.total_discrepant_events}[/yellow]"
+                )
+            else:
+                summary = (
+                    f"[green]✓ {len(unique_dates)} días procesados[/green] • "
+                    f"[cyan]{days_with_events} con eventos[/cyan] • "
+                    f"[dim]{total_events:,} eventos | {total_ticks:,} ticks[/dim]"
+                )
+            
             self._console.print(Panel(summary, title=f"Engine θ={self.theta}", border_style="blue", box=box.ROUNDED))
         
-        return results
+        # Guardar reporte de convergencia si se solicitó
+        if convergence_report is not None:
+            theta_str = f"{self.theta:.6f}".rstrip('0').rstrip('.')
+            report_path = (
+                self.silver_base_path / ticker / f"theta={theta_str}" / "convergence_report.json"
+            )
+            convergence_report.save(report_path)
+            
+            if self.verbose:
+                print(f"\n💾 Reporte de convergencia guardado: {report_path}")
+                print(convergence_report.generate_summary())
+        
+        return results, convergence_report
 
