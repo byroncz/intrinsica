@@ -164,13 +164,67 @@ def segment_events_kernel(
             # --- Determinar el extremo relevante ---
             if new_trend == 1:
                 prev_ext_idx = ext_low_idx
-                ext_high_price = p
-                ext_high_idx = t
+                threshold = ext_low_price * threshold_mult_up
             else:
                 prev_ext_idx = ext_high_idx
-                ext_low_price = p
-                ext_low_idx = t
-            
+                threshold = ext_high_price * threshold_mult_down
+
+            # --- REGLA CONSERVADORA: Buscar el mejor precio de confirmación ---
+            # Cuando hay múltiples ticks con el mismo timestamp que cruzan el threshold,
+            # seleccionar el más conservador:
+            # - Upturn: precio MÍNIMO >= threshold (el que "apenas" confirma)
+            # - Downturn: precio MÁXIMO <= threshold (el que "apenas" confirma)
+
+            conf_timestamp = timestamps[t]
+            best_price = p
+            best_idx = t
+
+            # Lookahead: buscar todos los ticks con el mismo timestamp
+            for j in range(t + 1, n):
+                if timestamps[j] != conf_timestamp:
+                    break
+                pj = prices[j]
+                if new_trend == 1:
+                    # Upturn: buscar el precio MÍNIMO que cruza el threshold
+                    if pj >= threshold and pj < best_price:
+                        best_price = pj
+                        best_idx = j
+                else:
+                    # Downturn: buscar el precio MÁXIMO que cruza el threshold
+                    if pj <= threshold and pj > best_price:
+                        best_price = pj
+                        best_idx = j
+
+            # Usar el mejor candidato como precio de confirmación
+            conf_price = best_price
+            conf_idx = best_idx
+
+            # --- Validación semántica: DC debe tener al menos 1 tick ---
+            # DC va de prev_ext_idx (inclusive) a conf_idx (exclusive)
+            # Si prev_ext_idx >= conf_idx, no hay ticks válidos para DC
+            if prev_ext_idx >= conf_idx:
+                # Actualizar extremos para mantener consistencia algorítmica
+                if new_trend == 1:
+                    ext_high_price = conf_price
+                    ext_high_idx = conf_idx
+                else:
+                    ext_low_price = conf_price
+                    ext_low_idx = conf_idx
+                # Actualizar tendencia (el cambio de dirección es real)
+                current_trend = new_trend
+                last_os_ref = conf_price
+                # NO incrementar n_events, NO escribir DC/OS
+                # Continuar al siguiente tick
+                continue
+
+            # --- Actualizar extremos (solo si el evento es válido) ---
+            if new_trend == 1:
+                ext_high_price = conf_price
+                ext_high_idx = conf_idx
+            else:
+                ext_low_price = conf_price
+                ext_low_idx = conf_idx
+
             # --- Cerrar OS del evento ANTERIOR (si existe) ---
             if n_events > 0 and prev_os_start >= 0:
                 # El OS del evento anterior va desde prev_os_start hasta prev_ext_idx (exclusive)
@@ -181,30 +235,30 @@ def segment_events_kernel(
                     os_directions[os_ptr] = directions[i]
                     os_ptr += 1
                 os_offsets[n_events] = os_ptr
-            
+
             # --- Escribir DC del evento ACTUAL ---
-            # DC va desde prev_ext_idx hasta t (exclusive)
-            for i in range(prev_ext_idx, t):
+            # DC va desde prev_ext_idx (inclusive) hasta conf_idx (exclusive)
+            for i in range(prev_ext_idx, conf_idx):
                 dc_prices[dc_ptr] = prices[i]
                 dc_times[dc_ptr] = timestamps[i]
                 dc_quantities[dc_ptr] = quantities[i]
                 dc_directions[dc_ptr] = directions[i]
                 dc_ptr += 1
-            
+
             # Registrar offset de DC para este evento
             dc_offsets[n_events + 1] = dc_ptr
-            
+
             # Registrar tipo de evento
             event_types[n_events] = new_trend
-            
-            # El OS de ESTE evento empezará en t (se escribirá cuando se confirme el siguiente)
-            prev_os_start = t
-            
+
+            # El OS de ESTE evento empezará en conf_idx (se escribirá cuando se confirme el siguiente)
+            prev_os_start = conf_idx
+
             # Actualizar estado
             current_trend = new_trend
-            last_os_ref = p
+            last_os_ref = conf_price
             n_events += 1
-            last_event_confirmation_idx = t
+            last_event_confirmation_idx = conf_idx
     
     # --- Finalización ---
     

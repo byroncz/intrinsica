@@ -35,6 +35,7 @@ class ConvergenceResult:
     # Flags
     converged: bool
     requires_forward_processing: bool
+    analysis_applicable: bool = True  # False si no había datos previos
     
     # Detalles opcionales
     discrepancy_details: list[dict] = field(default_factory=list)
@@ -69,6 +70,16 @@ class ConvergenceReport:
         """Indica si se alcanzó convergencia global."""
         return self.global_convergence_date is not None
     
+    @property
+    def n_days_without_prev_data(self) -> int:
+        """Número de días donde no había datos previos."""
+        return sum(1 for r in self.results.values() if not r.analysis_applicable)
+    
+    @property
+    def n_days_analyzed(self) -> int:
+        """Número de días donde sí se realizó análisis."""
+        return sum(1 for r in self.results.values() if r.analysis_applicable)
+    
     def to_dict(self) -> dict:
         """Convierte a diccionario serializable."""
         return {
@@ -94,16 +105,27 @@ class ConvergenceReport:
         if not self.results:
             return "Sin resultados de convergencia."
         
+        n_analyzed = self.n_days_analyzed
+        n_no_prev = self.n_days_without_prev_data
+        
         lines = [
             f"📊 Reporte de Convergencia: {self.ticker} (θ={self.theta})",
-            f"   Total días analizados: {len(self.results)}",
-            f"   Total eventos discrepantes: {self.total_discrepant_events}",
+            f"   Total días procesados: {len(self.results)}",
         ]
         
-        if self.converged:
-            lines.append(f"   ✅ Convergencia alcanzada: {self.global_convergence_date}")
+        if n_no_prev > 0:
+            lines.append(f"   🆕 Días sin datos previos (análisis N/A): {n_no_prev}")
+        
+        if n_analyzed > 0:
+            lines.append(f"   🔍 Días analizados: {n_analyzed}")
+            lines.append(f"   Total eventos discrepantes: {self.total_discrepant_events}")
+            
+            if self.converged:
+                lines.append(f"   ✅ Convergencia alcanzada: {self.global_convergence_date}")
+            else:
+                lines.append("   ⚠️ No se alcanzó convergencia en el período")
         else:
-            lines.append("   ⚠️ No se alcanzó convergencia en el período")
+            lines.append("   ℹ️ No había datos previos - análisis de convergencia no aplicable")
         
         return "\n".join(lines)
 

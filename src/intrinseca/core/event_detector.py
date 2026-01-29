@@ -119,71 +119,107 @@ def _dc_core_algorithm_optimized(
         # 3. Procesamiento de Eventos y Marcado
         if new_trend != 0:
             # --- Se confirma un evento ---
-            
-            if new_trend == 1: 
+
+            # --- REGLA CONSERVADORA: Buscar el mejor precio de confirmación ---
+            # Cuando hay múltiples ticks con el mismo timestamp que cruzan el threshold,
+            # seleccionar el más conservador:
+            # - Upturn: precio MÍNIMO >= threshold (el que "apenas" confirma)
+            # - Downturn: precio MÁXIMO <= threshold (el que "apenas" confirma)
+
+            if new_trend == 1:
+                threshold = ext_low_price * threshold_mult_up
+            else:
+                threshold = ext_high_price * threshold_mult_down
+
+            conf_timestamp = ts_val
+            best_price = p
+            best_idx = t
+
+            # Lookahead: buscar todos los ticks con el mismo timestamp
+            for j in range(t + 1, n):
+                if timestamps[j] != conf_timestamp:
+                    break
+                pj = prices[j]
+                if new_trend == 1:
+                    # Upturn: buscar el precio MÍNIMO que cruza el threshold
+                    if pj >= threshold and pj < best_price:
+                        best_price = pj
+                        best_idx = j
+                else:
+                    # Downturn: buscar el precio MÁXIMO que cruza el threshold
+                    if pj <= threshold and pj > best_price:
+                        best_price = pj
+                        best_idx = j
+
+            # Usar el mejor candidato
+            conf_price = best_price
+            conf_idx = best_idx
+            conf_time = timestamps[conf_idx]
+
+            if new_trend == 1:
                 # Reversión a Alza (Upturn Confirmed)
                 # El extremo relevante fue el Mínimo (Low) anterior
                 prev_ext_idx = ext_low_idx
                 prev_ext_price = ext_low_price
                 prev_ext_time = timestamps[ext_low_idx]
-                
+
                 # MARCADORES CLAVE:
                 # 1. Marcamos dónde ocurrió el Extremo (Retroactivo) -> Inicio Upturn Event
                 dc_markers[prev_ext_idx] = 3  # 3 = Extreme Low
                 # 2. Marcamos dónde estamos ahora (Confirmación) -> Inicio Upward Overshoot
-                dc_markers[t] = 4             # 4 = Upturn Confirmation (UCC)
-                
+                dc_markers[conf_idx] = 4      # 4 = Upturn Confirmation (UCC)
+
                 # Reset del opuesto para el nuevo ciclo
-                ext_high_price = p
-                ext_high_idx = t
-                
-            else: 
+                ext_high_price = conf_price
+                ext_high_idx = conf_idx
+
+            else:
                 # Reversión a Baja (Downturn Confirmed)
                 # El extremo relevante fue el Máximo (High) anterior
                 prev_ext_idx = ext_high_idx
                 prev_ext_price = ext_high_price
                 prev_ext_time = timestamps[ext_high_idx]
-                
+
                 # MARCADORES CLAVE:
                 # 1. Marcamos dónde ocurrió el Extremo (Retroactivo) -> Inicio Downturn Event
                 dc_markers[prev_ext_idx] = 1  # 1 = Extreme High
                 # 2. Marcamos dónde estamos ahora (Confirmación) -> Inicio Downward Overshoot
-                dc_markers[t] = 2             # 2 = Downturn Confirmation (DCC)
-                
+                dc_markers[conf_idx] = 2      # 2 = Downturn Confirmation (DCC)
+
                 # Reset del opuesto para el nuevo ciclo
-                ext_low_price = p
-                ext_low_idx = t
-            
+                ext_low_price = conf_price
+                ext_low_idx = conf_idx
+
             # --- Métricas del Evento Finalizado ---
             price_move = prev_ext_price - event_prices[tao]
             prev_evt_p = event_prices[tao]
-            
+
             overshoots[tao] = price_move
             returns_price[tao] = (price_move / prev_evt_p) if prev_evt_p != 0 else 0.0
             os_event_counts[tao] = current_event_run_count
-            
+
             # Registrar nuevo evento en arrays sparse
             tao += 1
-            event_indices[tao] = t
-            event_prices[tao] = p
-            event_timestamps[tao] = ts_val
+            event_indices[tao] = conf_idx
+            event_prices[tao] = conf_price
+            event_timestamps[tao] = conf_time
             event_types[tao] = new_trend
-            
+
             extreme_indices[tao] = prev_ext_idx
             extreme_prices[tao] = prev_ext_price
             extreme_timestamps[tao] = prev_ext_time
-            
-            dt = ts_val - prev_ext_time
+
+            dt = conf_time - prev_ext_time
             event_durations[tao] = dt
-            
+
             if dt > 0:
-                returns_speed[tao] = (p - prev_ext_price) / (dt / 1_000_000_000.0)
+                returns_speed[tao] = (conf_price - prev_ext_price) / (dt / 1_000_000_000.0)
             else:
                 returns_speed[tao] = 0.0
 
             # Actualizar estado global
             current_trend = new_trend
-            last_os_ref_price = p 
+            last_os_ref_price = conf_price
             current_event_run_count = 0
             
         else:

@@ -1,0 +1,86 @@
+"""
+Aggregation Metrics.
+
+Global indicators that collapse the event DataFrame into summary statistics.
+These metrics are computed using select() rather than with_columns().
+"""
+
+from intrinseca.indicators.base import BaseIndicator, IndicatorMetadata
+import polars as pl
+
+
+class TMV(BaseIndicator):
+    name = "tmv"
+    metadata = IndicatorMetadata(
+        description="Total Movement Value - sum of absolute returns.",
+        category="aggregation",
+        is_event_level=False
+    )
+    dependencies = ["return"]
+
+    def get_expression(self) -> pl.Expr:
+        return pl.col("return").abs().sum()
+
+
+class AvgDuration(BaseIndicator):
+    name = "avg_duration"
+    metadata = IndicatorMetadata(
+        description="Average duration of DC phases in nanoseconds.",
+        category="aggregation",
+        is_event_level=False
+    )
+    dependencies = ["duration_ns"]
+
+    def get_expression(self) -> pl.Expr:
+        return pl.col("duration_ns").mean()
+
+
+class AvgReturn(BaseIndicator):
+    name = "avg_return"
+    metadata = IndicatorMetadata(
+        description="Average return of DC phases.",
+        category="aggregation",
+        is_event_level=False
+    )
+    dependencies = ["return"]
+
+    def get_expression(self) -> pl.Expr:
+        return pl.col("return").mean()
+
+
+class AvgOvershoot(BaseIndicator):
+    name = "avg_overshoot"
+    metadata = IndicatorMetadata(
+        description="Average overshoot magnitude.",
+        category="aggregation",
+        is_event_level=False
+    )
+    dependencies = ["overshoot"]
+
+    def get_expression(self) -> pl.Expr:
+        return pl.col("overshoot").mean()
+
+
+class VolatilityDC(BaseIndicator):
+    name = "volatility_dc"
+    metadata = IndicatorMetadata(
+        description="Volatility measured as standard deviation of DC returns.",
+        category="aggregation",
+        is_event_level=False
+    )
+    dependencies = ["return"]
+
+    def get_expression(self) -> pl.Expr:
+        return pl.col("return").std()
+
+
+class UpturnRatio(BaseIndicator):
+    name = "upturn_ratio"
+    metadata = IndicatorMetadata(
+        description="Ratio of upturn events to total events.",
+        category="aggregation",
+        is_event_level=False
+    )
+
+    def get_expression(self) -> pl.Expr:
+        return (pl.col("event_type") == 1).mean()

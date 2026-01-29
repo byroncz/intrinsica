@@ -426,20 +426,40 @@ class Engine:
         # 12. (Convergencia) Comparar con datos previos si se solicitó
         convergence_result: Optional[ConvergenceResult] = None
         
-        if analyze_convergence and df_prev is not None:
-            convergence_result = compare_dc_events(
-                df_prev=df_prev,
-                df_new=df_silver,
-                ticker=ticker,
-                theta=self.theta,
-                day=process_date,
-                strict_comparison=strict_comparison,
-                tolerance_ns=tolerance_ns,
-            )
-            
-            if self.verbose:
-                status = "✅ Convergió" if convergence_result.converged else "⚠️ No convergió"
-                print(f"  📊 Convergencia: {status} | Discrepantes: {convergence_result.n_discrepant_events}")
+        if analyze_convergence:
+            if df_prev is not None:
+                # Hay datos previos: realizar análisis de convergencia
+                convergence_result = compare_dc_events(
+                    df_prev=df_prev,
+                    df_new=df_silver,
+                    ticker=ticker,
+                    theta=self.theta,
+                    day=process_date,
+                    strict_comparison=strict_comparison,
+                    tolerance_ns=tolerance_ns,
+                )
+                
+                if self.verbose:
+                    status = "✅ Convergió" if convergence_result.converged else "⚠️ No convergió"
+                    print(f"  📊 Convergencia: {status} | Discrepantes: {convergence_result.n_discrepant_events}")
+            else:
+                # No hay datos previos: análisis no aplicable
+                convergence_result = ConvergenceResult(
+                    ticker=ticker,
+                    theta=self.theta,
+                    day=process_date,
+                    n_events_prev=0,
+                    n_events_new=n_events,
+                    n_discrepant_events=0,
+                    first_discrepancy_idx=-1,
+                    convergence_idx=None,
+                    converged=False,  # No se puede determinar convergencia sin datos previos
+                    requires_forward_processing=False,
+                    analysis_applicable=False,  # Marcar como no aplicable
+                )
+                
+                if self.verbose:
+                    print(f"  🆕 Sin datos previos - análisis de convergencia N/A")
         
         return df_silver, n_events, len(stitched_prices), convergence_result
     
@@ -520,8 +540,8 @@ class Engine:
                 if conv_result is not None and convergence_report is not None:
                     convergence_report.add_result(conv_result)
                     
-                    # Early exit: si convergió, detener después de completar esta partición
-                    if conv_result.converged:
+                    # Early exit: solo si convergió Y el análisis era aplicable
+                    if conv_result.analysis_applicable and conv_result.converged:
                         print(f"  🛑 Convergencia alcanzada en {d}, deteniendo procesamiento")
                         early_exit = True
                         break
@@ -559,8 +579,8 @@ class Engine:
                     if conv_result is not None and convergence_report is not None:
                         convergence_report.add_result(conv_result)
                         
-                        # Early exit
-                        if conv_result.converged:
+                        # Early exit: solo si convergió Y el análisis era aplicable
+                        if conv_result.analysis_applicable and conv_result.converged:
                             early_exit = True
                             break
             
@@ -568,14 +588,25 @@ class Engine:
             days_with_events = sum(1 for r in results.values() if r is not None)
             
             if analyze_convergence and convergence_report is not None:
-                conv_status = "✅ Convergió" if convergence_report.converged else "⚠️ No convergió"
-                summary = (
-                    f"[green]✓ {len(results)}/{len(unique_dates)} días procesados[/green] • "
-                    f"[cyan]{days_with_events} con eventos[/cyan] • "
-                    f"[dim]{total_events:,} eventos | {total_ticks:,} ticks[/dim]\n"
-                    f"[yellow]📊 Convergencia: {conv_status} | "
-                    f"Discrepantes: {convergence_report.total_discrepant_events}[/yellow]"
-                )
+                n_analyzed = convergence_report.n_days_analyzed
+                n_no_prev = convergence_report.n_days_without_prev_data
+                
+                if n_analyzed > 0:
+                    conv_status = "✅ Convergió" if convergence_report.converged else "⚠️ No convergió"
+                    summary = (
+                        f"[green]✓ {len(results)}/{len(unique_dates)} días procesados[/green] • "
+                        f"[cyan]{days_with_events} con eventos[/cyan] • "
+                        f"[dim]{total_events:,} eventos | {total_ticks:,} ticks[/dim]\n"
+                        f"[yellow]📊 Convergencia: {conv_status} | "
+                        f"Discrepantes: {convergence_report.total_discrepant_events}[/yellow]"
+                    )
+                else:
+                    summary = (
+                        f"[green]✓ {len(unique_dates)} días procesados[/green] • "
+                        f"[cyan]{days_with_events} con eventos[/cyan] • "
+                        f"[dim]{total_events:,} eventos | {total_ticks:,} ticks[/dim]\n"
+                        f"[blue]ℹ️ {n_no_prev} días sin datos previos - análisis de convergencia N/A[/blue]"
+                    )
             else:
                 summary = (
                     f"[green]✓ {len(unique_dates)} días procesados[/green] • "
