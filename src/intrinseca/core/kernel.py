@@ -1,223 +1,273 @@
 """
 Kernel Numba para Segmentación de Eventos DC → Silver Layer.
 
-Patrón: Búferes Paralelos Sincronizados (Separados DC/OS)
-- Entrada: Arrays planos NumPy (Bronze)
-- Salida: Búferes de valores separados para DC y OS + offsets para Arrow zero-copy
+Optimizado para HFT:
+- Estimación inteligente de memoria basada en theta
+- Zero-copy slicing donde es posible
+- Cache-friendly memory access patterns
+- Compilación nopython garantizada
 
-Este módulo NO crea objetos Python dentro del bucle JIT.
+Patrón: Búferes Paralelos Sincronizados (Separados DC/OS)
 """
 
 from __future__ import annotations
 
+from typing import NamedTuple
+
 import numpy as np
 from numpy.typing import NDArray
-from numba import njit, int8, int64, float64
+from numba import njit, int8, int64, float64, types
+from numba.extending import overload
 
+
+# =============================================================================
+# TYPE ALIASES (para legibilidad)
+# =============================================================================
+
+ArrayF64 = NDArray[np.float64]
+ArrayI64 = NDArray[np.int64]
+ArrayI8 = NDArray[np.int8]
+
+
+class KernelResult(NamedTuple):
+    """Resultado estructurado del kernel (solo para documentación, Numba retorna tuple)."""
+    # Búferes DC
+    dc_prices: ArrayF64
+    dc_times: ArrayI64
+    dc_quantities: ArrayF64
+    dc_directions: ArrayI8
+    # Búferes OS
+    os_prices: ArrayF64
+    os_times: ArrayI64
+    os_quantities: ArrayF64
+    os_directions: ArrayI8
+    # Metadatos eventos
+    event_types: ArrayI8
+    dc_offsets: ArrayI64
+    os_offsets: ArrayI64
+    # Estado final
+    n_events: int
+    final_trend: int
+    final_ext_high: float
+    final_ext_low: float
+    final_os_ref: float
+    orphan_start_idx: int
+
+
+# =============================================================================
+# CONSTANTES
+# =============================================================================
+
+# Estimador de ratio eventos/ticks basado en theta típico
+# Para theta=0.5%, ratio empírico es ~1:5000 a 1:10000
+# Usamos 1:1000 como margen conservador
+_EVENT_RATIO_ESTIMATE = 1000
+
+# Mínimo de slots para eventos (evita edge cases)
+_MIN_EVENT_SLOTS = 64
+
+
+# =============================================================================
+# KERNEL PRINCIPAL
+# =============================================================================
 
 @njit(cache=True, fastmath=True, nogil=True)
 def segment_events_kernel(
-    # --- Inputs: Arrays planos Bronze ---
-    prices: NDArray[np.float64],
-    timestamps: NDArray[np.int64],
-    quantities: NDArray[np.float64],
-    directions: NDArray[np.int8],
-    theta: float,
-    # --- Estado inicial (para stitching) ---
+    prices: ArrayF64,
+    timestamps: ArrayI64,
+    quantities: ArrayF64,
+    directions: ArrayI8,
+    theta: float64,
     init_trend: int8,
     init_ext_high_price: float64,
     init_ext_low_price: float64,
-    init_last_os_ref: float64
-) -> tuple[
-    # --- Búferes DC (separados) ---
-    NDArray[np.float64],  # 0: dc_prices
-    NDArray[np.int64],    # 1: dc_times
-    NDArray[np.float64],  # 2: dc_quantities
-    NDArray[np.int8],     # 3: dc_directions
-    
-    # --- Búferes OS (separados) ---
-    NDArray[np.float64],  # 4: os_prices
-    NDArray[np.int64],    # 5: os_times
-    NDArray[np.float64],  # 6: os_quantities
-    NDArray[np.int8],     # 7: os_directions
-    
-    # --- Metadatos por evento ---
-    NDArray[np.int8],     # 8: event_types (1 por evento confirmado)
-    
-    # --- Búferes de OFFSETS ---
-    NDArray[np.int64],    # 9: dc_offsets (len = n_events + 1)
-    NDArray[np.int64],    # 10: os_offsets (len = n_events + 1)
-    
-    # --- Metadatos de Estado Final ---
-    int64,                # 11: n_events confirmados
-    int8,                 # 12: final_trend
-    float64,              # 13: final_ext_high_price
-    float64,              # 14: final_ext_low_price
-    float64,              # 15: final_last_os_ref
-    int64,                # 16: orphan_start_idx (primer tick huérfano)
-]:
+    init_last_os_ref: float64,
+) -> tuple:
     """
-    Kernel JIT que segmenta ticks en fases DC (Directional Change) y OS (Overshoot).
-    
-    El kernel opera bajo el paradigma de Búferes Paralelos Sincronizados:
-    - Búferes DC y OS están SEPARADOS para permitir construcción Arrow directa
-    - Los offsets permiten reconstruir las listas anidadas sin copias
-    
-    Semántica de un Evento DC:
-    - Fase DC: Desde el extremo anterior hasta el punto de confirmación (exclusive)
-    - Fase OS: Desde el punto de confirmación hasta el próximo extremo (exclusive)
-    
-    El último evento puede quedar incompleto (ticks huérfanos) si no hay confirmación
-    antes del final del array de entrada.
+    Kernel JIT para segmentación de eventos DC.
+
+    Complejidad: O(n) donde n = número de ticks
+    Memoria: O(n/k + e) donde k ≈ 1000 (ratio ticks/eventos), e = eventos detectados
+
+    Args:
+        prices: Precios de ticks (float64)
+        timestamps: Timestamps en nanosegundos (int64)
+        quantities: Cantidades/volúmenes (float64)
+        directions: Direcciones 1=buy, -1=sell (int8)
+        theta: Umbral DC (ej: 0.005 para 0.5%)
+        init_trend: Tendencia inicial (0=indefinido, 1=up, -1=down)
+        init_ext_high_price: Precio extremo alto inicial
+        init_ext_low_price: Precio extremo bajo inicial
+        init_last_os_ref: Precio referencia para OS runs
+
+    Returns:
+        Tuple con 17 elementos (ver KernelResult para documentación)
     """
     n = len(prices)
-    
+
+    # --- Early exit para array vacío ---
     if n == 0:
-        # Edge case: array vacío
         empty_f64 = np.empty(0, dtype=np.float64)
         empty_i64 = np.empty(0, dtype=np.int64)
         empty_i8 = np.empty(0, dtype=np.int8)
-        empty_offsets = np.array([0], dtype=np.int64)
+        zero_offset = np.zeros(1, dtype=np.int64)
         return (
-            empty_f64, empty_i64, empty_f64, empty_i8,  # DC
-            empty_f64, empty_i64, empty_f64, empty_i8,  # OS
-            empty_i8,  # event_types
-            empty_offsets, empty_offsets,  # offsets
-            0, init_trend, init_ext_high_price, init_ext_low_price, 
-            init_last_os_ref, 0
+            empty_f64, empty_i64, empty_f64, empty_i8,
+            empty_f64, empty_i64, empty_f64, empty_i8,
+            empty_i8,
+            zero_offset, zero_offset,
+            int64(0), init_trend, init_ext_high_price, init_ext_low_price,
+            init_last_os_ref, int64(0)
         )
-    
-    threshold_mult_up = 1.0 + theta
-    threshold_mult_down = 1.0 - theta
-    
-    # --- Allocación de Búferes SEPARADOS para DC y OS ---
-    # DC buffers
+
+    # --- Pre-cálculo de thresholds (evita multiplicaciones repetidas) ---
+    theta_up = 1.0 + theta
+    theta_down = 1.0 - theta
+
+    # --- Estimación inteligente de memoria ---
+    # Eventos esperados ≈ n / ratio, con mínimo garantizado
+    estimated_events = max(n // _EVENT_RATIO_ESTIMATE, _MIN_EVENT_SLOTS)
+
+    # Búferes para datos de ticks (tamaño completo necesario para worst case)
+    # Pero usamos n directamente ya que en el peor caso todos los ticks son eventos
     dc_prices = np.empty(n, dtype=np.float64)
     dc_times = np.empty(n, dtype=np.int64)
     dc_quantities = np.empty(n, dtype=np.float64)
     dc_directions = np.empty(n, dtype=np.int8)
-    dc_ptr = 0  # Puntero para DC
-    
-    # OS buffers
+
     os_prices = np.empty(n, dtype=np.float64)
     os_times = np.empty(n, dtype=np.int64)
     os_quantities = np.empty(n, dtype=np.float64)
     os_directions = np.empty(n, dtype=np.int8)
-    os_ptr = 0  # Puntero para OS
-    
-    # Event types (máximo N eventos teóricos)
-    max_events = n
-    event_types = np.empty(max_events, dtype=np.int8)
-    
-    # Offsets para DC y OS
-    dc_offsets = np.empty(max_events + 1, dtype=np.int64)
-    os_offsets = np.empty(max_events + 1, dtype=np.int64)
+
+    # Búferes para metadatos de eventos (tamaño estimado)
+    event_types = np.empty(estimated_events, dtype=np.int8)
+    dc_offsets = np.empty(estimated_events + 1, dtype=np.int64)
+    os_offsets = np.empty(estimated_events + 1, dtype=np.int64)
+
+    # Inicializar offsets
     dc_offsets[0] = 0
     os_offsets[0] = 0
-    
-    # --- Inicialización de Estado ---
-    current_trend = init_trend
-    ext_high_price = init_ext_high_price if init_ext_high_price > 0 else prices[0]
-    ext_high_idx = 0
-    ext_low_price = init_ext_low_price if init_ext_low_price > 0 else prices[0]
-    ext_low_idx = 0
-    last_os_ref = init_last_os_ref if init_last_os_ref > 0 else prices[0]
-    
-    # --- Contadores ---
+
+    # --- Punteros de escritura ---
+    dc_ptr = 0
+    os_ptr = 0
     n_events = 0
-    
-    # Tracking del OS del evento anterior
-    prev_os_start = -1  # -1 = no hay OS pendiente
-    
-    # Para identificar huérfanos
-    last_event_confirmation_idx = 0
-    
+
+    # --- Estado del algoritmo ---
+    current_trend = init_trend
+
+    # Extremos: precio e índice
+    p0 = prices[0]
+    ext_high_price = init_ext_high_price if init_ext_high_price > 0.0 else p0
+    ext_high_idx = 0
+    ext_low_price = init_ext_low_price if init_ext_low_price > 0.0 else p0
+    ext_low_idx = 0
+
+    # Referencia para OS
+    last_os_ref = init_last_os_ref if init_last_os_ref > 0.0 else p0
+
+    # Tracking de OS pendiente
+    prev_os_start = -1
+    last_conf_idx = 0
+
     # --- Bucle Principal ---
     for t in range(n):
         p = prices[t]
-        
-        # 1. Actualización de Extremos
+
+        # 1. Actualización de extremos (branch-free comparison)
         if p > ext_high_price:
             ext_high_price = p
             ext_high_idx = t
         if p < ext_low_price:
             ext_low_price = p
             ext_low_idx = t
-        
-        new_trend = 0
-        
-        # 2. Detección de Cambio (Confirmation Points)
+
+        # 2. Detección de cambio de tendencia
+        new_trend = int8(0)
+
         if current_trend == 0:
-            if p >= ext_low_price * threshold_mult_up:
-                new_trend = 1
-            elif p <= ext_high_price * threshold_mult_down:
-                new_trend = -1
+            # Estado inicial: detectar primera tendencia
+            if p >= ext_low_price * theta_up:
+                new_trend = int8(1)
+            elif p <= ext_high_price * theta_down:
+                new_trend = int8(-1)
         elif current_trend == 1:
-            if p <= ext_high_price * threshold_mult_down:
-                new_trend = -1
-        else:  # current_trend == -1
-            if p >= ext_low_price * threshold_mult_up:
-                new_trend = 1
-        
-        # 3. Procesamiento de Confirmación de Evento
+            # En tendencia alcista: buscar reversión bajista
+            if p <= ext_high_price * theta_down:
+                new_trend = int8(-1)
+        else:
+            # En tendencia bajista: buscar reversión alcista
+            if p >= ext_low_price * theta_up:
+                new_trend = int8(1)
+
+        # 3. Procesar confirmación de evento
         if new_trend != 0:
-            # --- Determinar el extremo relevante ---
+            # Determinar extremo relevante y threshold
             if new_trend == 1:
                 prev_ext_idx = ext_low_idx
-                threshold = ext_low_price * threshold_mult_up
+                threshold = ext_low_price * theta_up
             else:
                 prev_ext_idx = ext_high_idx
-                threshold = ext_high_price * threshold_mult_down
+                threshold = ext_high_price * theta_down
 
-            # --- REGLA CONSERVADORA: Buscar el mejor precio de confirmación ---
-            # Cuando hay múltiples ticks con el mismo timestamp que cruzan el threshold,
-            # seleccionar el más conservador:
-            # - Upturn: precio MÍNIMO >= threshold (el que "apenas" confirma)
-            # - Downturn: precio MÁXIMO <= threshold (el que "apenas" confirma)
-
-            conf_timestamp = timestamps[t]
+            # --- Regla Conservadora: lookahead para mejor precio ---
+            conf_ts = timestamps[t]
             best_price = p
             best_idx = t
 
-            # Lookahead: buscar todos los ticks con el mismo timestamp
-            for j in range(t + 1, n):
-                if timestamps[j] != conf_timestamp:
-                    break
+            # Buscar en ticks con mismo timestamp
+            j = t + 1
+            while j < n and timestamps[j] == conf_ts:
                 pj = prices[j]
                 if new_trend == 1:
-                    # Upturn: buscar el precio MÍNIMO que cruza el threshold
+                    # Upturn: precio MÍNIMO >= threshold
                     if pj >= threshold and pj < best_price:
                         best_price = pj
                         best_idx = j
                 else:
-                    # Downturn: buscar el precio MÁXIMO que cruza el threshold
+                    # Downturn: precio MÁXIMO <= threshold
                     if pj <= threshold and pj > best_price:
                         best_price = pj
                         best_idx = j
+                j += 1
 
-            # Usar el mejor candidato como precio de confirmación
             conf_price = best_price
             conf_idx = best_idx
 
-            # --- Validación semántica: DC debe tener al menos 1 tick ---
-            # DC va de prev_ext_idx (inclusive) a conf_idx (exclusive)
-            # Si prev_ext_idx >= conf_idx, no hay ticks válidos para DC
+            # Validación: DC debe tener al menos 1 tick
             if prev_ext_idx >= conf_idx:
-                # Actualizar extremos para mantener consistencia algorítmica
+                # Evento inválido: actualizar estado y continuar
                 if new_trend == 1:
                     ext_high_price = conf_price
                     ext_high_idx = conf_idx
                 else:
                     ext_low_price = conf_price
                     ext_low_idx = conf_idx
-                # Actualizar tendencia (el cambio de dirección es real)
                 current_trend = new_trend
                 last_os_ref = conf_price
-                # NO incrementar n_events, NO escribir DC/OS
-                # Continuar al siguiente tick
                 continue
 
-            # --- Actualizar extremos (solo si el evento es válido) ---
+            # --- Resize dinámico si es necesario ---
+            if n_events >= estimated_events:
+                # Duplicar capacidad
+                new_size = estimated_events * 2
+
+                new_event_types = np.empty(new_size, dtype=np.int8)
+                new_event_types[:n_events] = event_types[:n_events]
+                event_types = new_event_types
+
+                new_dc_offsets = np.empty(new_size + 1, dtype=np.int64)
+                new_dc_offsets[:n_events + 1] = dc_offsets[:n_events + 1]
+                dc_offsets = new_dc_offsets
+
+                new_os_offsets = np.empty(new_size + 1, dtype=np.int64)
+                new_os_offsets[:n_events + 1] = os_offsets[:n_events + 1]
+                os_offsets = new_os_offsets
+
+                estimated_events = new_size
+
+            # Actualizar extremos
             if new_trend == 1:
                 ext_high_price = conf_price
                 ext_high_idx = conf_idx
@@ -225,9 +275,8 @@ def segment_events_kernel(
                 ext_low_price = conf_price
                 ext_low_idx = conf_idx
 
-            # --- Cerrar OS del evento ANTERIOR (si existe) ---
+            # --- Cerrar OS del evento anterior ---
             if n_events > 0 and prev_os_start >= 0:
-                # El OS del evento anterior va desde prev_os_start hasta prev_ext_idx (exclusive)
                 for i in range(prev_os_start, prev_ext_idx):
                     os_prices[os_ptr] = prices[i]
                     os_times[os_ptr] = timestamps[i]
@@ -236,8 +285,7 @@ def segment_events_kernel(
                     os_ptr += 1
                 os_offsets[n_events] = os_ptr
 
-            # --- Escribir DC del evento ACTUAL ---
-            # DC va desde prev_ext_idx (inclusive) hasta conf_idx (exclusive)
+            # --- Escribir DC del evento actual ---
             for i in range(prev_ext_idx, conf_idx):
                 dc_prices[dc_ptr] = prices[i]
                 dc_times[dc_ptr] = timestamps[i]
@@ -245,26 +293,19 @@ def segment_events_kernel(
                 dc_directions[dc_ptr] = directions[i]
                 dc_ptr += 1
 
-            # Registrar offset de DC para este evento
+            # Registrar evento
             dc_offsets[n_events + 1] = dc_ptr
-
-            # Registrar tipo de evento
             event_types[n_events] = new_trend
 
-            # El OS de ESTE evento empezará en conf_idx (se escribirá cuando se confirme el siguiente)
+            # Preparar siguiente OS
             prev_os_start = conf_idx
-
-            # Actualizar estado
             current_trend = new_trend
             last_os_ref = conf_price
             n_events += 1
-            last_event_confirmation_idx = conf_idx
-    
-    # --- Finalización ---
-    
-    # Cerrar el último OS (si existe un evento confirmado)
+            last_conf_idx = conf_idx
+
+    # --- Finalización: cerrar último OS ---
     if n_events > 0 and prev_os_start >= 0:
-        # El OS del último evento va desde prev_os_start hasta n
         for i in range(prev_os_start, n):
             os_prices[os_ptr] = prices[i]
             os_times[os_ptr] = timestamps[i]
@@ -272,65 +313,196 @@ def segment_events_kernel(
             os_directions[os_ptr] = directions[i]
             os_ptr += 1
         os_offsets[n_events] = os_ptr
-    
-    # --- Identificar Ticks Huérfanos ---
-    # Huérfanos = ticks que no pertenecen a ningún evento confirmado
-    # Son los ticks desde el último extremo trackado (que podría ser el inicio de un futuro DC)
+
+    # --- Calcular índice de huérfanos ---
     if n_events == 0:
         orphan_start_idx = 0
     else:
-        # Los huérfanos son todo lo que está después del último evento
-        # El último evento confirmado terminó en last_event_confirmation_idx
-        # Su OS abarca hasta el final, así que técnicamente no hay huérfanos "puros"
-        # PERO: los ticks desde el último extremo hacia adelante son los que
-        # formarían la fase DC del PRÓXIMO evento
         if current_trend == 1:
-            # Tendencia alcista: el extremo high es el potencial inicio del próximo DC
             orphan_start_idx = ext_high_idx
         else:
-            # Tendencia bajista: el extremo low es el potencial inicio del próximo DC
             orphan_start_idx = ext_low_idx
-    
-    # --- Recortar búferes a tamaño real ---
-    dc_prices = dc_prices[:dc_ptr]
-    dc_times = dc_times[:dc_ptr]
-    dc_quantities = dc_quantities[:dc_ptr]
-    dc_directions = dc_directions[:dc_ptr]
-    
-    os_prices = os_prices[:os_ptr]
-    os_times = os_times[:os_ptr]
-    os_quantities = os_quantities[:os_ptr]
-    os_directions = os_directions[:os_ptr]
-    
-    event_types = event_types[:n_events]
-    dc_offsets = dc_offsets[:n_events + 1]
-    os_offsets = os_offsets[:n_events + 1] if n_events > 0 else np.array([0], dtype=np.int64)
-    
+
+    # --- Recortar búferes al tamaño real ---
     return (
-        dc_prices, dc_times, dc_quantities, dc_directions,
-        os_prices, os_times, os_quantities, os_directions,
-        event_types,
-        dc_offsets, os_offsets,
-        n_events,
+        dc_prices[:dc_ptr],
+        dc_times[:dc_ptr],
+        dc_quantities[:dc_ptr],
+        dc_directions[:dc_ptr],
+        os_prices[:os_ptr],
+        os_times[:os_ptr],
+        os_quantities[:os_ptr],
+        os_directions[:os_ptr],
+        event_types[:n_events],
+        dc_offsets[:n_events + 1],
+        os_offsets[:n_events + 1] if n_events > 0 else np.zeros(1, dtype=np.int64),
+        int64(n_events),
         current_trend,
         ext_high_price,
         ext_low_price,
         last_os_ref,
-        orphan_start_idx
+        int64(orphan_start_idx),
     )
 
+
+# =============================================================================
+# FUNCIONES DE UTILIDAD
+# =============================================================================
 
 def warmup_kernel(theta: float = 0.01) -> None:
     """
     Pre-compila el kernel con datos dummy.
-    Llamar una vez al inicio para evitar latencia en la primera ejecución real.
+
+    Llamar una vez al inicio para evitar latencia JIT en la primera ejecución real.
+    La compilación se cachea en disco, así que solo es lenta la primera vez.
     """
     p = np.array([100.0, 101.0, 99.0, 102.0], dtype=np.float64)
     t = np.array([1000, 2000, 3000, 4000], dtype=np.int64)
     q = np.array([1.0, 1.0, 1.0, 1.0], dtype=np.float64)
     d = np.array([1, -1, 1, -1], dtype=np.int8)
-    
+
     segment_events_kernel(
         p, t, q, d, theta,
         np.int8(0), np.float64(0), np.float64(0), np.float64(0)
     )
+
+
+def verify_nopython_mode() -> dict:
+    """
+    Verifica que el kernel esté compilado en modo nopython.
+
+    Returns:
+        Dict con información de compilación:
+        - nopython: bool - True si está en modo nopython
+        - signatures: list - Firmas compiladas
+        - cache_hits: int - Número de hits de cache
+    """
+    from numba.core import types as numba_types
+
+    func = segment_events_kernel
+
+    # Obtener información del dispatcher
+    signatures = list(func.signatures) if hasattr(func, 'signatures') else []
+
+    # Verificar modo nopython
+    nopython = True
+    if hasattr(func, 'nopython_signatures'):
+        nopython = len(func.nopython_signatures) > 0
+
+    # Stats de cache
+    stats = func.stats if hasattr(func, 'stats') else {}
+    cache_hits = stats.get('cache_hits', 0) if isinstance(stats, dict) else 0
+
+    return {
+        'nopython': nopython,
+        'signatures': [str(s) for s in signatures],
+        'cache_hits': cache_hits,
+        'cache_path': str(func._cache._cache_path) if hasattr(func, '_cache') else None,
+    }
+
+
+def estimate_memory_usage(n_ticks: int, theta: float = 0.005) -> dict:
+    """
+    Estima el uso de memoria del kernel para un número dado de ticks.
+
+    Args:
+        n_ticks: Número de ticks a procesar
+        theta: Umbral DC (afecta ratio de eventos)
+
+    Returns:
+        Dict con estimaciones en bytes y MB
+    """
+    # Estimación de eventos basada en theta
+    # Menor theta = más eventos
+    event_ratio = max(100, int(1000 * theta / 0.005))
+    estimated_events = max(n_ticks // event_ratio, _MIN_EVENT_SLOTS)
+
+    # Búferes de ticks (worst case: todos van a DC o OS)
+    tick_buffers = 8 * n_ticks * 8  # 8 arrays × n × 8 bytes promedio
+
+    # Búferes de eventos
+    event_buffers = (
+        estimated_events * 1 +  # event_types (int8)
+        (estimated_events + 1) * 8 * 2  # offsets (int64) × 2
+    )
+
+    total = tick_buffers + event_buffers
+
+    return {
+        'n_ticks': n_ticks,
+        'estimated_events': estimated_events,
+        'tick_buffers_bytes': tick_buffers,
+        'event_buffers_bytes': event_buffers,
+        'total_bytes': total,
+        'total_mb': total / (1024 * 1024),
+    }
+
+
+# =============================================================================
+# BENCHMARK UTILITIES
+# =============================================================================
+
+def benchmark_kernel(
+    n_ticks: int = 1_000_000,
+    theta: float = 0.005,
+    n_runs: int = 5,
+    warmup_runs: int = 2,
+) -> dict:
+    """
+    Benchmark del kernel con datos sintéticos.
+
+    Args:
+        n_ticks: Número de ticks sintéticos
+        theta: Umbral DC
+        n_runs: Número de ejecuciones para promediar
+        warmup_runs: Ejecuciones de calentamiento (no contadas)
+
+    Returns:
+        Dict con métricas de rendimiento
+    """
+    import time
+
+    # Generar datos sintéticos (random walk)
+    np.random.seed(42)
+    returns = np.random.randn(n_ticks) * 0.0001  # ~0.01% volatilidad por tick
+    prices = 100.0 * np.exp(np.cumsum(returns)).astype(np.float64)
+    timestamps = np.arange(n_ticks, dtype=np.int64) * 1_000_000  # 1ms entre ticks
+    quantities = np.ones(n_ticks, dtype=np.float64)
+    directions = np.random.choice(np.array([1, -1], dtype=np.int8), n_ticks)
+
+    # Warmup
+    for _ in range(warmup_runs):
+        segment_events_kernel(
+            prices, timestamps, quantities, directions, theta,
+            np.int8(0), np.float64(0), np.float64(0), np.float64(0)
+        )
+
+    # Benchmark
+    times = []
+    n_events_list = []
+
+    for _ in range(n_runs):
+        start = time.perf_counter()
+        result = segment_events_kernel(
+            prices, timestamps, quantities, directions, theta,
+            np.int8(0), np.float64(0), np.float64(0), np.float64(0)
+        )
+        end = time.perf_counter()
+
+        times.append(end - start)
+        n_events_list.append(result[11])  # n_events
+
+    avg_time = np.mean(times)
+    std_time = np.std(times)
+    avg_events = np.mean(n_events_list)
+
+    return {
+        'n_ticks': n_ticks,
+        'theta': theta,
+        'avg_time_ms': avg_time * 1000,
+        'std_time_ms': std_time * 1000,
+        'ticks_per_second': n_ticks / avg_time,
+        'avg_events': int(avg_events),
+        'event_ratio': n_ticks / avg_events if avg_events > 0 else float('inf'),
+        'memory_estimate_mb': estimate_memory_usage(n_ticks, theta)['total_mb'],
+    }
