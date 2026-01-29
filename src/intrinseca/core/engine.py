@@ -63,6 +63,10 @@ PARQUET_COMPRESSION_LEVEL = 3
 # Columnas Silver
 SILVER_COLUMNS = (
     "event_type",
+    # Atributos de evento (escalares)
+    "extreme_price", "extreme_time",
+    "confirm_price", "confirm_time",
+    # Arrays anidados (microestructura)
     "price_dc", "price_os",
     "time_dc", "time_os",
     "qty_dc", "qty_os",
@@ -568,12 +572,15 @@ class Engine:
             prev_state.last_os_ref,
         )
 
-        # Desempaquetar resultado
+        # Desempaquetar resultado (21 elementos)
         (
             dc_prices, dc_times, dc_quantities, dc_directions,
             os_prices, os_times, os_quantities, os_directions,
             event_types,
             dc_offsets, os_offsets,
+            # Atributos de evento (escalares, zero indirection)
+            extreme_prices, extreme_times, confirm_prices, confirm_times,
+            # Estado final
             n_events, final_trend, final_ext_high, final_ext_low,
             final_last_os_ref, orphan_start_idx
         ) = kernel_result
@@ -618,6 +625,12 @@ class Engine:
 
             arrow_table = pa.table({
                 "event_type": pa.array(event_types, type=pa.int8()),
+                # Atributos de evento (escalares, zero indirection)
+                "extreme_price": pa.array(extreme_prices, type=pa.float64()),
+                "extreme_time": pa.array(extreme_times, type=pa.int64()),
+                "confirm_price": pa.array(confirm_prices, type=pa.float64()),
+                "confirm_time": pa.array(confirm_times, type=pa.int64()),
+                # Arrays anidados (microestructura)
                 **list_columns,
             })
 

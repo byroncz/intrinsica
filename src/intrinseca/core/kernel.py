@@ -31,12 +31,12 @@ ArrayI8 = NDArray[np.int8]
 
 class KernelResult(NamedTuple):
     """Resultado estructurado del kernel (solo para documentación, Numba retorna tuple)."""
-    # Búferes DC
+    # Búferes DC (listas anidadas de ticks)
     dc_prices: ArrayF64
     dc_times: ArrayI64
     dc_quantities: ArrayF64
     dc_directions: ArrayI8
-    # Búferes OS
+    # Búferes OS (listas anidadas de ticks)
     os_prices: ArrayF64
     os_times: ArrayI64
     os_quantities: ArrayF64
@@ -45,6 +45,11 @@ class KernelResult(NamedTuple):
     event_types: ArrayI8
     dc_offsets: ArrayI64
     os_offsets: ArrayI64
+    # Atributos de evento (escalares por evento, zero indirection)
+    extreme_prices: ArrayF64      # Precio del extremo (inicio DC)
+    extreme_times: ArrayI64       # Timestamp del extremo
+    confirm_prices: ArrayF64      # Precio de confirmación (fin DC / inicio OS)
+    confirm_times: ArrayI64       # Timestamp de confirmación
     # Estado final
     n_events: int
     final_trend: int
@@ -101,7 +106,7 @@ def segment_events_kernel(
         init_last_os_ref: Precio referencia para OS runs
 
     Returns:
-        Tuple con 17 elementos (ver KernelResult para documentación)
+        Tuple con 21 elementos (ver KernelResult para documentación)
     """
     n = len(prices)
 
@@ -112,10 +117,11 @@ def segment_events_kernel(
         empty_i8 = np.empty(0, dtype=np.int8)
         zero_offset = np.zeros(1, dtype=np.int64)
         return (
-            empty_f64, empty_i64, empty_f64, empty_i8,
-            empty_f64, empty_i64, empty_f64, empty_i8,
-            empty_i8,
-            zero_offset, zero_offset,
+            empty_f64, empty_i64, empty_f64, empty_i8,  # DC buffers
+            empty_f64, empty_i64, empty_f64, empty_i8,  # OS buffers
+            empty_i8,                                    # event_types
+            zero_offset, zero_offset,                    # offsets
+            empty_f64, empty_i64, empty_f64, empty_i64,  # attributes (extreme/confirm price/time)
             int64(0), init_trend, init_ext_high_price, init_ext_low_price,
             init_last_os_ref, int64(0)
         )
@@ -144,6 +150,12 @@ def segment_events_kernel(
     event_types = np.empty(estimated_events, dtype=np.int8)
     dc_offsets = np.empty(estimated_events + 1, dtype=np.int64)
     os_offsets = np.empty(estimated_events + 1, dtype=np.int64)
+
+    # Atributos de evento (escalares por evento, elimina indirección list.first())
+    extreme_prices = np.empty(estimated_events, dtype=np.float64)
+    extreme_times = np.empty(estimated_events, dtype=np.int64)
+    confirm_prices = np.empty(estimated_events, dtype=np.float64)
+    confirm_times = np.empty(estimated_events, dtype=np.int64)
 
     # Inicializar offsets
     dc_offsets[0] = 0
@@ -265,6 +277,23 @@ def segment_events_kernel(
                 new_os_offsets[:n_events + 1] = os_offsets[:n_events + 1]
                 os_offsets = new_os_offsets
 
+                # Resize atributos de evento
+                new_extreme_prices = np.empty(new_size, dtype=np.float64)
+                new_extreme_prices[:n_events] = extreme_prices[:n_events]
+                extreme_prices = new_extreme_prices
+
+                new_extreme_times = np.empty(new_size, dtype=np.int64)
+                new_extreme_times[:n_events] = extreme_times[:n_events]
+                extreme_times = new_extreme_times
+
+                new_confirm_prices = np.empty(new_size, dtype=np.float64)
+                new_confirm_prices[:n_events] = confirm_prices[:n_events]
+                confirm_prices = new_confirm_prices
+
+                new_confirm_times = np.empty(new_size, dtype=np.int64)
+                new_confirm_times[:n_events] = confirm_times[:n_events]
+                confirm_times = new_confirm_times
+
                 estimated_events = new_size
 
             # Actualizar extremos
@@ -296,6 +325,12 @@ def segment_events_kernel(
             # Registrar evento
             dc_offsets[n_events + 1] = dc_ptr
             event_types[n_events] = new_trend
+
+            # Registrar atributos del evento (zero indirection)
+            extreme_prices[n_events] = prices[prev_ext_idx]
+            extreme_times[n_events] = timestamps[prev_ext_idx]
+            confirm_prices[n_events] = conf_price
+            confirm_times[n_events] = timestamps[conf_idx]
 
             # Preparar siguiente OS
             prev_os_start = conf_idx
@@ -336,6 +371,12 @@ def segment_events_kernel(
         event_types[:n_events],
         dc_offsets[:n_events + 1],
         os_offsets[:n_events + 1] if n_events > 0 else np.zeros(1, dtype=np.int64),
+        # Atributos de evento (escalares)
+        extreme_prices[:n_events],
+        extreme_times[:n_events],
+        confirm_prices[:n_events],
+        confirm_times[:n_events],
+        # Estado final
         int64(n_events),
         current_trend,
         ext_high_price,
@@ -426,13 +467,17 @@ def estimate_memory_usage(n_ticks: int, theta: float = 0.005) -> dict:
         (estimated_events + 1) * 8 * 2  # offsets (int64) × 2
     )
 
-    total = tick_buffers + event_buffers
+    # Atributos de evento: 4 arrays × n_events × 8 bytes
+    attribute_buffers = estimated_events * 8 * 4
+
+    total = tick_buffers + event_buffers + attribute_buffers
 
     return {
         'n_ticks': n_ticks,
         'estimated_events': estimated_events,
         'tick_buffers_bytes': tick_buffers,
         'event_buffers_bytes': event_buffers,
+        'attribute_buffers_bytes': attribute_buffers,
         'total_bytes': total,
         'total_mb': total / (1024 * 1024),
     }
@@ -490,7 +535,7 @@ def benchmark_kernel(
         end = time.perf_counter()
 
         times.append(end - start)
-        n_events_list.append(result[11])  # n_events
+        n_events_list.append(result[15])  # n_events (índice 15 después de 4 atributos)
 
     avg_time = np.mean(times)
     std_time = np.std(times)
