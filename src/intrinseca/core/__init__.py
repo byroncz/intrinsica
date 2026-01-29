@@ -6,13 +6,21 @@ de eventos DC. Arquitectura Silver Layer para materialización de eventos anidad
 
 Componentes:
     - Engine: Motor de transformación Bronze → Silver
+    - DayResult: Resultado estructurado del procesamiento de un día
+    - EngineStats: Estadísticas de rendimiento del Engine
     - kernel: Kernel Numba JIT para segmentación de eventos
     - DCState: Estado persistente para stitching entre días
     - Convergence: Análisis de convergencia entre ejecuciones
 """
 
-from intrinseca.core.engine import Engine
-from intrinseca.core.kernel import segment_events_kernel, warmup_kernel
+from intrinseca.core.engine import Engine, DayResult, EngineStats, EngineConfig
+from intrinseca.core.kernel import (
+    segment_events_kernel,
+    warmup_kernel,
+    verify_nopython_mode,
+    estimate_memory_usage,
+    benchmark_kernel,
+)
 from intrinseca.core.state import DCState
 from intrinseca.core.convergence import (
     ConvergenceResult,
@@ -23,8 +31,16 @@ from intrinseca.core.convergence import (
 __all__ = [
     # Silver Layer Engine
     "Engine",
+    "DayResult",
+    "EngineStats",
+    "EngineConfig",
+    # Kernel
     "segment_events_kernel",
     "warmup_kernel",
+    "verify_nopython_mode",
+    "estimate_memory_usage",
+    "benchmark_kernel",
+    # Estado
     "DCState",
     # Convergencia
     "ConvergenceResult",

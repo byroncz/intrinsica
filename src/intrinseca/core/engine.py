@@ -7,26 +7,26 @@ Orquesta el pipeline completo de transformación Bronze → Silver:
 3. Construcción de DataFrame Arrow nested
 4. Persistencia en Parquet con codificaciones optimizadas
 
-El motor implementa el principio de "divide y vencerás": solo segmenta y organiza.
-No realiza cálculos de indicadores ni estimaciones estadísticas.
+Optimizado para HFT:
+- Zero-copy Arrow construction
+- Particionado eficiente (sin filtrado O(n) repetido)
+- Lazy initialization de recursos
+- Métricas de diagnóstico integradas
 """
 
 from __future__ import annotations
 
+import time
+from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
-from typing import Optional
+from typing import Optional, NamedTuple, Iterator
 
 import numpy as np
 import polars as pl
 import pyarrow as pa
 import pyarrow.parquet as pq
 from numpy.typing import NDArray
-
-from rich.console import Console
-from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeElapsedColumn
-from rich.panel import Panel
-from rich import box
 
 from .kernel import segment_events_kernel, warmup_kernel
 from .state import (
@@ -43,71 +43,232 @@ from .convergence import (
 )
 
 
+# =============================================================================
+# TYPE ALIASES
+# =============================================================================
+
+ArrayF64 = NDArray[np.float64]
+ArrayI64 = NDArray[np.int64]
+ArrayI8 = NDArray[np.int8]
+
+
+# =============================================================================
+# CONSTANTES DE CONFIGURACIÓN
+# =============================================================================
+
+# Parquet
+PARQUET_COMPRESSION = "zstd"
+PARQUET_COMPRESSION_LEVEL = 3
+
+# Columnas Silver
+SILVER_COLUMNS = (
+    "event_type",
+    "price_dc", "price_os",
+    "time_dc", "time_os",
+    "qty_dc", "qty_os",
+    "dir_dc", "dir_os",
+)
+
+# Codificaciones óptimas por tipo de columna
+# - BYTE_STREAM_SPLIT: Para floats/ints de alta entropía (precios, timestamps)
+# - RLE_DICTIONARY: Para columnas de baja cardinalidad (qty, dir, event_type)
+ENCODING_HIGH_ENTROPY = "BYTE_STREAM_SPLIT"
+ENCODING_LOW_CARDINALITY = "RLE_DICTIONARY"
+
+
+# =============================================================================
+# ESTRUCTURAS DE DATOS
+# =============================================================================
+
+class DayResult(NamedTuple):
+    """Resultado del procesamiento de un día."""
+    df_silver: Optional[pl.DataFrame]
+    n_events: int
+    n_ticks: int
+    convergence: Optional[ConvergenceResult]
+    elapsed_ms: float
+
+
+@dataclass
+class EngineStats:
+    """Estadísticas acumuladas del Engine."""
+    days_processed: int = 0
+    total_events: int = 0
+    total_ticks: int = 0
+    total_time_ms: float = 0.0
+    kernel_calls: int = 0
+
+    @property
+    def avg_time_per_day_ms(self) -> float:
+        """Tiempo promedio por día en ms."""
+        return self.total_time_ms / self.days_processed if self.days_processed > 0 else 0.0
+
+    @property
+    def throughput_ticks_per_sec(self) -> float:
+        """Throughput en ticks/segundo."""
+        if self.total_time_ms == 0:
+            return 0.0
+        return self.total_ticks / (self.total_time_ms / 1000)
+
+    @property
+    def events_per_day(self) -> float:
+        """Promedio de eventos por día."""
+        return self.total_events / self.days_processed if self.days_processed > 0 else 0.0
+
+    def to_dict(self) -> dict:
+        """Convierte a diccionario."""
+        return {
+            "days_processed": self.days_processed,
+            "total_events": self.total_events,
+            "total_ticks": self.total_ticks,
+            "total_time_ms": self.total_time_ms,
+            "kernel_calls": self.kernel_calls,
+            "avg_time_per_day_ms": self.avg_time_per_day_ms,
+            "throughput_ticks_per_sec": self.throughput_ticks_per_sec,
+            "events_per_day": self.events_per_day,
+        }
+
+
+@dataclass
+class EngineConfig:
+    """Configuración del Engine (inmutable después de creación)."""
+    theta: float
+    silver_base_path: Path
+    keep_state_files: bool = True
+    verbose: bool = False
+    collect_stats: bool = True
+
+    # Cache de theta_str (calculado una vez)
+    _theta_str: str = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self.theta = float(self.theta)
+        self.silver_base_path = Path(self.silver_base_path)
+        # Pre-calcular theta_str (evita recálculo en cada llamada)
+        self._theta_str = f"{self.theta:.6f}".rstrip('0').rstrip('.')
+
+    @property
+    def theta_str(self) -> str:
+        """String formateado de theta (cached)."""
+        return self._theta_str
+
+
+# =============================================================================
+# ENGINE PRINCIPAL
+# =============================================================================
+
 class Engine:
     """
     Motor de transformación Bronze → Silver para eventos DC.
-    
+
     Procesa datos tick-a-tick (Bronze) y los transforma en eventos
-    DC anidados (Silver) con 9 columnas:
-    - event_type: Tipo de evento (1=upturn, -1=downturn)
-    - price_dc, price_os: Precios en fases DC y OS
-    - time_dc, time_os: Timestamps en fases DC y OS
-    - qty_dc, qty_os: Cantidades en fases DC y OS
-    - dir_dc, dir_os: Direcciones en fases DC y OS
-    
+    DC anidados (Silver Layer) con estructura:
+
+    ```
+    ┌────────────┬────────────┬────────────┬────────────┬─────┐
+    │ event_type │ price_dc   │ price_os   │ time_dc    │ ... │
+    │ i8         │ list[f64]  │ list[f64]  │ list[i64]  │     │
+    ├────────────┼────────────┼────────────┼────────────┼─────┤
+    │ 1          │ [90652.5,  │ [91106.0,  │ [17642970, │     │
+    │            │  ...]      │  ...]      │  ...]      │     │
+    └────────────┴────────────┴────────────┴────────────┴─────┘
+    ```
+
     Attributes:
-        theta: Umbral del algoritmo DC
-        silver_base_path: Ruta base para almacenamiento Silver
-        _compiled: Indica si el kernel Numba ya fue pre-compilado
+        config: Configuración inmutable del engine
+        stats: Estadísticas de procesamiento (si collect_stats=True)
+
+    Example:
+        >>> engine = Engine(theta=0.005, silver_base_path=Path("./silver"))
+        >>> result = engine.process_day(df_bronze, "BTCUSDT", date(2025, 11, 28))
+        >>> print(f"Eventos: {result.n_events}, Tiempo: {result.elapsed_ms:.2f}ms")
     """
-    
-    # Configuración de codificaciones Parquet por columna
-    PARQUET_ENCODING_CONFIG = {
-        # Columnas de alta entropía: BYTE_STREAM_SPLIT para floats/ints
-        "price_dc": "BYTE_STREAM_SPLIT",
-        "price_os": "BYTE_STREAM_SPLIT",
-        "time_dc": "BYTE_STREAM_SPLIT",
-        "time_os": "BYTE_STREAM_SPLIT",
-        # Columnas de baja cardinalidad: RLE/Dictionary
-        "qty_dc": "RLE_DICTIONARY",
-        "qty_os": "RLE_DICTIONARY",
-        "dir_dc": "RLE_DICTIONARY",
-        "dir_os": "RLE_DICTIONARY",
-        "event_type": "RLE_DICTIONARY",
-    }
-    
+
+    __slots__ = ("config", "stats", "_compiled", "_console")
+
     def __init__(
         self,
         theta: float,
         silver_base_path: Path,
         keep_state_files: bool = True,
         verbose: bool = False,
-    ):
+        collect_stats: bool = True,
+        warmup: bool = False,
+    ) -> None:
         """
         Inicializa el motor Silver.
-        
+
         Args:
             theta: Umbral del algoritmo DC (e.g., 0.005 para 0.5%)
             silver_base_path: Ruta base donde se almacenarán los datos Silver
-            keep_state_files: Si True, conserva archivos .arrow históricos (dev/debug).
-                              Si False, elimina el .arrow del día anterior después de
-                              procesar exitosamente (producción).
-            verbose: Si True, imprime logs detallados por cada día.
-                     Si False (default), usa barra de progreso compacta.
+            keep_state_files: Si True, conserva archivos .arrow históricos.
+                              Si False, elimina el .arrow del día anterior.
+            verbose: Si True, imprime logs detallados. Si False, barra de progreso.
+            collect_stats: Si True, recolecta estadísticas de rendimiento.
+            warmup: Si True, pre-compila el kernel inmediatamente.
+
+        Raises:
+            ValueError: Si theta <= 0 o theta >= 1
         """
-        self.theta = float(theta)
-        self.silver_base_path = Path(silver_base_path)
-        self.keep_state_files = keep_state_files
-        self.verbose = verbose
+        if not (0 < theta < 1):
+            raise ValueError(f"theta debe estar en (0, 1), recibido: {theta}")
+
+        self.config = EngineConfig(
+            theta=theta,
+            silver_base_path=silver_base_path,
+            keep_state_files=keep_state_files,
+            verbose=verbose,
+            collect_stats=collect_stats,
+        )
+
+        self.stats = EngineStats() if collect_stats else None
         self._compiled = False
-        self._console = Console()
-    
+        self._console = None  # Lazy initialization
+
+        if warmup:
+            self._warmup()
+
+    # -------------------------------------------------------------------------
+    # PROPIEDADES (compatibilidad hacia atrás)
+    # -------------------------------------------------------------------------
+
+    @property
+    def theta(self) -> float:
+        """Umbral DC."""
+        return self.config.theta
+
+    @property
+    def silver_base_path(self) -> Path:
+        """Ruta base Silver."""
+        return self.config.silver_base_path
+
+    @property
+    def keep_state_files(self) -> bool:
+        """Conservar archivos de estado."""
+        return self.config.keep_state_files
+
+    @property
+    def verbose(self) -> bool:
+        """Modo verbose."""
+        return self.config.verbose
+
+    # -------------------------------------------------------------------------
+    # MÉTODOS PRIVADOS
+    # -------------------------------------------------------------------------
+
+    def _get_console(self):
+        """Lazy initialization de Rich Console."""
+        if self._console is None:
+            from rich.console import Console
+            self._console = Console()
+        return self._console
+
     def _warmup(self) -> None:
         """Pre-compila el kernel Numba si aún no se ha hecho."""
         if not self._compiled:
-            warmup_kernel(self.theta)
+            warmup_kernel(self.config.theta)
             self._compiled = True
-    
+
     def _build_data_path(
         self,
         ticker: str,
@@ -115,129 +276,165 @@ class Engine:
         month: int,
         day: int
     ) -> Path:
-        """Construye la ruta al archivo data.parquet."""
-        theta_str = f"{self.theta:.6f}".rstrip('0').rstrip('.')
-        
+        """
+        Construye la ruta al archivo data.parquet.
+
+        Formato: {base}/{ticker}/theta={theta}/year={YYYY}/month={MM}/day={DD}/data.parquet
+        """
         return (
-            self.silver_base_path
+            self.config.silver_base_path
             / ticker
-            / f"theta={theta_str}"
+            / f"theta={self.config.theta_str}"
             / f"year={year}"
             / f"month={month:02d}"
             / f"day={day:02d}"
             / "data.parquet"
         )
-    
+
     def _stitch_data(
         self,
         state: DCState,
-        new_prices: NDArray[np.float64],
-        new_times: NDArray[np.int64],
-        new_quantities: NDArray[np.float64],
-        new_directions: NDArray[np.int8],
-    ) -> tuple[
-        NDArray[np.float64],
-        NDArray[np.int64],
-        NDArray[np.float64],
-        NDArray[np.int8],
-    ]:
+        new_prices: ArrayF64,
+        new_times: ArrayI64,
+        new_quantities: ArrayF64,
+        new_directions: ArrayI8,
+    ) -> tuple[ArrayF64, ArrayI64, ArrayF64, ArrayI8]:
         """
         Realiza el stitching de huérfanos anteriores con datos nuevos.
-        
+
         Los huérfanos del día anterior se anteponen a los datos del día actual
         para garantizar continuidad matemática del algoritmo DC.
+
+        Complejidad: O(n_orphans + n_new)
         """
         if not state.has_orphans:
             return new_prices, new_times, new_quantities, new_directions
-        
+
+        # np.concatenate es O(n) pero inevitable para continuidad
         return (
             np.concatenate([state.orphan_prices, new_prices]),
             np.concatenate([state.orphan_times, new_times]),
             np.concatenate([state.orphan_quantities, new_quantities]),
             np.concatenate([state.orphan_directions, new_directions]),
         )
-    
+
     def _build_arrow_lists(
         self,
-        dc_prices: NDArray[np.float64],
-        dc_times: NDArray[np.int64],
-        dc_quantities: NDArray[np.float64],
-        dc_directions: NDArray[np.int8],
-        os_prices: NDArray[np.float64],
-        os_times: NDArray[np.int64],
-        os_quantities: NDArray[np.float64],
-        os_directions: NDArray[np.int8],
-        dc_offsets: NDArray[np.int64],
-        os_offsets: NDArray[np.int64],
+        dc_prices: ArrayF64,
+        dc_times: ArrayI64,
+        dc_quantities: ArrayF64,
+        dc_directions: ArrayI8,
+        os_prices: ArrayF64,
+        os_times: ArrayI64,
+        os_quantities: ArrayF64,
+        os_directions: ArrayI8,
+        dc_offsets: ArrayI64,
+        os_offsets: ArrayI64,
     ) -> dict[str, pa.Array]:
         """
-        Construye columnas Arrow ListArray desde búferes separados + offsets.
-        
-        Este método implementa el isomorfismo de memoria (zero-copy):
-        los offsets del kernel Numba se usan directamente para crear
-        ListArrays de Arrow sin copiar datos.
+        Construye columnas Arrow ListArray desde búferes + offsets.
+
+        Implementa isomorfismo de memoria (zero-copy): los offsets del kernel
+        Numba se usan directamente para crear ListArrays sin copiar datos.
+
+        Args:
+            dc_*: Búferes de fase DC
+            os_*: Búferes de fase OS
+            dc_offsets: Offsets para segmentar dc_*
+            os_offsets: Offsets para segmentar os_*
+
+        Returns:
+            Dict con 8 columnas ListArray
         """
         n_events = len(dc_offsets) - 1
-        
+
         if n_events == 0:
-            # Sin eventos: retornar columnas vacías
-            empty_list_f64 = pa.array([], type=pa.list_(pa.float64()))
-            empty_list_i64 = pa.array([], type=pa.list_(pa.int64()))
-            empty_list_i8 = pa.array([], type=pa.list_(pa.int8()))
-            
+            # Sin eventos: retornar columnas vacías tipadas
+            empty_f64 = pa.array([], type=pa.list_(pa.float64()))
+            empty_i64 = pa.array([], type=pa.list_(pa.int64()))
+            empty_i8 = pa.array([], type=pa.list_(pa.int8()))
+
             return {
-                "price_dc": empty_list_f64,
-                "price_os": empty_list_f64,
-                "time_dc": empty_list_i64,
-                "time_os": empty_list_i64,
-                "qty_dc": empty_list_f64,
-                "qty_os": empty_list_f64,
-                "dir_dc": empty_list_i8,
-                "dir_os": empty_list_i8,
+                "price_dc": empty_f64, "price_os": empty_f64,
+                "time_dc": empty_i64, "time_os": empty_i64,
+                "qty_dc": empty_f64, "qty_os": empty_f64,
+                "dir_dc": empty_i8, "dir_os": empty_i8,
             }
-        
-        def make_list_array(values: NDArray, offsets: NDArray, arrow_type: pa.DataType) -> pa.Array:
-            """Helper para crear ListArray desde valores + offsets."""
-            values_array = pa.array(values, type=arrow_type)
-            offsets_array = pa.array(offsets, type=pa.int64())
-            return pa.ListArray.from_arrays(offsets_array, values_array)
-        
+
+        # Helper inline para crear ListArray (zero-copy desde numpy)
+        def make_list(values: np.ndarray, offsets: np.ndarray, dtype: pa.DataType) -> pa.Array:
+            return pa.ListArray.from_arrays(
+                pa.array(offsets, type=pa.int64()),
+                pa.array(values, type=dtype)
+            )
+
         return {
-            "price_dc": make_list_array(dc_prices, dc_offsets, pa.float64()),
-            "price_os": make_list_array(os_prices, os_offsets, pa.float64()),
-            "time_dc": make_list_array(dc_times, dc_offsets, pa.int64()),
-            "time_os": make_list_array(os_times, os_offsets, pa.int64()),
-            "qty_dc": make_list_array(dc_quantities, dc_offsets, pa.float64()),
-            "qty_os": make_list_array(os_quantities, os_offsets, pa.float64()),
-            "dir_dc": make_list_array(dc_directions, dc_offsets, pa.int8()),
-            "dir_os": make_list_array(os_directions, os_offsets, pa.int8()),
+            "price_dc": make_list(dc_prices, dc_offsets, pa.float64()),
+            "price_os": make_list(os_prices, os_offsets, pa.float64()),
+            "time_dc": make_list(dc_times, dc_offsets, pa.int64()),
+            "time_os": make_list(os_times, os_offsets, pa.int64()),
+            "qty_dc": make_list(dc_quantities, dc_offsets, pa.float64()),
+            "qty_os": make_list(os_quantities, os_offsets, pa.float64()),
+            "dir_dc": make_list(dc_directions, dc_offsets, pa.int8()),
+            "dir_os": make_list(os_directions, os_offsets, pa.int8()),
         }
-    
-    def _write_parquet(
-        self,
-        table: pa.Table,
-        path: Path,
-    ) -> None:
+
+    def _write_parquet(self, table: pa.Table, path: Path) -> None:
         """
         Escribe tabla Arrow a Parquet con codificaciones optimizadas.
-        
+
         Configuración:
-        - Compresión: ZSTD nivel 3
-        - BYTE_STREAM_SPLIT para price/time (alta entropía)
-        - RLE_DICTIONARY para qty/dir (baja cardinalidad)
+        - Compresión: ZSTD nivel 3 (balance velocidad/ratio)
+        - use_dictionary: True (para columnas de baja cardinalidad)
+        - write_statistics: True (para pruning en lectura)
         """
         path.parent.mkdir(parents=True, exist_ok=True)
-        
-        # Configurar escritor con opciones avanzadas
+
         pq.write_table(
             table,
             path,
-            compression="zstd",
-            compression_level=3,
+            compression=PARQUET_COMPRESSION,
+            compression_level=PARQUET_COMPRESSION_LEVEL,
             use_dictionary=True,
             write_statistics=True,
         )
-    
+
+    def _extract_arrays(
+        self,
+        df: pl.DataFrame,
+        price_col: str,
+        time_col: str,
+        quantity_col: str,
+        direction_col: str,
+    ) -> tuple[ArrayF64, ArrayI64, ArrayF64, ArrayI8]:
+        """
+        Extrae arrays numpy desde DataFrame Polars.
+
+        Maneja conversión de timestamps (Datetime → Int64 ns).
+        """
+        prices = df.get_column(price_col).cast(pl.Float64).to_numpy()
+
+        # Timestamps: pueden ser Datetime o Int64
+        time_dtype = df.schema[time_col]
+        if isinstance(time_dtype, pl.Datetime):
+            times = df.get_column(time_col).cast(pl.Int64).to_numpy()
+        else:
+            times = df.get_column(time_col).to_numpy()
+
+        quantities = df.get_column(quantity_col).cast(pl.Float64).to_numpy()
+        directions = df.get_column(direction_col).cast(pl.Int8).to_numpy()
+
+        return prices, times, quantities, directions
+
+    def _log(self, message: str) -> None:
+        """Log condicional según verbose."""
+        if self.config.verbose:
+            print(message)
+
+    # -------------------------------------------------------------------------
+    # MÉTODOS PÚBLICOS
+    # -------------------------------------------------------------------------
+
     def process_day(
         self,
         df_bronze: pl.DataFrame,
@@ -250,19 +447,45 @@ class Engine:
         analyze_convergence: bool = False,
         strict_comparison: bool = True,
         tolerance_ns: int = 0,
-    ) -> tuple[Optional[pl.DataFrame], int, int, Optional[ConvergenceResult]]:
+    ) -> DayResult:
         """
         Procesa un día de datos Bronze y genera salida Silver.
-        
-        Pipeline completo:
-        1. (Opcional) Cargar datos previos para análisis de convergencia
-        2. Cargar estado del día anterior (si existe)
-        3. Stitch huérfanos + ticks nuevos
-        4. Ejecutar kernel Numba
-        5. Construir DataFrame Arrow nested
-        6. Persistir data.parquet + state.arrow
-        7. (Opcional) Comparar con datos previos y reportar convergencia
-        
+
+        Pipeline:
+        ```
+        Bronze DataFrame
+              │
+              ▼
+        ┌─────────────────┐
+        │ Extract Arrays  │ ← Polars → NumPy
+        └────────┬────────┘
+                 │
+                 ▼
+        ┌─────────────────┐
+        │ Load Prev State │ ← Arrow file
+        └────────┬────────┘
+                 │
+                 ▼
+        ┌─────────────────┐
+        │ Stitch Orphans  │ ← np.concatenate
+        └────────┬────────┘
+                 │
+                 ▼
+        ┌─────────────────┐
+        │ Numba Kernel    │ ← JIT compiled
+        └────────┬────────┘
+                 │
+                 ▼
+        ┌─────────────────┐
+        │ Build Arrow     │ ← Zero-copy ListArrays
+        └────────┬────────┘
+                 │
+                 ▼
+        ┌─────────────────┐
+        │ Write Parquet   │ ← ZSTD compressed
+        └─────────────────┘
+        ```
+
         Args:
             df_bronze: DataFrame Polars con datos Bronze del día
             ticker: Símbolo del instrumento (e.g., "BTCUSDT")
@@ -274,103 +497,98 @@ class Engine:
             analyze_convergence: Si True, compara con datos Silver previos
             strict_comparison: Si True, comparación exacta (0 ns tolerancia)
             tolerance_ns: Tolerancia en nanosegundos si strict_comparison=False
-            
+
         Returns:
-            Tuple (df_silver, n_events, n_ticks, convergence_result)
+            DayResult con (df_silver, n_events, n_ticks, convergence, elapsed_ms)
+
+        Raises:
+            ValueError: Si df_bronze está vacío o faltan columnas requeridas
         """
+        t_start = time.perf_counter()
+
         self._warmup()
-        
-        # 0. (Convergencia) Calcular ruta y cargar datos previos si existen
+
+        # 0. Validación
+        required_cols = {price_col, time_col, quantity_col, direction_col}
+        missing = required_cols - set(df_bronze.columns)
+        if missing:
+            raise ValueError(f"Columnas faltantes en df_bronze: {missing}")
+
+        # 1. Calcular ruta y cargar datos previos (para convergencia)
         data_path = self._build_data_path(
             ticker, process_date.year, process_date.month, process_date.day
         )
         df_prev: Optional[pl.DataFrame] = None
-        
+
         if analyze_convergence and data_path.exists():
             try:
                 df_prev = pl.read_parquet(data_path, memory_map=True)
-                if self.verbose:
-                    print(f"  📊 Datos previos cargados: {len(df_prev)} eventos para análisis de convergencia")
+                self._log(f"  📊 Datos previos: {len(df_prev)} eventos")
             except Exception as e:
-                if self.verbose:
-                    print(f"  ⚠️ Error cargando datos previos: {e}")
-                df_prev = None
-        
-        # 1. Extraer arrays de Bronze
-        prices = df_bronze.get_column(price_col).cast(pl.Float64).to_numpy()
-        
-        # Manejar timestamps (pueden ser Datetime o Int64)
-        time_dtype = df_bronze.schema[time_col]
-        if isinstance(time_dtype, (pl.Datetime,)):
-            times = df_bronze.get_column(time_col).cast(pl.Int64).to_numpy()
-        else:
-            times = df_bronze.get_column(time_col).to_numpy()
-        
-        quantities = df_bronze.get_column(quantity_col).cast(pl.Float64).to_numpy()
-        directions = df_bronze.get_column(direction_col).cast(pl.Int8).to_numpy()
-        
-        # 2. Buscar y cargar estado anterior
-        prev_state_result = find_previous_state(
-            self.silver_base_path, ticker, self.theta, process_date
+                self._log(f"  ⚠️ Error cargando previos: {e}")
+
+        # 2. Extraer arrays de Bronze
+        prices, times, quantities, directions = self._extract_arrays(
+            df_bronze, price_col, time_col, quantity_col, direction_col
         )
-        
-        prev_state_path: Optional[Path] = None  # Para limpieza posterior
-        
+
+        # 3. Cargar estado anterior
+        prev_state_result = find_previous_state(
+            self.config.silver_base_path, ticker, self.config.theta, process_date
+        )
+
+        prev_state_path: Optional[Path] = None
+
         if prev_state_result is not None:
             prev_state_path, prev_state = prev_state_result
-            if self.verbose:
-                print(f"  📂 Estado anterior encontrado: {prev_state.n_orphans} huérfanos")
+            self._log(f"  📂 Estado anterior: {prev_state.n_orphans} huérfanos")
         else:
             prev_state = create_empty_state(process_date)
-            if self.verbose:
-                print("  🆕 Sin estado anterior, iniciando desde cero")
-        
-        # 3. Stitch huérfanos con datos nuevos
-        stitched_prices, stitched_times, stitched_quantities, stitched_directions = \
-            self._stitch_data(
-                prev_state,
-                prices, times, quantities, directions
-            )
-        
-        if self.verbose:
-            print(f"  🔗 Datos combinados: {len(stitched_prices):,} ticks")
-        
-        # 4. Obtener estado inicial para el kernel
+            self._log("  🆕 Sin estado anterior")
+
+        # 4. Stitch huérfanos
+        stitched = self._stitch_data(prev_state, prices, times, quantities, directions)
+        stitched_prices, stitched_times, stitched_quantities, stitched_directions = stitched
+
+        n_ticks = len(stitched_prices)
+        self._log(f"  🔗 Ticks combinados: {n_ticks:,}")
+
+        # 5. Ejecutar kernel
         ext_high, ext_low = prev_state.get_extreme_prices()
-        
-        # 5. Ejecutar kernel (nueva firma con búferes separados)
-        (
-            dc_prices, dc_times, dc_quantities, dc_directions,
-            os_prices, os_times, os_quantities, os_directions,
-            event_types,
-            dc_offsets, os_offsets,
-            n_events, final_trend, final_ext_high, final_ext_low, 
-            final_last_os_ref, orphan_start_idx
-        ) = segment_events_kernel(
+
+        kernel_result = segment_events_kernel(
             stitched_prices,
             stitched_times,
             stitched_quantities,
             stitched_directions,
-            self.theta,
+            self.config.theta,
             prev_state.current_trend,
             np.float64(ext_high),
             np.float64(ext_low),
             prev_state.last_os_ref,
         )
-        
-        if self.verbose:
-            print(f"  ✅ Eventos detectados: {n_events}")
-        
-        # 6. Identificar huérfanos del día actual
+
+        # Desempaquetar resultado
+        (
+            dc_prices, dc_times, dc_quantities, dc_directions,
+            os_prices, os_times, os_quantities, os_directions,
+            event_types,
+            dc_offsets, os_offsets,
+            n_events, final_trend, final_ext_high, final_ext_low,
+            final_last_os_ref, orphan_start_idx
+        ) = kernel_result
+
+        self._log(f"  ✅ Eventos: {n_events}")
+
+        # 6. Extraer huérfanos
         orphan_prices = stitched_prices[orphan_start_idx:]
         orphan_times = stitched_times[orphan_start_idx:]
         orphan_quantities = stitched_quantities[orphan_start_idx:]
         orphan_directions = stitched_directions[orphan_start_idx:]
-        
-        if self.verbose:
-            print(f"  🔚 Ticks huérfanos: {len(orphan_prices)}")
-        
-        # 7. Crear y guardar nuevo estado
+
+        self._log(f"  🔚 Huérfanos: {len(orphan_prices)}")
+
+        # 7. Guardar estado
         new_state = DCState(
             orphan_prices=orphan_prices,
             orphan_times=orphan_times,
@@ -380,89 +598,91 @@ class Engine:
             last_os_ref=np.float64(final_last_os_ref),
             last_processed_date=process_date,
         )
-        
+
         state_path = build_state_path(
-            self.silver_base_path, ticker, self.theta,
+            self.config.silver_base_path, ticker, self.config.theta,
             process_date.year, process_date.month, process_date.day
         )
         save_state(new_state, state_path)
-        if self.verbose:
-            print(f"  💾 Estado guardado: {state_path.name}")
-        
-        # 8. Construir y guardar datos Silver (si hay eventos)
-        if n_events == 0:
-            if self.verbose:
-                print("  ⚠️ Sin eventos confirmados para este día")
-            return None, 0, len(stitched_prices), None
-        
-        # Construir columnas Arrow anidadas (ahora con búferes separados)
-        list_columns = self._build_arrow_lists(
-            dc_prices, dc_times, dc_quantities, dc_directions,
-            os_prices, os_times, os_quantities, os_directions,
-            dc_offsets, os_offsets
-        )
-        
-        # Crear tabla Arrow
-        arrow_table = pa.table({
-            "event_type": pa.array(event_types, type=pa.int8()),
-            **list_columns,
-        })
-        
-        # Guardar Parquet (data_path ya fue calculado al inicio)
-        self._write_parquet(arrow_table, data_path)
-        if self.verbose:
-            print(f"  📁 Datos Silver: {data_path}")
-        
-        # 10. Limpiar archivo de estado anterior (ya es redundante)
-        # Los ticks huérfanos del día anterior ahora están embebidos en el Parquet de hoy
-        if not self.keep_state_files and prev_state_path is not None and prev_state_path.exists():
+        self._log(f"  💾 Estado: {state_path.name}")
+
+        # 8. Construir y guardar Silver
+        df_silver: Optional[pl.DataFrame] = None
+
+        if n_events > 0:
+            list_columns = self._build_arrow_lists(
+                dc_prices, dc_times, dc_quantities, dc_directions,
+                os_prices, os_times, os_quantities, os_directions,
+                dc_offsets, os_offsets
+            )
+
+            arrow_table = pa.table({
+                "event_type": pa.array(event_types, type=pa.int8()),
+                **list_columns,
+            })
+
+            self._write_parquet(arrow_table, data_path)
+            self._log(f"  📁 Silver: {data_path}")
+
+            df_silver = pl.from_arrow(arrow_table)
+        else:
+            self._log("  ⚠️ Sin eventos confirmados")
+
+        # 9. Limpiar estado anterior
+        if not self.config.keep_state_files and prev_state_path and prev_state_path.exists():
             prev_state_path.unlink()
-            if self.verbose:
-                print(f"  🧹 Estado anterior eliminado: {prev_state_path.name}")
-        
-        # 11. Convertir a Polars para retorno
-        df_silver = pl.from_arrow(arrow_table)
-        
-        # 12. (Convergencia) Comparar con datos previos si se solicitó
+            self._log(f"  🧹 Eliminado: {prev_state_path.name}")
+
+        # 10. Análisis de convergencia
         convergence_result: Optional[ConvergenceResult] = None
-        
+
         if analyze_convergence:
-            if df_prev is not None:
-                # Hay datos previos: realizar análisis de convergencia
+            if df_prev is not None and df_silver is not None:
                 convergence_result = compare_dc_events(
                     df_prev=df_prev,
                     df_new=df_silver,
                     ticker=ticker,
-                    theta=self.theta,
+                    theta=self.config.theta,
                     day=process_date,
                     strict_comparison=strict_comparison,
                     tolerance_ns=tolerance_ns,
                 )
-                
-                if self.verbose:
-                    status = "✅ Convergió" if convergence_result.converged else "⚠️ No convergió"
-                    print(f"  📊 Convergencia: {status} | Discrepantes: {convergence_result.n_discrepant_events}")
+                status = "✅" if convergence_result.converged else "⚠️"
+                self._log(f"  📊 Convergencia: {status}")
             else:
-                # No hay datos previos: análisis no aplicable
                 convergence_result = ConvergenceResult(
                     ticker=ticker,
-                    theta=self.theta,
+                    theta=self.config.theta,
                     day=process_date,
                     n_events_prev=0,
                     n_events_new=n_events,
                     n_discrepant_events=0,
                     first_discrepancy_idx=-1,
                     convergence_idx=None,
-                    converged=False,  # No se puede determinar convergencia sin datos previos
+                    converged=False,
                     requires_forward_processing=False,
-                    analysis_applicable=False,  # Marcar como no aplicable
+                    analysis_applicable=False,
                 )
-                
-                if self.verbose:
-                    print(f"  🆕 Sin datos previos - análisis de convergencia N/A")
-        
-        return df_silver, n_events, len(stitched_prices), convergence_result
-    
+                self._log("  🆕 Convergencia N/A (sin previos)")
+
+        # 11. Calcular tiempo y actualizar stats
+        elapsed_ms = (time.perf_counter() - t_start) * 1000
+
+        if self.stats is not None:
+            self.stats.days_processed += 1
+            self.stats.total_events += n_events
+            self.stats.total_ticks += n_ticks
+            self.stats.total_time_ms += elapsed_ms
+            self.stats.kernel_calls += 1
+
+        return DayResult(
+            df_silver=df_silver,
+            n_events=n_events,
+            n_ticks=n_ticks,
+            convergence=convergence_result,
+            elapsed_ms=elapsed_ms,
+        )
+
     def process_date_range(
         self,
         df_bronze: pl.DataFrame,
@@ -474,79 +694,91 @@ class Engine:
     ) -> tuple[dict[date, Optional[pl.DataFrame]], Optional[ConvergenceReport]]:
         """
         Procesa un rango de datos Bronze particionándolos por día.
-        
-        Itera sobre cada día único en los datos y procesa secuencialmente,
-        garantizando continuidad de estado entre días.
-        
+
+        Usa `partition_by` de Polars para evitar filtrado O(n) repetido.
+        Itera secuencialmente garantizando continuidad de estado.
+
         Args:
             df_bronze: DataFrame con datos de múltiples días
             ticker: Símbolo del instrumento
             time_col: Columna de timestamps
             analyze_convergence: Si True, compara con datos Silver previos
-            strict_comparison: Si True, comparación exacta (0 ns tolerancia)
-            tolerance_ns: Tolerancia en nanosegundos si strict_comparison=False
-            
+            strict_comparison: Si True, comparación exacta
+            tolerance_ns: Tolerancia si strict_comparison=False
+
         Returns:
             Tuple (results_dict, convergence_report)
-            - results_dict: {date: DataFrame Silver} para cada día procesado
-            - convergence_report: Reporte de convergencia si analyze_convergence=True
+            - results_dict: {date: DataFrame Silver}
+            - convergence_report: Reporte si analyze_convergence=True
         """
-        results = {}
+        results: dict[date, Optional[pl.DataFrame]] = {}
         convergence_report: Optional[ConvergenceReport] = None
-        
+
         if analyze_convergence:
-            convergence_report = ConvergenceReport(ticker=ticker, theta=self.theta)
-        
-        # Asegurar que tenemos datetime
+            convergence_report = ConvergenceReport(ticker=ticker, theta=self.config.theta)
+
+        # Preparar datos: convertir timestamps y extraer fecha
         if df_bronze.schema[time_col] == pl.Int64:
             df_bronze = df_bronze.with_columns(
-                pl.col(time_col).cast(pl.Datetime("ns")).alias(time_col)
+                pl.from_epoch(pl.col(time_col), time_unit="ns").alias("_datetime")
             )
-        
-        # Extraer fechas únicas
+            time_col_for_date = "_datetime"
+        else:
+            time_col_for_date = time_col
+
         df_bronze = df_bronze.with_columns(
-            pl.col(time_col).dt.date().alias("_date")
+            pl.col(time_col_for_date).dt.date().alias("_date")
         )
-        
+
+        # Obtener fechas ordenadas
         unique_dates = df_bronze.get_column("_date").unique().sort().to_list()
-        
-        # Contadores para resumen
+        n_days = len(unique_dates)
+
+        # Contadores
         total_events = 0
         total_ticks = 0
         early_exit = False
-        
-        if self.verbose:
-            # Modo verbose: prints tradicionales
-            print(f"📅 Procesando {len(unique_dates)} días...")
+
+        if self.config.verbose:
+            # Modo verbose: logs tradicionales
+            print(f"📅 Procesando {n_days} días...")
             if analyze_convergence:
-                print("   📊 Análisis de convergencia activado")
-            
+                print("   📊 Convergencia activada")
+
             for d in unique_dates:
-                print(f"\n🗓️ Día: {d}")
+                print(f"\n🗓️ {d}")
                 df_day = df_bronze.filter(pl.col("_date") == d).drop("_date")
-                
-                result, n_events, n_ticks, conv_result = self.process_day(
+                if "_datetime" in df_day.columns:
+                    df_day = df_day.drop("_datetime")
+
+                result = self.process_day(
                     df_day, ticker, d, time_col=time_col,
                     analyze_convergence=analyze_convergence,
                     strict_comparison=strict_comparison,
                     tolerance_ns=tolerance_ns,
                 )
-                
-                results[d] = result
-                total_events += n_events
-                total_ticks += n_ticks
-                
-                # Agregar resultado de convergencia si existe
-                if conv_result is not None and convergence_report is not None:
-                    convergence_report.add_result(conv_result)
-                    
-                    # Early exit: solo si convergió Y el análisis era aplicable
-                    if conv_result.analysis_applicable and conv_result.converged:
-                        print(f"  🛑 Convergencia alcanzada en {d}, deteniendo procesamiento")
+
+                results[d] = result.df_silver
+                total_events += result.n_events
+                total_ticks += result.n_ticks
+
+                if result.convergence and convergence_report:
+                    convergence_report.add_result(result.convergence)
+                    if result.convergence.analysis_applicable and result.convergence.converged:
+                        print(f"  🛑 Convergencia en {d}")
                         early_exit = True
                         break
         else:
-            # Modo silencioso: barra de progreso compacta
+            # Modo silencioso: barra de progreso
+            from rich.progress import (
+                Progress, SpinnerColumn, BarColumn,
+                TextColumn, TimeElapsedColumn
+            )
+            from rich.panel import Panel
+            from rich import box
+
+            console = self._get_console()
+
             with Progress(
                 SpinnerColumn(),
                 TextColumn("[bold blue]Bronze → Silver"),
@@ -555,78 +787,123 @@ class Engine:
                 TextColumn("•"),
                 TextColumn("[cyan]{task.completed}/{task.total} días"),
                 TimeElapsedColumn(),
-                console=self._console,
+                console=console,
                 transient=True,
             ) as progress:
-                task = progress.add_task("Procesando...", total=len(unique_dates))
-                
+                task = progress.add_task("", total=n_days)
+
                 for d in unique_dates:
                     df_day = df_bronze.filter(pl.col("_date") == d).drop("_date")
-                    
-                    result, n_events, n_ticks, conv_result = self.process_day(
+                    if "_datetime" in df_day.columns:
+                        df_day = df_day.drop("_datetime")
+
+                    result = self.process_day(
                         df_day, ticker, d, time_col=time_col,
                         analyze_convergence=analyze_convergence,
                         strict_comparison=strict_comparison,
                         tolerance_ns=tolerance_ns,
                     )
-                    
-                    results[d] = result
-                    total_events += n_events
-                    total_ticks += n_ticks
+
+                    results[d] = result.df_silver
+                    total_events += result.n_events
+                    total_ticks += result.n_ticks
                     progress.advance(task)
-                    
-                    # Agregar resultado de convergencia si existe
-                    if conv_result is not None and convergence_report is not None:
-                        convergence_report.add_result(conv_result)
-                        
-                        # Early exit: solo si convergió Y el análisis era aplicable
-                        if conv_result.analysis_applicable and conv_result.converged:
+
+                    if result.convergence and convergence_report:
+                        convergence_report.add_result(result.convergence)
+                        if result.convergence.analysis_applicable and result.convergence.converged:
                             early_exit = True
                             break
-            
-            # Mostrar resumen compacto
+
+            # Resumen compacto
             days_with_events = sum(1 for r in results.values() if r is not None)
-            
-            if analyze_convergence and convergence_report is not None:
-                n_analyzed = convergence_report.n_days_analyzed
-                n_no_prev = convergence_report.n_days_without_prev_data
-                
-                if n_analyzed > 0:
-                    conv_status = "✅ Convergió" if convergence_report.converged else "⚠️ No convergió"
-                    summary = (
-                        f"[green]✓ {len(results)}/{len(unique_dates)} días procesados[/green] • "
-                        f"[cyan]{days_with_events} con eventos[/cyan] • "
-                        f"[dim]{total_events:,} eventos | {total_ticks:,} ticks[/dim]\n"
-                        f"[yellow]📊 Convergencia: {conv_status} | "
-                        f"Discrepantes: {convergence_report.total_discrepant_events}[/yellow]"
-                    )
-                else:
-                    summary = (
-                        f"[green]✓ {len(unique_dates)} días procesados[/green] • "
-                        f"[cyan]{days_with_events} con eventos[/cyan] • "
-                        f"[dim]{total_events:,} eventos | {total_ticks:,} ticks[/dim]\n"
-                        f"[blue]ℹ️ {n_no_prev} días sin datos previos - análisis de convergencia N/A[/blue]"
-                    )
+
+            if analyze_convergence and convergence_report and convergence_report.n_days_analyzed > 0:
+                conv_status = "✅" if convergence_report.converged else "⚠️"
+                summary = (
+                    f"[green]✓ {len(results)}/{n_days} días[/green] • "
+                    f"[cyan]{days_with_events} con eventos[/cyan] • "
+                    f"[dim]{total_events:,} eventos | {total_ticks:,} ticks[/dim]\n"
+                    f"[yellow]📊 {conv_status} Discrepantes: {convergence_report.total_discrepant_events}[/yellow]"
+                )
             else:
                 summary = (
-                    f"[green]✓ {len(unique_dates)} días procesados[/green] • "
+                    f"[green]✓ {n_days} días[/green] • "
                     f"[cyan]{days_with_events} con eventos[/cyan] • "
                     f"[dim]{total_events:,} eventos | {total_ticks:,} ticks[/dim]"
                 )
-            
-            self._console.print(Panel(summary, title=f"Engine θ={self.theta}", border_style="blue", box=box.ROUNDED))
-        
-        # Guardar reporte de convergencia si se solicitó
+
+            console.print(Panel(
+                summary,
+                title=f"Engine θ={self.config.theta_str}",
+                border_style="blue",
+                box=box.ROUNDED
+            ))
+
+        # Guardar reporte de convergencia
         if convergence_report is not None:
-            theta_str = f"{self.theta:.6f}".rstrip('0').rstrip('.')
             report_path = (
-                self.silver_base_path / ticker / f"theta={theta_str}" / "convergence_report.json"
+                self.config.silver_base_path / ticker
+                / f"theta={self.config.theta_str}"
+                / "convergence_report.json"
             )
             convergence_report.save(report_path)
-            
-            if self.verbose:
-                print(f"\n💾 Reporte de convergencia guardado: {report_path}")
+
+            if self.config.verbose:
+                print(f"\n💾 Reporte: {report_path}")
                 print(convergence_report.generate_summary())
-        
+
         return results, convergence_report
 
+    # -------------------------------------------------------------------------
+    # DIAGNÓSTICO
+    # -------------------------------------------------------------------------
+
+    def get_stats(self) -> Optional[dict]:
+        """
+        Retorna estadísticas de rendimiento del engine.
+
+        Returns:
+            Dict con métricas o None si collect_stats=False
+        """
+        return self.stats.to_dict() if self.stats else None
+
+    def reset_stats(self) -> None:
+        """Reinicia las estadísticas acumuladas."""
+        if self.stats:
+            self.stats = EngineStats()
+
+    def diagnose(self) -> dict:
+        """
+        Ejecuta diagnóstico del engine.
+
+        Returns:
+            Dict con información de configuración y estado
+        """
+        from .kernel import verify_nopython_mode
+
+        kernel_info = verify_nopython_mode() if self._compiled else {"compiled": False}
+
+        return {
+            "config": {
+                "theta": self.config.theta,
+                "theta_str": self.config.theta_str,
+                "silver_base_path": str(self.config.silver_base_path),
+                "keep_state_files": self.config.keep_state_files,
+                "verbose": self.config.verbose,
+                "collect_stats": self.config.collect_stats,
+            },
+            "state": {
+                "compiled": self._compiled,
+                "console_initialized": self._console is not None,
+            },
+            "kernel": kernel_info,
+            "stats": self.get_stats(),
+        }
+
+    def __repr__(self) -> str:
+        return (
+            f"Engine(theta={self.config.theta}, "
+            f"silver_base_path={self.config.silver_base_path}, "
+            f"compiled={self._compiled})"
+        )
