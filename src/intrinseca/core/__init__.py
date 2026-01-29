@@ -21,11 +21,28 @@ from intrinseca.core.kernel import (
     estimate_memory_usage,
     benchmark_kernel,
 )
-from intrinseca.core.state import DCState
+from intrinseca.core.state import (
+    DCState,
+    format_theta,
+    build_state_path,
+    save_state,
+    load_state,
+    find_previous_state,
+    create_empty_state,
+    list_available_states,
+    get_state_stats,
+    cleanup_old_states,
+    MAX_LOOKBACK_DAYS,
+)
 from intrinseca.core.convergence import (
     ConvergenceResult,
     ConvergenceReport,
+    DiscrepancyDetail,
     compare_dc_events,
+    load_report,
+    compare_reports,
+    MAX_DISCREPANCY_DETAILS,
+    DEFAULT_TOLERANCE_NS,
 )
 
 __all__ = [
@@ -42,8 +59,23 @@ __all__ = [
     "benchmark_kernel",
     # Estado
     "DCState",
+    "format_theta",
+    "build_state_path",
+    "save_state",
+    "load_state",
+    "find_previous_state",
+    "create_empty_state",
+    "list_available_states",
+    "get_state_stats",
+    "cleanup_old_states",
+    "MAX_LOOKBACK_DAYS",
     # Convergencia
     "ConvergenceResult",
     "ConvergenceReport",
+    "DiscrepancyDetail",
     "compare_dc_events",
+    "load_report",
+    "compare_reports",
+    "MAX_DISCREPANCY_DETAILS",
+    "DEFAULT_TOLERANCE_NS",
 ]
