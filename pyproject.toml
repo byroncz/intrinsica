@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "intrinseca"
-version = "0.1.0"
+version = "0.2.0"
 description = "Motor de transformación Directional Change (DC) y análisis de eventos para trading algorítmico"
 readme = "README.md"
 license = {text = "MIT"}

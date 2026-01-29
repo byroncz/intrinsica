@@ -2,14 +2,17 @@
 Núcleo de cálculo de alto rendimiento para Directional Change.
 
 Este módulo contiene los algoritmos optimizados con Numba para detección
-de eventos DC e indicadores derivados. No requiere dependencias gráficas.
+de eventos DC. Arquitectura Silver Layer para materialización de eventos anidados.
 
-Incluye también el motor Silver Layer para materialización de eventos anidados.
+Componentes:
+    - Engine: Motor de transformación Bronze → Silver
+    - kernel: Kernel Numba JIT para segmentación de eventos
+    - DCState: Estado persistente para stitching entre días
+    - Convergence: Análisis de convergencia entre ejecuciones
 """
 
-from intrinseca.core.event_detector import DCDetector, DCResult
-from intrinseca.core.indicators import DCIndicators
 from intrinseca.core.engine import Engine
+from intrinseca.core.kernel import segment_events_kernel, warmup_kernel
 from intrinseca.core.state import DCState
 from intrinseca.core.convergence import (
     ConvergenceResult,
@@ -18,12 +21,10 @@ from intrinseca.core.convergence import (
 )
 
 __all__ = [
-    # Bronze Layer (análisis tick-a-tick)
-    "DCDetector",
-    "DCResult",
-    "DCIndicators",
-    # Silver Layer (eventos anidados)
+    # Silver Layer Engine
     "Engine",
+    "segment_events_kernel",
+    "warmup_kernel",
     "DCState",
     # Convergencia
     "ConvergenceResult",
