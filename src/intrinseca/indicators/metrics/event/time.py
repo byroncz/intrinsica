@@ -1,5 +1,5 @@
 """
-Dynamics Metrics.
+Time Metrics.
 
 Indicators related to time, velocity, and speed of events.
 
@@ -23,7 +23,7 @@ class Duration(BaseIndicator):
     name = "duration_ns"
     metadata = IndicatorMetadata(
         description="Duration of the DC phase (Extreme -> Confirmation) in nanoseconds.",
-        category="dynamics"
+        category="event/time"
     )
     dependencies = []  # Uses Silver columns directly
 
@@ -40,7 +40,7 @@ class Velocity(BaseIndicator):
     name = "velocity"
     metadata = IndicatorMetadata(
         description="Speed of the DC price change (Price Change / Duration).",
-        category="dynamics"
+        category="event/time"
     )
     dependencies = ["duration_ns"]  # Needs duration calculated first
 

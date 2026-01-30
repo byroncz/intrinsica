@@ -1,5 +1,5 @@
 """
-Geometry Metrics.
+Price Metrics.
 
 Indicators related to price movement magnitude, returns, and spatial extent.
 
@@ -30,7 +30,7 @@ class Overshoot(BaseIndicator):
     name = "overshoot"
     metadata = IndicatorMetadata(
         description="Magnitude of the OS phase (Confirmation -> Next Extreme).",
-        category="geometry"
+        category="event/price"
     )
     dependencies = []  # Uses Silver columns directly
 
@@ -50,7 +50,7 @@ class DcReturn(BaseIndicator):
     name = "dc_return"
     metadata = IndicatorMetadata(
         description="Return of the DC phase (Extreme -> Confirmation).",
-        category="geometry"
+        category="event/price"
     )
     dependencies = []  # Uses Silver columns directly
 
@@ -67,7 +67,7 @@ class OsReturn(BaseIndicator):
     name = "os_return"
     metadata = IndicatorMetadata(
         description="Return of the OS phase (Confirmation -> Next Extreme).",
-        category="geometry"
+        category="event/price"
     )
     dependencies = ["overshoot"]  # Depends on calculated Overshoot
 

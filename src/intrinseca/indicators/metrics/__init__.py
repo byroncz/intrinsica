@@ -2,33 +2,34 @@
 Metrics Package.
 
 Contains all indicator implementations organized by category:
-- geometry: Price movement magnitude and returns
-- dynamics: Time and velocity metrics
-- microstructure: Tick-level analysis
-- aggregation: Summary statistics
+- event/price: Price movement magnitude and returns
+- event/time: Time and velocity metrics
+- event/tick: Tick-level analysis
+- event/series: Signal processing (Fourier, wavelets, etc.)
+- summary/stats: Summary statistics
 """
 
-from .geometry import Overshoot, DcReturn, OsReturn
-from .dynamics import Duration, Velocity
-from .microstructure import RunsCount
-from .aggregation import TMV, AvgDuration, AvgReturn, AvgOvershoot, VolatilityDC, UpturnRatio
+from .event.price import Overshoot, DcReturn, OsReturn
+from .event.time import Duration, Velocity
+from .event.tick import RunsCount
+from .summary.stats import TMV, AvgDuration, AvgReturn, AvgOvershoot, VolatilityDC, UpturnRatio
 
 
 def register_all(registry):
     """Registers all standard metrics to the provided registry."""
-    # Geometry (event-level)
+    # Event/Price (event-level)
     registry.register(Overshoot())
     registry.register(DcReturn())
     registry.register(OsReturn())
 
-    # Dynamics (event-level)
+    # Event/Time (event-level)
     registry.register(Duration())
     registry.register(Velocity())
 
-    # Microstructure (event-level)
+    # Event/Tick (event-level)
     registry.register(RunsCount())
 
-    # Aggregation (summary statistics)
+    # Summary/Stats (aggregation)
     registry.register(TMV())
     registry.register(AvgDuration())
     registry.register(AvgReturn())
@@ -38,13 +39,13 @@ def register_all(registry):
 
 
 __all__ = [
-    # Geometry
+    # Event/Price
     "Overshoot", "DcReturn", "OsReturn",
-    # Dynamics
+    # Event/Time
     "Duration", "Velocity",
-    # Microstructure
+    # Event/Tick
     "RunsCount",
-    # Aggregation
+    # Summary/Stats
     "TMV", "AvgDuration", "AvgReturn", "AvgOvershoot", "VolatilityDC", "UpturnRatio",
     # Registration
     "register_all",

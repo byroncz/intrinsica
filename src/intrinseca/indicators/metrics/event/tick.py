@@ -1,5 +1,5 @@
 """
-Microstructure Metrics.
+Tick Metrics.
 
 Indicators related to tick-level dynamics, runs, and volume profiles.
 """
@@ -40,7 +40,7 @@ class RunsCount(BaseIndicator):
     name = "runs_count"
     metadata = IndicatorMetadata(
         description="Number of directional grid crossings during the event.",
-        category="microstructure"
+        category="event/tick"
     )
 
     def get_expression(self) -> pl.Expr:

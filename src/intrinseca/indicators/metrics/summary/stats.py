@@ -1,5 +1,5 @@
 """
-Aggregation Metrics.
+Summary Statistics.
 
 Global indicators that collapse the event DataFrame into summary statistics.
 These metrics are computed using select() rather than with_columns().
@@ -14,7 +14,7 @@ class TMV(BaseIndicator):
     name = "tmv"
     metadata = IndicatorMetadata(
         description="Total Movement Value - sum of absolute returns.",
-        category="aggregation",
+        category="summary/stats",
         is_event_level=False
     )
     dependencies = ["dc_return"]
@@ -28,7 +28,7 @@ class AvgDuration(BaseIndicator):
     name = "avg_duration"
     metadata = IndicatorMetadata(
         description="Average duration of DC phases in nanoseconds.",
-        category="aggregation",
+        category="summary/stats",
         is_event_level=False
     )
     dependencies = ["duration_ns"]
@@ -42,7 +42,7 @@ class AvgReturn(BaseIndicator):
     name = "avg_return"
     metadata = IndicatorMetadata(
         description="Average return of DC phases.",
-        category="aggregation",
+        category="summary/stats",
         is_event_level=False
     )
     dependencies = ["dc_return"]
@@ -56,7 +56,7 @@ class AvgOvershoot(BaseIndicator):
     name = "avg_overshoot"
     metadata = IndicatorMetadata(
         description="Average overshoot magnitude.",
-        category="aggregation",
+        category="summary/stats",
         is_event_level=False
     )
     dependencies = ["overshoot"]
@@ -70,7 +70,7 @@ class VolatilityDC(BaseIndicator):
     name = "volatility_dc"
     metadata = IndicatorMetadata(
         description="Volatility measured as standard deviation of DC returns.",
-        category="aggregation",
+        category="summary/stats",
         is_event_level=False
     )
     dependencies = ["dc_return"]
@@ -84,7 +84,7 @@ class UpturnRatio(BaseIndicator):
     name = "upturn_ratio"
     metadata = IndicatorMetadata(
         description="Ratio of upturn events to total events.",
-        category="aggregation",
+        category="summary/stats",
         is_event_level=False
     )
     dependencies = []  # Uses Silver column directly
