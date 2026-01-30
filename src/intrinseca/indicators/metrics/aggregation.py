@@ -10,19 +10,21 @@ import polars as pl
 
 
 class TMV(BaseIndicator):
+    """Total Movement Value - sum of absolute DC returns."""
     name = "tmv"
     metadata = IndicatorMetadata(
         description="Total Movement Value - sum of absolute returns.",
         category="aggregation",
         is_event_level=False
     )
-    dependencies = ["return"]
+    dependencies = ["dc_return"]
 
     def get_expression(self) -> pl.Expr:
-        return pl.col("return").abs().sum()
+        return pl.col("dc_return").abs().sum()
 
 
 class AvgDuration(BaseIndicator):
+    """Average duration of DC phases."""
     name = "avg_duration"
     metadata = IndicatorMetadata(
         description="Average duration of DC phases in nanoseconds.",
@@ -36,19 +38,21 @@ class AvgDuration(BaseIndicator):
 
 
 class AvgReturn(BaseIndicator):
+    """Average return of DC phases."""
     name = "avg_return"
     metadata = IndicatorMetadata(
         description="Average return of DC phases.",
         category="aggregation",
         is_event_level=False
     )
-    dependencies = ["return"]
+    dependencies = ["dc_return"]
 
     def get_expression(self) -> pl.Expr:
-        return pl.col("return").mean()
+        return pl.col("dc_return").mean()
 
 
 class AvgOvershoot(BaseIndicator):
+    """Average overshoot magnitude."""
     name = "avg_overshoot"
     metadata = IndicatorMetadata(
         description="Average overshoot magnitude.",
@@ -62,25 +66,28 @@ class AvgOvershoot(BaseIndicator):
 
 
 class VolatilityDC(BaseIndicator):
+    """Volatility measured as standard deviation of DC returns."""
     name = "volatility_dc"
     metadata = IndicatorMetadata(
         description="Volatility measured as standard deviation of DC returns.",
         category="aggregation",
         is_event_level=False
     )
-    dependencies = ["return"]
+    dependencies = ["dc_return"]
 
     def get_expression(self) -> pl.Expr:
-        return pl.col("return").std()
+        return pl.col("dc_return").std()
 
 
 class UpturnRatio(BaseIndicator):
+    """Ratio of upturn events to total events."""
     name = "upturn_ratio"
     metadata = IndicatorMetadata(
         description="Ratio of upturn events to total events.",
         category="aggregation",
         is_event_level=False
     )
+    dependencies = []  # Uses Silver column directly
 
     def get_expression(self) -> pl.Expr:
         return (pl.col("event_type") == 1).mean()
