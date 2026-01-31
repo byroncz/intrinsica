@@ -18,6 +18,7 @@ Eventos DC (movimiento fijo):         ▲────▼────▲──▼
 ```
 
 **Ventajas:**
+
 - Captura la microestructura real del mercado
 - Invariante al tiempo (elimina ruido de baja volatilidad)
 - Base teórica sólida para indicadores intrínsecos
@@ -147,50 +148,57 @@ print(f"Volatilidad DC: {volatility:.6f}")
 
 ### Event-Level (por evento)
 
-| Indicador | Descripción |
-|-----------|-------------|
-| `duration_ns` | Duración de la fase DC en nanosegundos |
-| `velocity` | Velocidad del cambio de precio (price/time) |
-| `overshoot` | Magnitud del movimiento DC (Extreme → Confirmation) |
-| `return` | Retorno de la fase DC |
-| `os_return` | Retorno de la fase Overshoot |
-| `runs_count` | Número de cruces de grilla durante el evento |
+| Indicador     | Descripción                                         |
+| ------------- | --------------------------------------------------- |
+| `duration_ns` | Duración de la fase DC en nanosegundos              |
+| `velocity`    | Velocidad del cambio de precio (price/time)         |
+| `overshoot`   | Magnitud del movimiento DC (Extreme → Confirmation) |
+| `return`      | Retorno de la fase DC                               |
+| `os_return`   | Retorno de la fase Overshoot                        |
+| `runs_count`  | Número de cruces de grilla durante el evento        |
 
 ### Aggregation-Level (globales)
 
-| Indicador | Descripción |
-|-----------|-------------|
-| `tmv` | Total Movement Value (suma de retornos absolutos) |
-| `avg_duration` | Duración promedio de eventos |
-| `avg_return` | Retorno promedio |
-| `avg_overshoot` | Overshoot promedio |
-| `volatility_dc` | Volatilidad medida como std de retornos DC |
-| `upturn_ratio` | Proporción de eventos upturn vs total |
+| Indicador       | Descripción                                       |
+| --------------- | ------------------------------------------------- |
+| `tmv`           | Total Movement Value (suma de retornos absolutos) |
+| `avg_duration`  | Duración promedio de eventos                      |
+| `avg_return`    | Retorno promedio                                  |
+| `avg_overshoot` | Overshoot promedio                                |
+| `volatility_dc` | Volatilidad medida como std de retornos DC        |
+| `upturn_ratio`  | Proporción de eventos upturn vs total             |
 
 ---
 
 ## Features Técnicas
 
 ### Kernel Numba JIT
+
 - Compilación ahead-of-time para máximo rendimiento
 - Zero-copy entre NumPy y Arrow
 - Procesamiento de millones de ticks por segundo
 
 ### Regla Conservadora
+
 Cuando múltiples ticks tienen el mismo timestamp:
+
 - **Upturn**: selecciona el precio MÍNIMO que cruza el threshold
 - **Downturn**: selecciona el precio MÁXIMO que cruza el threshold
 
 Esto garantiza resultados determinísticos y conservadores.
 
 ### State Stitching
+
 Continuidad matemática entre días de procesamiento:
+
 - Estado persistido en Arrow
 - Ticks huérfanos se integran al siguiente día
 - Garantiza detección correcta de eventos cross-day
 
 ### Análisis de Convergencia
+
 Verifica consistencia entre ejecuciones:
+
 ```python
 results, report = engine.process_date_range(
     df_bronze, ticker,
@@ -238,13 +246,13 @@ intrinseca/
 
 ## Dependencias Principales
 
-| Paquete | Uso |
-|---------|-----|
-| `polars` | DataFrames de alto rendimiento |
-| `pyarrow` | Formato columnar y ListArrays |
-| `numba` | Compilación JIT del kernel |
-| `numpy` | Arrays numéricos |
-| `rich` | Progress bars y logging |
+| Paquete   | Uso                            |
+| --------- | ------------------------------ |
+| `polars`  | DataFrames de alto rendimiento |
+| `pyarrow` | Formato columnar y ListArrays  |
+| `numba`   | Compilación JIT del kernel     |
+| `numpy`   | Arrays numéricos               |
+| `rich`    | Progress bars y logging        |
 
 ---
 
@@ -254,7 +262,60 @@ intrinseca/
 - [ ] Integración con InfluxDB/TimescaleDB
 - [ ] Backtesting framework
 - [ ] REST API para consultas
-- [ ] Soporte multi-asset
+
+---
+
+## Desarrollo
+
+### Configurar entorno de desarrollo
+
+```bash
+# Clonar repositorio
+git clone https://github.com/tu-usuario/intrinseca.git
+cd intrinseca
+
+# Crear entorno virtual
+python -m venv .venv
+source .venv/bin/activate  # En Windows: .venv\Scripts\activate
+
+# Instalar dependencias de desarrollo
+pip install -e ".[dev]"
+
+# Configurar pre-commit hooks
+pre-commit install
+```
+
+### Pre-commit
+
+Este proyecto usa **pre-commit** para garantizar calidad de código:
+
+```bash
+# Ejecutar manualmente en todos los archivos
+pre-commit run --all-files
+
+# Los hooks se ejecutan automáticamente en cada commit
+git commit -m "mi cambio"  # → pre-commit valida antes de commitear
+```
+
+**Hooks configurados:**
+
+- **Ruff**: Linting + formateo (ultra-rápido, escrito en Rust)
+- **trailing-whitespace**: Elimina espacios en blanco
+- **check-yaml/toml**: Valida sintaxis de configuración
+- **check-merge-conflict**: Detecta conflictos sin resolver
+
+### Ejecutar tests
+
+```bash
+# Todos los tests
+pytest tests/ -v
+
+# Con cobertura
+pytest tests/ --cov=src/intrinseca --cov-report=term-missing
+
+# Sin tests lentos
+pytest tests/ -v -m "not slow"
+```
 
 ---
 

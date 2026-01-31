@@ -1,0 +1,68 @@
+# Pre-commit Configuration for Intrinsica
+# See https://pre-commit.com for more information
+
+repos:
+  # =============================================================================
+  # Ruff: Linting + Formatting ultra-rápido (escrito en Rust)
+  # =============================================================================
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.3.0
+    hooks:
+      # Linting (detecta errores, imports no usados, etc.)
+      - id: ruff
+        args: [--fix, --exit-non-zero-on-fix]
+      # Formateo automático (reemplaza Black)
+      - id: ruff-format
+
+  # =============================================================================
+  # Pre-commit hooks estándar
+  # =============================================================================
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.5.0
+    hooks:
+      # Eliminar espacios en blanco al final de líneas
+      - id: trailing-whitespace
+        args: [--markdown-linebreak-ext=md]
+      # Asegurar newline al final de archivos
+      - id: end-of-file-fixer
+      # Validar sintaxis YAML
+      - id: check-yaml
+      # Validar sintaxis TOML
+      - id: check-toml
+      # Bloquear archivos grandes (>500KB)
+      - id: check-added-large-files
+        args: ["--maxkb=500"]
+      # Detectar merge conflicts sin resolver
+      - id: check-merge-conflict
+      # Detectar debug statements (print, breakpoint, etc.)
+      - id: debug-statements
+
+  # =============================================================================
+  # Type checking (opcional, comentar si es muy lento)
+  # =============================================================================
+  # - repo: https://github.com/pre-commit/mirrors-mypy
+  #   rev: v1.8.0
+  #   hooks:
+  #     - id: mypy
+  #       additional_dependencies: [polars, numpy, pyarrow]
+  #       args: [--ignore-missing-imports]
+  #       files: ^src/
+
+# =============================================================================
+# Configuración Global
+# =============================================================================
+default_language_version:
+  python: python3.11
+
+# Excluir archivos/directorios
+exclude: |
+  (?x)^(
+    \.git/|
+    \.venv/|
+    __pycache__/|
+    \.pytest_cache/|
+    libs/|
+    data/|
+    output/|
+    docs/
+  )$
