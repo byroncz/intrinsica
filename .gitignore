@@ -233,6 +233,7 @@ check_*.py
 dummy/
 output/
 docs/
+CLAUDE.md
 
 # macOS
 .DS_Store

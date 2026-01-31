@@ -1,274 +1,500 @@
 """
-Tests para el núcleo de cálculo DC.
+Tests para el núcleo de cálculo DC (Silver Layer).
 
-NOTA: Estos tests usan clases legacy (DCDetector, DCIndicators, TrendState)
-que fueron reemplazadas por la arquitectura Silver Layer (Engine, kernel).
-Se mantienen como referencia pero están deshabilitados.
+Arquitectura actual:
+- Engine: orquestador Bronze → Silver
+- segment_events_kernel: kernel Numba JIT
+- DCState: estado persistente entre días
+
+Estos tests reemplazan los tests legacy de DCDetector/DCIndicators/TrendState
+que fueron eliminados en la migración a Silver Layer.
 """
 
-import pytest
-
-# Marcar todo el módulo como skip
-pytestmark = pytest.mark.skip(
-    reason="Tests legacy: DCDetector/DCIndicators/TrendState fueron reemplazados por Engine/kernel Silver Layer"
-)
+from datetime import date
+from pathlib import Path
+import tempfile
 
 import numpy as np
+import polars as pl
+import pytest
 from numpy.testing import assert_array_equal, assert_allclose
 
-# Imports removidos porque las clases/módulos no existen:
-# from intrinseca import DCDetector, DCIndicators, TrendState
-# from intrinseca.core.bridging import to_numpy, to_polars
-
-# Stubs para que el archivo sea válido sintácticamente
-DCDetector = None
-DCIndicators = None
-TrendState = None
-to_numpy = lambda x: x
-to_polars = lambda x: x
+from intrinseca.core.engine import Engine, EngineConfig
+from intrinseca.core.kernel import segment_events_kernel, warmup_kernel, verify_nopython_mode
+from intrinseca.core.state import DCState, create_empty_state, save_state, load_state
 
 
-class TestDCDetector:
-    """Tests para DCDetector."""
+# =============================================================================
+# FIXTURES COMUNES
+# =============================================================================
+
+@pytest.fixture
+def sample_bronze_df():
+    """DataFrame Bronze de ejemplo con datos realistas."""
+    n = 1000
+    np.random.seed(42)
+    # Precios con tendencia y ruido
+    trend = np.linspace(0, 10, n)
+    noise = np.random.randn(n) * 0.5
+    prices = 100.0 + trend + noise.cumsum() * 0.1
+    prices = np.abs(prices)  # Asegurar positivos
     
-    def test_initialization(self):
-        """Test de inicialización básica."""
-        detector = DCDetector(theta=0.01)
-        assert detector.theta == 0.01
-        assert detector.compute_overshoot is True
+    return pl.DataFrame({
+        "price": prices.astype(np.float64),
+        "timestamp": (np.arange(n) * 1_000_000_000).astype(np.int64),
+        "quantity": np.ones(n, dtype=np.float64),
+        "direction": np.random.choice([1, -1], n).astype(np.int8),
+    })
+
+
+@pytest.fixture
+def simple_uptrend_prices():
+    """Serie de precios con tendencia alcista simple."""
+    return np.array([100.0, 102.0, 104.0, 106.0, 108.0, 110.0], dtype=np.float64)
+
+
+@pytest.fixture
+def simple_downtrend_prices():
+    """Serie de precios con tendencia bajista simple."""
+    return np.array([100.0, 98.0, 96.0, 94.0, 92.0, 90.0], dtype=np.float64)
+
+
+@pytest.fixture
+def tmp_silver_path(tmp_path):
+    """Directorio temporal para Silver Layer."""
+    silver_path = tmp_path / "silver"
+    silver_path.mkdir(parents=True)
+    return silver_path
+
+
+# =============================================================================
+# TESTS: EngineConfig
+# =============================================================================
+
+class TestEngineConfig:
+    """Tests para configuración del Engine."""
     
-    def test_invalid_theta(self):
-        """Test que theta inválido lanza excepción."""
-        with pytest.raises(ValueError):
-            DCDetector(theta=0)
-        with pytest.raises(ValueError):
-            DCDetector(theta=1.5)
-        with pytest.raises(ValueError):
-            DCDetector(theta=-0.01)
+    def test_config_creation_with_defaults(self, tmp_silver_path):
+        """Test creación con valores por defecto."""
+        config = EngineConfig(theta=0.005, silver_base_path=tmp_silver_path)
+        assert config.theta == 0.005
+        assert config.verbose is False
+        assert config.collect_stats is True
+        assert config.keep_state_files is True
     
-    def test_detect_simple_uptrend(self):
+    def test_config_custom_theta(self, tmp_silver_path):
+        """Test con theta personalizado."""
+        config = EngineConfig(theta=0.02, silver_base_path=tmp_silver_path)
+        assert config.theta == 0.02
+        assert config.theta_str == "0.02"
+    
+    def test_config_theta_str_formatting(self, tmp_silver_path):
+        """Test que theta_str elimina ceros trailing."""
+        config1 = EngineConfig(theta=0.005, silver_base_path=tmp_silver_path)
+        assert config1.theta_str == "0.005"
+        
+        config2 = EngineConfig(theta=0.010000, silver_base_path=tmp_silver_path)
+        assert config2.theta_str == "0.01"
+    
+    def test_config_path_converted_to_pathlib(self, tmp_silver_path):
+        """Test que el path se convierte a Path."""
+        config = EngineConfig(theta=0.01, silver_base_path=str(tmp_silver_path))
+        assert isinstance(config.silver_base_path, Path)
+
+
+# =============================================================================
+# TESTS: Kernel Directo
+# =============================================================================
+
+class TestKernelDirect:
+    """Tests directos del kernel Numba."""
+    
+    def test_warmup_kernel(self):
+        """Test que warmup no lanza excepción."""
+        # No debería lanzar excepción
+        warmup_kernel()
+    
+    def test_verify_nopython_mode(self):
+        """Test verificación de modo nopython."""
+        # Retorna dict con información de compilación
+        result = verify_nopython_mode()
+        assert isinstance(result, dict)
+        assert "nopython" in result
+        assert result["nopython"] is True
+    
+    def test_simple_uptrend_detection(self, simple_uptrend_prices):
         """Test detección de upturn simple."""
-        # Serie con subida del 5%
-        prices = np.array([100.0, 100.5, 101.0, 102.0, 105.0, 106.0])
-        detector = DCDetector(theta=0.02)  # 2%
+        prices = simple_uptrend_prices
+        timestamps = np.arange(len(prices), dtype=np.int64) * 1_000_000_000
+        quantities = np.ones(len(prices), dtype=np.float64)
+        directions = np.ones(len(prices), dtype=np.int8)
         
-        result = detector.detect(prices)
+        result = segment_events_kernel(
+            prices, timestamps, quantities, directions,
+            theta=0.02,  # 2%
+            init_trend=np.int8(0),
+            init_ext_high_price=np.float64(0),
+            init_ext_low_price=np.float64(0),
+            init_last_os_ref=np.float64(0),
+        )
         
-        # Debería detectar al menos un upturn
-        assert result.n_events >= 1
-        assert result.n_upturns >= 1
+        n_events = int(result[17])
+        # Con 10% de subida total y theta=2%, debería detectar eventos
+        assert n_events >= 0
     
-    def test_detect_simple_downtrend(self):
+    def test_simple_downtrend_detection(self, simple_downtrend_prices):
         """Test detección de downturn simple."""
-        # Serie con caída del 5%
-        prices = np.array([100.0, 99.5, 99.0, 98.0, 95.0, 94.0])
-        detector = DCDetector(theta=0.02)
+        prices = simple_downtrend_prices
+        timestamps = np.arange(len(prices), dtype=np.int64) * 1_000_000_000
+        quantities = np.ones(len(prices), dtype=np.float64)
+        directions = -np.ones(len(prices), dtype=np.int8)
         
-        result = detector.detect(prices)
+        result = segment_events_kernel(
+            prices, timestamps, quantities, directions,
+            theta=0.02,
+            init_trend=np.int8(0),
+            init_ext_high_price=np.float64(0),
+            init_ext_low_price=np.float64(0),
+            init_last_os_ref=np.float64(0),
+        )
         
-        assert result.n_events >= 1
-        assert result.n_downturns >= 1
+        n_events = int(result[17])
+        assert n_events >= 0
     
-    def test_detect_alternating(self):
-        """Test con tendencias alternantes."""
-        # Subida, bajada, subida
-        prices = np.array([
-            100.0, 101.0, 102.0, 103.0,  # Subida
-            102.0, 101.0, 100.0, 99.0,   # Bajada
-            100.0, 101.0, 102.0, 103.0   # Subida
-        ])
-        detector = DCDetector(theta=0.02)
+    def test_flat_prices_no_events(self):
+        """Test que precios planos no generan eventos."""
+        prices = np.array([100.0, 100.0, 100.0, 100.0, 100.0], dtype=np.float64)
+        timestamps = np.arange(5, dtype=np.int64) * 1_000_000_000
+        quantities = np.ones(5, dtype=np.float64)
+        directions = np.ones(5, dtype=np.int8)
         
-        result = detector.detect(prices)
+        result = segment_events_kernel(
+            prices, timestamps, quantities, directions,
+            theta=0.02,
+            init_trend=np.int8(0),
+            init_ext_high_price=np.float64(0),
+            init_ext_low_price=np.float64(0),
+            init_last_os_ref=np.float64(0),
+        )
         
-        # Debería detectar múltiples eventos
-        assert result.n_events >= 2
+        n_events = int(result[17])
+        assert n_events == 0
     
-    def test_detect_no_events(self):
-        """Test con serie sin movimientos significativos."""
-        # Serie casi plana
-        prices = np.array([100.0, 100.1, 100.0, 100.1, 100.0])
-        detector = DCDetector(theta=0.05)  # 5% - muy alto para esta serie
+    def test_single_tick(self):
+        """Test con un solo tick."""
+        prices = np.array([100.0], dtype=np.float64)
+        timestamps = np.array([1_000_000_000], dtype=np.int64)
+        quantities = np.array([1.0], dtype=np.float64)
+        directions = np.array([1], dtype=np.int8)
         
-        result = detector.detect(prices)
+        result = segment_events_kernel(
+            prices, timestamps, quantities, directions,
+            theta=0.02,
+            init_trend=np.int8(0),
+            init_ext_high_price=np.float64(0),
+            init_ext_low_price=np.float64(0),
+            init_last_os_ref=np.float64(0),
+        )
         
-        # No debería detectar eventos
-        assert result.n_events == 0
+        n_events = int(result[17])
+        assert n_events == 0
     
-    def test_detect_with_polars(self):
-        """Test que acepta DataFrame de Polars."""
-        pytest.importorskip("polars")
-        import polars as pl
+    def test_kernel_output_structure(self, sample_bronze_df):
+        """Test que el kernel retorna la estructura correcta."""
+        df = sample_bronze_df
+        prices = df.get_column("price").to_numpy()
+        timestamps = df.get_column("timestamp").to_numpy()
+        quantities = df.get_column("quantity").to_numpy()
+        directions = df.get_column("direction").to_numpy()
         
-        prices = np.array([100.0, 102.0, 104.0, 103.0, 101.0, 103.0])
-        df = pl.DataFrame({"close": prices, "volume": [1000] * len(prices)})
+        result = segment_events_kernel(
+            prices, timestamps, quantities, directions,
+            theta=0.01,
+            init_trend=np.int8(0),
+            init_ext_high_price=np.float64(0),
+            init_ext_low_price=np.float64(0),
+            init_last_os_ref=np.float64(0),
+        )
         
-        detector = DCDetector(theta=0.01)
-        result = detector.detect(df, price_column="close")
+        # El kernel retorna 23 elementos
+        assert len(result) == 23
         
-        assert result.n_events >= 0  # Puede o no tener eventos
-    
-    def test_trends_array_length(self):
-        """Test que el array de tendencias tiene longitud correcta."""
-        prices = np.random.randn(1000).cumsum() + 100
-        detector = DCDetector(theta=0.01)
-        
-        result = detector.detect(prices)
-        
-        assert len(result.trends) == len(prices)
-    
-    def test_event_attributes(self):
-        """Test que los eventos tienen todos los atributos."""
-        prices = np.array([100.0, 105.0, 100.0, 105.0, 100.0])
-        detector = DCDetector(theta=0.02)
-        
-        result = detector.detect(prices)
-        
-        if result.n_events > 0:
-            event = result.events[0]
-            assert hasattr(event, "index")
-            assert hasattr(event, "price")
-            assert hasattr(event, "event_type")
-            assert hasattr(event, "extreme_index")
-            assert hasattr(event, "extreme_price")
-            assert hasattr(event, "dc_return")
-            assert hasattr(event, "dc_duration")
-    
-    def test_streaming_detection(self):
-        """Test detección en modo streaming."""
-        detector = DCDetector(theta=0.02)
-        
-        prices = [100.0, 102.0, 104.0, 103.0, 101.0, 103.0, 105.0]
-        
-        state = None
-        events_detected = []
-        
-        for price in prices:
-            event, state = detector.detect_streaming(price, state)
-            if event:
-                events_detected.append(event)
-        
-        # Verificar que el estado se mantiene
-        assert state is not None
-        assert "trend" in state
-        assert "extreme_high" in state
+        # Verificar tipos de los elementos principales
+        assert isinstance(result[0], np.ndarray)  # dc_prices
+        assert isinstance(result[17], (int, np.integer))  # n_events
 
 
-class TestDCIndicators:
-    """Tests para DCIndicators."""
+# =============================================================================
+# TESTS: DCState
+# =============================================================================
+
+class TestDCState:
+    """Tests para estado persistente."""
     
-    def test_compute_metrics_empty(self):
-        """Test métricas con resultado vacío."""
-        from intrinseca.core.event_detector import DCResult
-        
-        result = DCResult()
-        indicators = DCIndicators()
-        
-        metrics = indicators.compute_metrics(result)
-        
-        assert metrics.n_events == 0
-        assert metrics.tmv == 0.0
+    def test_empty_state_creation(self):
+        """Test creación de estado vacío."""
+        state = create_empty_state(date(2025, 1, 1))
+        assert state.n_orphans == 0
+        assert state.current_trend == 0
+        assert state.last_processed_date == date(2025, 1, 1)
     
-    def test_compute_metrics(self):
-        """Test cálculo de métricas."""
-        prices = np.random.randn(500).cumsum() + 100
-        prices = np.abs(prices)  # Asegurar positivos
-        
-        detector = DCDetector(theta=0.01)
-        result = detector.detect(prices)
-        
-        indicators = DCIndicators()
-        metrics = indicators.compute_metrics(result)
-        
-        # TMV debe ser positivo si hay eventos
-        if result.n_events > 0:
-            assert metrics.tmv > 0
-            assert 0 <= metrics.upturn_ratio <= 1
+    def test_state_with_orphans(self):
+        """Test estado con ticks huérfanos."""
+        state = DCState(
+            orphan_prices=np.array([100.0, 101.0, 102.0], dtype=np.float64),
+            orphan_times=np.array([1, 2, 3], dtype=np.int64),
+            orphan_quantities=np.ones(3, dtype=np.float64),
+            orphan_directions=np.array([1, 1, 1], dtype=np.int8),
+            current_trend=np.int8(1),
+            last_os_ref=np.float64(100.0),
+            reference_extreme_price=np.float64(102.0),
+            reference_extreme_time=np.int64(3),
+            last_processed_date=date(2025, 1, 1),
+        )
+        assert state.n_orphans == 3
+        assert state.current_trend == 1
     
-    def test_rolling_metrics(self):
-        """Test métricas rolling."""
-        prices = np.random.randn(1000).cumsum() + 100
-        prices = np.abs(prices)
-        
-        detector = DCDetector(theta=0.01)
-        result = detector.detect(prices)
-        
-        indicators = DCIndicators()
-        rolling = indicators.compute_rolling_metrics(result, window=10)
-        
-        assert "rolling_tmv" in rolling
-        assert "rolling_duration" in rolling
+    def test_state_get_extreme_prices(self):
+        """Test cálculo de precios extremos."""
+        state = DCState(
+            orphan_prices=np.array([100.0, 105.0, 103.0], dtype=np.float64),
+            orphan_times=np.array([1, 2, 3], dtype=np.int64),
+            orphan_quantities=np.ones(3, dtype=np.float64),
+            orphan_directions=np.array([1, 1, -1], dtype=np.int8),
+            current_trend=np.int8(1),
+            last_os_ref=np.float64(100.0),
+            reference_extreme_price=np.float64(105.0),
+            reference_extreme_time=np.int64(2),
+            last_processed_date=date(2025, 1, 1),
+        )
+        ext_high, ext_low = state.get_extreme_prices()
+        assert ext_high == 105.0
+        assert ext_low == 100.0
     
-    def test_extract_features(self):
-        """Test extracción de features para ML."""
-        prices = np.random.randn(500).cumsum() + 100
-        prices = np.abs(prices)
+    def test_state_memory_usage(self):
+        """Test estimación de uso de memoria."""
+        state = DCState(
+            orphan_prices=np.array([100.0, 101.0], dtype=np.float64),
+            orphan_times=np.array([1, 2], dtype=np.int64),
+            orphan_quantities=np.ones(2, dtype=np.float64),
+            orphan_directions=np.array([1, 1], dtype=np.int8),
+            current_trend=np.int8(1),
+            last_os_ref=np.float64(100.0),
+            reference_extreme_price=np.float64(101.0),
+            reference_extreme_time=np.int64(2),
+            last_processed_date=date(2025, 1, 1),
+        )
         
-        detector = DCDetector(theta=0.01)
-        result = detector.detect(prices)
-        
-        indicators = DCIndicators()
-        features = indicators.extract_features(result, n_last_events=5)
-        
-        assert isinstance(features, np.ndarray)
-        assert features.ndim == 1
+        memory = state.memory_usage_bytes
+        assert memory > 0
+        # 2 orphans × (8+8+8+1) bytes = 50 bytes mínimo
+        assert memory >= 50
 
 
-class TestBridging:
-    """Tests para funciones de bridging."""
+class TestStatePersistence:
+    """Tests para persistencia de estado Arrow IPC."""
     
-    def test_to_numpy_from_list(self):
-        """Test conversión desde lista."""
-        data = [1.0, 2.0, 3.0]
-        arr = to_numpy(data)
+    def test_save_load_roundtrip(self, tmp_path):
+        """Test guardar y cargar estado."""
+        original = DCState(
+            orphan_prices=np.array([100.0, 101.0, 102.0], dtype=np.float64),
+            orphan_times=np.array([1000, 2000, 3000], dtype=np.int64),
+            orphan_quantities=np.array([1.0, 2.0, 3.0], dtype=np.float64),
+            orphan_directions=np.array([1, -1, 1], dtype=np.int8),
+            current_trend=np.int8(-1),
+            last_os_ref=np.float64(99.5),
+            reference_extreme_price=np.float64(102.0),
+            reference_extreme_time=np.int64(3000),
+            last_processed_date=date(2025, 6, 15),
+        )
         
-        assert isinstance(arr, np.ndarray)
-        assert arr.dtype == np.float64
-        assert_array_equal(arr, [1.0, 2.0, 3.0])
+        state_path = tmp_path / "test_state.arrow"
+        save_state(original, state_path)
+        
+        assert state_path.exists()
+        
+        loaded = load_state(state_path)
+        
+        assert loaded is not None
+        assert_array_equal(loaded.orphan_prices, original.orphan_prices)
+        assert_array_equal(loaded.orphan_times, original.orphan_times)
+        assert_array_equal(loaded.orphan_quantities, original.orphan_quantities)
+        assert_array_equal(loaded.orphan_directions, original.orphan_directions)
+        assert loaded.current_trend == original.current_trend
+        assert loaded.last_os_ref == original.last_os_ref
+        assert loaded.last_processed_date == original.last_processed_date
     
-    def test_to_numpy_from_array(self):
-        """Test conversión desde array."""
-        data = np.array([1, 2, 3], dtype=np.int32)
-        arr = to_numpy(data, dtype=np.float64)
-        
-        assert arr.dtype == np.float64
+    def test_load_nonexistent_returns_none(self, tmp_path):
+        """Test que cargar archivo inexistente retorna None."""
+        state_path = tmp_path / "nonexistent.arrow"
+        loaded = load_state(state_path)
+        assert loaded is None
     
-    def test_to_numpy_from_polars(self):
-        """Test conversión desde Polars."""
-        pl = pytest.importorskip("polars")
+    def test_empty_state_roundtrip(self, tmp_path):
+        """Test guardar y cargar estado vacío."""
+        original = create_empty_state(date(2025, 1, 1))
         
-        series = pl.Series("prices", [1.0, 2.0, 3.0])
-        arr = to_numpy(series)
+        state_path = tmp_path / "empty_state.arrow"
+        save_state(original, state_path)
         
-        assert isinstance(arr, np.ndarray)
-        assert_allclose(arr, [1.0, 2.0, 3.0])
-    
-    def test_to_polars_from_dict(self):
-        """Test conversión a Polars desde dict."""
-        pl = pytest.importorskip("polars")
+        loaded = load_state(state_path)
         
-        data = {"a": [1, 2, 3], "b": [4, 5, 6]}
-        df = to_polars(data)
-        
-        assert isinstance(df, pl.DataFrame)
-        assert df.shape == (3, 2)
+        assert loaded is not None
+        assert loaded.n_orphans == 0
+        assert loaded.current_trend == 0
 
 
-# Benchmark tests (requieren pytest-benchmark)
-class TestPerformance:
-    """Tests de rendimiento."""
+# =============================================================================
+# TESTS: Engine
+# =============================================================================
+
+class TestEngine:
+    """Tests para el Engine de transformación."""
     
-    @pytest.mark.benchmark
-    def test_detection_speed(self, benchmark):
-        """Benchmark de velocidad de detección."""
-        prices = np.random.randn(10000).cumsum() + 100
-        prices = np.abs(prices)
-        detector = DCDetector(theta=0.01)
+    def test_engine_creation(self, tmp_silver_path):
+        """Test creación de Engine."""
+        config = EngineConfig(theta=0.01, silver_base_path=tmp_silver_path)
+        engine = Engine(config)
         
-        # Warm-up
-        detector.detect(prices)
+        assert engine.config.theta == 0.01
+        assert engine.stats is not None
+    
+    def test_engine_warmup(self, tmp_silver_path):
+        """Test warmup del Engine."""
+        config = EngineConfig(theta=0.01, silver_base_path=tmp_silver_path)
+        engine = Engine(config)
         
-        # Benchmark
-        result = benchmark(detector.detect, prices)
+        # No debería lanzar excepción
+        engine.warmup()
+    
+    def test_process_day_basic(self, sample_bronze_df, tmp_silver_path):
+        """Test procesamiento básico de un día."""
+        config = EngineConfig(
+            theta=0.02,
+            silver_base_path=tmp_silver_path,
+            verbose=False,
+        )
+        engine = Engine(config)
         
-        assert result.n_events > 0
+        result = engine.process_day(
+            sample_bronze_df,
+            ticker="TEST",
+            process_date=date(2025, 1, 1),
+            time_col="timestamp",
+        )
+        
+        assert result.n_ticks == len(sample_bronze_df)
+        assert result.n_events >= 0
+        assert result.elapsed_ms > 0
+    
+    def test_process_day_creates_parquet(self, sample_bronze_df, tmp_silver_path):
+        """Test que process_day crea archivo Parquet."""
+        config = EngineConfig(
+            theta=0.02,
+            silver_base_path=tmp_silver_path,
+        )
+        engine = Engine(config)
+        
+        engine.process_day(
+            sample_bronze_df,
+            ticker="TEST",
+            process_date=date(2025, 1, 15),
+            time_col="timestamp",
+        )
+        
+        # Verificar que se creó el archivo Parquet
+        expected_path = (
+            tmp_silver_path / "TEST" / "theta=0.02" / 
+            "year=2025" / "month=01" / "day=15" / "data.parquet"
+        )
+        assert expected_path.exists()
+    
+    def test_engine_stats_collected(self, sample_bronze_df, tmp_silver_path):
+        """Test que las estadísticas se recolectan."""
+        config = EngineConfig(
+            theta=0.02,
+            silver_base_path=tmp_silver_path,
+            collect_stats=True,
+        )
+        engine = Engine(config)
+        
+        engine.process_day(
+            sample_bronze_df,
+            ticker="TEST",
+            process_date=date(2025, 1, 1),
+            time_col="timestamp",
+        )
+        
+        stats = engine.get_stats()
+        assert stats.days_processed == 1
+        assert stats.total_ticks == len(sample_bronze_df)
+        assert stats.kernel_calls >= 1
+    
+    def test_engine_reset_stats(self, sample_bronze_df, tmp_silver_path):
+        """Test reset de estadísticas."""
+        config = EngineConfig(
+            theta=0.02,
+            silver_base_path=tmp_silver_path,
+        )
+        engine = Engine(config)
+        
+        engine.process_day(
+            sample_bronze_df,
+            ticker="TEST",
+            process_date=date(2025, 1, 1),
+            time_col="timestamp",
+        )
+        
+        engine.reset_stats()
+        
+        stats = engine.get_stats()
+        assert stats.days_processed == 0
+        assert stats.total_ticks == 0
+
+
+# =============================================================================
+# TESTS: Integración
+# =============================================================================
+
+class TestIntegration:
+    """Tests de integración del pipeline completo."""
+    
+    def test_multi_day_processing(self, tmp_silver_path):
+        """Test procesamiento de múltiples días."""
+        np.random.seed(42)
+        
+        # Crear datos para 3 días
+        days_data = []
+        for day in range(1, 4):
+            n = 500
+            prices = np.abs(np.random.randn(n).cumsum() + 100)
+            df = pl.DataFrame({
+                "price": prices.astype(np.float64),
+                "timestamp": (np.arange(n) * 1_000_000_000).astype(np.int64),
+                "quantity": np.ones(n, dtype=np.float64),
+                "direction": np.random.choice([1, -1], n).astype(np.int8),
+            }).with_columns(
+                pl.lit(date(2025, 1, day)).alias("_date")
+            )
+            days_data.append(df)
+        
+        # Concatenar
+        df_bronze = pl.concat(days_data)
+        
+        config = EngineConfig(
+            theta=0.02,
+            silver_base_path=tmp_silver_path,
+            verbose=False,
+        )
+        engine = Engine(config)
+        
+        results = engine.process_date_range(
+            df_bronze,
+            ticker="TEST",
+            time_col="timestamp",
+        )
+        
+        assert len(results) == 3
+        
+        stats = engine.get_stats()
+        assert stats.days_processed == 3

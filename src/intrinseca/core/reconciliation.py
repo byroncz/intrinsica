@@ -182,9 +182,21 @@ def reconcile_previous_day(
                 .alias("extreme_time"),
             ])
         elif reconciliation_type == ReconciliationType.EXTEND_OS:
-            # TODO: Extender OS del último evento con los huérfanos
-            # Esto requiere lógica más compleja de manipulación de listas
-            pass
+            # Falsa alarma: el precio siguió en la dirección del trend anterior
+            # Actualizamos el extreme_price del último evento con el nuevo extremo
+            # Nota: Los ticks huérfanos no se agregan a price_os aquí porque
+            # serán procesados como parte del día actual por el kernel
+            df = df.with_columns([
+                pl.when(pl.arange(0, df.height) == df.height - 1)
+                .then(pl.lit(new_extreme_price))
+                .otherwise(pl.col("extreme_price"))
+                .alias("extreme_price"),
+
+                pl.when(pl.arange(0, df.height) == df.height - 1)
+                .then(pl.lit(new_extreme_time))
+                .otherwise(pl.col("extreme_time"))
+                .alias("extreme_time"),
+            ])
 
         # 4. Escribir a archivo temporal
         temp_path = silver_path.with_suffix(".parquet.tmp")

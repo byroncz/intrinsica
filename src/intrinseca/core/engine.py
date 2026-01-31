@@ -48,6 +48,14 @@ from .reconciliation import (
     cleanup_backup,
 )
 
+# Rich (observabilidad)
+from rich.progress import (
+    Progress, SpinnerColumn, BarColumn,
+    TextColumn, TimeElapsedColumn
+)
+from rich.panel import Panel
+from rich import box
+
 
 # =============================================================================
 # TYPE ALIASES
@@ -422,18 +430,27 @@ class Engine:
         Extrae arrays numpy desde DataFrame Polars.
 
         Maneja conversión de timestamps (Datetime → Int64 ns).
+        Intenta zero-copy; fallback a copia si el layout no es contiguo.
         """
-        prices = df.get_column(price_col).cast(pl.Float64).to_numpy()
+        # Helper para extracción con zero-copy preferente
+        def safe_to_numpy(series: pl.Series, target_dtype: type) -> np.ndarray:
+            try:
+                return series.to_numpy(zero_copy_only=True, writable=False)
+            except Exception:
+                # Fallback: copia si layout no permite zero-copy
+                return series.to_numpy()
+
+        prices = safe_to_numpy(df.get_column(price_col).cast(pl.Float64), np.float64)
 
         # Timestamps: pueden ser Datetime o Int64
         time_dtype = df.schema[time_col]
         if isinstance(time_dtype, pl.Datetime):
-            times = df.get_column(time_col).cast(pl.Int64).to_numpy()
+            times = safe_to_numpy(df.get_column(time_col).cast(pl.Int64), np.int64)
         else:
-            times = df.get_column(time_col).to_numpy()
+            times = safe_to_numpy(df.get_column(time_col), np.int64)
 
-        quantities = df.get_column(quantity_col).cast(pl.Float64).to_numpy()
-        directions = df.get_column(direction_col).cast(pl.Int8).to_numpy()
+        quantities = safe_to_numpy(df.get_column(quantity_col).cast(pl.Float64), np.float64)
+        directions = safe_to_numpy(df.get_column(direction_col).cast(pl.Int8), np.int8)
 
         return prices, times, quantities, directions
 
@@ -805,13 +822,19 @@ class Engine:
 
         if self.config.verbose:
             # Modo verbose: logs tradicionales
+            # Usar partition_by para evitar O(n) por cada día
+            partitions = df_bronze.partition_by("_date", as_dict=True, maintain_order=True)
+
             print(f"📅 Procesando {n_days} días...")
             if analyze_convergence:
                 print("   📊 Convergencia activada")
 
             for d in unique_dates:
                 print(f"\n🗓️ {d}")
-                df_day = df_bronze.filter(pl.col("_date") == d).drop("_date")
+                df_day = partitions.get(d)
+                if df_day is None:
+                    continue
+                df_day = df_day.drop("_date")
                 if "_datetime" in df_day.columns:
                     df_day = df_day.drop("_datetime")
 
@@ -834,12 +857,8 @@ class Engine:
                         break
         else:
             # Modo silencioso: barra de progreso
-            from rich.progress import (
-                Progress, SpinnerColumn, BarColumn,
-                TextColumn, TimeElapsedColumn
-            )
-            from rich.panel import Panel
-            from rich import box
+            # Usar partition_by para evitar O(n) por cada día
+            partitions = df_bronze.partition_by("_date", as_dict=True, maintain_order=True)
 
             console = self._get_console()
 
@@ -857,7 +876,11 @@ class Engine:
                 task = progress.add_task("", total=n_days)
 
                 for d in unique_dates:
-                    df_day = df_bronze.filter(pl.col("_date") == d).drop("_date")
+                    df_day = partitions.get(d)
+                    if df_day is None:
+                        progress.advance(task)
+                        continue
+                    df_day = df_day.drop("_date")
                     if "_datetime" in df_day.columns:
                         df_day = df_day.drop("_datetime")
 

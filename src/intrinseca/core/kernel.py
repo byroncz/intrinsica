@@ -133,9 +133,9 @@ def segment_events_kernel(
     theta_up = 1.0 + theta
     theta_down = 1.0 - theta
 
-    # --- Estimación inteligente de memoria ---
-    # Eventos esperados ≈ n / ratio, con mínimo garantizado
-    estimated_events = max(n // _EVENT_RATIO_ESTIMATE, _MIN_EVENT_SLOTS)
+    # --- Estimación inteligente de memoria con factor de seguridad 3x ---
+    # Eventos esperados ≈ n / ratio, con mínimo garantizado y factor 3x
+    estimated_events = max(n // _EVENT_RATIO_ESTIMATE, _MIN_EVENT_SLOTS) * 3
 
     # Búferes para datos de ticks (tamaño completo necesario para worst case)
     # Pero usamos n directamente ya que en el peor caso todos los ticks son eventos
@@ -149,7 +149,7 @@ def segment_events_kernel(
     os_quantities = np.empty(n, dtype=np.float64)
     os_directions = np.empty(n, dtype=np.int8)
 
-    # Búferes para metadatos de eventos (tamaño estimado)
+    # Búferes para metadatos de eventos (tamaño estimado * 3x)
     event_types = np.empty(estimated_events, dtype=np.int8)
     dc_offsets = np.empty(estimated_events + 1, dtype=np.int64)
     os_offsets = np.empty(estimated_events + 1, dtype=np.int64)
@@ -317,27 +317,29 @@ def segment_events_kernel(
                 ext_low_price = conf_price
                 ext_low_idx = conf_idx
 
-            # --- Cerrar OS del evento anterior (incluye el extremo) ---
+            # --- Cerrar OS del evento anterior (incluye el extremo) - VECTORIZADO ---
             if n_events > 0 and prev_os_start >= 0:
-                for i in range(prev_os_start, prev_ext_idx + 1):  # CAMBIO: +1 para incluir extremo
-                    os_prices[os_ptr] = prices[i]
-                    os_times[os_ptr] = timestamps[i]
-                    os_quantities[os_ptr] = quantities[i]
-                    os_directions[os_ptr] = directions[i]
-                    os_ptr += 1
+                os_length = prev_ext_idx + 1 - prev_os_start
+                os_prices[os_ptr:os_ptr + os_length] = prices[prev_os_start:prev_ext_idx + 1]
+                os_times[os_ptr:os_ptr + os_length] = timestamps[prev_os_start:prev_ext_idx + 1]
+                os_quantities[os_ptr:os_ptr + os_length] = quantities[prev_os_start:prev_ext_idx + 1]
+                os_directions[os_ptr:os_ptr + os_length] = directions[prev_os_start:prev_ext_idx + 1]
+                os_ptr += os_length
                 os_offsets[n_events] = os_ptr
                 
                 # Llenar retrospectivamente extreme_price del evento ANTERIOR
                 extreme_prices[n_events - 1] = prices[prev_ext_idx]
                 extreme_times[n_events - 1] = timestamps[prev_ext_idx]
 
-            # --- Escribir DC del evento actual (excluye extremo, incluye DCC) ---
-            for i in range(prev_ext_idx + 1, conf_idx + 1):  # CAMBIO: +1 para excluir extremo, +1 para incluir DCC
-                dc_prices[dc_ptr] = prices[i]
-                dc_times[dc_ptr] = timestamps[i]
-                dc_quantities[dc_ptr] = quantities[i]
-                dc_directions[dc_ptr] = directions[i]
-                dc_ptr += 1
+            # --- Escribir DC del evento actual (excluye extremo, incluye DCC) - VECTORIZADO ---
+            dc_start = prev_ext_idx + 1
+            dc_end = conf_idx + 1
+            dc_length = dc_end - dc_start
+            dc_prices[dc_ptr:dc_ptr + dc_length] = prices[dc_start:dc_end]
+            dc_times[dc_ptr:dc_ptr + dc_length] = timestamps[dc_start:dc_end]
+            dc_quantities[dc_ptr:dc_ptr + dc_length] = quantities[dc_start:dc_end]
+            dc_directions[dc_ptr:dc_ptr + dc_length] = directions[dc_start:dc_end]
+            dc_ptr += dc_length
 
             # Registrar evento
             dc_offsets[n_events + 1] = dc_ptr
@@ -358,14 +360,14 @@ def segment_events_kernel(
             n_events += 1
             last_conf_idx = conf_idx
 
-    # --- Finalización: cerrar último OS ---
+    # --- Finalización: cerrar último OS - VECTORIZADO ---
     if n_events > 0 and prev_os_start >= 0:
-        for i in range(prev_os_start, n):
-            os_prices[os_ptr] = prices[i]
-            os_times[os_ptr] = timestamps[i]
-            os_quantities[os_ptr] = quantities[i]
-            os_directions[os_ptr] = directions[i]
-            os_ptr += 1
+        final_os_length = n - prev_os_start
+        os_prices[os_ptr:os_ptr + final_os_length] = prices[prev_os_start:n]
+        os_times[os_ptr:os_ptr + final_os_length] = timestamps[prev_os_start:n]
+        os_quantities[os_ptr:os_ptr + final_os_length] = quantities[prev_os_start:n]
+        os_directions[os_ptr:os_ptr + final_os_length] = directions[prev_os_start:n]
+        os_ptr += final_os_length
         os_offsets[n_events] = os_ptr
 
     # --- Calcular índice de huérfanos (excluye el extremo, que pertenece al OS) ---
