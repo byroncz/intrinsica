@@ -1,5 +1,4 @@
-"""
-Kernel Numba para Segmentación de Eventos DC → Silver Layer.
+"""Kernel Numba para Segmentación de Eventos DC → Silver Layer.
 
 Optimizado para HFT:
 - Estimación inteligente de memoria basada en theta
@@ -15,10 +14,8 @@ from __future__ import annotations
 from typing import NamedTuple
 
 import numpy as np
+from numba import float64, int8, int64, njit
 from numpy.typing import NDArray
-from numba import njit, int8, int64, float64, types
-from numba.extending import overload
-
 
 # =============================================================================
 # TYPE ALIASES (para legibilidad)
@@ -31,6 +28,7 @@ ArrayI8 = NDArray[np.int8]
 
 class KernelResult(NamedTuple):
     """Resultado estructurado del kernel (solo para documentación, Numba retorna tuple)."""
+
     # Búferes DC (listas anidadas de ticks)
     dc_prices: ArrayF64
     dc_times: ArrayI64
@@ -46,12 +44,12 @@ class KernelResult(NamedTuple):
     dc_offsets: ArrayI64
     os_offsets: ArrayI64
     # Atributos de evento (escalares por evento, zero indirection)
-    reference_prices: ArrayF64    # Precio del extremo de referencia (del evento N-1)
-    reference_times: ArrayI64     # Timestamp del extremo de referencia
-    extreme_prices: ArrayF64      # Precio del extremo (último tick del OS)
-    extreme_times: ArrayI64       # Timestamp del extremo
-    confirm_prices: ArrayF64      # Precio de confirmación (último tick del DC)
-    confirm_times: ArrayI64       # Timestamp de confirmación
+    reference_prices: ArrayF64  # Precio del extremo de referencia (del evento N-1)
+    reference_times: ArrayI64  # Timestamp del extremo de referencia
+    extreme_prices: ArrayF64  # Precio del extremo (último tick del OS)
+    extreme_times: ArrayI64  # Timestamp del extremo
+    confirm_prices: ArrayF64  # Precio de confirmación (último tick del DC)
+    confirm_times: ArrayI64  # Timestamp de confirmación
     # Estado final
     n_events: int
     final_trend: int
@@ -78,6 +76,7 @@ _MIN_EVENT_SLOTS = 64
 # KERNEL PRINCIPAL
 # =============================================================================
 
+
 @njit(cache=True, fastmath=True, nogil=True)
 def segment_events_kernel(
     prices: ArrayF64,
@@ -90,13 +89,13 @@ def segment_events_kernel(
     init_ext_low_price: float64,
     init_last_os_ref: float64,
 ) -> tuple:
-    """
-    Kernel JIT para segmentación de eventos DC.
+    """Kernel JIT para segmentación de eventos DC.
 
     Complejidad: O(n) donde n = número de ticks
     Memoria: O(n/k + e) donde k ≈ 1000 (ratio ticks/eventos), e = eventos detectados
 
     Args:
+    ----
         prices: Precios de ticks (float64)
         timestamps: Timestamps en nanosegundos (int64)
         quantities: Cantidades/volúmenes (float64)
@@ -108,7 +107,9 @@ def segment_events_kernel(
         init_last_os_ref: Precio referencia para OS runs
 
     Returns:
+    -------
         Tuple con 21 elementos (ver KernelResult para documentación)
+
     """
     n = len(prices)
 
@@ -119,14 +120,29 @@ def segment_events_kernel(
         empty_i8 = np.empty(0, dtype=np.int8)
         zero_offset = np.zeros(1, dtype=np.int64)
         return (
-            empty_f64, empty_i64, empty_f64, empty_i8,  # DC buffers
-            empty_f64, empty_i64, empty_f64, empty_i8,  # OS buffers
-            empty_i8,                                    # event_types
-            zero_offset, zero_offset,                    # offsets
-            empty_f64, empty_i64,                        # reference price/time
-            empty_f64, empty_i64, empty_f64, empty_i64,  # extreme/confirm price/time
-            int64(0), init_trend, init_ext_high_price, init_ext_low_price,
-            init_last_os_ref, int64(0)
+            empty_f64,
+            empty_i64,
+            empty_f64,
+            empty_i8,  # DC buffers
+            empty_f64,
+            empty_i64,
+            empty_f64,
+            empty_i8,  # OS buffers
+            empty_i8,  # event_types
+            zero_offset,
+            zero_offset,  # offsets
+            empty_f64,
+            empty_i64,  # reference price/time
+            empty_f64,
+            empty_i64,
+            empty_f64,
+            empty_i64,  # extreme/confirm price/time
+            int64(0),
+            init_trend,
+            init_ext_high_price,
+            init_ext_low_price,
+            init_last_os_ref,
+            int64(0),
         )
 
     # --- Pre-cálculo de thresholds (evita multiplicaciones repetidas) ---
@@ -186,7 +202,6 @@ def segment_events_kernel(
 
     # Tracking de OS pendiente
     prev_os_start = -1
-    last_conf_idx = 0
 
     # --- Bucle Principal ---
     for t in range(n):
@@ -275,11 +290,11 @@ def segment_events_kernel(
                 event_types = new_event_types
 
                 new_dc_offsets = np.empty(new_size + 1, dtype=np.int64)
-                new_dc_offsets[:n_events + 1] = dc_offsets[:n_events + 1]
+                new_dc_offsets[: n_events + 1] = dc_offsets[: n_events + 1]
                 dc_offsets = new_dc_offsets
 
                 new_os_offsets = np.empty(new_size + 1, dtype=np.int64)
-                new_os_offsets[:n_events + 1] = os_offsets[:n_events + 1]
+                new_os_offsets[: n_events + 1] = os_offsets[: n_events + 1]
                 os_offsets = new_os_offsets
 
                 # Resize atributos de evento
@@ -320,13 +335,17 @@ def segment_events_kernel(
             # --- Cerrar OS del evento anterior (incluye el extremo) - VECTORIZADO ---
             if n_events > 0 and prev_os_start >= 0:
                 os_length = prev_ext_idx + 1 - prev_os_start
-                os_prices[os_ptr:os_ptr + os_length] = prices[prev_os_start:prev_ext_idx + 1]
-                os_times[os_ptr:os_ptr + os_length] = timestamps[prev_os_start:prev_ext_idx + 1]
-                os_quantities[os_ptr:os_ptr + os_length] = quantities[prev_os_start:prev_ext_idx + 1]
-                os_directions[os_ptr:os_ptr + os_length] = directions[prev_os_start:prev_ext_idx + 1]
+                os_prices[os_ptr : os_ptr + os_length] = prices[prev_os_start : prev_ext_idx + 1]
+                os_times[os_ptr : os_ptr + os_length] = timestamps[prev_os_start : prev_ext_idx + 1]
+                os_quantities[os_ptr : os_ptr + os_length] = quantities[
+                    prev_os_start : prev_ext_idx + 1
+                ]
+                os_directions[os_ptr : os_ptr + os_length] = directions[
+                    prev_os_start : prev_ext_idx + 1
+                ]
                 os_ptr += os_length
                 os_offsets[n_events] = os_ptr
-                
+
                 # Llenar retrospectivamente extreme_price del evento ANTERIOR
                 extreme_prices[n_events - 1] = prices[prev_ext_idx]
                 extreme_times[n_events - 1] = timestamps[prev_ext_idx]
@@ -335,10 +354,10 @@ def segment_events_kernel(
             dc_start = prev_ext_idx + 1
             dc_end = conf_idx + 1
             dc_length = dc_end - dc_start
-            dc_prices[dc_ptr:dc_ptr + dc_length] = prices[dc_start:dc_end]
-            dc_times[dc_ptr:dc_ptr + dc_length] = timestamps[dc_start:dc_end]
-            dc_quantities[dc_ptr:dc_ptr + dc_length] = quantities[dc_start:dc_end]
-            dc_directions[dc_ptr:dc_ptr + dc_length] = directions[dc_start:dc_end]
+            dc_prices[dc_ptr : dc_ptr + dc_length] = prices[dc_start:dc_end]
+            dc_times[dc_ptr : dc_ptr + dc_length] = timestamps[dc_start:dc_end]
+            dc_quantities[dc_ptr : dc_ptr + dc_length] = quantities[dc_start:dc_end]
+            dc_directions[dc_ptr : dc_ptr + dc_length] = directions[dc_start:dc_end]
             dc_ptr += dc_length
 
             # Registrar evento
@@ -358,15 +377,14 @@ def segment_events_kernel(
             current_trend = new_trend
             last_os_ref = conf_price
             n_events += 1
-            last_conf_idx = conf_idx
 
     # --- Finalización: cerrar último OS - VECTORIZADO ---
     if n_events > 0 and prev_os_start >= 0:
         final_os_length = n - prev_os_start
-        os_prices[os_ptr:os_ptr + final_os_length] = prices[prev_os_start:n]
-        os_times[os_ptr:os_ptr + final_os_length] = timestamps[prev_os_start:n]
-        os_quantities[os_ptr:os_ptr + final_os_length] = quantities[prev_os_start:n]
-        os_directions[os_ptr:os_ptr + final_os_length] = directions[prev_os_start:n]
+        os_prices[os_ptr : os_ptr + final_os_length] = prices[prev_os_start:n]
+        os_times[os_ptr : os_ptr + final_os_length] = timestamps[prev_os_start:n]
+        os_quantities[os_ptr : os_ptr + final_os_length] = quantities[prev_os_start:n]
+        os_directions[os_ptr : os_ptr + final_os_length] = directions[prev_os_start:n]
         os_ptr += final_os_length
         os_offsets[n_events] = os_ptr
 
@@ -374,10 +392,8 @@ def segment_events_kernel(
     if n_events == 0:
         orphan_start_idx = 0
     else:
-        if current_trend == 1:
-            orphan_start_idx = ext_high_idx + 1  # CAMBIO: +1 para excluir extremo
-        else:
-            orphan_start_idx = ext_low_idx + 1   # CAMBIO: +1 para excluir extremo
+        # Ternario: +1 excluye el extremo del conjunto huérfano
+        orphan_start_idx = ext_high_idx + 1 if current_trend == 1 else ext_low_idx + 1
 
     # --- Recortar búferes al tamaño real ---
     return (
@@ -390,8 +406,8 @@ def segment_events_kernel(
         os_quantities[:os_ptr],
         os_directions[:os_ptr],
         event_types[:n_events],
-        dc_offsets[:n_events + 1],
-        os_offsets[:n_events + 1] if n_events > 0 else np.zeros(1, dtype=np.int64),
+        dc_offsets[: n_events + 1],
+        os_offsets[: n_events + 1] if n_events > 0 else np.zeros(1, dtype=np.int64),
         # Atributos de evento (escalares)
         reference_prices[:n_events],
         reference_times[:n_events],
@@ -413,9 +429,9 @@ def segment_events_kernel(
 # FUNCIONES DE UTILIDAD
 # =============================================================================
 
+
 def warmup_kernel(theta: float = 0.01) -> None:
-    """
-    Pre-compila el kernel con datos dummy.
+    """Pre-compila el kernel con datos dummy.
 
     Llamar una vez al inicio para evitar latencia JIT en la primera ejecución real.
     La compilación se cachea en disco, así que solo es lenta la primera vez.
@@ -426,55 +442,55 @@ def warmup_kernel(theta: float = 0.01) -> None:
     d = np.array([1, -1, 1, -1], dtype=np.int8)
 
     segment_events_kernel(
-        p, t, q, d, theta,
-        np.int8(0), np.float64(0), np.float64(0), np.float64(0)
+        p, t, q, d, theta, np.int8(0), np.float64(0), np.float64(0), np.float64(0)
     )
 
 
 def verify_nopython_mode() -> dict:
-    """
-    Verifica que el kernel esté compilado en modo nopython.
+    """Verifica que el kernel esté compilado en modo nopython.
 
     Returns:
+    -------
         Dict con información de compilación:
         - nopython: bool - True si está en modo nopython
         - signatures: list - Firmas compiladas
         - cache_hits: int - Número de hits de cache
-    """
-    from numba.core import types as numba_types
 
+    """
     func = segment_events_kernel
 
     # Obtener información del dispatcher
-    signatures = list(func.signatures) if hasattr(func, 'signatures') else []
+    signatures = list(func.signatures) if hasattr(func, "signatures") else []
 
     # Verificar modo nopython
     nopython = True
-    if hasattr(func, 'nopython_signatures'):
+    if hasattr(func, "nopython_signatures"):
         nopython = len(func.nopython_signatures) > 0
 
     # Stats de cache
-    stats = func.stats if hasattr(func, 'stats') else {}
-    cache_hits = stats.get('cache_hits', 0) if isinstance(stats, dict) else 0
+    stats = func.stats if hasattr(func, "stats") else {}
+    cache_hits = stats.get("cache_hits", 0) if isinstance(stats, dict) else 0
 
     return {
-        'nopython': nopython,
-        'signatures': [str(s) for s in signatures],
-        'cache_hits': cache_hits,
-        'cache_path': str(func._cache._cache_path) if hasattr(func, '_cache') else None,
+        "nopython": nopython,
+        "signatures": [str(s) for s in signatures],
+        "cache_hits": cache_hits,
+        "cache_path": str(func._cache._cache_path) if hasattr(func, "_cache") else None,
     }
 
 
 def estimate_memory_usage(n_ticks: int, theta: float = 0.005) -> dict:
-    """
-    Estima el uso de memoria del kernel para un número dado de ticks.
+    """Estima el uso de memoria del kernel para un número dado de ticks.
 
     Args:
+    ----
         n_ticks: Número de ticks a procesar
         theta: Umbral DC (afecta ratio de eventos)
 
     Returns:
+    -------
         Dict con estimaciones en bytes y MB
+
     """
     # Estimación de eventos basada en theta
     # Menor theta = más eventos
@@ -486,8 +502,8 @@ def estimate_memory_usage(n_ticks: int, theta: float = 0.005) -> dict:
 
     # Búferes de eventos
     event_buffers = (
-        estimated_events * 1 +  # event_types (int8)
-        (estimated_events + 1) * 8 * 2  # offsets (int64) × 2
+        estimated_events * 1  # event_types (int8)
+        + (estimated_events + 1) * 8 * 2  # offsets (int64) × 2
     )
 
     # Atributos de evento: 4 arrays × n_events × 8 bytes
@@ -496,13 +512,13 @@ def estimate_memory_usage(n_ticks: int, theta: float = 0.005) -> dict:
     total = tick_buffers + event_buffers + attribute_buffers
 
     return {
-        'n_ticks': n_ticks,
-        'estimated_events': estimated_events,
-        'tick_buffers_bytes': tick_buffers,
-        'event_buffers_bytes': event_buffers,
-        'attribute_buffers_bytes': attribute_buffers,
-        'total_bytes': total,
-        'total_mb': total / (1024 * 1024),
+        "n_ticks": n_ticks,
+        "estimated_events": estimated_events,
+        "tick_buffers_bytes": tick_buffers,
+        "event_buffers_bytes": event_buffers,
+        "attribute_buffers_bytes": attribute_buffers,
+        "total_bytes": total,
+        "total_mb": total / (1024 * 1024),
     }
 
 
@@ -510,23 +526,26 @@ def estimate_memory_usage(n_ticks: int, theta: float = 0.005) -> dict:
 # BENCHMARK UTILITIES
 # =============================================================================
 
+
 def benchmark_kernel(
     n_ticks: int = 1_000_000,
     theta: float = 0.005,
     n_runs: int = 5,
     warmup_runs: int = 2,
 ) -> dict:
-    """
-    Benchmark del kernel con datos sintéticos.
+    """Benchmark del kernel con datos sintéticos.
 
     Args:
+    ----
         n_ticks: Número de ticks sintéticos
         theta: Umbral DC
         n_runs: Número de ejecuciones para promediar
         warmup_runs: Ejecuciones de calentamiento (no contadas)
 
     Returns:
+    -------
         Dict con métricas de rendimiento
+
     """
     import time
 
@@ -541,8 +560,15 @@ def benchmark_kernel(
     # Warmup
     for _ in range(warmup_runs):
         segment_events_kernel(
-            prices, timestamps, quantities, directions, theta,
-            np.int8(0), np.float64(0), np.float64(0), np.float64(0)
+            prices,
+            timestamps,
+            quantities,
+            directions,
+            theta,
+            np.int8(0),
+            np.float64(0),
+            np.float64(0),
+            np.float64(0),
         )
 
     # Benchmark
@@ -552,8 +578,15 @@ def benchmark_kernel(
     for _ in range(n_runs):
         start = time.perf_counter()
         result = segment_events_kernel(
-            prices, timestamps, quantities, directions, theta,
-            np.int8(0), np.float64(0), np.float64(0), np.float64(0)
+            prices,
+            timestamps,
+            quantities,
+            directions,
+            theta,
+            np.int8(0),
+            np.float64(0),
+            np.float64(0),
+            np.float64(0),
         )
         end = time.perf_counter()
 
@@ -565,12 +598,12 @@ def benchmark_kernel(
     avg_events = np.mean(n_events_list)
 
     return {
-        'n_ticks': n_ticks,
-        'theta': theta,
-        'avg_time_ms': avg_time * 1000,
-        'std_time_ms': std_time * 1000,
-        'ticks_per_second': n_ticks / avg_time,
-        'avg_events': int(avg_events),
-        'event_ratio': n_ticks / avg_events if avg_events > 0 else float('inf'),
-        'memory_estimate_mb': estimate_memory_usage(n_ticks, theta)['total_mb'],
+        "n_ticks": n_ticks,
+        "theta": theta,
+        "avg_time_ms": avg_time * 1000,
+        "std_time_ms": std_time * 1000,
+        "ticks_per_second": n_ticks / avg_time,
+        "avg_events": int(avg_events),
+        "event_ratio": n_ticks / avg_events if avg_events > 0 else float("inf"),
+        "memory_estimate_mb": estimate_memory_usage(n_ticks, theta)["total_mb"],
     }

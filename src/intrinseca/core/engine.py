@@ -1,5 +1,4 @@
-"""
-Motor Silver Layer para Intrinsica.
+"""Motor Silver Layer para Intrinsica.
 
 Orquesta el pipeline completo de transformación Bronze → Silver:
 1. Carga de estado anterior (stitching)
@@ -20,15 +19,31 @@ import time
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
-from typing import Optional, NamedTuple, Iterator
+from typing import NamedTuple
 
 import numpy as np
 import polars as pl
 import pyarrow as pa
 import pyarrow.parquet as pq
 from numpy.typing import NDArray
+from rich import box
+from rich.panel import Panel
 
+# Rich (observabilidad)
+from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
+
+from .convergence import (
+    ConvergenceReport,
+    ConvergenceResult,
+    compare_dc_events,
+)
 from .kernel import segment_events_kernel, warmup_kernel
+from .reconciliation import (
+    ReconciliationType,
+    check_reconciliation_needed,
+    cleanup_backup,
+    reconcile_previous_day,
+)
 from .state import (
     DCState,
     build_state_path,
@@ -36,26 +51,6 @@ from .state import (
     find_previous_state,
     save_state,
 )
-from .convergence import (
-    ConvergenceResult,
-    ConvergenceReport,
-    compare_dc_events,
-)
-from .reconciliation import (
-    ReconciliationType,
-    check_reconciliation_needed,
-    reconcile_previous_day,
-    cleanup_backup,
-)
-
-# Rich (observabilidad)
-from rich.progress import (
-    Progress, SpinnerColumn, BarColumn,
-    TextColumn, TimeElapsedColumn
-)
-from rich.panel import Panel
-from rich import box
-
 
 # =============================================================================
 # TYPE ALIASES
@@ -78,14 +73,21 @@ PARQUET_COMPRESSION_LEVEL = 3
 SILVER_COLUMNS = (
     "event_type",
     # Atributos de evento (escalares)
-    "reference_price", "reference_time",
-    "extreme_price", "extreme_time",
-    "confirm_price", "confirm_time",
+    "reference_price",
+    "reference_time",
+    "extreme_price",
+    "extreme_time",
+    "confirm_price",
+    "confirm_time",
     # Arrays anidados (microestructura)
-    "price_dc", "price_os",
-    "time_dc", "time_os",
-    "qty_dc", "qty_os",
-    "dir_dc", "dir_os",
+    "price_dc",
+    "price_os",
+    "time_dc",
+    "time_os",
+    "qty_dc",
+    "qty_os",
+    "dir_dc",
+    "dir_os",
 )
 
 # Codificaciones óptimas por tipo de columna
@@ -99,18 +101,21 @@ ENCODING_LOW_CARDINALITY = "RLE_DICTIONARY"
 # ESTRUCTURAS DE DATOS
 # =============================================================================
 
+
 class DayResult(NamedTuple):
     """Resultado del procesamiento de un día."""
-    df_silver: Optional[pl.DataFrame]
+
+    df_silver: pl.DataFrame | None
     n_events: int
     n_ticks: int
-    convergence: Optional[ConvergenceResult]
+    convergence: ConvergenceResult | None
     elapsed_ms: float
 
 
 @dataclass
 class EngineStats:
     """Estadísticas acumuladas del Engine."""
+
     days_processed: int = 0
     total_events: int = 0
     total_ticks: int = 0
@@ -151,6 +156,7 @@ class EngineStats:
 @dataclass
 class EngineConfig:
     """Configuración del Engine (inmutable después de creación)."""
+
     theta: float
     silver_base_path: Path
     keep_state_files: bool = True
@@ -161,10 +167,11 @@ class EngineConfig:
     _theta_str: str = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
+        """Validate and normalize configuration after initialization."""
         self.theta = float(self.theta)
         self.silver_base_path = Path(self.silver_base_path)
         # Pre-calcular theta_str (evita recálculo en cada llamada)
-        self._theta_str = f"{self.theta:.6f}".rstrip('0').rstrip('.')
+        self._theta_str = f"{self.theta:.6f}".rstrip("0").rstrip(".")
 
     @property
     def theta_str(self) -> str:
@@ -176,9 +183,9 @@ class EngineConfig:
 # ENGINE PRINCIPAL
 # =============================================================================
 
+
 class Engine:
-    """
-    Motor de transformación Bronze → Silver para eventos DC.
+    """Motor de transformación Bronze → Silver para eventos DC.
 
     Procesa datos tick-a-tick (Bronze) y los transforma en eventos
     DC anidados (Silver Layer) con estructura:
@@ -194,13 +201,16 @@ class Engine:
     ```
 
     Attributes:
+    ----------
         config: Configuración inmutable del engine
         stats: Estadísticas de procesamiento (si collect_stats=True)
 
     Example:
+    -------
         >>> engine = Engine(theta=0.005, silver_base_path=Path("./silver"))
         >>> result = engine.process_day(df_bronze, "BTCUSDT", date(2025, 11, 28))
         >>> print(f"Eventos: {result.n_events}, Tiempo: {result.elapsed_ms:.2f}ms")
+
     """
 
     __slots__ = ("config", "stats", "_compiled", "_console")
@@ -214,10 +224,10 @@ class Engine:
         collect_stats: bool = True,
         warmup: bool = False,
     ) -> None:
-        """
-        Inicializa el motor Silver.
+        """Inicializa el motor Silver.
 
         Args:
+        ----
             theta: Umbral del algoritmo DC (e.g., 0.005 para 0.5%)
             silver_base_path: Ruta base donde se almacenarán los datos Silver
             keep_state_files: Si True, conserva archivos .arrow históricos.
@@ -227,7 +237,9 @@ class Engine:
             warmup: Si True, pre-compila el kernel inmediatamente.
 
         Raises:
+        ------
             ValueError: Si theta <= 0 o theta >= 1
+
         """
         if not (0 < theta < 1):
             raise ValueError(f"theta debe estar en (0, 1), recibido: {theta}")
@@ -279,6 +291,7 @@ class Engine:
         """Lazy initialization de Rich Console."""
         if self._console is None:
             from rich.console import Console
+
             self._console = Console()
         return self._console
 
@@ -288,15 +301,8 @@ class Engine:
             warmup_kernel(self.config.theta)
             self._compiled = True
 
-    def _build_data_path(
-        self,
-        ticker: str,
-        year: int,
-        month: int,
-        day: int
-    ) -> Path:
-        """
-        Construye la ruta al archivo data.parquet.
+    def _build_data_path(self, ticker: str, year: int, month: int, day: int) -> Path:
+        """Construye la ruta al archivo data.parquet.
 
         Formato: {base}/{ticker}/theta={theta}/year={YYYY}/month={MM}/day={DD}/data.parquet
         """
@@ -318,8 +324,7 @@ class Engine:
         new_quantities: ArrayF64,
         new_directions: ArrayI8,
     ) -> tuple[ArrayF64, ArrayI64, ArrayF64, ArrayI8]:
-        """
-        Realiza el stitching de huérfanos anteriores con datos nuevos.
+        """Realiza el stitching de huérfanos anteriores con datos nuevos.
 
         Los huérfanos del día anterior se anteponen a los datos del día actual
         para garantizar continuidad matemática del algoritmo DC.
@@ -350,20 +355,28 @@ class Engine:
         dc_offsets: ArrayI64,
         os_offsets: ArrayI64,
     ) -> dict[str, pa.Array]:
-        """
-        Construye columnas Arrow ListArray desde búferes + offsets.
+        """Construye columnas Arrow ListArray desde búferes + offsets.
 
         Implementa isomorfismo de memoria (zero-copy): los offsets del kernel
         Numba se usan directamente para crear ListArrays sin copiar datos.
 
         Args:
-            dc_*: Búferes de fase DC
-            os_*: Búferes de fase OS
-            dc_offsets: Offsets para segmentar dc_*
-            os_offsets: Offsets para segmentar os_*
+        ----
+            dc_prices: Precios de la fase DC.
+            dc_times: Timestamps de la fase DC.
+            dc_quantities: Cantidades de la fase DC.
+            dc_directions: Direcciones de la fase DC.
+            os_prices: Precios de la fase OS.
+            os_times: Timestamps de la fase OS.
+            os_quantities: Cantidades de la fase OS.
+            os_directions: Direcciones de la fase OS.
+            dc_offsets: Offsets para segmentar búferes DC.
+            os_offsets: Offsets para segmentar búferes OS.
 
         Returns:
-            Dict con 8 columnas ListArray
+        -------
+            Dict con 8 columnas ListArray.
+
         """
         n_events = len(dc_offsets) - 1
 
@@ -374,17 +387,20 @@ class Engine:
             empty_i8 = pa.array([], type=pa.list_(pa.int8()))
 
             return {
-                "price_dc": empty_f64, "price_os": empty_f64,
-                "time_dc": empty_i64, "time_os": empty_i64,
-                "qty_dc": empty_f64, "qty_os": empty_f64,
-                "dir_dc": empty_i8, "dir_os": empty_i8,
+                "price_dc": empty_f64,
+                "price_os": empty_f64,
+                "time_dc": empty_i64,
+                "time_os": empty_i64,
+                "qty_dc": empty_f64,
+                "qty_os": empty_f64,
+                "dir_dc": empty_i8,
+                "dir_os": empty_i8,
             }
 
         # Helper inline para crear ListArray (zero-copy desde numpy)
         def make_list(values: np.ndarray, offsets: np.ndarray, dtype: pa.DataType) -> pa.Array:
             return pa.ListArray.from_arrays(
-                pa.array(offsets, type=pa.int64()),
-                pa.array(values, type=dtype)
+                pa.array(offsets, type=pa.int64()), pa.array(values, type=dtype)
             )
 
         return {
@@ -399,8 +415,7 @@ class Engine:
         }
 
     def _write_parquet(self, table: pa.Table, path: Path) -> None:
-        """
-        Escribe tabla Arrow a Parquet con codificaciones optimizadas.
+        """Escribe tabla Arrow a Parquet con codificaciones optimizadas.
 
         Configuración:
         - Compresión: ZSTD nivel 3 (balance velocidad/ratio)
@@ -426,12 +441,12 @@ class Engine:
         quantity_col: str,
         direction_col: str,
     ) -> tuple[ArrayF64, ArrayI64, ArrayF64, ArrayI8]:
-        """
-        Extrae arrays numpy desde DataFrame Polars.
+        """Extrae arrays numpy desde DataFrame Polars.
 
         Maneja conversión de timestamps (Datetime → Int64 ns).
         Intenta zero-copy; fallback a copia si el layout no es contiguo.
         """
+
         # Helper para extracción con zero-copy preferente
         def safe_to_numpy(series: pl.Series, target_dtype: type) -> np.ndarray:
             try:
@@ -476,8 +491,7 @@ class Engine:
         strict_comparison: bool = True,
         tolerance_ns: int = 0,
     ) -> DayResult:
-        """
-        Procesa un día de datos Bronze y genera salida Silver.
+        """Procesa un día de datos Bronze y genera salida Silver.
 
         Pipeline:
         ```
@@ -515,6 +529,7 @@ class Engine:
         ```
 
         Args:
+        ----
             df_bronze: DataFrame Polars con datos Bronze del día
             ticker: Símbolo del instrumento (e.g., "BTCUSDT")
             process_date: Fecha siendo procesada
@@ -527,10 +542,13 @@ class Engine:
             tolerance_ns: Tolerancia en nanosegundos si strict_comparison=False
 
         Returns:
+        -------
             DayResult con (df_silver, n_events, n_ticks, convergence, elapsed_ms)
 
         Raises:
+        ------
             ValueError: Si df_bronze está vacío o faltan columnas requeridas
+
         """
         t_start = time.perf_counter()
 
@@ -546,7 +564,7 @@ class Engine:
         data_path = self._build_data_path(
             ticker, process_date.year, process_date.month, process_date.day
         )
-        df_prev: Optional[pl.DataFrame] = None
+        df_prev: pl.DataFrame | None = None
 
         if analyze_convergence and data_path.exists():
             try:
@@ -565,7 +583,7 @@ class Engine:
             self.config.silver_base_path, ticker, self.config.theta, process_date
         )
 
-        prev_state_path: Optional[Path] = None
+        prev_state_path: Path | None = None
 
         if prev_state_result is not None:
             prev_state_path, prev_state = prev_state_result
@@ -580,34 +598,36 @@ class Engine:
             recon_type, recon_context = check_reconciliation_needed(
                 prev_state, prices[0], self.config.theta
             )
-            
+
             if recon_type != ReconciliationType.NONE:
                 # Encontrar ruta del Parquet del día anterior
                 prev_data_path = self._build_data_path(
                     ticker,
                     prev_state.last_processed_date.year,
                     prev_state.last_processed_date.month,
-                    prev_state.last_processed_date.day
+                    prev_state.last_processed_date.day,
                 )
-                
+
                 # Determinar el nuevo precio extremo
                 if recon_type == ReconciliationType.CONFIRM_REVERSAL:
                     # El extremo es el último tick antes de la confirmación
                     ext_high, ext_low = prev_state.get_extreme_prices()
                     new_ext_price = ext_high if prev_state.current_trend == 1 else ext_low
-                    new_ext_time = prev_state.orphan_times[-1] if len(prev_state.orphan_times) > 0 else 0
+                    new_ext_time = (
+                        prev_state.orphan_times[-1] if len(prev_state.orphan_times) > 0 else 0
+                    )
                 else:
                     # EXTEND_OS: usar el precio actual como nuevo extremo
                     new_ext_price = prices[0]
                     new_ext_time = times[0]
-                
+
                 recon_result = reconcile_previous_day(
                     silver_path=prev_data_path,
                     reconciliation_type=recon_type,
                     new_extreme_price=new_ext_price,
                     new_extreme_time=new_ext_time,
                 )
-                
+
                 if recon_result.success:
                     self._log(f"  ↩️ Reconciliación {recon_type.value}: {prev_data_path.name}")
                     if recon_result.backup_path:
@@ -639,16 +659,31 @@ class Engine:
 
         # Desempaquetar resultado (23 elementos)
         (
-            dc_prices, dc_times, dc_quantities, dc_directions,
-            os_prices, os_times, os_quantities, os_directions,
+            dc_prices,
+            dc_times,
+            dc_quantities,
+            dc_directions,
+            os_prices,
+            os_times,
+            os_quantities,
+            os_directions,
             event_types,
-            dc_offsets, os_offsets,
+            dc_offsets,
+            os_offsets,
             # Atributos de evento (escalares, zero indirection)
-            reference_prices, reference_times,
-            extreme_prices, extreme_times, confirm_prices, confirm_times,
+            reference_prices,
+            reference_times,
+            extreme_prices,
+            extreme_times,
+            confirm_prices,
+            confirm_times,
             # Estado final
-            n_events, final_trend, final_ext_high, final_ext_low,
-            final_last_os_ref, orphan_start_idx
+            n_events,
+            final_trend,
+            final_ext_high,
+            final_ext_low,
+            final_last_os_ref,
+            orphan_start_idx,
         ) = kernel_result
 
         self._log(f"  ✅ Eventos: {n_events}")
@@ -673,34 +708,47 @@ class Engine:
         )
 
         state_path = build_state_path(
-            self.config.silver_base_path, ticker, self.config.theta,
-            process_date.year, process_date.month, process_date.day
+            self.config.silver_base_path,
+            ticker,
+            self.config.theta,
+            process_date.year,
+            process_date.month,
+            process_date.day,
         )
         save_state(new_state, state_path)
         self._log(f"  💾 Estado: {state_path.name}")
 
         # 8. Construir y guardar Silver
-        df_silver: Optional[pl.DataFrame] = None
+        df_silver: pl.DataFrame | None = None
 
         if n_events > 0:
             list_columns = self._build_arrow_lists(
-                dc_prices, dc_times, dc_quantities, dc_directions,
-                os_prices, os_times, os_quantities, os_directions,
-                dc_offsets, os_offsets
+                dc_prices,
+                dc_times,
+                dc_quantities,
+                dc_directions,
+                os_prices,
+                os_times,
+                os_quantities,
+                os_directions,
+                dc_offsets,
+                os_offsets,
             )
 
-            arrow_table = pa.table({
-                "event_type": pa.array(event_types, type=pa.int8()),
-                # Atributos de evento (escalares, zero indirection)
-                "reference_price": pa.array(reference_prices, type=pa.float64()),
-                "reference_time": pa.array(reference_times, type=pa.int64()),
-                "extreme_price": pa.array(extreme_prices, type=pa.float64()),
-                "extreme_time": pa.array(extreme_times, type=pa.int64()),
-                "confirm_price": pa.array(confirm_prices, type=pa.float64()),
-                "confirm_time": pa.array(confirm_times, type=pa.int64()),
-                # Arrays anidados (microestructura)
-                **list_columns,
-            })
+            arrow_table = pa.table(
+                {
+                    "event_type": pa.array(event_types, type=pa.int8()),
+                    # Atributos de evento (escalares, zero indirection)
+                    "reference_price": pa.array(reference_prices, type=pa.float64()),
+                    "reference_time": pa.array(reference_times, type=pa.int64()),
+                    "extreme_price": pa.array(extreme_prices, type=pa.float64()),
+                    "extreme_time": pa.array(extreme_times, type=pa.int64()),
+                    "confirm_price": pa.array(confirm_prices, type=pa.float64()),
+                    "confirm_time": pa.array(confirm_times, type=pa.int64()),
+                    # Arrays anidados (microestructura)
+                    **list_columns,
+                }
+            )
 
             self._write_parquet(arrow_table, data_path)
             self._log(f"  📁 Silver: {data_path}")
@@ -715,7 +763,7 @@ class Engine:
             self._log(f"  🧹 Eliminado: {prev_state_path.name}")
 
         # 10. Análisis de convergencia
-        convergence_result: Optional[ConvergenceResult] = None
+        convergence_result: ConvergenceResult | None = None
 
         if analyze_convergence:
             if df_prev is not None and df_silver is not None:
@@ -772,14 +820,14 @@ class Engine:
         analyze_convergence: bool = False,
         strict_comparison: bool = True,
         tolerance_ns: int = 0,
-    ) -> tuple[dict[date, Optional[pl.DataFrame]], Optional[ConvergenceReport]]:
-        """
-        Procesa un rango de datos Bronze particionándolos por día.
+    ) -> tuple[dict[date, pl.DataFrame | None], ConvergenceReport | None]:
+        """Procesa un rango de datos Bronze particionándolos por día.
 
         Usa `partition_by` de Polars para evitar filtrado O(n) repetido.
         Itera secuencialmente garantizando continuidad de estado.
 
         Args:
+        ----
             df_bronze: DataFrame con datos de múltiples días
             ticker: Símbolo del instrumento
             time_col: Columna de timestamps
@@ -788,12 +836,14 @@ class Engine:
             tolerance_ns: Tolerancia si strict_comparison=False
 
         Returns:
+        -------
             Tuple (results_dict, convergence_report)
             - results_dict: {date: DataFrame Silver}
             - convergence_report: Reporte si analyze_convergence=True
+
         """
-        results: dict[date, Optional[pl.DataFrame]] = {}
-        convergence_report: Optional[ConvergenceReport] = None
+        results: dict[date, pl.DataFrame | None] = {}
+        convergence_report: ConvergenceReport | None = None
 
         if analyze_convergence:
             convergence_report = ConvergenceReport(ticker=ticker, theta=self.config.theta)
@@ -807,9 +857,7 @@ class Engine:
         else:
             time_col_for_date = time_col
 
-        df_bronze = df_bronze.with_columns(
-            pl.col(time_col_for_date).dt.date().alias("_date")
-        )
+        df_bronze = df_bronze.with_columns(pl.col(time_col_for_date).dt.date().alias("_date"))
 
         # Obtener fechas ordenadas
         unique_dates = df_bronze.get_column("_date").unique().sort().to_list()
@@ -818,7 +866,6 @@ class Engine:
         # Contadores
         total_events = 0
         total_ticks = 0
-        early_exit = False
 
         if self.config.verbose:
             # Modo verbose: logs tradicionales
@@ -831,7 +878,8 @@ class Engine:
 
             for d in unique_dates:
                 print(f"\n🗓️ {d}")
-                df_day = partitions.get(d)
+                # partition_by retorna tuplas como claves
+                df_day = partitions.get((d,))
                 if df_day is None:
                     continue
                 df_day = df_day.drop("_date")
@@ -839,7 +887,10 @@ class Engine:
                     df_day = df_day.drop("_datetime")
 
                 result = self.process_day(
-                    df_day, ticker, d, time_col=time_col,
+                    df_day,
+                    ticker,
+                    d,
+                    time_col=time_col,
                     analyze_convergence=analyze_convergence,
                     strict_comparison=strict_comparison,
                     tolerance_ns=tolerance_ns,
@@ -853,7 +904,6 @@ class Engine:
                     convergence_report.add_result(result.convergence)
                     if result.convergence.analysis_applicable and result.convergence.converged:
                         print(f"  🛑 Convergencia en {d}")
-                        early_exit = True
                         break
         else:
             # Modo silencioso: barra de progreso
@@ -876,7 +926,8 @@ class Engine:
                 task = progress.add_task("", total=n_days)
 
                 for d in unique_dates:
-                    df_day = partitions.get(d)
+                    # partition_by retorna tuplas como claves
+                    df_day = partitions.get((d,))
                     if df_day is None:
                         progress.advance(task)
                         continue
@@ -885,7 +936,10 @@ class Engine:
                         df_day = df_day.drop("_datetime")
 
                     result = self.process_day(
-                        df_day, ticker, d, time_col=time_col,
+                        df_day,
+                        ticker,
+                        d,
+                        time_col=time_col,
                         analyze_convergence=analyze_convergence,
                         strict_comparison=strict_comparison,
                         tolerance_ns=tolerance_ns,
@@ -899,19 +953,23 @@ class Engine:
                     if result.convergence and convergence_report:
                         convergence_report.add_result(result.convergence)
                         if result.convergence.analysis_applicable and result.convergence.converged:
-                            early_exit = True
                             break
 
             # Resumen compacto
             days_with_events = sum(1 for r in results.values() if r is not None)
 
-            if analyze_convergence and convergence_report and convergence_report.n_days_analyzed > 0:
+            if (
+                analyze_convergence
+                and convergence_report
+                and convergence_report.n_days_analyzed > 0
+            ):
                 conv_status = "✅" if convergence_report.converged else "⚠️"
                 summary = (
                     f"[green]✓ {len(results)}/{n_days} días[/green] • "
                     f"[cyan]{days_with_events} con eventos[/cyan] • "
                     f"[dim]{total_events:,} eventos | {total_ticks:,} ticks[/dim]\n"
-                    f"[yellow]📊 {conv_status} Discrepantes: {convergence_report.total_discrepant_events}[/yellow]"
+                    f"[yellow]📊 {conv_status} Discrepantes: "
+                    f"{convergence_report.total_discrepant_events}[/yellow]"
                 )
             else:
                 summary = (
@@ -920,17 +978,20 @@ class Engine:
                     f"[dim]{total_events:,} eventos | {total_ticks:,} ticks[/dim]"
                 )
 
-            console.print(Panel(
-                summary,
-                title=f"Engine θ={self.config.theta_str}",
-                border_style="blue",
-                box=box.ROUNDED
-            ))
+            console.print(
+                Panel(
+                    summary,
+                    title=f"Engine θ={self.config.theta_str}",
+                    border_style="blue",
+                    box=box.ROUNDED,
+                )
+            )
 
         # Guardar reporte de convergencia
         if convergence_report is not None:
             report_path = (
-                self.config.silver_base_path / ticker
+                self.config.silver_base_path
+                / ticker
                 / f"theta={self.config.theta_str}"
                 / "convergence_report.json"
             )
@@ -946,12 +1007,13 @@ class Engine:
     # DIAGNÓSTICO
     # -------------------------------------------------------------------------
 
-    def get_stats(self) -> Optional[dict]:
-        """
-        Retorna estadísticas de rendimiento del engine.
+    def get_stats(self) -> dict | None:
+        """Retorna estadísticas de rendimiento del engine.
 
         Returns:
+        -------
             Dict con métricas o None si collect_stats=False
+
         """
         return self.stats.to_dict() if self.stats else None
 
@@ -961,11 +1023,12 @@ class Engine:
             self.stats = EngineStats()
 
     def diagnose(self) -> dict:
-        """
-        Ejecuta diagnóstico del engine.
+        """Ejecuta diagnóstico del engine.
 
         Returns:
+        -------
             Dict con información de configuración y estado
+
         """
         from .kernel import verify_nopython_mode
 
@@ -989,6 +1052,7 @@ class Engine:
         }
 
     def __repr__(self) -> str:
+        """Return string representation of Engine."""
         return (
             f"Engine(theta={self.config.theta}, "
             f"silver_base_path={self.config.silver_base_path}, "

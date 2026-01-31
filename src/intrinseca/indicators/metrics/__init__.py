@@ -1,5 +1,4 @@
-"""
-Metrics Package.
+"""Metrics Package.
 
 Contains all indicator implementations organized by category:
 - event/price: Price movement magnitude and returns
@@ -9,10 +8,10 @@ Contains all indicator implementations organized by category:
 - summary/stats: Summary statistics
 """
 
-from .event.price import Overshoot, DcReturn, OsReturn
-from .event.time import Duration, Velocity
+from .event.price import DcReturn, OsReturn, Overshoot
 from .event.tick import RunsCount
-from .summary.stats import TMV, AvgDuration, AvgReturn, AvgOvershoot, VolatilityDC, UpturnRatio
+from .event.time import Duration, Velocity
+from .summary.stats import TMV, AvgDuration, AvgOvershoot, AvgReturn, UpturnRatio, VolatilityDC
 
 
 def register_all(registry):
@@ -40,13 +39,21 @@ def register_all(registry):
 
 __all__ = [
     # Event/Price
-    "Overshoot", "DcReturn", "OsReturn",
+    "Overshoot",
+    "DcReturn",
+    "OsReturn",
     # Event/Time
-    "Duration", "Velocity",
+    "Duration",
+    "Velocity",
     # Event/Tick
     "RunsCount",
     # Summary/Stats
-    "TMV", "AvgDuration", "AvgReturn", "AvgOvershoot", "VolatilityDC", "UpturnRatio",
+    "TMV",
+    "AvgDuration",
+    "AvgReturn",
+    "AvgOvershoot",
+    "VolatilityDC",
+    "UpturnRatio",
     # Registration
     "register_all",
 ]

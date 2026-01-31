@@ -48,9 +48,9 @@ dependencies = [
 interactive = [
     "panel>=1.3.0",         # Dashboard framework del ecosistema HoloViz
     "holoviews>=1.18.0",    # Orquestador de la visualización [cite: 31]
-    "datashader>=0.16.0",   # Motor de rasterizado server-side (sustituye al DOM) 
+    "datashader>=0.16.0",   # Motor de rasterizado server-side (sustituye al DOM)
     "bokeh>=3.3.0",         # Backend interactivo para el navegador [cite: 37]
-    "dask[dataframe]",      # Procesamiento paralelo para >5M de puntos 
+    "dask[dataframe]",      # Procesamiento paralelo para >5M de puntos
     "pandas",               # Requerido como puente para Datashader [cite: 45]
     "colorcet",             # Paletas de color optimizadas
     "streamlit>=1.30.0"     # Opcional: Para servir el dashboard
@@ -92,8 +92,22 @@ target-version = ["py310", "py311", "py312"]
 
 [tool.ruff]
 line-length = 100
+
+[tool.ruff.lint]
 select = ["E", "F", "W", "I", "N", "D", "UP", "B", "C4", "SIM"]
-ignore = ["D100", "D104", "D107"]
+ignore = [
+    # Docstrings - Solo reglas incompatibles con español o estilísticas
+    "D100",  # Missing docstring in public module
+    "D104",  # Missing docstring in public package
+    "D107",  # Missing docstring in __init__
+    "D205",  # 1 blank line required between summary and description (ruido)
+    "D400",  # First line should end with a period (estilístico)
+    "D401",  # First line should be in imperative mood (incompatible con español)
+    "D415",  # First line should end with period/question/exclamation (estilístico)
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
 
 [tool.mypy]
 python_version = "3.10"

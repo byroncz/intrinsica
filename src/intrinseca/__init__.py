@@ -1,5 +1,4 @@
-"""
-Intrinseca: Biblioteca para análisis Directional Change (DC).
+"""Intrinseca: Biblioteca para análisis Directional Change (DC).
 
 Submódulos disponibles:
     - intrinseca.core: Motor de detección de eventos DC
@@ -9,7 +8,7 @@ Submódulos disponibles:
 Uso:
     # Para indicadores (sin cargar visualización)
     from intrinseca.indicators import compute
-    
+
     # Para visualización (carga Panel/HoloViz)
     from intrinseca.visualization import create_dual_axis_dashboard
 """
@@ -23,6 +22,6 @@ __version__ = "0.1.0"
 
 __all__ = [
     "core",
-    "indicators", 
+    "indicators",
     "visualization",
 ]

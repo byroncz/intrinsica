@@ -1,5 +1,4 @@
-"""
-Series Metrics.
+"""Series Metrics.
 
 Indicators based on signal processing of intra-event price/time series.
 
@@ -16,7 +15,5 @@ Future indicators may include:
 - SeriesEntropy: Entropy of intra-event returns
 """
 
-from intrinseca.indicators.base import BaseIndicator, IndicatorMetadata
-import polars as pl
 
 # Placeholder module - add signal processing indicators here

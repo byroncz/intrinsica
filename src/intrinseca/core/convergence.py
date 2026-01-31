@@ -1,5 +1,4 @@
-"""
-Análisis de Convergencia para Silver Layer.
+"""Análisis de Convergencia para Silver Layer.
 
 Proporciona herramientas para comparar series de eventos DC antes y después
 de un reprocesamiento, detectando discrepancias y puntos de convergencia.
@@ -29,15 +28,14 @@ from __future__ import annotations
 
 import json
 import time
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
-from typing import Optional, NamedTuple
+from typing import NamedTuple
 
 import numpy as np
 import polars as pl
 from numpy.typing import NDArray
-
 
 # =============================================================================
 # TYPE ALIASES
@@ -62,8 +60,10 @@ DEFAULT_TOLERANCE_NS = 1_000_000  # 1ms
 # ESTRUCTURAS DE DATOS
 # =============================================================================
 
+
 class DiscrepancyDetail(NamedTuple):
     """Detalle de una discrepancia entre eventos."""
+
     index: int
     prev_time: int
     new_time: int
@@ -85,10 +85,10 @@ class DiscrepancyDetail(NamedTuple):
 
 @dataclass
 class ConvergenceResult:
-    """
-    Resultado del análisis de convergencia entre dos series DC para un día.
+    """Resultado del análisis de convergencia entre dos series DC para un día.
 
     Attributes:
+    ----------
         ticker: Símbolo del instrumento
         theta: Umbral DC
         day: Fecha analizada
@@ -102,7 +102,9 @@ class ConvergenceResult:
         analysis_applicable: False si no había datos previos para comparar
         discrepancy_details: Lista de detalles de las primeras discrepancias
         analysis_time_ms: Tiempo de análisis en milisegundos
+
     """
+
     # Identificadores
     ticker: str
     theta: float
@@ -113,7 +115,7 @@ class ConvergenceResult:
     n_events_new: int
     n_discrepant_events: int
     first_discrepancy_idx: int  # -1 si no hay discrepancia
-    convergence_idx: Optional[int]  # None si no convergió
+    convergence_idx: int | None  # None si no convergió
 
     # Flags
     converged: bool
@@ -139,9 +141,9 @@ class ConvergenceResult:
     def is_perfect_match(self) -> bool:
         """True si ambas series son idénticas."""
         return (
-            self.converged and
-            self.n_discrepant_events == 0 and
-            self.n_events_prev == self.n_events_new
+            self.converged
+            and self.n_discrepant_events == 0
+            and self.n_events_prev == self.n_events_new
         )
 
     def to_dict(self) -> dict:
@@ -189,28 +191,31 @@ class ConvergenceResult:
 
 @dataclass
 class ConvergenceReport:
-    """
-    Reporte consolidado de convergencia para un rango de fechas.
+    """Reporte consolidado de convergencia para un rango de fechas.
 
     Attributes:
+    ----------
         ticker: Símbolo del instrumento
         theta: Umbral DC
         results: Diccionario de resultados por fecha
         global_convergence_date: Primera fecha donde se alcanzó convergencia
         total_discrepant_events: Suma de discrepancias en todos los días
+
     """
+
     ticker: str
     theta: float
     results: dict[str, ConvergenceResult] = field(default_factory=dict)
-    global_convergence_date: Optional[date] = None
+    global_convergence_date: date | None = None
     total_discrepant_events: int = 0
 
     def add_result(self, result: ConvergenceResult) -> None:
-        """
-        Agrega un resultado diario al reporte.
+        """Agrega un resultado diario al reporte.
 
         Args:
+        ----
             result: Resultado de convergencia para un día
+
         """
         key = result.day.isoformat()
         self.results[key] = result
@@ -243,8 +248,7 @@ class ConvergenceReport:
     def n_days_with_discrepancies(self) -> int:
         """Número de días con al menos una discrepancia."""
         return sum(
-            1 for r in self.results.values()
-            if r.analysis_applicable and r.n_discrepant_events > 0
+            1 for r in self.results.values() if r.analysis_applicable and r.n_discrepant_events > 0
         )
 
     @property
@@ -255,10 +259,7 @@ class ConvergenceReport:
     @property
     def avg_discrepancy_rate(self) -> float:
         """Tasa de discrepancia promedio."""
-        rates = [
-            r.discrepancy_rate for r in self.results.values()
-            if r.analysis_applicable
-        ]
+        rates = [r.discrepancy_rate for r in self.results.values() if r.analysis_applicable]
         return sum(rates) / len(rates) if rates else 0.0
 
     def to_dict(self) -> dict:
@@ -267,8 +268,7 @@ class ConvergenceReport:
             "ticker": self.ticker,
             "theta": self.theta,
             "global_convergence_date": (
-                self.global_convergence_date.isoformat()
-                if self.global_convergence_date else None
+                self.global_convergence_date.isoformat() if self.global_convergence_date else None
             ),
             "total_discrepant_events": self.total_discrepant_events,
             "converged": self.converged,
@@ -284,14 +284,16 @@ class ConvergenceReport:
         }
 
     def save(self, path: Path) -> int:
-        """
-        Guarda el reporte como JSON.
+        """Guarda el reporte como JSON.
 
         Args:
+        ----
             path: Ruta de destino
 
         Returns:
+        -------
             Tamaño del archivo en bytes
+
         """
         path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:
@@ -304,10 +306,10 @@ class ConvergenceReport:
             return "Sin resultados de convergencia."
 
         lines = [
-            f"{'='*60}",
+            f"{'=' * 60}",
             f"📊 Reporte de Convergencia: {self.ticker} (θ={self.theta})",
-            f"{'='*60}",
-            f"",
+            f"{'=' * 60}",
+            "",
             f"📅 Días procesados: {self.n_days_total}",
         ]
 
@@ -315,46 +317,47 @@ class ConvergenceReport:
             lines.append(f"   🆕 Sin datos previos: {self.n_days_without_prev_data}")
 
         if self.n_days_analyzed > 0:
-            lines.extend([
-                f"   🔍 Analizados: {self.n_days_analyzed}",
-                f"   ✅ Match perfecto: {self.n_perfect_matches}",
-                f"   ⚠️ Con discrepancias: {self.n_days_with_discrepancies}",
-                f"",
-                f"📈 Métricas:",
-                f"   Total discrepancias: {self.total_discrepant_events}",
-                f"   Tasa promedio: {self.avg_discrepancy_rate:.2%}",
-            ])
+            lines.extend(
+                [
+                    f"   🔍 Analizados: {self.n_days_analyzed}",
+                    f"   ✅ Match perfecto: {self.n_perfect_matches}",
+                    f"   ⚠️ Con discrepancias: {self.n_days_with_discrepancies}",
+                    "",
+                    "📈 Métricas:",
+                    f"   Total discrepancias: {self.total_discrepant_events}",
+                    f"   Tasa promedio: {self.avg_discrepancy_rate:.2%}",
+                ]
+            )
 
             if self.converged:
                 lines.append(f"   🎯 Convergencia global: {self.global_convergence_date}")
             else:
                 lines.append("   ❌ No se alcanzó convergencia")
 
-        lines.append(f"{'='*60}")
+        lines.append(f"{'=' * 60}")
         return "\n".join(lines)
 
     def get_worst_days(self, n: int = 5) -> list[ConvergenceResult]:
-        """
-        Retorna los N días con más discrepancias.
+        """Retorna los N días con más discrepancias.
 
         Args:
+        ----
             n: Número de días a retornar
 
         Returns:
+        -------
             Lista de resultados ordenados por discrepancias (descendente)
+
         """
         applicable = [r for r in self.results.values() if r.analysis_applicable]
-        sorted_results = sorted(
-            applicable,
-            key=lambda r: r.n_discrepant_events,
-            reverse=True
-        )
+        sorted_results = sorted(applicable, key=lambda r: r.n_discrepant_events, reverse=True)
         return sorted_results[:n]
 
 
 # =============================================================================
 # FUNCIONES DE COMPARACIÓN
 # =============================================================================
+
 
 def compare_dc_events(
     df_prev: pl.DataFrame,
@@ -365,12 +368,12 @@ def compare_dc_events(
     strict_comparison: bool = True,
     tolerance_ns: int = 0,
 ) -> ConvergenceResult:
-    """
-    Compara dos series de eventos DC y detecta convergencia.
+    """Compara dos series de eventos DC y detecta convergencia.
 
     Implementación vectorizada con numpy para máximo rendimiento.
 
     Args:
+    ----
         df_prev: DataFrame con eventos del procesamiento anterior
         df_new: DataFrame con eventos del nuevo procesamiento
         ticker: Símbolo del instrumento
@@ -380,11 +383,14 @@ def compare_dc_events(
         tolerance_ns: Tolerancia en nanosegundos si strict_comparison=False
 
     Returns:
+    -------
         ConvergenceResult con métricas de discrepancia y convergencia
 
     Example:
+    -------
         >>> result = compare_dc_events(df_prev, df_new, "BTCUSDT", 0.005, date(2025, 11, 28))
         >>> print(result.summary())
+
     """
     t_start = time.perf_counter()
 
@@ -427,13 +433,9 @@ def compare_dc_events(
     tol = 0 if strict_comparison else tolerance_ns
 
     # Extraer arrays una sola vez (evitar múltiples to_numpy)
-    prev_times: ArrayI64 = df_prev.select(
-        pl.col("time_dc").list.first().alias("t")
-    )["t"].to_numpy()
+    prev_times: ArrayI64 = df_prev.select(pl.col("time_dc").list.first().alias("t"))["t"].to_numpy()
 
-    new_times: ArrayI64 = df_new.select(
-        pl.col("time_dc").list.first().alias("t")
-    )["t"].to_numpy()
+    new_times: ArrayI64 = df_new.select(pl.col("time_dc").list.first().alias("t"))["t"].to_numpy()
 
     prev_types: ArrayI8 = df_prev["event_type"].to_numpy()
     new_types: ArrayI8 = df_new["event_type"].to_numpy()
@@ -482,14 +484,16 @@ def compare_dc_events(
     discrepancy_details: list[DiscrepancyDetail] = []
     for idx in discrepancy_indices[:MAX_DISCREPANCY_DETAILS]:
         i = int(idx)
-        discrepancy_details.append(DiscrepancyDetail(
-            index=i,
-            prev_time=int(prev_times[i]),
-            new_time=int(new_times[i]),
-            prev_type=int(prev_types[i]),
-            new_type=int(new_types[i]),
-            time_diff_ns=int(time_diffs[i]),
-        ))
+        discrepancy_details.append(
+            DiscrepancyDetail(
+                index=i,
+                prev_time=int(prev_times[i]),
+                new_time=int(new_times[i]),
+                prev_type=int(prev_types[i]),
+                new_type=int(new_types[i]),
+                time_diff_ns=int(time_diffs[i]),
+            )
+        )
 
     return ConvergenceResult(
         ticker=ticker,
@@ -511,23 +515,27 @@ def compare_dc_events(
 # FUNCIONES DE CARGA
 # =============================================================================
 
-def load_report(path: Path) -> Optional[ConvergenceReport]:
-    """
-    Carga un reporte de convergencia desde JSON.
+
+def load_report(path: Path) -> ConvergenceReport | None:
+    """Carga un reporte de convergencia desde JSON.
 
     Args:
+    ----
         path: Ruta al archivo JSON
 
     Returns:
+    -------
         ConvergenceReport si existe, None en caso contrario
 
     Raises:
+    ------
         ValueError: Si el archivo tiene formato inválido
+
     """
     if not path.exists():
         return None
 
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path, encoding="utf-8") as f:
         data = json.load(f)
 
     # Validar campos requeridos
@@ -543,12 +551,9 @@ def load_report(path: Path) -> Optional[ConvergenceReport]:
     )
 
     # Reconstruir resultados
-    for day_str, result_dict in data.get("results", {}).items():
+    for _, result_dict in data.get("results", {}).items():
         # Reconstruir discrepancy_details
-        details = [
-            DiscrepancyDetail(**d)
-            for d in result_dict.get("discrepancy_details", [])
-        ]
+        details = [DiscrepancyDetail(**d) for d in result_dict.get("discrepancy_details", [])]
 
         result = ConvergenceResult(
             ticker=result_dict["ticker"],
@@ -569,9 +574,7 @@ def load_report(path: Path) -> Optional[ConvergenceReport]:
 
     # Restaurar convergence_date si estaba en el JSON
     if data.get("global_convergence_date"):
-        report.global_convergence_date = date.fromisoformat(
-            data["global_convergence_date"]
-        )
+        report.global_convergence_date = date.fromisoformat(data["global_convergence_date"])
 
     return report
 
@@ -580,17 +583,19 @@ def compare_reports(
     report_a: ConvergenceReport,
     report_b: ConvergenceReport,
 ) -> dict:
-    """
-    Compara dos reportes de convergencia.
+    """Compara dos reportes de convergencia.
 
     Útil para comparar resultados con diferentes thetas o configuraciones.
 
     Args:
+    ----
         report_a: Primer reporte
         report_b: Segundo reporte
 
     Returns:
+    -------
         Dict con métricas de comparación
+
     """
     days_a = set(report_a.results.keys())
     days_b = set(report_b.results.keys())
@@ -602,10 +607,7 @@ def compare_reports(
     # Comparar métricas en días comunes
     discrepancy_diff = []
     for day in common_days:
-        diff = (
-            report_a.results[day].n_discrepant_events -
-            report_b.results[day].n_discrepant_events
-        )
+        diff = report_a.results[day].n_discrepant_events - report_b.results[day].n_discrepant_events
         discrepancy_diff.append(diff)
 
     return {
@@ -617,8 +619,7 @@ def compare_reports(
         "total_discrepancies_a": report_a.total_discrepant_events,
         "total_discrepancies_b": report_b.total_discrepant_events,
         "avg_discrepancy_diff": (
-            sum(discrepancy_diff) / len(discrepancy_diff)
-            if discrepancy_diff else 0.0
+            sum(discrepancy_diff) / len(discrepancy_diff) if discrepancy_diff else 0.0
         ),
         "converged_a": report_a.converged,
         "converged_b": report_b.converged,

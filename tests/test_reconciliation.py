@@ -1,5 +1,4 @@
-"""
-Tests para el sistema de reconciliación retroactiva.
+"""Tests para el sistema de reconciliación retroactiva.
 
 Verifica:
 - Detección correcta del tipo de reconciliación
@@ -8,18 +7,15 @@ Verifica:
 """
 
 from datetime import date
-from pathlib import Path
-import tempfile
 
 import numpy as np
 import polars as pl
 import pytest
-
 from intrinseca.core.reconciliation import (
     ReconciliationType,
     check_reconciliation_needed,
-    reconcile_previous_day,
     cleanup_backup,
+    reconcile_previous_day,
 )
 from intrinseca.core.state import DCState
 
@@ -62,22 +58,18 @@ class TestReconciliationDetection:
         theta = 0.02  # 2%
         # Precio que cruza threshold hacia abajo
         first_price = 107.0 * 0.97  # Más bajo que threshold
-        
-        recon_type, _ = check_reconciliation_needed(
-            uptrend_state, first_price, theta
-        )
-        
+
+        recon_type, _ = check_reconciliation_needed(uptrend_state, first_price, theta)
+
         assert recon_type == ReconciliationType.CONFIRM_REVERSAL
 
     def test_extend_os_from_uptrend(self, uptrend_state):
         """Falsa alarma en tendencia alcista (precio sigue subiendo)."""
         theta = 0.02
         first_price = 108.0  # Más alto que el extremo alto
-        
-        recon_type, _ = check_reconciliation_needed(
-            uptrend_state, first_price, theta
-        )
-        
+
+        recon_type, _ = check_reconciliation_needed(uptrend_state, first_price, theta)
+
         assert recon_type == ReconciliationType.EXTEND_OS
 
     def test_confirm_reversal_from_downtrend(self, downtrend_state):
@@ -85,22 +77,18 @@ class TestReconciliationDetection:
         theta = 0.02
         # Precio que cruza threshold hacia arriba
         first_price = 93.0 * 1.03  # Más alto que threshold
-        
-        recon_type, _ = check_reconciliation_needed(
-            downtrend_state, first_price, theta
-        )
-        
+
+        recon_type, _ = check_reconciliation_needed(downtrend_state, first_price, theta)
+
         assert recon_type == ReconciliationType.CONFIRM_REVERSAL
 
     def test_extend_os_from_downtrend(self, downtrend_state):
         """Falsa alarma en tendencia bajista (precio sigue bajando)."""
         theta = 0.02
         first_price = 92.0  # Más bajo que el extremo bajo
-        
-        recon_type, _ = check_reconciliation_needed(
-            downtrend_state, first_price, theta
-        )
-        
+
+        recon_type, _ = check_reconciliation_needed(downtrend_state, first_price, theta)
+
         assert recon_type == ReconciliationType.EXTEND_OS
 
     def test_no_reconciliation_when_empty(self):
@@ -116,11 +104,9 @@ class TestReconciliationDetection:
             reference_extreme_time=np.int64(0),
             last_processed_date=date(2025, 1, 1),
         )
-        
-        recon_type, _ = check_reconciliation_needed(
-            empty_state, 100.0, 0.02
-        )
-        
+
+        recon_type, _ = check_reconciliation_needed(empty_state, 100.0, 0.02)
+
         assert recon_type == ReconciliationType.NONE
 
 
@@ -130,31 +116,33 @@ class TestReconciliationExecution:
     @pytest.fixture
     def sample_silver_df(self):
         """DataFrame Silver de ejemplo."""
-        return pl.DataFrame({
-            "event_type": [1, -1],
-            "reference_price": [100.0, 105.0],
-            "reference_time": [1000, 2000],
-            "extreme_price": [-1.0, -1.0],  # Sentinels
-            "extreme_time": [-1, -1],
-            "confirm_price": [103.0, 100.0],
-            "confirm_time": [1500, 2500],
-        })
+        return pl.DataFrame(
+            {
+                "event_type": [1, -1],
+                "reference_price": [100.0, 105.0],
+                "reference_time": [1000, 2000],
+                "extreme_price": [-1.0, -1.0],  # Sentinels
+                "extreme_time": [-1, -1],
+                "confirm_price": [103.0, 100.0],
+                "confirm_time": [1500, 2500],
+            }
+        )
 
     def test_reconciliation_updates_parquet(self, sample_silver_df, tmp_path):
         """Verifica que la reconciliación actualiza el Parquet correctamente."""
         parquet_path = tmp_path / "test.parquet"
         sample_silver_df.write_parquet(parquet_path)
-        
+
         result = reconcile_previous_day(
             silver_path=parquet_path,
             reconciliation_type=ReconciliationType.CONFIRM_REVERSAL,
             new_extreme_price=107.0,
             new_extreme_time=3000,
         )
-        
+
         assert result.success
         assert result.backup_path.exists()
-        
+
         # Verificar que el último evento fue actualizado
         updated_df = pl.read_parquet(parquet_path)
         assert updated_df["extreme_price"][-1] == 107.0
@@ -164,17 +152,17 @@ class TestReconciliationExecution:
         """Verifica que se crea backup antes de modificar."""
         parquet_path = tmp_path / "test.parquet"
         sample_silver_df.write_parquet(parquet_path)
-        
+
         result = reconcile_previous_day(
             silver_path=parquet_path,
             reconciliation_type=ReconciliationType.CONFIRM_REVERSAL,
             new_extreme_price=107.0,
             new_extreme_time=3000,
         )
-        
+
         assert result.backup_path is not None
         assert result.backup_path.exists()
-        
+
         # El backup debe ser igual al original
         backup_df = pl.read_parquet(result.backup_path)
         assert backup_df["extreme_price"][-1] == -1.0  # Valor original
@@ -183,14 +171,14 @@ class TestReconciliationExecution:
         """Verifica que cleanup_backup elimina el archivo."""
         parquet_path = tmp_path / "test.parquet"
         sample_silver_df.write_parquet(parquet_path)
-        
+
         result = reconcile_previous_day(
             silver_path=parquet_path,
             reconciliation_type=ReconciliationType.CONFIRM_REVERSAL,
             new_extreme_price=107.0,
             new_extreme_time=3000,
         )
-        
+
         assert result.backup_path.exists()
         cleanup_backup(result.backup_path)
         assert not result.backup_path.exists()

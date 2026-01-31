@@ -1,5 +1,4 @@
-"""
-Gestión de Estado para Silver Layer.
+"""Gestión de Estado para Silver Layer.
 
 Manejo de estados transitorios y ticks huérfanos usando Apache Arrow IPC.
 El formato Arrow garantiza isomorfismo de memoria (zero-copy) para máxima
@@ -24,16 +23,15 @@ El archivo state.arrow contiene:
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from pathlib import Path
-from typing import Optional, Iterator
 
 import numpy as np
 import pyarrow as pa
 import pyarrow.feather as feather
 from numpy.typing import NDArray
-
 
 # =============================================================================
 # TYPE ALIASES
@@ -74,27 +72,29 @@ _EMPTY_I8: ArrayI8 = np.array([], dtype=np.int8)
 # UTILIDADES
 # =============================================================================
 
+
 def format_theta(theta: float) -> str:
-    """
-    Formatea theta como string sin ceros trailing.
+    """Formatea theta como string sin ceros trailing.
 
     Examples:
+    --------
         >>> format_theta(0.005)
         '0.005'
         >>> format_theta(0.010000)
         '0.01'
+
     """
-    return f"{theta:.6f}".rstrip('0').rstrip('.')
+    return f"{theta:.6f}".rstrip("0").rstrip(".")
 
 
 # =============================================================================
 # ESTADO DC
 # =============================================================================
 
+
 @dataclass
 class DCState:
-    """
-    Estado del algoritmo DC para continuidad entre particiones.
+    """Estado del algoritmo DC para continuidad entre particiones.
 
     Contiene tanto los ticks huérfanos (posteriores al último evento confirmado)
     como el estado algorítmico necesario para reanudar el procesamiento.
@@ -112,6 +112,7 @@ class DCState:
     ```
 
     Attributes:
+    ----------
         orphan_prices: Precios de los ticks huérfanos
         orphan_times: Timestamps de los ticks huérfanos (nanosegundos)
         orphan_quantities: Cantidades de los ticks huérfanos
@@ -121,6 +122,7 @@ class DCState:
         last_processed_date: Fecha del último día procesado
 
     Example:
+    -------
         >>> state = DCState(
         ...     orphan_prices=np.array([100.0, 101.0]),
         ...     orphan_times=np.array([1000, 2000]),
@@ -132,7 +134,9 @@ class DCState:
         ... )
         >>> state.n_orphans
         2
+
     """
+
     # Ticks huérfanos (arrays)
     orphan_prices: ArrayF64
     orphan_times: ArrayI64
@@ -151,9 +155,7 @@ class DCState:
     reference_extreme_time: np.int64 = np.int64(0)
 
     # Cache interno (no serializado)
-    _extreme_cache: Optional[tuple[float, float]] = field(
-        default=None, repr=False, compare=False
-    )
+    _extreme_cache: tuple[float, float] | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         """Validación y normalización post-inicialización."""
@@ -174,12 +176,13 @@ class DCState:
         return self.n_orphans > 0
 
     def get_extreme_prices(self) -> tuple[float, float]:
-        """
-        Calcula los precios extremos desde los huérfanos (cached).
+        """Calcula los precios extremos desde los huérfanos (cached).
 
         Returns:
+        -------
             Tuple (ext_high_price, ext_low_price) derivados de los huérfanos.
             Si no hay huérfanos, retorna (0.0, 0.0).
+
         """
         if self._extreme_cache is not None:
             return self._extreme_cache
@@ -187,36 +190,37 @@ class DCState:
         if not self.has_orphans:
             result = (0.0, 0.0)
         else:
-            result = (
-                float(np.max(self.orphan_prices)),
-                float(np.min(self.orphan_prices))
-            )
+            result = (float(np.max(self.orphan_prices)), float(np.min(self.orphan_prices)))
 
         # Cache para llamadas subsecuentes
-        object.__setattr__(self, '_extreme_cache', result)
+        object.__setattr__(self, "_extreme_cache", result)
         return result
 
     def memory_usage_bytes(self) -> int:
-        """
-        Estima el uso de memoria del estado en bytes.
+        """Estima el uso de memoria del estado en bytes.
 
         Returns:
+        -------
             Tamaño aproximado en bytes
+
         """
         return (
-            self.orphan_prices.nbytes +
-            self.orphan_times.nbytes +
-            self.orphan_quantities.nbytes +
-            self.orphan_directions.nbytes +
-            8 + 8 + 8  # current_trend, last_os_ref, date overhead
+            self.orphan_prices.nbytes
+            + self.orphan_times.nbytes
+            + self.orphan_quantities.nbytes
+            + self.orphan_directions.nbytes
+            + 8
+            + 8
+            + 8  # current_trend, last_os_ref, date overhead
         )
 
     def validate(self) -> tuple[bool, list[str]]:
-        """
-        Valida la consistencia interna del estado.
+        """Valida la consistencia interna del estado.
 
         Returns:
+        -------
             Tuple (is_valid, errors) donde errors es lista de mensajes
+
         """
         errors = []
         n = self.n_orphans
@@ -263,6 +267,7 @@ class DCState:
 # FUNCIONES DE PERSISTENCIA
 # =============================================================================
 
+
 def build_state_path(
     base_path: Path,
     ticker: str,
@@ -271,12 +276,12 @@ def build_state_path(
     month: int,
     day: int,
     *,
-    theta_str: Optional[str] = None,
+    theta_str: str | None = None,
 ) -> Path:
-    """
-    Construye la ruta completa al archivo de estado.
+    """Construye la ruta completa al archivo de estado.
 
     Args:
+    ----
         base_path: Ruta base del datalake Silver
         ticker: Símbolo del instrumento
         theta: Umbral del algoritmo DC
@@ -286,11 +291,14 @@ def build_state_path(
         theta_str: String pre-formateado de theta (para evitar recálculo)
 
     Returns:
+    -------
         Path completo al archivo state.arrow
 
     Example:
+    -------
         >>> build_state_path(Path("/silver"), "BTCUSDT", 0.005, 2025, 11, 28)
         PosixPath('/silver/BTCUSDT/theta=0.005/year=2025/month=11/day=28/state_BTCUSDT_0.005.arrow')
+
     """
     if theta_str is None:
         theta_str = format_theta(theta)
@@ -307,22 +315,25 @@ def build_state_path(
 
 
 def save_state(state: DCState, path: Path) -> int:
-    """
-    Persiste el estado como Arrow IPC (Feather v2).
+    """Persiste el estado como Arrow IPC (Feather v2).
 
     El archivo contiene:
     - Columnas con los ticks huérfanos (price, time, quantity, direction)
     - Metadata del schema con el estado algorítmico
 
     Args:
+    ----
         state: Estado a persistir
         path: Ruta completa al archivo de destino
 
     Returns:
+    -------
         Tamaño del archivo escrito en bytes
 
     Raises:
+    ------
         ValueError: Si el estado es inválido
+
     """
     # Validar estado antes de guardar
     is_valid, errors = state.validate()
@@ -333,12 +344,14 @@ def save_state(state: DCState, path: Path) -> int:
     path.parent.mkdir(parents=True, exist_ok=True)
 
     # Construir tabla Arrow con los huérfanos
-    table = pa.table({
-        "price": pa.array(state.orphan_prices, type=pa.float64()),
-        "time": pa.array(state.orphan_times, type=pa.int64()),
-        "quantity": pa.array(state.orphan_quantities, type=pa.float64()),
-        "direction": pa.array(state.orphan_directions, type=pa.int8()),
-    })
+    table = pa.table(
+        {
+            "price": pa.array(state.orphan_prices, type=pa.float64()),
+            "time": pa.array(state.orphan_times, type=pa.int64()),
+            "quantity": pa.array(state.orphan_quantities, type=pa.float64()),
+            "direction": pa.array(state.orphan_directions, type=pa.int8()),
+        }
+    )
 
     # Añadir metadata al schema
     metadata = {
@@ -358,20 +371,23 @@ def save_state(state: DCState, path: Path) -> int:
     return path.stat().st_size
 
 
-def load_state(path: Path) -> Optional[DCState]:
-    """
-    Carga el estado desde Arrow IPC.
+def load_state(path: Path) -> DCState | None:
+    """Carga el estado desde Arrow IPC.
 
     Realiza memory-mapping para zero-copy donde sea posible.
 
     Args:
+    ----
         path: Ruta al archivo de estado
 
     Returns:
+    -------
         DCState si el archivo existe, None en caso contrario
 
     Raises:
+    ------
         ValueError: Si el archivo existe pero tiene formato inválido
+
     """
     if not path.exists():
         return None
@@ -387,18 +403,11 @@ def load_state(path: Path) -> Optional[DCState]:
     # Extraer metadata
     schema_metadata = table.schema.metadata or {}
 
-    current_trend = np.int8(
-        int(schema_metadata.get(META_CURRENT_TREND, b"0").decode())
-    )
-    last_os_ref = np.float64(
-        float(schema_metadata.get(META_LAST_OS_REF, b"0").decode())
-    )
+    current_trend = np.int8(int(schema_metadata.get(META_CURRENT_TREND, b"0").decode()))
+    last_os_ref = np.float64(float(schema_metadata.get(META_LAST_OS_REF, b"0").decode()))
     last_date_str = schema_metadata.get(META_LAST_PROCESSED_DATE, b"").decode()
 
-    if last_date_str:
-        last_processed_date = date.fromisoformat(last_date_str)
-    else:
-        last_processed_date = date.today()
+    last_processed_date = date.fromisoformat(last_date_str) if last_date_str else date.today()
 
     # Extraer campos de referencia (nuevos)
     reference_extreme_price = np.float64(
@@ -436,13 +445,13 @@ def find_previous_state(
     current_date: date,
     *,
     max_lookback: int = MAX_LOOKBACK_DAYS,
-) -> Optional[tuple[Path, DCState]]:
-    """
-    Busca el archivo de estado del día anterior más reciente.
+) -> tuple[Path, DCState] | None:
+    """Busca el archivo de estado del día anterior más reciente.
 
     Navega hacia atrás en el tiempo buscando el último estado disponible.
 
     Args:
+    ----
         base_path: Ruta base del datalake Silver
         ticker: Símbolo del instrumento
         theta: Umbral del algoritmo DC
@@ -450,13 +459,16 @@ def find_previous_state(
         max_lookback: Máximo de días hacia atrás a buscar (default: 7)
 
     Returns:
+    -------
         Tuple (path, state) si se encuentra, None en caso contrario
 
     Example:
+    -------
         >>> result = find_previous_state(Path("/silver"), "BTCUSDT", 0.005, date(2025, 11, 28))
         >>> if result:
         ...     path, state = result
         ...     print(f"Estado del {state.last_processed_date}: {state.n_orphans} huérfanos")
+
     """
     # Pre-calcular theta_str (evita recálculo en loop)
     theta_str = format_theta(theta)
@@ -465,8 +477,12 @@ def find_previous_state(
         prev_date = current_date - timedelta(days=days_back)
 
         state_path = build_state_path(
-            base_path, ticker, theta,
-            prev_date.year, prev_date.month, prev_date.day,
+            base_path,
+            ticker,
+            theta,
+            prev_date.year,
+            prev_date.month,
+            prev_date.day,
             theta_str=theta_str,
         )
 
@@ -478,17 +494,19 @@ def find_previous_state(
 
 
 def create_empty_state(process_date: date) -> DCState:
-    """
-    Crea un estado vacío para iniciar el procesamiento.
+    """Crea un estado vacío para iniciar el procesamiento.
 
     Usado cuando no existe estado previo (primer día de procesamiento).
     Reutiliza arrays vacíos singleton para evitar allocaciones.
 
     Args:
+    ----
         process_date: Fecha del procesamiento
 
     Returns:
+    -------
         DCState vacío con la fecha especificada
+
     """
     return DCState(
         orphan_prices=_EMPTY_F64,
@@ -507,25 +525,29 @@ def create_empty_state(process_date: date) -> DCState:
 # FUNCIONES DE DIAGNÓSTICO
 # =============================================================================
 
+
 def list_available_states(
     base_path: Path,
     ticker: str,
     theta: float,
 ) -> Iterator[tuple[date, Path]]:
-    """
-    Lista todos los archivos de estado disponibles para un ticker/theta.
+    """Lista todos los archivos de estado disponibles para un ticker/theta.
 
     Args:
+    ----
         base_path: Ruta base del datalake Silver
         ticker: Símbolo del instrumento
         theta: Umbral del algoritmo DC
 
     Yields:
+    ------
         Tuples (date, path) ordenados por fecha descendente
 
     Example:
+    -------
         >>> for d, p in list_available_states(Path("/silver"), "BTCUSDT", 0.005):
         ...     print(f"{d}: {p}")
+
     """
     theta_str = format_theta(theta)
     ticker_path = base_path / ticker / f"theta={theta_str}"
@@ -561,16 +583,18 @@ def get_state_stats(
     ticker: str,
     theta: float,
 ) -> dict:
-    """
-    Calcula estadísticas de los archivos de estado disponibles.
+    """Calcula estadísticas de los archivos de estado disponibles.
 
     Args:
+    ----
         base_path: Ruta base del datalake Silver
         ticker: Símbolo del instrumento
         theta: Umbral del algoritmo DC
 
     Returns:
+    -------
         Dict con estadísticas
+
     """
     states = list(list_available_states(base_path, ticker, theta))
 
@@ -601,10 +625,10 @@ def cleanup_old_states(
     keep_last_n: int = 1,
     dry_run: bool = True,
 ) -> list[Path]:
-    """
-    Elimina archivos de estado antiguos, conservando los más recientes.
+    """Elimina archivos de estado antiguos, conservando los más recientes.
 
     Args:
+    ----
         base_path: Ruta base del datalake Silver
         ticker: Símbolo del instrumento
         theta: Umbral del algoritmo DC
@@ -612,7 +636,9 @@ def cleanup_old_states(
         dry_run: Si True, solo lista archivos sin eliminar
 
     Returns:
+    -------
         Lista de paths eliminados (o que serían eliminados si dry_run=True)
+
     """
     states = list(list_available_states(base_path, ticker, theta))
 
