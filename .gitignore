@@ -232,6 +232,7 @@ check_*.py
 *_test.py
 dummy/
 output/
+docs/
 
 # macOS
 .DS_Store
