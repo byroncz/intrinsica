@@ -61,6 +61,8 @@ STATE_COLUMNS = ("price", "time", "quantity", "direction")
 META_CURRENT_TREND = b"current_trend"
 META_LAST_OS_REF = b"last_os_ref"
 META_LAST_PROCESSED_DATE = b"last_processed_date"
+META_REFERENCE_EXTREME_PRICE = b"reference_extreme_price"
+META_REFERENCE_EXTREME_TIME = b"reference_extreme_time"
 
 # Cache de arrays vacíos (singleton para evitar recreación)
 _EMPTY_F64: ArrayF64 = np.array([], dtype=np.float64)
@@ -141,8 +143,12 @@ class DCState:
     current_trend: np.int8
     last_os_ref: np.float64
 
-    # Metadatos
+    # Metadatos (requerido)
     last_processed_date: date
+
+    # Referencia del extremo para el próximo evento DC (con defaults)
+    reference_extreme_price: np.float64 = np.float64(0.0)
+    reference_extreme_time: np.int64 = np.int64(0)
 
     # Cache interno (no serializado)
     _extreme_cache: Optional[tuple[float, float]] = field(
@@ -339,6 +345,8 @@ def save_state(state: DCState, path: Path) -> int:
         META_CURRENT_TREND: str(int(state.current_trend)).encode(),
         META_LAST_OS_REF: f"{state.last_os_ref:.15g}".encode(),
         META_LAST_PROCESSED_DATE: state.last_processed_date.isoformat().encode(),
+        META_REFERENCE_EXTREME_PRICE: f"{state.reference_extreme_price:.15g}".encode(),
+        META_REFERENCE_EXTREME_TIME: str(int(state.reference_extreme_time)).encode(),
     }
 
     new_schema = table.schema.with_metadata(metadata)
@@ -392,6 +400,14 @@ def load_state(path: Path) -> Optional[DCState]:
     else:
         last_processed_date = date.today()
 
+    # Extraer campos de referencia (nuevos)
+    reference_extreme_price = np.float64(
+        float(schema_metadata.get(META_REFERENCE_EXTREME_PRICE, b"0").decode())
+    )
+    reference_extreme_time = np.int64(
+        int(schema_metadata.get(META_REFERENCE_EXTREME_TIME, b"0").decode())
+    )
+
     # Extraer arrays con tipos correctos (evitar copia innecesaria)
     # PyArrow to_numpy() con zero_copy_only=False permite conversión eficiente
     directions_raw = table.column("direction").to_numpy()
@@ -407,6 +423,8 @@ def load_state(path: Path) -> Optional[DCState]:
         orphan_directions=directions,
         current_trend=current_trend,
         last_os_ref=last_os_ref,
+        reference_extreme_price=reference_extreme_price,
+        reference_extreme_time=reference_extreme_time,
         last_processed_date=last_processed_date,
     )
 
@@ -479,6 +497,8 @@ def create_empty_state(process_date: date) -> DCState:
         orphan_directions=_EMPTY_I8,
         current_trend=np.int8(0),
         last_os_ref=np.float64(0),
+        reference_extreme_price=np.float64(0),
+        reference_extreme_time=np.int64(0),
         last_processed_date=process_date,
     )
 

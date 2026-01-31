@@ -41,6 +41,12 @@ from .convergence import (
     ConvergenceReport,
     compare_dc_events,
 )
+from .reconciliation import (
+    ReconciliationType,
+    check_reconciliation_needed,
+    reconcile_previous_day,
+    cleanup_backup,
+)
 
 
 # =============================================================================
@@ -64,6 +70,7 @@ PARQUET_COMPRESSION_LEVEL = 3
 SILVER_COLUMNS = (
     "event_type",
     # Atributos de evento (escalares)
+    "reference_price", "reference_time",
     "extreme_price", "extreme_time",
     "confirm_price", "confirm_time",
     # Arrays anidados (microestructura)
@@ -550,7 +557,48 @@ class Engine:
             prev_state = create_empty_state(process_date)
             self._log("  🆕 Sin estado anterior")
 
-        # 4. Stitch huérfanos
+        # 4. Reconciliación retroactiva (si es necesario)
+        recon_result = None
+        if prev_state.n_orphans > 0 and len(prices) > 0:
+            recon_type, recon_context = check_reconciliation_needed(
+                prev_state, prices[0], self.config.theta
+            )
+            
+            if recon_type != ReconciliationType.NONE:
+                # Encontrar ruta del Parquet del día anterior
+                prev_data_path = self._build_data_path(
+                    ticker,
+                    prev_state.last_processed_date.year,
+                    prev_state.last_processed_date.month,
+                    prev_state.last_processed_date.day
+                )
+                
+                # Determinar el nuevo precio extremo
+                if recon_type == ReconciliationType.CONFIRM_REVERSAL:
+                    # El extremo es el último tick antes de la confirmación
+                    ext_high, ext_low = prev_state.get_extreme_prices()
+                    new_ext_price = ext_high if prev_state.current_trend == 1 else ext_low
+                    new_ext_time = prev_state.orphan_times[-1] if len(prev_state.orphan_times) > 0 else 0
+                else:
+                    # EXTEND_OS: usar el precio actual como nuevo extremo
+                    new_ext_price = prices[0]
+                    new_ext_time = times[0]
+                
+                recon_result = reconcile_previous_day(
+                    silver_path=prev_data_path,
+                    reconciliation_type=recon_type,
+                    new_extreme_price=new_ext_price,
+                    new_extreme_time=new_ext_time,
+                )
+                
+                if recon_result.success:
+                    self._log(f"  ↩️ Reconciliación {recon_type.value}: {prev_data_path.name}")
+                    if recon_result.backup_path:
+                        cleanup_backup(recon_result.backup_path)
+                else:
+                    self._log(f"  ⚠️ Reconciliación fallida: {recon_result.error}")
+
+        # 5. Stitch huérfanos
         stitched = self._stitch_data(prev_state, prices, times, quantities, directions)
         stitched_prices, stitched_times, stitched_quantities, stitched_directions = stitched
 
@@ -572,13 +620,14 @@ class Engine:
             prev_state.last_os_ref,
         )
 
-        # Desempaquetar resultado (21 elementos)
+        # Desempaquetar resultado (23 elementos)
         (
             dc_prices, dc_times, dc_quantities, dc_directions,
             os_prices, os_times, os_quantities, os_directions,
             event_types,
             dc_offsets, os_offsets,
             # Atributos de evento (escalares, zero indirection)
+            reference_prices, reference_times,
             extreme_prices, extreme_times, confirm_prices, confirm_times,
             # Estado final
             n_events, final_trend, final_ext_high, final_ext_low,
@@ -626,6 +675,8 @@ class Engine:
             arrow_table = pa.table({
                 "event_type": pa.array(event_types, type=pa.int8()),
                 # Atributos de evento (escalares, zero indirection)
+                "reference_price": pa.array(reference_prices, type=pa.float64()),
+                "reference_time": pa.array(reference_times, type=pa.int64()),
                 "extreme_price": pa.array(extreme_prices, type=pa.float64()),
                 "extreme_time": pa.array(extreme_times, type=pa.int64()),
                 "confirm_price": pa.array(confirm_prices, type=pa.float64()),

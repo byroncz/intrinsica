@@ -46,9 +46,11 @@ class KernelResult(NamedTuple):
     dc_offsets: ArrayI64
     os_offsets: ArrayI64
     # Atributos de evento (escalares por evento, zero indirection)
-    extreme_prices: ArrayF64      # Precio del extremo (inicio DC)
+    reference_prices: ArrayF64    # Precio del extremo de referencia (del evento N-1)
+    reference_times: ArrayI64     # Timestamp del extremo de referencia
+    extreme_prices: ArrayF64      # Precio del extremo (último tick del OS)
     extreme_times: ArrayI64       # Timestamp del extremo
-    confirm_prices: ArrayF64      # Precio de confirmación (fin DC / inicio OS)
+    confirm_prices: ArrayF64      # Precio de confirmación (último tick del DC)
     confirm_times: ArrayI64       # Timestamp de confirmación
     # Estado final
     n_events: int
@@ -121,7 +123,8 @@ def segment_events_kernel(
             empty_f64, empty_i64, empty_f64, empty_i8,  # OS buffers
             empty_i8,                                    # event_types
             zero_offset, zero_offset,                    # offsets
-            empty_f64, empty_i64, empty_f64, empty_i64,  # attributes (extreme/confirm price/time)
+            empty_f64, empty_i64,                        # reference price/time
+            empty_f64, empty_i64, empty_f64, empty_i64,  # extreme/confirm price/time
             int64(0), init_trend, init_ext_high_price, init_ext_low_price,
             init_last_os_ref, int64(0)
         )
@@ -152,8 +155,10 @@ def segment_events_kernel(
     os_offsets = np.empty(estimated_events + 1, dtype=np.int64)
 
     # Atributos de evento (escalares por evento, elimina indirección list.first())
-    extreme_prices = np.empty(estimated_events, dtype=np.float64)
-    extreme_times = np.empty(estimated_events, dtype=np.int64)
+    reference_prices = np.empty(estimated_events, dtype=np.float64)
+    reference_times = np.empty(estimated_events, dtype=np.int64)
+    extreme_prices = np.full(estimated_events, -1.0, dtype=np.float64)  # -1.0 = provisional
+    extreme_times = np.full(estimated_events, int64(-1), dtype=np.int64)
     confirm_prices = np.empty(estimated_events, dtype=np.float64)
     confirm_times = np.empty(estimated_events, dtype=np.int64)
 
@@ -278,11 +283,19 @@ def segment_events_kernel(
                 os_offsets = new_os_offsets
 
                 # Resize atributos de evento
-                new_extreme_prices = np.empty(new_size, dtype=np.float64)
+                new_reference_prices = np.empty(new_size, dtype=np.float64)
+                new_reference_prices[:n_events] = reference_prices[:n_events]
+                reference_prices = new_reference_prices
+
+                new_reference_times = np.empty(new_size, dtype=np.int64)
+                new_reference_times[:n_events] = reference_times[:n_events]
+                reference_times = new_reference_times
+
+                new_extreme_prices = np.full(new_size, -1.0, dtype=np.float64)
                 new_extreme_prices[:n_events] = extreme_prices[:n_events]
                 extreme_prices = new_extreme_prices
 
-                new_extreme_times = np.empty(new_size, dtype=np.int64)
+                new_extreme_times = np.full(new_size, int64(-1), dtype=np.int64)
                 new_extreme_times[:n_events] = extreme_times[:n_events]
                 extreme_times = new_extreme_times
 
@@ -304,18 +317,22 @@ def segment_events_kernel(
                 ext_low_price = conf_price
                 ext_low_idx = conf_idx
 
-            # --- Cerrar OS del evento anterior ---
+            # --- Cerrar OS del evento anterior (incluye el extremo) ---
             if n_events > 0 and prev_os_start >= 0:
-                for i in range(prev_os_start, prev_ext_idx):
+                for i in range(prev_os_start, prev_ext_idx + 1):  # CAMBIO: +1 para incluir extremo
                     os_prices[os_ptr] = prices[i]
                     os_times[os_ptr] = timestamps[i]
                     os_quantities[os_ptr] = quantities[i]
                     os_directions[os_ptr] = directions[i]
                     os_ptr += 1
                 os_offsets[n_events] = os_ptr
+                
+                # Llenar retrospectivamente extreme_price del evento ANTERIOR
+                extreme_prices[n_events - 1] = prices[prev_ext_idx]
+                extreme_times[n_events - 1] = timestamps[prev_ext_idx]
 
-            # --- Escribir DC del evento actual ---
-            for i in range(prev_ext_idx, conf_idx):
+            # --- Escribir DC del evento actual (excluye extremo, incluye DCC) ---
+            for i in range(prev_ext_idx + 1, conf_idx + 1):  # CAMBIO: +1 para excluir extremo, +1 para incluir DCC
                 dc_prices[dc_ptr] = prices[i]
                 dc_times[dc_ptr] = timestamps[i]
                 dc_quantities[dc_ptr] = quantities[i]
@@ -327,13 +344,15 @@ def segment_events_kernel(
             event_types[n_events] = new_trend
 
             # Registrar atributos del evento (zero indirection)
-            extreme_prices[n_events] = prices[prev_ext_idx]
-            extreme_times[n_events] = timestamps[prev_ext_idx]
+            # reference = extremo que define este DC (pertenece al OS anterior)
+            reference_prices[n_events] = prices[prev_ext_idx]
+            reference_times[n_events] = timestamps[prev_ext_idx]
+            # extreme se llenará retrospectivamente cuando se confirme el siguiente evento
             confirm_prices[n_events] = conf_price
             confirm_times[n_events] = timestamps[conf_idx]
 
-            # Preparar siguiente OS
-            prev_os_start = conf_idx
+            # Preparar siguiente OS (empieza DESPUÉS del DCC)
+            prev_os_start = conf_idx + 1  # CAMBIO: +1 para excluir DCC
             current_trend = new_trend
             last_os_ref = conf_price
             n_events += 1
@@ -349,14 +368,14 @@ def segment_events_kernel(
             os_ptr += 1
         os_offsets[n_events] = os_ptr
 
-    # --- Calcular índice de huérfanos ---
+    # --- Calcular índice de huérfanos (excluye el extremo, que pertenece al OS) ---
     if n_events == 0:
         orphan_start_idx = 0
     else:
         if current_trend == 1:
-            orphan_start_idx = ext_high_idx
+            orphan_start_idx = ext_high_idx + 1  # CAMBIO: +1 para excluir extremo
         else:
-            orphan_start_idx = ext_low_idx
+            orphan_start_idx = ext_low_idx + 1   # CAMBIO: +1 para excluir extremo
 
     # --- Recortar búferes al tamaño real ---
     return (
@@ -372,6 +391,8 @@ def segment_events_kernel(
         dc_offsets[:n_events + 1],
         os_offsets[:n_events + 1] if n_events > 0 else np.zeros(1, dtype=np.int64),
         # Atributos de evento (escalares)
+        reference_prices[:n_events],
+        reference_times[:n_events],
         extreme_prices[:n_events],
         extreme_times[:n_events],
         confirm_prices[:n_events],
