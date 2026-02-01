@@ -79,8 +79,8 @@ class OsMagnitude(BaseIndicator):
 class DcReturn(BaseIndicator):
     """DC Return: Relative price change during the DC phase.
 
-    Formula: (confirm_price[N] - reference_price[N]) / reference_price[N]
-           = dc_magnitude[N] / reference_price[N]
+    Formula: dc_magnitude[N] / reference_price[N]
+           = (confirm_price[N] - reference_price[N]) / reference_price[N]
 
     This measures the return from the start of the DC phase (reference)
     to the end of the DC phase (confirmation/DCC). The sign indicates direction:
@@ -95,11 +95,11 @@ class DcReturn(BaseIndicator):
         description="Relative return of the DC phase. Reference -> DCC.",
         category="event/price",
     )
-    dependencies = []  # Uses Silver columns directly
+    dependencies = ["dc_magnitude"]  # Reutiliza dc_magnitude calculado
 
     def get_expression(self) -> pl.Expr:
         """Return Polars expression for DC return calculation."""
-        return (pl.col("confirm_price") - pl.col("reference_price")) / pl.col("reference_price")
+        return pl.col("dc_magnitude") / pl.col("reference_price")
 
 
 class OsReturn(BaseIndicator):

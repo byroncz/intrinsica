@@ -177,51 +177,35 @@ def get_expression(self) -> pl.Expr:
 | **Módulo**         | `indicators/metrics/event/price.py` |
 | **Estado**         | ✅ Implementado                     |
 | **Categoría**      | `event/price`                       |
+| **Dependencias**   | `dc_magnitude`                      |
 
 ##### Definición Teórica
 
-El DC Return cuantifica el retorno relativo (porcentual) del movimiento de precio durante la fase DC, desde el punto de referencia (inicio del DC) hasta el punto de confirmación (DCC) (Guillaume et al., 1997).
+El DC Return cuantifica el retorno relativo (porcentual) del movimiento de precio durante la fase DC (Guillaume et al., 1997).
 
 **Fórmula canónica:**
 
-$$\text{DC Return}_N = \frac{P_{DCC,N} - P_{REF,N}}{P_{REF,N}} = \frac{P_{DCC,N} - P_{EXT,N-1}}{P_{EXT,N-1}}$$
+$$\text{DC Return}_N = \frac{\text{DC Magnitude}_N}{P_{REF,N}} = \frac{P_{DCC,N} - P_{REF,N}}{P_{REF,N}}$$
 
-Donde:
-
-- $P_{REF,N}$ es el precio de referencia (inicio del DC) = `reference_price[N]` = $P_{EXT,N-1}$ es el precio extremo del evento anterior = `extreme_price[N-1]`
-- $P_{DCC,N}$ es el precio de confirmación (fin del DC) = `confirm_price[N]`
-
-**Unidades:** Adimensional (proporción; multiplicar por 100 para porcentaje).
+**Unidades:** Adimensional (proporción).
 
 **Propiedad teórica:** Por construcción del algoritmo DC, $|\text{DC Return}| \geq \theta$.
-
-**Signo:**
-
-- Positivo para upturns (confirm_price > reference_price)
-- Negativo para downturns (confirm_price < reference_price)
 
 ##### Implementación Práctica
 
 ```python
 def get_expression(self) -> pl.Expr:
-    # DC phase: reference_price → confirm_price
-    return (pl.col("confirm_price") - pl.col("reference_price")) / pl.col("reference_price")
+    return pl.col("dc_magnitude") / pl.col("reference_price")
 ```
 
-**Columnas Silver utilizadas:**
-
-- `reference_price`: Precio al inicio del DC (= extreme_price del evento anterior)
-- `confirm_price`: Precio en el punto de confirmación (DCC)
+**Dependencias:** Requiere que `dc_magnitude` esté calculado previamente.
 
 ##### Salvedades
 
-| Aspecto           | Teoría vs. Práctica                              |                                 |
-| ----------------- | ------------------------------------------------ | ------------------------------- |
-| Magnitud mínima   | Teórico: exactamente θ                           | Práctico: ≥ θ debido a slippage |
-| Signo             | Positivo para upturns, negativo para downturns   |                                 |
-| División por cero | No ocurre: `reference_price` siempre es positivo |                                 |
-
-**Nota terminológica:** En la literatura, $P_{EXT,i}$ a veces se refiere al extremo que _inicia_ el DC (nuestro `reference_price`), no al extremo que _termina_ el OS (nuestro `extreme_price`). La implementación de Intrinseca usa nombres explícitos para evitar esta ambigüedad.
+| Aspecto           | Comportamiento                                |
+| ----------------- | --------------------------------------------- |
+| Magnitud mínima   | ≥ θ debido a slippage                         |
+| División por cero | No ocurre: `reference_price` siempre positivo |
 
 **Referencias:** Guillaume et al. (1997), Tsang (2010).
 
