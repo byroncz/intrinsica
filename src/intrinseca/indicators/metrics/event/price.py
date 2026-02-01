@@ -3,10 +3,14 @@
 Indicators related to price movement magnitude, returns, and spatial extent.
 
 All indicators use Silver Layer columns directly:
-- extreme_price: Price at event origin (extreme point)
-- extreme_time: Timestamp at event origin
-- confirm_price: Price at event confirmation
-- confirm_time: Timestamp at event confirmation
+- reference_price: Price at DC phase origin (= extreme_price of previous event)
+- extreme_price: Price at OS phase end (last tick of price_os)
+- confirm_price: Price at DC phase end / OS phase start (DCC, last tick of price_dc)
+
+Temporal structure of event N:
+    reference_price[N] → DC phase → confirm_price[N] → OS phase → extreme_price[N]
+                                                                         ↓
+                                                              = reference_price[N+1]
 """
 
 import polars as pl
@@ -14,63 +18,107 @@ import polars as pl
 from intrinseca.indicators.base import BaseIndicator, IndicatorMetadata
 
 
-class Overshoot(BaseIndicator):
-    """Overshoot: Magnitude of price movement during the OS phase.
+class DcMagnitude(BaseIndicator):
+    """DC Magnitude: Absolute price change during the DC phase.
 
-    Definition (Directional Change Literature):
-        Overshoot = Next Extreme Price - Confirmation Price
+    Definition (Adegboye et al., 2017 - Attribute A1):
+        DC Magnitude[N] = confirm_price[N] - reference_price[N]
 
-    The Overshoot phase starts at the confirmation point (end of DC event)
-    and ends at the next extreme (start of the next DC event).
+    This is the raw (non-normalized) price change during the DC phase.
+    Equivalent to A1 (DC magnitude) in the canonical taxonomy.
 
-    Note: The last event in a series will have null overshoot since
-    there is no subsequent extreme to close the OS phase.
+    Sign indicates direction:
+    - Positive for upturns (confirm_price > reference_price)
+    - Negative for downturns (confirm_price < reference_price)
+
+    Note: |DC Magnitude| / reference_price = |DC Return|
     """
 
-    name = "overshoot"
+    name = "dc_magnitude"
     metadata = IndicatorMetadata(
-        description="Magnitude of the OS phase (Confirmation -> Next Extreme).",
+        description="Absolute price change during DC phase (A1). Reference -> DCC.",
         category="event/price",
     )
     dependencies = []  # Uses Silver columns directly
 
     def get_expression(self) -> pl.Expr:
-        """Return Polars expression for overshoot calculation."""
-        # extreme_price already exists in Silver (precalculated in kernel)
-        # shift(-1) gets the next event's extreme = end of this OS phase
-        next_ext_price = pl.col("extreme_price").shift(-1)
-        return next_ext_price - pl.col("confirm_price")
+        """Return Polars expression for DC magnitude calculation."""
+        return pl.col("confirm_price") - pl.col("reference_price")
+
+
+class OsMagnitude(BaseIndicator):
+    """OS Magnitude: Absolute price change during the Overshoot phase.
+
+    Definition (Directional Change Literature):
+        OS Magnitude[N] = extreme_price[N] - confirm_price[N]
+
+    The Overshoot phase starts at the confirmation point (DCC) and ends at
+    the extreme point of the same event. Both values are in the same row:
+    - confirm_price[N]: DCC, last tick of price_dc[N]
+    - extreme_price[N]: Last tick of price_os[N], filled retrospectively
+                        when event N+1 is confirmed
+
+    Note: extreme_price[N] = reference_price[N+1] by construction.
+    The last event may have extreme_price = -1.0 (provisional) if the
+    OS phase has not been closed by a subsequent confirmation.
+    """
+
+    name = "os_magnitude"
+    metadata = IndicatorMetadata(
+        description="Absolute price change during OS phase. DCC -> Extreme.",
+        category="event/price",
+    )
+    dependencies = []  # Uses Silver columns directly
+
+    def get_expression(self) -> pl.Expr:
+        """Return Polars expression for OS magnitude calculation."""
+        # Both extreme_price and confirm_price belong to the same event row.
+        return pl.col("extreme_price") - pl.col("confirm_price")
 
 
 class DcReturn(BaseIndicator):
     """DC Return: Relative price change during the DC phase.
 
-    Formula: (Extreme Price - Confirm Price) / Confirm Price
+    Formula: (confirm_price[N] - reference_price[N]) / reference_price[N]
+           = dc_magnitude[N] / reference_price[N]
+
+    This measures the return from the start of the DC phase (reference)
+    to the end of the DC phase (confirmation/DCC). The sign indicates direction:
+    - Positive for upturns (confirm_price > reference_price)
+    - Negative for downturns (confirm_price < reference_price)
+
+    By construction: |DC Return| >= theta (the DC threshold).
     """
 
     name = "dc_return"
     metadata = IndicatorMetadata(
-        description="Return of the DC phase (Extreme -> Confirmation).", category="event/price"
+        description="Relative return of the DC phase. Reference -> DCC.",
+        category="event/price",
     )
     dependencies = []  # Uses Silver columns directly
 
     def get_expression(self) -> pl.Expr:
         """Return Polars expression for DC return calculation."""
-        return (pl.col("extreme_price") - pl.col("confirm_price")) / pl.col("confirm_price")
+        return (pl.col("confirm_price") - pl.col("reference_price")) / pl.col("reference_price")
 
 
 class OsReturn(BaseIndicator):
     """OS Return: Relative price change during the Overshoot phase.
 
-    Formula: Overshoot / Confirm Price
+    Formula: os_magnitude[N] / confirm_price[N]
+           = (extreme_price[N] - confirm_price[N]) / confirm_price[N]
+
+    This measures the return from the DCC to the end of the OS phase,
+    both within the same event row.
     """
 
     name = "os_return"
     metadata = IndicatorMetadata(
-        description="Return of the OS phase (Confirmation -> Next Extreme).", category="event/price"
+        description="Relative return of the OS phase. DCC -> Extreme.",
+        category="event/price",
     )
-    dependencies = ["overshoot"]  # Depends on calculated Overshoot
+    dependencies = ["os_magnitude"]  # Depends on calculated OS Magnitude
 
     def get_expression(self) -> pl.Expr:
         """Return Polars expression for OS return calculation."""
-        return pl.col("overshoot") / pl.col("confirm_price")
+        return pl.col("os_magnitude") / pl.col("confirm_price")

@@ -67,22 +67,66 @@ Estos indicadores se calculan para cada evento DC individual.
 
 ---
 
-#### 2.1.1 Overshoot
+#### 2.1.1 DC Magnitude (A1)
 
 | Atributo           | Valor                               |
 | ------------------ | ----------------------------------- |
-| **Nombre interno** | `overshoot`                         |
+| **Nombre interno** | `dc_magnitude`                      |
 | **Módulo**         | `indicators/metrics/event/price.py` |
 | **Estado**         | ✅ Implementado                     |
 | **Categoría**      | `event/price`                       |
 
 ##### Definición Teórica
 
-El Overshoot mide la magnitud absoluta del movimiento de precio durante la fase OS, es decir, desde el punto de confirmación (DCC) hasta el punto extremo del mismo evento (Glattfelder et al., 2011).
+El DC Magnitude mide el cambio de precio absoluto durante la fase DC, desde el punto de referencia hasta el punto de confirmación (DCC). Es equivalente al atributo A1 en Adegboye et al. (2017).
+
+**Fórmula canónica (A1):**
+
+$$\text{DC Magnitude}_N = P_{DCC,N} - P_{REF,N}$$
+
+Donde:
+
+- $P_{DCC,N}$ es el precio de confirmación del evento $N$ (`confirm_price`)
+- $P_{REF,N}$ es el precio de referencia del evento $N$ (`reference_price`)
+
+**Unidades:** Unidades de precio del activo subyacente.
+
+**Interpretación:** El signo indica la dirección del movimiento:
+
+- Positivo para upturns
+- Negativo para downturns
+
+##### Implementación Práctica
+
+```python
+def get_expression(self) -> pl.Expr:
+    return pl.col("confirm_price") - pl.col("reference_price")
+```
+
+**Columnas Silver utilizadas:** `confirm_price`, `reference_price`
+
+**Relación:** `dc_magnitude / reference_price = dc_return`
+
+**Referencias:** Adegboye et al. (2017) - Atributo A1.
+
+---
+
+#### 2.1.2 OS Magnitude
+
+| Atributo           | Valor                               |
+| ------------------ | ----------------------------------- |
+| **Nombre interno** | `os_magnitude`                      |
+| **Módulo**         | `indicators/metrics/event/price.py` |
+| **Estado**         | ✅ Implementado                     |
+| **Categoría**      | `event/price`                       |
+
+##### Definición Teórica
+
+El OS Magnitude mide la magnitud absoluta del movimiento de precio durante la fase OS, es decir, desde el punto de confirmación (DCC) hasta el punto extremo del mismo evento (Glattfelder et al., 2011).
 
 **Fórmula canónica:**
 
-$$\text{Overshoot}_N = P_{EXT,N} - P_{DCC,N}$$
+$$\text{OS Magnitude}_N = P_{EXT,N} - P_{DCC,N}$$
 
 Donde:
 
@@ -99,38 +143,33 @@ reference_price[N] → DC phase → confirm_price[N] → OS phase → extreme_pr
 
 **Unidades:** Unidades de precio del activo subyacente.
 
-**Interpretación:** Un overshoot positivo indica que el precio continuó moviéndose en la dirección de la tendencia confirmada. La magnitud indica la "rentabilidad potencial" de seguir la tendencia después de la confirmación.
+**Interpretación:** Un OS magnitude positivo indica que el precio continuó moviéndose en la dirección de la tendencia confirmada. La magnitud indica la "rentabilidad potencial" de seguir la tendencia después de la confirmación.
 
 ##### Implementación Práctica
 
 ```python
 def get_expression(self) -> pl.Expr:
     # Ambos valores están en la misma fila del evento N
-    # No se necesita shift: extreme_price[N] es el fin del OS del evento N
     return pl.col("extreme_price") - pl.col("confirm_price")
 ```
 
 **Columnas Silver utilizadas:**
 
-- `extreme_price`: Precio en el punto extremo (fin del OS, precalculado retrospectivamente en kernel)
+- `extreme_price`: Precio en el punto extremo (fin del OS)
 - `confirm_price`: Precio en el punto de confirmación (DCC)
-
-**Mecánica:** No se requiere `shift()`. El kernel asigna `extreme_price[N]` retrospectivamente cuando se confirma el evento N+1, garantizando que `extreme_price[N]` contenga el último tick del OS del evento N.
 
 ##### Salvedades
 
 | Caso                      | Comportamiento                                                                             |
 | ------------------------- | ------------------------------------------------------------------------------------------ |
-| Último evento de la serie | `extreme_price = -1.0` (provisional); Overshoot inválido                                   |
-| Overshoot cero            | Ocurre cuando $P_{EXT,N} = P_{DCC,N}$; indica reversión inmediata sin movimiento adicional |
-
-**Relación con otras columnas:** Por construcción del kernel, `extreme_price[N] = reference_price[N+1]`.
+| Último evento de la serie | `extreme_price = -1.0` (provisional); OS Magnitude inválido                                |
+| OS Magnitude cero         | Ocurre cuando $P_{EXT,N} = P_{DCC,N}$; indica reversión inmediata sin movimiento adicional |
 
 **Referencias:** Glattfelder et al. (2011), Tsang et al. (2015).
 
 ---
 
-#### 2.1.2 DC Return
+#### 2.1.3 DC Return
 
 | Atributo           | Valor                               |
 | ------------------ | ----------------------------------- |
@@ -145,11 +184,11 @@ El DC Return cuantifica el retorno relativo (porcentual) del movimiento de preci
 
 **Fórmula canónica:**
 
-$$\text{DC Return}_N = \frac{P_{DCC,N} - P_{REF,N}}{P_{REF,N}}$$
+$$\text{DC Return}_N = \frac{P_{DCC,N} - P_{REF,N}}{P_{REF,N}} = \frac{P_{DCC,N} - P_{EXT,N-1}}{P_{EXT,N-1}}$$
 
 Donde:
 
-- $P_{REF,N}$ es el precio de referencia (inicio del DC) = `reference_price[N]`
+- $P_{REF,N}$ es el precio de referencia (inicio del DC) = `reference_price[N]` = $P_{EXT,N-1}$ es el precio extremo del evento anterior = `extreme_price[N-1]`
 - $P_{DCC,N}$ es el precio de confirmación (fin del DC) = `confirm_price[N]`
 
 **Unidades:** Adimensional (proporción; multiplicar por 100 para porcentaje).
@@ -176,11 +215,11 @@ def get_expression(self) -> pl.Expr:
 
 ##### Salvedades
 
-| Aspecto           | Teoría vs. Práctica                              |
+| Aspecto           | Teoría vs. Práctica                              |                                 |
 | ----------------- | ------------------------------------------------ | ------------------------------- |
 | Magnitud mínima   | Teórico: exactamente θ                           | Práctico: ≥ θ debido a slippage |
-| Signo             | Positivo para upturns, negativo para downturns   |
-| División por cero | No ocurre: `reference_price` siempre es positivo |
+| Signo             | Positivo para upturns, negativo para downturns   |                                 |
+| División por cero | No ocurre: `reference_price` siempre es positivo |                                 |
 
 **Nota terminológica:** En la literatura, $P_{EXT,i}$ a veces se refiere al extremo que _inicia_ el DC (nuestro `reference_price`), no al extremo que _termina_ el OS (nuestro `extreme_price`). La implementación de Intrinseca usa nombres explícitos para evitar esta ambigüedad.
 
@@ -188,7 +227,7 @@ def get_expression(self) -> pl.Expr:
 
 ---
 
-#### 2.1.3 OS Return
+#### 2.1.4 OS Return
 
 | Atributo           | Valor                               |
 | ------------------ | ----------------------------------- |
@@ -196,7 +235,7 @@ def get_expression(self) -> pl.Expr:
 | **Módulo**         | `indicators/metrics/event/price.py` |
 | **Estado**         | ✅ Implementado                     |
 | **Categoría**      | `event/price`                       |
-| **Dependencias**   | `overshoot`                         |
+| **Dependencias**   | `os_magnitude`                      |
 
 ##### Definición Teórica
 
@@ -204,54 +243,58 @@ El OS Return cuantifica el retorno relativo durante la fase de Overshoot, normal
 
 **Fórmula canónica:**
 
-$$\text{OS Return}_N = \frac{\text{Overshoot}_N}{P_{DCC,N}} = \frac{P_{EXT,N} - P_{DCC,N}}{P_{DCC,N}}$$
+$$\text{OS Return}_N = \frac{\text{OS Magnitude}_N}{P_{DCC,N}} = \frac{P_{EXT,N} - P_{DCC,N}}{P_{DCC,N}}$$
 
 **Unidades:** Adimensional (proporción).
 
-**Interpretación:** Mide la "ganancia" relativa obtenible por un trader que entra en la posición exactamente en el punto de confirmación (DCC) y sale en el punto extremo del mismo evento. Es el indicador más directo de rentabilidad teórica por evento.
+**Interpretación:** Mide la "ganancia" relativa obtenible por un trader que entra en la posición exactamente en el punto de confirmación (DCC) y sale en el punto extremo del mismo evento.
 
 ##### Implementación Práctica
 
 ```python
 def get_expression(self) -> pl.Expr:
-    return pl.col("overshoot") / pl.col("confirm_price")
+    return pl.col("os_magnitude") / pl.col("confirm_price")
 ```
 
-**Dependencia:** Requiere que `overshoot` esté calculado previamente.
+**Dependencia:** Requiere que `os_magnitude` esté calculado previamente.
 
 **Columnas utilizadas:**
 
-- `overshoot`: Indicador calculado (no columna Silver)
+- `os_magnitude`: Indicador calculado
 - `confirm_price`: Columna Silver
 
 ##### Salvedades
 
-| Caso               | Comportamiento                                                                       |
-| ------------------ | ------------------------------------------------------------------------------------ |
-| Último evento      | `null` (heredado de `overshoot`)                                                     |
-| Overshoot cero     | OS Return = 0 exactamente                                                            |
-| Overshoot negativo | Puede ocurrir si el precio revierte antes de hacer nuevo extremo (evento incompleto) |
+| Caso              | Comportamiento                      |
+| ----------------- | ----------------------------------- |
+| Último evento     | `null` (heredado de `os_magnitude`) |
+| OS Magnitude cero | OS Return = 0 exactamente           |
 
 **Referencias:** Tsang et al. (2015).
 
 ---
 
-#### 2.1.4 Duration
+#### 2.1.5 DC Time
 
 | Atributo           | Valor                              |
 | ------------------ | ---------------------------------- |
-| **Nombre interno** | `duration_ns`                      |
+| **Nombre interno** | `dc_time`                          |
 | **Módulo**         | `indicators/metrics/event/time.py` |
 | **Estado**         | ✅ Implementado                    |
 | **Categoría**      | `event/time`                       |
 
 ##### Definición Teórica
 
-Duration mide el intervalo de tiempo físico transcurrido durante la fase DC, desde el momento del punto extremo hasta el momento de la confirmación (Glattfelder et al., 2011).
+DC Time mide el intervalo de tiempo físico transcurrido durante la fase DC, desde el momento del punto de referencia (inicio del DC) hasta el momento de la confirmación (Glattfelder et al., 2011).
 
 **Fórmula canónica:**
 
-$$\text{Duration}_i = T_{DCC,i} - T_{EXT,i}$$
+$$\text{DC Time}_N = T_{DCC,N} - T_{REF,N} = T_{DCC,N} - T_{EXT,N-1}$$
+
+Donde:
+
+- $T_{REF,N}$ es el timestamp del punto de referencia (inicio del DC) = `reference_time[N]` = $T_{EXT,N-1}$
+- $T_{DCC,N}$ es el timestamp de confirmación (fin del DC) = `confirm_time[N]`
 
 **Unidades:** Tiempo (segundos en literatura; nanosegundos en implementación).
 
@@ -261,13 +304,13 @@ $$\text{Duration}_i = T_{DCC,i} - T_{EXT,i}$$
 
 ```python
 def get_expression(self) -> pl.Expr:
-    return pl.col("confirm_time") - pl.col("extreme_time")
+    return pl.col("confirm_time") - pl.col("reference_time")
 ```
 
 **Columnas Silver utilizadas:**
 
-- `confirm_time`: Timestamp de confirmación (nanosegundos desde epoch, Int64)
-- `extreme_time`: Timestamp del extremo (nanosegundos desde epoch, Int64)
+- `confirm_time`: Timestamp de confirmación (DCC, nanosegundos desde epoch, Int64)
+- `reference_time`: Timestamp del punto de referencia (inicio del DC, Int64)
 
 **Unidades de implementación:** Nanosegundos (Int64). Para convertir a segundos: dividir por $10^9$.
 
@@ -276,63 +319,234 @@ def get_expression(self) -> pl.Expr:
 | Caso            | Teoría                | Práctica                                |
 | --------------- | --------------------- | --------------------------------------- |
 | Duración mínima | > 0 (tiempo continuo) | ≥ 0 (puede ser 0 en gaps/flash events)  |
-| Flash event     | No definido           | Duration = 0 cuando $T_{DCC} = T_{EXT}$ |
+| Flash event     | No definido           | DC Time = 0 cuando $T_{DCC} = T_{REF}$  |
 | Overflow        | No aplica             | Int64 soporta ~292 años en nanosegundos |
-
-**Caso especial (A6 - Flash Event):** Cuando `duration_ns = 0`, indica un gap de precio o flash crash donde el extremo y la confirmación ocurren en el mismo tick.
 
 **Referencias:** Glattfelder et al. (2011), Adegboye et al. (2017).
 
 ---
 
-#### 2.1.5 Velocity
+#### 2.1.5 OS Time
 
 | Atributo           | Valor                              |
 | ------------------ | ---------------------------------- |
-| **Nombre interno** | `velocity`                         |
+| **Nombre interno** | `os_time`                          |
 | **Módulo**         | `indicators/metrics/event/time.py` |
 | **Estado**         | ✅ Implementado                    |
 | **Categoría**      | `event/time`                       |
-| **Dependencias**   | `duration_ns`                      |
 
 ##### Definición Teórica
 
-Velocity mide la tasa de cambio de precio por unidad de tiempo durante la fase DC. Representa el "impulso" o "momentum" de la reversión inicial (Adegboye et al., 2017).
+OS Time mide el intervalo de tiempo físico transcurrido durante la fase Overshoot, desde el momento de la confirmación (DCC) hasta el momento del punto extremo.
 
-**Fórmula canónica (A3 / Sigma0):**
+**Fórmula canónica:**
 
-$$\text{Velocity}_i = \frac{A1_i}{A2_i} = \frac{|P_{DCC,i} - P_{EXT,i}|}{T_{DCC,i} - T_{EXT,i}}$$
+$$\text{OS Time}_N = T_{EXT,N} - T_{DCC,N}$$
 
-**Unidades:** Unidades de precio por unidad de tiempo.
+Donde:
 
-**Interpretación:** Velocidades altas se correlacionan estadísticamente con fases OS más cortas, ya que el movimiento agota rápidamente la "energía" direccional del mercado.
+- $T_{DCC,N}$ es el timestamp de confirmación (fin del DC / inicio del OS) = `confirm_time[N]`
+- $T_{EXT,N}$ es el timestamp del punto extremo (fin del OS) = `extreme_time[N]`
+
+**Unidades:** Nanosegundos (Int64).
+
+> [!NOTE]
+> Este indicador **no tiene equivalente directo en la literatura Q1**. Es una extensión de Intrinseca para completitud funcional.
 
 ##### Implementación Práctica
 
 ```python
 def get_expression(self) -> pl.Expr:
-    duration_sec = pl.col("duration_ns") / 1_000_000_000.0
-    price_change = pl.col("confirm_price") - pl.col("extreme_price")
-
-    return pl.when(duration_sec > 0).then(price_change / duration_sec).otherwise(0.0)
+    return pl.col("extreme_time") - pl.col("confirm_time")
 ```
 
-**Dependencia:** Requiere que `duration_ns` esté calculado previamente.
+**Columnas Silver utilizadas:**
 
-**Columnas utilizadas:**
-
-- `duration_ns`: Indicador calculado
-- `confirm_price`, `extreme_price`: Columnas Silver
-
-**Unidades de implementación:** Unidades de precio por segundo.
+- `extreme_time`: Timestamp del punto extremo (fin del OS, Int64)
+- `confirm_time`: Timestamp de confirmación (DCC, Int64)
 
 ##### Salvedades
 
-| Aspecto           | Teoría (A3)                  | Implementación      |
-| ----------------- | ---------------------------- | ------------------- |
-| Valor absoluto    | Sí ($\|P_{DCC} - P_{EXT}\|$) | No (preserva signo) |
-| División por cero | Indefinido                   | Retorna 0.0         |
-| Flash events      | No contemplado               | Velocity = 0        |
+| Caso           | Comportamiento                                            |
+| -------------- | --------------------------------------------------------- |
+| Último evento  | `extreme_time = -1` (provisional) → OS Time inválido (<0) |
+| Overshoot cero | OS Time = 0 exactamente                                   |
+
+**Referencias:** N/A (extensión Intrinseca).
+
+---
+
+#### 2.1.6 Event Time
+
+| Atributo           | Valor                              |
+| ------------------ | ---------------------------------- |
+| **Nombre interno** | `event_time`                       |
+| **Módulo**         | `indicators/metrics/event/time.py` |
+| **Estado**         | ✅ Implementado                    |
+| **Categoría**      | `event/time`                       |
+| **Dependencias**   | `dc_time`, `os_time`               |
+
+##### Definición Teórica
+
+Event Time mide la duración total del evento DC completo (fases DC + OS), desde el punto de referencia hasta el punto extremo.
+
+**Fórmula canónica:**
+
+$$\text{Event Time}_N = \text{DC Time}_N + \text{OS Time}_N = T_{EXT,N} - T_{REF,N}$$
+
+**Unidades:** Nanosegundos (Int64).
+
+##### Implementación Práctica
+
+```python
+def get_expression(self) -> pl.Expr:
+    return pl.col("dc_time") + pl.col("os_time")
+```
+
+**Dependencias:** Requiere que `dc_time` y `os_time` estén calculados previamente.
+
+##### Salvedades
+
+| Caso          | Comportamiento                        |
+| ------------- | ------------------------------------- |
+| Último evento | Heredado de `os_time`: valor inválido |
+
+**Referencias:** N/A (extensión Intrinseca).
+
+---
+
+#### 2.1.8 DC Velocity (A3)
+
+| Atributo           | Valor                              |
+| ------------------ | ---------------------------------- |
+| **Nombre interno** | `dc_velocity`                      |
+| **Módulo**         | `indicators/metrics/event/time.py` |
+| **Estado**         | ✅ Implementado                    |
+| **Categoría**      | `event/time`                       |
+| **Dependencias**   | `dc_time`, `dc_magnitude`          |
+
+##### Definición Teórica
+
+DC Velocity mide la tasa de cambio de precio por unidad de tiempo durante la fase DC. Representa el "impulso" o "momentum" de la reversión inicial (Adegboye et al., 2017).
+
+**Fórmula canónica (A3 / σ₀):**
+
+$$\text{DC Velocity}_N = \frac{A1_N}{A2_N} = \frac{P_{DCC,N} - P_{REF,N}}{T_{DCC,N} - T_{REF,N}} = \frac{\text{dc\_magnitude}}{\text{dc\_time}}$$
+
+**Unidades:** Unidades de precio por segundo.
+
+**Interpretación:** Velocidades altas se correlacionan estadísticamente con fases OS más cortas.
+
+##### Implementación Práctica
+
+```python
+def get_expression(self) -> pl.Expr:
+    dc_time_sec = pl.col("dc_time") / 1_000_000_000.0
+
+    return pl.when(dc_time_sec > 0).then(
+        pl.col("dc_magnitude") / dc_time_sec
+    ).otherwise(0.0)
+```
+
+**Dependencias:** Requiere `dc_time` y `dc_magnitude` calculados previamente.
+
+##### Salvedades
+
+| Aspecto           | Comportamiento |
+| ----------------- | -------------- |
+| División por cero | Retorna 0.0    |
+| Flash events      | Velocity = 0   |
+
+**Referencias:** Adegboye et al. (2017) - Atributo A3.
+
+---
+
+#### 2.1.9 OS Velocity
+
+| Atributo           | Valor                              |
+| ------------------ | ---------------------------------- |
+| **Nombre interno** | `os_velocity`                      |
+| **Módulo**         | `indicators/metrics/event/time.py` |
+| **Estado**         | ✅ Implementado                    |
+| **Categoría**      | `event/time`                       |
+| **Dependencias**   | `os_time`, `os_magnitude`          |
+
+##### Definición Teórica
+
+OS Velocity mide la tasa de cambio de precio por unidad de tiempo durante la fase Overshoot.
+
+**Fórmula:**
+
+$$\text{OS Velocity}_N = \frac{\text{OS Magnitude}_N}{\text{OS Time}_N} = \frac{P_{EXT,N} - P_{DCC,N}}{T_{EXT,N} - T_{DCC,N}}$$
+
+**Unidades:** Unidades de precio por segundo.
+
+##### Implementación Práctica
+
+```python
+def get_expression(self) -> pl.Expr:
+    os_time_sec = pl.col("os_time") / 1_000_000_000.0
+
+    return pl.when(os_time_sec > 0).then(
+        pl.col("os_magnitude") / os_time_sec
+    ).otherwise(0.0)
+```
+
+**Dependencias:** Requiere `os_time` y `os_magnitude` calculados previamente.
+
+##### Salvedades
+
+| Aspecto           | Comportamiento      |
+| ----------------- | ------------------- |
+| División por cero | Retorna 0.0         |
+| Último evento     | Heredado de os_time |
+
+**Referencias:** N/A (extensión Intrinseca).
+
+---
+
+#### 2.1.10 Event Velocity
+
+| Atributo           | Valor                              |
+| ------------------ | ---------------------------------- |
+| **Nombre interno** | `event_velocity`                   |
+| **Módulo**         | `indicators/metrics/event/time.py` |
+| **Estado**         | ✅ Implementado                    |
+| **Categoría**      | `event/time`                       |
+| **Dependencias**   | `event_time`                       |
+
+##### Definición Teórica
+
+Event Velocity mide la tasa de cambio de precio total del evento completo.
+
+**Fórmula:**
+
+$$\text{Event Velocity}_N = \frac{P_{EXT,N} - P_{REF,N}}{\text{Event Time}_N}$$
+
+**Unidades:** Unidades de precio por segundo.
+
+##### Implementación Práctica
+
+```python
+def get_expression(self) -> pl.Expr:
+    event_time_sec = pl.col("event_time") / 1_000_000_000.0
+    total_magnitude = pl.col("extreme_price") - pl.col("reference_price")
+
+    return pl.when(event_time_sec > 0).then(
+        total_magnitude / event_time_sec
+    ).otherwise(0.0)
+```
+
+**Dependencias:** Requiere `event_time` calculado previamente.
+
+##### Salvedades
+
+| Aspecto           | Comportamiento         |
+| ----------------- | ---------------------- |
+| División por cero | Retorna 0.0            |
+| Último evento     | Heredado de event_time |
+
+**Referencias:** N/A (extensión Intrinseca).
 
 **Discrepancia:** La definición canónica de A3 usa valor absoluto. La implementación actual preserva el signo del cambio de precio, lo que permite distinguir upturns (positivo) de downturns (negativo).
 

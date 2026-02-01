@@ -8,50 +8,60 @@ Contains all indicator implementations organized by category:
 - summary/stats: Summary statistics
 """
 
-from .event.price import DcReturn, OsReturn, Overshoot
+from .event.price import DcMagnitude, DcReturn, OsMagnitude, OsReturn
 from .event.tick import RunsCount
-from .event.time import Duration, Velocity
-from .summary.stats import TMV, AvgDuration, AvgOvershoot, AvgReturn, UpturnRatio, VolatilityDC
+from .event.time import DcTime, DcVelocity, EventTime, EventVelocity, OsTime, OsVelocity
+from .summary.stats import TMV, AvgDcTime, AvgOsMagnitude, AvgReturn, UpturnRatio, VolatilityDC
 
 
 def register_all(registry):
     """Registers all standard metrics to the provided registry."""
     # Event/Price (event-level)
-    registry.register(Overshoot())
+    registry.register(DcMagnitude())
+    registry.register(OsMagnitude())
     registry.register(DcReturn())
     registry.register(OsReturn())
 
     # Event/Time (event-level)
-    registry.register(Duration())
-    registry.register(Velocity())
+    registry.register(DcTime())
+    registry.register(OsTime())
+    registry.register(EventTime())
+    registry.register(DcVelocity())
+    registry.register(OsVelocity())
+    registry.register(EventVelocity())
 
     # Event/Tick (event-level)
     registry.register(RunsCount())
 
     # Summary/Stats (aggregation)
     registry.register(TMV())
-    registry.register(AvgDuration())
+    registry.register(AvgDcTime())
     registry.register(AvgReturn())
-    registry.register(AvgOvershoot())
+    registry.register(AvgOsMagnitude())
     registry.register(VolatilityDC())
     registry.register(UpturnRatio())
 
 
 __all__ = [
     # Event/Price
-    "Overshoot",
+    "DcMagnitude",
+    "OsMagnitude",
     "DcReturn",
     "OsReturn",
     # Event/Time
-    "Duration",
-    "Velocity",
+    "DcTime",
+    "OsTime",
+    "EventTime",
+    "DcVelocity",
+    "OsVelocity",
+    "EventVelocity",
     # Event/Tick
     "RunsCount",
     # Summary/Stats
     "TMV",
-    "AvgDuration",
+    "AvgDcTime",
     "AvgReturn",
-    "AvgOvershoot",
+    "AvgOsMagnitude",
     "VolatilityDC",
     "UpturnRatio",
     # Registration

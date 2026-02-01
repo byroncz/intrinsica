@@ -25,20 +25,20 @@ class TMV(BaseIndicator):
         return pl.col("dc_return").abs().sum()
 
 
-class AvgDuration(BaseIndicator):
+class AvgDcTime(BaseIndicator):
     """Average duration of DC phases."""
 
-    name = "avg_duration"
+    name = "avg_dc_time"
     metadata = IndicatorMetadata(
         description="Average duration of DC phases in nanoseconds.",
         category="summary/stats",
         is_event_level=False,
     )
-    dependencies = ["duration_ns"]
+    dependencies = ["dc_time"]
 
     def get_expression(self) -> pl.Expr:
-        """Return Polars expression for average duration."""
-        return pl.col("duration_ns").mean()
+        """Return Polars expression for average DC time."""
+        return pl.col("dc_time").mean()
 
 
 class AvgReturn(BaseIndicator):
@@ -55,18 +55,18 @@ class AvgReturn(BaseIndicator):
         return pl.col("dc_return").mean()
 
 
-class AvgOvershoot(BaseIndicator):
-    """Average overshoot magnitude."""
+class AvgOsMagnitude(BaseIndicator):
+    """Average OS magnitude (overshoot)."""
 
-    name = "avg_overshoot"
+    name = "avg_os_magnitude"
     metadata = IndicatorMetadata(
-        description="Average overshoot magnitude.", category="summary/stats", is_event_level=False
+        description="Average OS magnitude.", category="summary/stats", is_event_level=False
     )
-    dependencies = ["overshoot"]
+    dependencies = ["os_magnitude"]
 
     def get_expression(self) -> pl.Expr:
-        """Return Polars expression for average overshoot."""
-        return pl.col("overshoot").mean()
+        """Return Polars expression for average OS magnitude."""
+        return pl.col("os_magnitude").mean()
 
 
 class VolatilityDC(BaseIndicator):
