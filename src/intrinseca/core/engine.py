@@ -1185,7 +1185,9 @@ class Engine:
         # 3. Buscar estado del mes anterior (si existe)
         from calendar import monthrange
 
-        # Último día del mes anterior
+        from .state import find_previous_month_state
+
+        # Calcular mes anterior
         if month == 1:
             prev_year, prev_month = year - 1, 12
         else:
@@ -1194,12 +1196,12 @@ class Engine:
         _, prev_last_day = monthrange(prev_year, prev_month)
         prev_date = date(prev_year, prev_month, prev_last_day)
 
-        prev_result = find_previous_state(
+        prev_result = find_previous_month_state(
             self.config.silver_base_path,
             ticker,
             self.config.theta,
-            prev_date,
-            max_lookback=31,  # Buscar hasta un mes atrás
+            year,
+            month,
         )
 
         if prev_result:

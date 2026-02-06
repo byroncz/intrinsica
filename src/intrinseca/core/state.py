@@ -493,6 +493,56 @@ def find_previous_state(
     return None
 
 
+def find_previous_month_state(
+    base_path: Path,
+    ticker: str,
+    theta: float,
+    year: int,
+    month: int,
+) -> tuple[Path, DCState] | None:
+    """Busca el archivo de estado del mes anterior (para particionado mensual).
+
+    A diferencia de find_previous_state() que busca por días, esta función
+    busca el estado mensual directamente en month={MM}/state_*.arrow
+
+    Args:
+    ----
+        base_path: Ruta base del datalake Silver
+        ticker: Símbolo del instrumento
+        theta: Umbral del algoritmo DC
+        year: Año del mes actual
+        month: Mes actual (1-12)
+
+    Returns:
+    -------
+        Tuple (path, state) si se encuentra, None en caso contrario
+
+    """
+    # Calcular mes anterior
+    if month == 1:
+        prev_year, prev_month = year - 1, 12
+    else:
+        prev_year, prev_month = year, month - 1
+
+    theta_str = format_theta(theta)
+
+    # Ruta al estado mensual (sin day=)
+    state_path = (
+        base_path
+        / ticker
+        / f"theta={theta_str}"
+        / f"year={prev_year}"
+        / f"month={prev_month:02d}"
+        / f"state_{ticker}_{theta_str}.arrow"
+    )
+
+    state = load_state(state_path)
+    if state is not None:
+        return (state_path, state)
+
+    return None
+
+
 def create_empty_state(process_date: date) -> DCState:
     """Crea un estado vacío para iniciar el procesamiento.
 
