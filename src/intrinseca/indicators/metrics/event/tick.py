@@ -39,17 +39,34 @@ def _count_runs(prices: list, event_type: int, theta: float = 0.005) -> int:
 
 
 class RunsCount(BaseIndicator):
-    """Count directional grid crossings (runs) during the OS phase."""
+    """Count directional grid crossings (runs) during the OS phase.
+
+    A "run" occurs when the price moves at least theta in the direction
+    of the trend from the last reference point.
+
+    Note: This indicator requires theta as a parameter to match the
+    threshold used in DC processing.
+    """
 
     name = "runs_count"
     metadata = IndicatorMetadata(
-        description="Number of directional grid crossings during the event.", category="event/tick"
+        description="Number of directional grid crossings during the event.",
+        category="event/tick",
     )
+    dependencies = []
+
+    def __init__(self, theta: float = 0.005):
+        """Initialize Runs Count indicator.
+
+        Args:
+            theta: DC threshold for grid crossing (default: 0.5%)
+        """
+        self.theta = theta
 
     def get_expression(self) -> pl.Expr:
         """Return Polars expression for runs count calculation."""
-        # Use map_elements to apply the runs counting logic
-        # This is slower than pure Polars but correct
+        theta = self.theta
         return pl.struct(["price_os", "event_type"]).map_elements(
-            lambda row: _count_runs(row["price_os"], row["event_type"]), return_dtype=pl.Int64
+            lambda row: _count_runs(row["price_os"], row["event_type"], theta),
+            return_dtype=pl.Int64,
         )

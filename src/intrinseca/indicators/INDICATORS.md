@@ -227,10 +227,10 @@ def get_expression(self) -> pl.Expr:
 
 ##### Salvedades
 
-| Caso              | Comportamiento                                                  |
-| ----------------- | --------------------------------------------------------------- |
-| Último evento     | `os_magnitude` puede ser inválido → `event_magnitude` inválido  |
-| Evento sin OS     | `event_magnitude = dc_magnitude` exactamente                    |
+| Caso          | Comportamiento                                                 |
+| ------------- | -------------------------------------------------------------- |
+| Último evento | `os_magnitude` puede ser inválido → `event_magnitude` inválido |
+| Evento sin OS | `event_magnitude = dc_magnitude` exactamente                   |
 
 **Referencias:** Extensión Intrinseca basada en Glattfelder et al. (2011).
 
@@ -353,6 +353,7 @@ $$\text{Slippage}_N = P_{DCC,N} - P_{REF,N} \times (1 + \text{event\_type} \time
 **Unidades:** Unidades de precio del activo subyacente.
 
 **Interpretación:**
+
 - Slippage positivo → El precio "saltó" más allá del umbral teórico
 - Slippage ≈ 0 → Mercado continuo con alta liquidez
 - Slippage alto → Gaps, flash events, o baja liquidez
@@ -371,16 +372,17 @@ def get_expression(self) -> pl.Expr:
 ```
 
 **Columnas Silver utilizadas:**
+
 - `confirm_price`: Precio real de confirmación (conservador)
 - `reference_price`: Precio extremo del evento anterior
 - `event_type`: Dirección del evento (+1 upturn, -1 downturn)
 
 ##### Salvedades
 
-| Aspecto                | Comportamiento                                           |
-| ---------------------- | -------------------------------------------------------- |
-| Slippage siempre ≥ 0   | Por construcción (política conservadora selecciona el mejor precio) |
-| Dependencia de θ       | Debe coincidir con el θ usado en el procesamiento        |
+| Aspecto              | Comportamiento                                                      |
+| -------------------- | ------------------------------------------------------------------- |
+| Slippage siempre ≥ 0 | Por construcción (política conservadora selecciona el mejor precio) |
+| Dependencia de θ     | Debe coincidir con el θ usado en el procesamiento                   |
 
 **Referencias:** Extensión Intrinseca.
 
@@ -415,6 +417,7 @@ $$\text{Slippage Real}_N = P_{worst} - P_{REF,N} \times (1 - \theta)$$
 **Unidades:** Unidades de precio del activo subyacente.
 
 **Interpretación:**
+
 - Mide el máximo slippage posible que un trader pudo haber experimentado
 - La diferencia `(Slippage Real - Slippage Facial)` indica la **dispersión de precios** en el instante de confirmación (ruido de microestructura)
 - Si `Real == Facial`, había un solo precio en el instante de confirmación
@@ -442,6 +445,7 @@ def get_expression(self) -> pl.Expr:
 ```
 
 **Columnas Silver utilizadas:**
+
 - `price_dc`: Lista de precios durante la fase DC
 - `time_dc`: Lista de timestamps durante la fase DC
 - `confirm_time`: Timestamp de confirmación
@@ -450,19 +454,19 @@ def get_expression(self) -> pl.Expr:
 
 ##### Salvedades
 
-| Aspecto                  | Comportamiento                                           |
-| ------------------------ | -------------------------------------------------------- |
+| Aspecto                    | Comportamiento                                                                                                       |
+| -------------------------- | -------------------------------------------------------------------------------------------------------------------- |
 | Requiere corrección kernel | El kernel debe incluir TODOS los ticks del instante de confirmación en `price_dc` (corregido via `last_same_ts_idx`) |
-| Rendimiento              | Usa `map_elements` (Python puro), más lento que expresiones nativas |
-| Dependencia de θ         | Debe coincidir con el θ usado en el procesamiento        |
+| Rendimiento                | Usa `map_elements` (Python puro), más lento que expresiones nativas                                                  |
+| Dependencia de θ           | Debe coincidir con el θ usado en el procesamiento                                                                    |
 
 ##### Relación con Slippage Facial
 
-| Escenario                        | Slippage Facial | Slippage Real |
-| -------------------------------- | --------------- | ------------- |
-| Un solo tick en confirmación     | X               | X (iguales)   |
-| Múltiples ticks, mismo precio    | X               | X (iguales)   |
-| Múltiples ticks, precios diversos| Conservador     | Peor caso     |
+| Escenario                         | Slippage Facial | Slippage Real |
+| --------------------------------- | --------------- | ------------- |
+| Un solo tick en confirmación      | X               | X (iguales)   |
+| Múltiples ticks, mismo precio     | X               | X (iguales)   |
+| Múltiples ticks, precios diversos | Conservador     | Peor caso     |
 
 **Referencias:** Extensión Intrinseca.
 
@@ -1396,17 +1400,17 @@ $$\text{SMQ} = \frac{|\text{OS}|}{|\text{DC}|}$$
 | Avg Overshoot    | ❌         | ✅           | -         |
 | Volatility DC    | ✅         | ✅           | -         |
 | Upturn Ratio     | ❌         | ✅           | -         |
-| TM               | ✅         | ❌           | Alta      |
-| TMV (por evento) | ✅         | ❌           | Alta      |
-| OSV              | ✅         | ❌           | Alta      |
+| TM (Total Move)  | ✅         | ✅           | -         |
+| TMV (por evento) | ✅         | ✅           | -         |
+| OSV              | ✅         | ✅           | -         |
 | aTMV             | ✅         | ❌           | Media     |
-| NDC              | ✅         | ❌           | Alta      |
-| AT               | ✅         | ❌           | Media     |
-| A1 (DC Price)    | ✅         | ❌           | Alta      |
-| A4               | ✅         | ❌           | Media     |
-| A5               | ✅         | ❌           | Media     |
-| A6               | ✅         | ❌           | Media     |
-| CDC              | ✅         | ❌           | Alta      |
+| NDC              | ✅         | ✅           | -         |
+| AT               | ✅         | ✅           | -         |
+| A1 (DC Price)    | ✅         | ✅           | -         |
+| A4               | ✅         | ✅           | -         |
+| A5               | ✅         | ✅           | -         |
+| A6               | ✅         | ✅           | -         |
+| CDC              | ✅         | ✅           | -         |
 | mRV              | ✅         | ❌           | Baja      |
 | SMQ              | ✅         | ❌           | Baja      |
 
@@ -1444,14 +1448,15 @@ Tsang, E. P. K., & Ma, S. (2021). _Distribution of aTMV, an empirical study_. Wo
 
 ## 7. Historial de Revisiones
 
-| Versión | Fecha      | Autor       | Descripción                                                                                                     |
-| ------- | ---------- | ----------- | --------------------------------------------------------------------------------------------------------------- |
-| 1.0.0   | 2026-01-31 | Claude Code | Documento inicial                                                                                               |
-| 1.1.0   | 2026-01-31 | Claude Code | Refactorización: primitivas movidas a `core/DC_FRAMEWORK.md`; nueva introducción orientada a indicadores        |
-| 1.2.0   | 2026-01-31 | Claude Code | Agregada estructura Teoría/Práctica/Salvedades a cada indicador implementado; código de implementación incluido |
-| 1.3.0   | 2026-02-01 | Claude Code | Agregado Event Magnitude (§2.1.3); actualizado DAG de dependencias y matriz de cobertura; renumeración de secciones |
-| 1.4.0   | 2026-02-01 | Claude Code | Agregado DC Slippage Facial (§2.1.6); documentación de viabilidad de Slippage Real |
-| 1.5.0   | 2026-02-01 | Claude Code | Agregado DC Slippage Real (§2.1.7) tras corrección de kernel para incluir todos los ticks del instante de confirmación |
+| Versión | Fecha      | Autor       | Descripción                                                                                                                                                                                                     |
+| ------- | ---------- | ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1.0.0   | 2026-01-31 | Claude Code | Documento inicial                                                                                                                                                                                               |
+| 1.1.0   | 2026-01-31 | Claude Code | Refactorización: primitivas movidas a `core/DC_FRAMEWORK.md`; nueva introducción orientada a indicadores                                                                                                        |
+| 1.2.0   | 2026-01-31 | Claude Code | Agregada estructura Teoría/Práctica/Salvedades a cada indicador implementado; código de implementación incluido                                                                                                 |
+| 1.3.0   | 2026-02-01 | Claude Code | Agregado Event Magnitude (§2.1.3); actualizado DAG de dependencias y matriz de cobertura; renumeración de secciones                                                                                             |
+| 1.4.0   | 2026-02-01 | Claude Code | Agregado DC Slippage Facial (§2.1.6); documentación de viabilidad de Slippage Real                                                                                                                              |
+| 1.5.0   | 2026-02-01 | Claude Code | Agregado DC Slippage Real (§2.1.7) tras corrección de kernel para incluir todos los ticks del instante de confirmación                                                                                          |
+| 1.6.0   | 2026-02-05 | Claude Code | Implementados 10 indicadores: TotalMove, TmvEvent, OsvEvent, A1DcPriceAbs, A4PrevDccPrice, A5PrevOsFlag, A6FlashEvent, Ndc, Cdc, AccumulatedTime. Corregido θ en RunsCount. Cobertura: 29/32 indicadores (91%). |
 
 ---
 

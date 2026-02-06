@@ -532,13 +532,13 @@ El Core de Intrinseca implementa una arquitectura de tres capas optimizada para 
 
 **Módulos del Core:**
 
-| Módulo | Archivo | Responsabilidad |
-|--------|---------|-----------------|
-| Engine | `engine.py` | Orquestación Bronze→Silver, gestión de pipeline |
-| Kernel | `kernel.py` | Segmentación DC con Numba JIT, O(n) |
-| State | `state.py` | Persistencia de huérfanos y estado algorítmico |
-| Reconciliation | `reconciliation.py` | Corrección retroactiva de eventos |
-| Convergence | `convergence.py` | Validación de determinismo |
+| Módulo         | Archivo             | Responsabilidad                                 |
+| -------------- | ------------------- | ----------------------------------------------- |
+| Engine         | `engine.py`         | Orquestación Bronze→Silver, gestión de pipeline |
+| Kernel         | `kernel.py`         | Segmentación DC con Numba JIT, O(n)             |
+| State          | `state.py`          | Persistencia de huérfanos y estado algorítmico  |
+| Reconciliation | `reconciliation.py` | Corrección retroactiva de eventos               |
+| Convergence    | `convergence.py`    | Validación de determinismo                      |
 
 ---
 
@@ -551,6 +551,7 @@ El kernel Numba JIT es el corazón del sistema. Las siguientes capacidades han s
 **Problema:** En datos de alta frecuencia, múltiples ticks pueden tener el mismo timestamp (resolución de milisegundos o microsegundos). Sin una regla determinista, diferentes ejecuciones podrían producir resultados diferentes.
 
 **Solución implementada:**
+
 - En **upturn**: seleccionar el precio **mínimo** que cruza θ (más conservador)
 - En **downturn**: seleccionar el precio **máximo** que cruza θ (más conservador)
 
@@ -571,11 +572,13 @@ else:
 #### 8.2.2 Inclusión Completa del Instante de Confirmación
 
 **Problema:** Ticks con el mismo timestamp que el DCC podrían quedar en fases diferentes (DC vs OS), causando:
+
 - Violación semántica (ticks contemporáneos en eventos distintos)
 - `os_time = 0` espurio (velocidades infinitas)
 - Overshoots "fantasma"
 
 **Solución implementada:**
+
 ```python
 # Se trackean dos índices:
 # - best_idx: tick con precio más conservador (para confirm_price)
@@ -590,6 +593,7 @@ conf_idx = last_same_ts_idx  # Todos van al DC
 **Problema:** La cantidad de eventos DC es impredecible y depende de la volatilidad del mercado.
 
 **Solución implementada:**
+
 - Estimación inicial con factor de seguridad 3x
 - Resize dinámico duplicando capacidad cuando se agota
 - Orden correcto: cerrar OS anterior **antes** del resize
@@ -611,6 +615,7 @@ if n_events >= estimated_events:
 **Problema:** El precio extremo de un evento solo se conoce cuando se confirma el evento **siguiente**.
 
 **Solución implementada:**
+
 ```python
 # Al confirmar evento N+1, llenar extreme_price del evento N
 extreme_prices[n_events - 1] = prices[prev_ext_idx]
@@ -624,6 +629,7 @@ El último evento queda con `extreme_price = -1.0` (provisional) hasta la reconc
 **Problema:** Loops tick-a-tick son lentos incluso con Numba.
 
 **Solución implementada:**
+
 ```python
 # Antes (loop):
 for i in range(prev_os_start, prev_ext_idx + 1):
@@ -643,6 +649,7 @@ os_ptr += os_length
 **Problema:** Edge cases pueden producir longitudes negativas si `prev_os_start > prev_ext_idx`.
 
 **Solución implementada:**
+
 ```python
 os_length = prev_ext_idx + 1 - prev_os_start
 if os_length > 0:
@@ -672,6 +679,7 @@ Día N                          Día N+1
 ```
 
 Los ticks huérfanos se persisten en Arrow IPC con metadata algorítmica:
+
 - `current_trend`: Tendencia activa (1/-1/0)
 - `last_os_ref`: Precio de referencia
 - `orphan_prices/times/quantities/directions`: Ticks pendientes
@@ -717,6 +725,7 @@ for days_back in range(1, MAX_LOOKBACK_DAYS + 1):
 #### 8.4.1 Tipos de Reconciliación
 
 **Problema:** Al final del día, un evento puede parecer confirmado pero al día siguiente se determina que fue:
+
 - Una reversión real (CONFIRM_REVERSAL)
 - Una falsa alarma (EXTEND_OS)
 
@@ -730,6 +739,7 @@ class ReconciliationType(Enum):
 ```
 
 **Lógica de detección:**
+
 ```python
 if trend == 1:  # Alcista
     if first_price <= ext_high * (1 - theta):
@@ -741,6 +751,7 @@ if trend == 1:  # Alcista
 #### 8.4.2 Escritura Atómica con Backup
 
 **Mitigación de corrupción:**
+
 1. Crear backup del archivo original
 2. Escribir a archivo temporal
 3. Rename atómico
@@ -764,6 +775,7 @@ temp_path.rename(silver_path)  # Atómico en POSIX
 **Problema:** Bugs en el kernel pueden producir estructuras inconsistentes.
 
 **Solución implementada:**
+
 ```python
 # engine.py - Validación antes de escribir Parquet
 expected_offset_len = n_events + 1
@@ -804,6 +816,7 @@ def validate(self) -> tuple[bool, list[str]]:
 **Problema:** El procesamiento puede detenerse prematuramente sin advertencia.
 
 **Solución implementada:**
+
 ```python
 if len(results) < n_days:
     warnings.warn(
@@ -843,15 +856,15 @@ if np.any(remaining):
 
 ### 8.7 Optimizaciones de Rendimiento
 
-| Optimización | Técnica | Impacto |
-|--------------|---------|---------|
-| Compilación JIT | Numba `@njit(cache=True)` | ~100x vs Python puro |
-| Sin GIL | `nogil=True` | Paralelismo potencial |
-| Fast math | `fastmath=True` | ~10% más rápido |
-| Zero-copy | Arrow ListArray desde offsets | Sin copia de datos |
-| Memory mapping | `memory_map=True` en lectura | Reduce uso de RAM |
-| Pre-cálculo | `theta_up = 1.0 + theta` | Evita multiplicaciones en loop |
-| Warmup | `warmup_kernel()` | Evita latencia JIT en producción |
+| Optimización    | Técnica                       | Impacto                          |
+| --------------- | ----------------------------- | -------------------------------- |
+| Compilación JIT | Numba `@njit(cache=True)`     | ~100x vs Python puro             |
+| Sin GIL         | `nogil=True`                  | Paralelismo potencial            |
+| Fast math       | `fastmath=True`               | ~10% más rápido                  |
+| Zero-copy       | Arrow ListArray desde offsets | Sin copia de datos               |
+| Memory mapping  | `memory_map=True` en lectura  | Reduce uso de RAM                |
+| Pre-cálculo     | `theta_up = 1.0 + theta`      | Evita multiplicaciones en loop   |
+| Warmup          | `warmup_kernel()`             | Evita latencia JIT en producción |
 
 ---
 
@@ -868,6 +881,7 @@ if np.any(remaining):
 **Fenómeno:** Caídas/subidas súbitas con recuperación rápida.
 
 **Manejo:**
+
 - Múltiples eventos DC en rápida sucesión
 - Overshoots potencialmente muy pequeños o cero
 - El sistema captura la microestructura completa
@@ -877,6 +891,7 @@ if np.any(remaining):
 **Fenómeno:** Períodos sin ticks (noches, fines de semana).
 
 **Manejo:**
+
 - Lookback de 7 días para encontrar estado
 - Stitching preserva continuidad algorítmica
 - Reconciliación corrige eventos al cruzar gaps
@@ -886,6 +901,7 @@ if np.any(remaining):
 **Fenómeno:** Miles de ticks por segundo con mismo timestamp.
 
 **Manejo:**
+
 - Regla conservadora determinista
 - Inclusión completa del instante de confirmación
 - Vectorización para mantener rendimiento
@@ -896,26 +912,91 @@ if np.any(remaining):
 
 Esta sección documenta los bugs más significativos encontrados y corregidos durante el desarrollo:
 
-| Bug | Impacto | Solución |
-|-----|---------|----------|
-| Resize antes de cerrar OS | Offsets con valores no inicializados | Reordenar: cerrar OS → resize |
-| conf_idx usando best_idx | Ticks del mismo timestamp en fases diferentes | Usar last_same_ts_idx |
-| Terminación prematura por convergencia | Solo 13/30 días procesados | Flag `stop_on_convergence=False` |
-| Falta de validación post-kernel | Datos corruptos escritos | Validación exhaustiva antes de write |
-| os_length negativo potencial | Comportamiento indefinido | Validación `if os_length > 0` |
-| Sin warning por procesamiento incompleto | Fallo silencioso | `warnings.warn()` si `results < n_days` |
+| Bug                                      | Impacto                                       | Solución                                |
+| ---------------------------------------- | --------------------------------------------- | --------------------------------------- |
+| Resize antes de cerrar OS                | Offsets con valores no inicializados          | Reordenar: cerrar OS → resize           |
+| conf_idx usando best_idx                 | Ticks del mismo timestamp en fases diferentes | Usar last_same_ts_idx                   |
+| Terminación prematura por convergencia   | Solo 13/30 días procesados                    | Flag `stop_on_convergence=False`        |
+| Falta de validación post-kernel          | Datos corruptos escritos                      | Validación exhaustiva antes de write    |
+| os_length negativo potencial             | Comportamiento indefinido                     | Validación `if os_length > 0`           |
+| Sin warning por procesamiento incompleto | Fallo silencioso                              | `warnings.warn()` si `results < n_days` |
+
+---
+
+### 8.10 Estrategias de Particionado
+
+El Engine soporta dos estrategias de particionado para la salida Silver:
+
+#### 8.10.1 Particionado Diario (por defecto)
+
+**Método:** `process_day()` / `process_date_range()`
+
+```
+{base}/{ticker}/theta={θ}/year={YYYY}/month={MM}/day={DD}/data.parquet
+```
+
+**Características:**
+
+- Un archivo Parquet por día
+- Huérfanos persistidos entre días (`state.arrow` por día)
+- Menor uso de RAM (~50MB por día)
+- Soporta análisis de convergencia intra-procesamiento
+
+**Caso de uso:** Procesamiento streaming, recursos limitados, análisis diario.
+
+#### 8.10.2 Particionado Mensual
+
+**Método:** `process_month()`
+
+```
+{base}/{ticker}/theta={θ}/year={YYYY}/month={MM}/data.parquet
+```
+
+**Características:**
+
+- Un archivo Parquet por mes (sin subdirectorio `day=`)
+- Huérfanos solo entre meses
+- Una sola invocación del kernel Numba
+- Mayor uso de RAM (~1.5GB para BTCUSDT)
+
+**Caso de uso:** Batch processing, reprocesamiento masivo.
+
+#### 8.10.3 Comparación
+
+| Aspecto      | Diario | Mensual |
+| ------------ | ------ | ------- |
+| Archivos/mes | ~30    | 1       |
+| Estados/mes  | ~30    | 1       |
+| Overhead I/O | Alto   | Bajo    |
+| RAM          | ~50MB  | ~1.5GB  |
+| Convergencia | Sí     | No      |
+| Kernel calls | N      | 1       |
+
+#### 8.10.4 Lectura Transparente
+
+`read_dc_events()` detecta automáticamente el esquema:
+
+```python
+# Funciona con ambos esquemas
+dataset = read_dc_events(base_path, ticker, year, month)
+# Si existe month/MM/data.parquet → lee directo
+# Si existen month/MM/day=DD/data.parquet → concatena
+```
+
+**Nota:** Si se especifica `day_start` o `day_end`, siempre busca archivos diarios.
 
 ---
 
 ## 9. Historial de Revisiones
 
-| Versión | Fecha      | Autor       | Descripción                                                                                                                                   |
-| ------- | ---------- | ----------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1.0.0   | 2026-01-31 | Claude Code | Documento inicial                                                                                                                             |
-| 1.1.0   | 2026-01-31 | Claude Code | Agregada documentación del caso crítico: cálculo del umbral en overshoot cero (DCC como referencia)                                           |
-| 1.2.0   | 2026-02-01 | Claude Code | Agregado diagrama ASCII pedagógico "Anatomía del Cambio Direccional" (§3.0) con visualización de primitivas, fases y relaciones fundamentales |
-| 1.3.0   | 2026-02-01 | Claude Code | Documentada política de inclusión completa del instante de confirmación en §3.3; corrección de kernel para evitar ticks del mismo timestamp en fases diferentes |
+| Versión | Fecha      | Autor       | Descripción                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| ------- | ---------- | ----------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1.0.0   | 2026-01-31 | Claude Code | Documento inicial                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| 1.1.0   | 2026-01-31 | Claude Code | Agregada documentación del caso crítico: cálculo del umbral en overshoot cero (DCC como referencia)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| 1.2.0   | 2026-02-01 | Claude Code | Agregado diagrama ASCII pedagógico "Anatomía del Cambio Direccional" (§3.0) con visualización de primitivas, fases y relaciones fundamentales                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| 1.3.0   | 2026-02-01 | Claude Code | Documentada política de inclusión completa del instante de confirmación en §3.3; corrección de kernel para evitar ticks del mismo timestamp en fases diferentes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | 2.0.0   | 2026-02-02 | Claude Code | **Nueva sección §8: Capacidades de Implementación del Core.** Documentación exhaustiva de: arquitectura del core, capacidades del kernel (regla conservadora, inclusión completa de instante de confirmación, resize dinámico, llenado retrospectivo, operaciones vectorizadas, validación de longitudes), sistema de continuidad cross-día (stitching, huérfanos, Arrow IPC), reconciliación retroactiva (tipos, escritura atómica), validación de integridad (post-kernel, estado, warnings), análisis de convergencia, optimizaciones de rendimiento, manejo de fenómenos del mercado (gaps, flash crashes, baja liquidez, alta frecuencia), y resumen de bugs corregidos. |
+| 2.1.0   | 2026-02-06 | Claude Code | **Nueva sección §8.10: Estrategias de Particionado.** Documentación de particionado diario vs mensual (`process_month()`), tabla comparativa, y lectura transparente en `read_dc_events()`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 
 ---
 

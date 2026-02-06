@@ -291,9 +291,7 @@ class DcSlippageReal(BaseIndicator):
         theta = self.theta
 
         # Use struct to pass multiple columns to map_elements
-        worst_price = pl.struct(
-            ["price_dc", "time_dc", "confirm_time", "event_type"]
-        ).map_elements(
+        worst_price = pl.struct(["price_dc", "time_dc", "confirm_time", "event_type"]).map_elements(
             lambda row: _compute_worst_confirm_price(
                 row["price_dc"],
                 row["time_dc"],
@@ -309,3 +307,125 @@ class DcSlippageReal(BaseIndicator):
         )
 
         return worst_price - theoretical_confirm
+
+
+class TotalMove(BaseIndicator):
+    """Total Move: Absolute magnitude of the complete event movement.
+
+    Formula: |event_magnitude| = |extreme_price[N] - reference_price[N]|
+
+    This is the absolute (unsigned) version of event_magnitude, measuring
+    the total price displacement regardless of direction.
+
+    Interpretation:
+    - Represents the "life span" of a complete trend in DC framework
+    - Used as basis for TMV (normalized by theta)
+
+    References: Tsang et al. (2015)
+    """
+
+    name = "total_move"
+    metadata = IndicatorMetadata(
+        description="Absolute magnitude of complete event (|extreme - reference|).",
+        category="event/price",
+    )
+    dependencies = ["event_magnitude"]
+
+    def get_expression(self) -> pl.Expr:
+        """Return Polars expression for total move calculation."""
+        return pl.col("event_magnitude").abs()
+
+
+class TmvEvent(BaseIndicator):
+    """TMV per Event: Total Move normalized by threshold theta.
+
+    Formula: TMV[N] = |event_magnitude[N]| / (reference_price[N] × θ)
+                    = total_move[N] / (reference_price[N] × θ)
+
+    Interpretation:
+    - TMV = 1.0 → Movement equals exactly theta (no overshoot)
+    - TMV = 2.0 → Movement is double the threshold
+    - TMV > 1 indicates overshoot occurred
+
+    Note: This is the CANONICAL TMV per Tsang et al. (2015), different from
+    the summary-level TMV that sums returns.
+
+    References: Tsang et al. (2015)
+    """
+
+    name = "tmv_event"
+    metadata = IndicatorMetadata(
+        description="Total Movement Value per event (|movement| / (price × θ)).",
+        category="event/price",
+    )
+    dependencies = ["total_move"]
+
+    def __init__(self, theta: float = 0.005):
+        """Initialize TMV Event indicator.
+
+        Args:
+            theta: DC threshold used in processing (default: 0.5%)
+        """
+        self.theta = theta
+
+    def get_expression(self) -> pl.Expr:
+        """Return Polars expression for TMV calculation."""
+        return pl.col("total_move") / (pl.col("reference_price") * self.theta)
+
+
+class OsvEvent(BaseIndicator):
+    """Overshoot Value: OS Return normalized by threshold theta.
+
+    Formula: OSV[N] = |os_return[N]| / θ
+
+    Interpretation:
+    - OSV measures overshoot in "threshold units"
+    - Average OSV ≈ 1.0 across many events indicates market equilibrium
+      (consistent with the "factor of 2" scaling law)
+    - High OSV indicates strong trend continuation after confirmation
+
+    References: Glattfelder et al. (2011), Tsang et al. (2015)
+    """
+
+    name = "osv_event"
+    metadata = IndicatorMetadata(
+        description="Overshoot Value per event (|OS return| / θ).",
+        category="event/price",
+    )
+    dependencies = ["os_return"]
+
+    def __init__(self, theta: float = 0.005):
+        """Initialize OSV Event indicator.
+
+        Args:
+            theta: DC threshold used in processing (default: 0.5%)
+        """
+        self.theta = theta
+
+    def get_expression(self) -> pl.Expr:
+        """Return Polars expression for OSV calculation."""
+        return pl.col("os_return").abs() / self.theta
+
+
+class A1DcPriceAbs(BaseIndicator):
+    """A1 Absolute: Absolute DC magnitude for ML feature vectors.
+
+    Formula: A1[N] = |dc_magnitude[N]| = |confirm_price[N] - reference_price[N]|
+
+    Unlike dc_return (normalized) or dc_magnitude (signed), this captures
+    the raw absolute price change. Useful for detecting liquidity gaps
+    where price "jumps" beyond the theoretical threshold.
+
+    References: Adegboye et al. (2017) - Attribute A1
+    """
+
+    name = "a1_dc_price_abs"
+    metadata = IndicatorMetadata(
+        description="Absolute DC magnitude for ML (|confirm - reference|).",
+        category="event/price",
+    )
+    dependencies = ["dc_magnitude"]
+
+    def get_expression(self) -> pl.Expr:
+        """Return Polars expression for absolute DC price."""
+        return pl.col("dc_magnitude").abs()

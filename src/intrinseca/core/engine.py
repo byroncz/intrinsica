@@ -112,6 +112,18 @@ class DayResult(NamedTuple):
     elapsed_ms: float
 
 
+class MonthResult(NamedTuple):
+    """Resultado del procesamiento de un mes completo.
+
+    Similar a DayResult pero sin convergencia (no aplica para mes completo).
+    """
+
+    n_events: int
+    n_ticks: int
+    elapsed_ms: float
+    output_path: Path
+
+
 @dataclass
 class EngineStats:
     """Estadísticas acumuladas del Engine."""
@@ -302,7 +314,7 @@ class Engine:
             self._compiled = True
 
     def _build_data_path(self, ticker: str, year: int, month: int, day: int) -> Path:
-        """Construye la ruta al archivo data.parquet.
+        """Construye la ruta al archivo data.parquet (particionado diario).
 
         Formato: {base}/{ticker}/theta={theta}/year={YYYY}/month={MM}/day={DD}/data.parquet
         """
@@ -313,6 +325,20 @@ class Engine:
             / f"year={year}"
             / f"month={month:02d}"
             / f"day={day:02d}"
+            / "data.parquet"
+        )
+
+    def _build_month_data_path(self, ticker: str, year: int, month: int) -> Path:
+        """Construye la ruta al archivo data.parquet (particionado mensual).
+
+        Formato: {base}/{ticker}/theta={theta}/year={YYYY}/month={MM}/data.parquet
+        """
+        return (
+            self.config.silver_base_path
+            / ticker
+            / f"theta={self.config.theta_str}"
+            / f"year={year}"
+            / f"month={month:02d}"
             / "data.parquet"
         )
 
@@ -421,8 +447,18 @@ class Engine:
         - Compresión: ZSTD nivel 3 (balance velocidad/ratio)
         - use_dictionary: True (para columnas de baja cardinalidad)
         - write_statistics: True (para pruning en lectura)
+        - Metadata: theta incluido para trazabilidad
         """
         path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Agregar theta como metadata del schema para trazabilidad
+        # Los indicadores que requieren theta lo leerán de aquí
+        existing_metadata = table.schema.metadata or {}
+        new_metadata = {
+            **existing_metadata,
+            b"theta": str(self.config.theta).encode(),
+        }
+        table = table.replace_schema_metadata(new_metadata)
 
         pq.write_table(
             table,
@@ -1068,6 +1104,265 @@ class Engine:
                 print(convergence_report.generate_summary())
 
         return results, convergence_report
+
+    # -------------------------------------------------------------------------
+    # PROCESAMIENTO MENSUAL
+    # -------------------------------------------------------------------------
+
+    def process_month(
+        self,
+        df_bronze: pl.DataFrame,
+        ticker: str,
+        year: int,
+        month: int,
+        price_col: str = "price",
+        time_col: str = "time",
+        quantity_col: str = "quantity",
+        direction_col: str = "direction",
+    ) -> MonthResult:
+        """Procesa un mes completo sin particionado diario.
+
+        A diferencia de process_date_range(), este método ejecuta el kernel
+        Numba una sola vez para todo el mes, eliminando el overhead de
+        huérfanos entre días.
+
+        Ventajas:
+        - Sin overhead de persistencia/carga de estado entre días
+        - Una sola invocación del kernel Numba
+        - Archivo Parquet único por mes
+
+        Tradeoffs:
+        - Requiere más RAM (todo el mes en memoria)
+        - No genera análisis de convergencia intra-mes
+
+        Args:
+        ----
+            df_bronze: DataFrame Polars con datos Bronze del mes completo
+            ticker: Símbolo del instrumento (e.g., "BTCUSDT")
+            year: Año del mes a procesar
+            month: Mes a procesar (1-12)
+            price_col: Nombre de la columna de precios
+            time_col: Nombre de la columna de timestamps
+            quantity_col: Nombre de la columna de cantidades
+            direction_col: Nombre de la columna de direcciones
+
+        Returns:
+        -------
+            MonthResult con estadísticas del procesamiento
+
+        Example:
+        -------
+            >>> engine = Engine(theta=0.005, silver_base_path=Path("./silver"))
+            >>> result = engine.process_month(df_january, "BTCUSDT", 2025, 1)
+            >>> print(f"Procesados {result.n_events} eventos en {result.elapsed_ms:.0f}ms")
+
+        """
+        import time
+
+        start_time = time.perf_counter()
+
+        # 1. Warmup si necesario
+        self._warmup()
+
+        # 2. Extraer arrays
+        prices, times, quantities, directions = self._extract_arrays(
+            df_bronze, price_col, time_col, quantity_col, direction_col
+        )
+        n_ticks = len(prices)
+
+        if n_ticks == 0:
+            output_path = self._build_month_data_path(ticker, year, month)
+            elapsed_ms = (time.perf_counter() - start_time) * 1000
+            return MonthResult(
+                n_events=0,
+                n_ticks=0,
+                elapsed_ms=elapsed_ms,
+                output_path=output_path,
+            )
+
+        self._log(f"📦 Procesando {ticker} {year}-{month:02d}: {n_ticks:,} ticks")
+
+        # 3. Buscar estado del mes anterior (si existe)
+        from calendar import monthrange
+
+        # Último día del mes anterior
+        if month == 1:
+            prev_year, prev_month = year - 1, 12
+        else:
+            prev_year, prev_month = year, month - 1
+
+        _, prev_last_day = monthrange(prev_year, prev_month)
+        prev_date = date(prev_year, prev_month, prev_last_day)
+
+        prev_result = find_previous_state(
+            self.config.silver_base_path,
+            ticker,
+            self.config.theta,
+            prev_date,
+            max_lookback=31,  # Buscar hasta un mes atrás
+        )
+
+        if prev_result:
+            _, prev_state = prev_result
+            self._log(f"  📂 Estado anterior: {prev_state.n_orphans} huérfanos")
+        else:
+            prev_state = create_empty_state(prev_date)
+            self._log("  📂 Sin estado anterior (inicio fresco)")
+
+        # 4. Stitch con huérfanos del mes anterior
+        stitched_prices, stitched_times, stitched_quantities, stitched_directions = (
+            self._stitch_data(prev_state, prices, times, quantities, directions)
+        )
+
+        # 5. Ejecutar kernel
+        ext_high, ext_low = prev_state.get_extreme_prices()
+
+        kernel_result = segment_events_kernel(
+            stitched_prices,
+            stitched_times,
+            stitched_quantities,
+            stitched_directions,
+            self.config.theta,
+            prev_state.current_trend,
+            np.float64(ext_high),
+            np.float64(ext_low),
+            prev_state.last_os_ref,
+        )
+
+        (
+            event_types,
+            dc_indices,
+            os_indices,
+            os_start_indices,
+            dcc_indices,
+            extreme_indices,
+            confirm_indices,
+            reference_indices,
+            final_trend,
+            final_os_ref,
+            orphan_start_idx,
+        ) = kernel_result
+
+        n_events = len(event_types)
+        self._log(f"  ⚡ Kernel: {n_events} eventos detectados")
+
+        if n_events == 0:
+            # Sin eventos, solo guardar estado para el siguiente mes
+            orphan_prices = stitched_prices[orphan_start_idx:]
+            orphan_times = stitched_times[orphan_start_idx:]
+            orphan_quantities = stitched_quantities[orphan_start_idx:]
+            orphan_directions = stitched_directions[orphan_start_idx:]
+
+            new_state = DCState(
+                orphan_prices=orphan_prices,
+                orphan_times=orphan_times,
+                orphan_quantities=orphan_quantities,
+                orphan_directions=orphan_directions,
+                current_trend=final_trend,
+                last_os_ref=final_os_ref,
+                last_processed_date=date(year, month, monthrange(year, month)[1]),
+            )
+
+            # Guardar estado en el directorio del mes
+            state_path = (
+                self.config.silver_base_path
+                / ticker
+                / f"theta={self.config.theta_str}"
+                / f"year={year}"
+                / f"month={month:02d}"
+                / f"state_{ticker}_{self.config.theta_str}.arrow"
+            )
+            save_state(new_state, state_path)
+
+            output_path = self._build_month_data_path(ticker, year, month)
+            elapsed_ms = (time.perf_counter() - start_time) * 1000
+            return MonthResult(
+                n_events=0,
+                n_ticks=n_ticks,
+                elapsed_ms=elapsed_ms,
+                output_path=output_path,
+            )
+
+        # 6. Construir listas Arrow
+        arrow_lists = self._build_arrow_lists(
+            stitched_prices,
+            stitched_times,
+            stitched_quantities,
+            stitched_directions,
+            dc_indices,
+            os_indices,
+            os_start_indices,
+            dcc_indices,
+            extreme_indices,
+            confirm_indices,
+            reference_indices,
+        )
+
+        # 7. Construir tabla Arrow con estructura anidada
+        arrow_table = self._build_arrow_table(
+            n_events,
+            event_types,
+            stitched_prices,
+            stitched_times,
+            stitched_quantities,
+            extreme_indices,
+            confirm_indices,
+            reference_indices,
+            dcc_indices,
+            arrow_lists,
+        )
+
+        # 8. Escribir Parquet
+        output_path = self._build_month_data_path(ticker, year, month)
+        self._write_parquet(arrow_table, output_path)
+        self._log(f"  💾 Guardado: {output_path}")
+
+        # 9. Guardar estado para el siguiente mes
+        orphan_prices = stitched_prices[orphan_start_idx:]
+        orphan_times = stitched_times[orphan_start_idx:]
+        orphan_quantities = stitched_quantities[orphan_start_idx:]
+        orphan_directions = stitched_directions[orphan_start_idx:]
+
+        self._log(f"  🔚 Huérfanos: {len(orphan_prices)}")
+
+        new_state = DCState(
+            orphan_prices=orphan_prices,
+            orphan_times=orphan_times,
+            orphan_quantities=orphan_quantities,
+            orphan_directions=orphan_directions,
+            current_trend=final_trend,
+            last_os_ref=final_os_ref,
+            last_processed_date=date(year, month, monthrange(year, month)[1]),
+        )
+
+        state_path = (
+            self.config.silver_base_path
+            / ticker
+            / f"theta={self.config.theta_str}"
+            / f"year={year}"
+            / f"month={month:02d}"
+            / f"state_{ticker}_{self.config.theta_str}.arrow"
+        )
+        save_state(new_state, state_path)
+
+        # 10. Actualizar estadísticas
+        if self.stats:
+            self.stats.days_processed += 1  # Contamos como 1 "unidad" procesada
+            self.stats.total_events += n_events
+            self.stats.total_ticks += n_ticks
+            self.stats.kernel_calls += 1
+
+        elapsed_ms = (time.perf_counter() - start_time) * 1000
+        self.stats.total_time_ms += elapsed_ms if self.stats else 0
+
+        self._log(f"  ✅ Completado en {elapsed_ms:.0f}ms")
+
+        return MonthResult(
+            n_events=n_events,
+            n_ticks=n_ticks,
+            elapsed_ms=elapsed_ms,
+            output_path=output_path,
+        )
 
     # -------------------------------------------------------------------------
     # DIAGNÓSTICO

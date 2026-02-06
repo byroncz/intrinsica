@@ -10,6 +10,7 @@ Componentes:
     - kernel: Kernel Numba JIT para segmentación de eventos
     - DCState: Estado persistente para stitching entre días
     - Convergence: Análisis de convergencia entre ejecuciones
+    - readers: Funciones de lectura con extracción de metadata (theta)
 """
 
 from intrinseca.core.convergence import (
@@ -22,7 +23,7 @@ from intrinseca.core.convergence import (
     compare_reports,
     load_report,
 )
-from intrinseca.core.engine import DayResult, Engine, EngineConfig, EngineStats
+from intrinseca.core.engine import DayResult, Engine, EngineConfig, EngineStats, MonthResult
 from intrinseca.core.kernel import (
     benchmark_kernel,
     estimate_memory_usage,
@@ -30,6 +31,7 @@ from intrinseca.core.kernel import (
     verify_nopython_mode,
     warmup_kernel,
 )
+from intrinseca.core.readers import DCDataset, read_dc_events, read_dc_month
 from intrinseca.core.state import (
     MAX_LOOKBACK_DAYS,
     DCState,
@@ -45,9 +47,10 @@ from intrinseca.core.state import (
 )
 
 __all__ = [
-    # Silver Layer Engine
+    # Engine
     "Engine",
     "DayResult",
+    "MonthResult",
     "EngineStats",
     "EngineConfig",
     # Kernel
@@ -77,4 +80,8 @@ __all__ = [
     "compare_reports",
     "MAX_DISCREPANCY_DETAILS",
     "DEFAULT_TOLERANCE_NS",
+    # Readers
+    "DCDataset",
+    "read_dc_events",
+    "read_dc_month",
 ]
