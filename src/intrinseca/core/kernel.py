@@ -244,13 +244,26 @@ def segment_events_kernel(
                 threshold = ext_high_price * theta_down
 
             # --- Regla Conservadora: lookahead para mejor precio ---
+            #
+            # IMPORTANTE: Todos los ticks con el mismo timestamp pertenecen al
+            # "instante de confirmación" y deben ir al DC, no al OS. Esto evita:
+            # - Ticks del mismo instante en fases diferentes (DC vs OS)
+            # - os_time = 0 espurio (velocidad infinita)
+            # - Overshoots "fantasma" con ticks contemporáneos al DCC
+            #
+            # Se trackean dos índices:
+            # - best_idx: tick con precio más conservador (para confirm_price)
+            # - last_same_ts_idx: último tick del grupo (para conf_idx)
+            #
             conf_ts = timestamps[t]
             best_price = p
             best_idx = t
+            last_same_ts_idx = t
 
             # Buscar en ticks con mismo timestamp
             j = t + 1
             while j < n and timestamps[j] == conf_ts:
+                last_same_ts_idx = j  # Siempre actualizar al último del grupo
                 pj = prices[j]
                 if new_trend == 1:
                     # Upturn: precio MÍNIMO >= threshold
@@ -265,7 +278,7 @@ def segment_events_kernel(
                 j += 1
 
             conf_price = best_price
-            conf_idx = best_idx
+            conf_idx = last_same_ts_idx  # Usar último del grupo, no best_idx
 
             # Validación: DC debe tener al menos 1 tick
             if prev_ext_idx >= conf_idx:
@@ -280,7 +293,37 @@ def segment_events_kernel(
                 last_os_ref = conf_price
                 continue
 
+            # --- Cerrar OS del evento anterior ANTES del resize ---
+            # IMPORTANTE: Debe ejecutarse antes del resize para que os_offsets[n_events]
+            # esté escrito cuando se copie durante el resize dinámico.
+            if n_events > 0 and prev_os_start >= 0:
+                os_length = prev_ext_idx + 1 - prev_os_start
+                # Validación defensiva: os_length debe ser >= 0
+                # Si es negativo, significa que prev_os_start > prev_ext_idx (bug lógico)
+                if os_length > 0:
+                    os_prices[os_ptr : os_ptr + os_length] = prices[
+                        prev_os_start : prev_ext_idx + 1
+                    ]
+                    os_times[os_ptr : os_ptr + os_length] = timestamps[
+                        prev_os_start : prev_ext_idx + 1
+                    ]
+                    os_quantities[os_ptr : os_ptr + os_length] = quantities[
+                        prev_os_start : prev_ext_idx + 1
+                    ]
+                    os_directions[os_ptr : os_ptr + os_length] = directions[
+                        prev_os_start : prev_ext_idx + 1
+                    ]
+                    os_ptr += os_length
+                # Siempre escribir os_offsets para mantener consistencia
+                os_offsets[n_events] = os_ptr
+
+                # Llenar retrospectivamente extreme_price del evento ANTERIOR
+                extreme_prices[n_events - 1] = prices[prev_ext_idx]
+                extreme_times[n_events - 1] = timestamps[prev_ext_idx]
+
             # --- Resize dinámico si es necesario ---
+            # NOTA: El resize ahora ocurre DESPUÉS de cerrar el OS del evento anterior,
+            # garantizando que os_offsets[:n_events+1] contenga valores válidos.
             if n_events >= estimated_events:
                 # Duplicar capacidad
                 new_size = estimated_events * 2
@@ -332,24 +375,6 @@ def segment_events_kernel(
                 ext_low_price = conf_price
                 ext_low_idx = conf_idx
 
-            # --- Cerrar OS del evento anterior (incluye el extremo) - VECTORIZADO ---
-            if n_events > 0 and prev_os_start >= 0:
-                os_length = prev_ext_idx + 1 - prev_os_start
-                os_prices[os_ptr : os_ptr + os_length] = prices[prev_os_start : prev_ext_idx + 1]
-                os_times[os_ptr : os_ptr + os_length] = timestamps[prev_os_start : prev_ext_idx + 1]
-                os_quantities[os_ptr : os_ptr + os_length] = quantities[
-                    prev_os_start : prev_ext_idx + 1
-                ]
-                os_directions[os_ptr : os_ptr + os_length] = directions[
-                    prev_os_start : prev_ext_idx + 1
-                ]
-                os_ptr += os_length
-                os_offsets[n_events] = os_ptr
-
-                # Llenar retrospectivamente extreme_price del evento ANTERIOR
-                extreme_prices[n_events - 1] = prices[prev_ext_idx]
-                extreme_times[n_events - 1] = timestamps[prev_ext_idx]
-
             # --- Escribir DC del evento actual (excluye extremo, incluye DCC) - VECTORIZADO ---
             dc_start = prev_ext_idx + 1
             dc_end = conf_idx + 1
@@ -381,11 +406,15 @@ def segment_events_kernel(
     # --- Finalización: cerrar último OS - VECTORIZADO ---
     if n_events > 0 and prev_os_start >= 0:
         final_os_length = n - prev_os_start
-        os_prices[os_ptr : os_ptr + final_os_length] = prices[prev_os_start:n]
-        os_times[os_ptr : os_ptr + final_os_length] = timestamps[prev_os_start:n]
-        os_quantities[os_ptr : os_ptr + final_os_length] = quantities[prev_os_start:n]
-        os_directions[os_ptr : os_ptr + final_os_length] = directions[prev_os_start:n]
-        os_ptr += final_os_length
+        # Validación defensiva: final_os_length debe ser >= 0
+        # Puede ser 0 si el último evento confirmó en el último tick
+        if final_os_length > 0:
+            os_prices[os_ptr : os_ptr + final_os_length] = prices[prev_os_start:n]
+            os_times[os_ptr : os_ptr + final_os_length] = timestamps[prev_os_start:n]
+            os_quantities[os_ptr : os_ptr + final_os_length] = quantities[prev_os_start:n]
+            os_directions[os_ptr : os_ptr + final_os_length] = directions[prev_os_start:n]
+            os_ptr += final_os_length
+        # Siempre escribir os_offsets para mantener consistencia
         os_offsets[n_events] = os_ptr
 
     # --- Calcular índice de huérfanos (excluye el extremo, que pertenece al OS) ---

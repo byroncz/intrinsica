@@ -83,19 +83,3 @@ class VolatilityDC(BaseIndicator):
     def get_expression(self) -> pl.Expr:
         """Return Polars expression for volatility."""
         return pl.col("dc_return").std()
-
-
-class UpturnRatio(BaseIndicator):
-    """Ratio of upturn events to total events."""
-
-    name = "upturn_ratio"
-    metadata = IndicatorMetadata(
-        description="Ratio of upturn events to total events.",
-        category="summary/stats",
-        is_event_level=False,
-    )
-    dependencies = []  # Uses Silver column directly
-
-    def get_expression(self) -> pl.Expr:
-        """Return Polars expression for upturn ratio."""
-        return (pl.col("event_type") == 1).mean()

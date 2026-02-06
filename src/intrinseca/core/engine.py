@@ -722,6 +722,41 @@ class Engine:
         df_silver: pl.DataFrame | None = None
 
         if n_events > 0:
+            # --- Validación de integridad post-kernel ---
+            # CRÍTICO: Verificar que todas las estructuras tienen dimensiones consistentes
+            # antes de construir el Arrow table. Detecta bugs en el kernel tempranamente.
+            expected_offset_len = n_events + 1
+            if len(dc_offsets) != expected_offset_len:
+                raise ValueError(
+                    f"Integridad fallida: dc_offsets tiene {len(dc_offsets)} elementos, "
+                    f"esperados {expected_offset_len} (n_events={n_events})"
+                )
+            if len(os_offsets) != expected_offset_len:
+                raise ValueError(
+                    f"Integridad fallida: os_offsets tiene {len(os_offsets)} elementos, "
+                    f"esperados {expected_offset_len} (n_events={n_events}). "
+                    "Posible bug en kernel: os_offsets no se cerró correctamente."
+                )
+            if len(event_types) != n_events:
+                raise ValueError(
+                    f"Integridad fallida: event_types tiene {len(event_types)} elementos, "
+                    f"esperados {n_events}"
+                )
+            # Validar atributos de evento
+            for name, arr in [
+                ("reference_prices", reference_prices),
+                ("reference_times", reference_times),
+                ("extreme_prices", extreme_prices),
+                ("extreme_times", extreme_times),
+                ("confirm_prices", confirm_prices),
+                ("confirm_times", confirm_times),
+            ]:
+                if len(arr) != n_events:
+                    raise ValueError(
+                        f"Integridad fallida: {name} tiene {len(arr)} elementos, "
+                        f"esperados {n_events}"
+                    )
+
             list_columns = self._build_arrow_lists(
                 dc_prices,
                 dc_times,
@@ -820,6 +855,7 @@ class Engine:
         analyze_convergence: bool = False,
         strict_comparison: bool = True,
         tolerance_ns: int = 0,
+        stop_on_convergence: bool = False,
     ) -> tuple[dict[date, pl.DataFrame | None], ConvergenceReport | None]:
         """Procesa un rango de datos Bronze particionándolos por día.
 
@@ -834,6 +870,10 @@ class Engine:
             analyze_convergence: Si True, compara con datos Silver previos
             strict_comparison: Si True, comparación exacta
             tolerance_ns: Tolerancia si strict_comparison=False
+            stop_on_convergence: Si True, detiene el procesamiento cuando se
+                detecta convergencia. ADVERTENCIA: Usar con precaución, puede
+                causar pérdida de datos si hay días posteriores sin procesar.
+                Por defecto es False para garantizar procesamiento completo.
 
         Returns:
         -------
@@ -902,8 +942,12 @@ class Engine:
 
                 if result.convergence and convergence_report:
                     convergence_report.add_result(result.convergence)
-                    if result.convergence.analysis_applicable and result.convergence.converged:
-                        print(f"  🛑 Convergencia en {d}")
+                    if (
+                        stop_on_convergence
+                        and result.convergence.analysis_applicable
+                        and result.convergence.converged
+                    ):
+                        print(f"  🛑 Convergencia en {d} - deteniendo procesamiento")
                         break
         else:
             # Modo silencioso: barra de progreso
@@ -952,7 +996,11 @@ class Engine:
 
                     if result.convergence and convergence_report:
                         convergence_report.add_result(result.convergence)
-                        if result.convergence.analysis_applicable and result.convergence.converged:
+                        if (
+                            stop_on_convergence
+                            and result.convergence.analysis_applicable
+                            and result.convergence.converged
+                        ):
                             break
 
             # Resumen compacto
@@ -986,6 +1034,24 @@ class Engine:
                     box=box.ROUNDED,
                 )
             )
+
+        # ADVERTENCIA: Verificar que todos los días fueron procesados
+        if len(results) < n_days:
+            missing_count = n_days - len(results)
+            import warnings
+
+            warnings.warn(
+                f"⚠️ ADVERTENCIA: Solo se procesaron {len(results)}/{n_days} días. "
+                f"{missing_count} días no fueron procesados. "
+                "Esto puede indicar terminación prematura por convergencia o un error.",
+                UserWarning,
+                stacklevel=2,
+            )
+            if self.config.verbose:
+                print(
+                    f"\n⚠️ ADVERTENCIA: {missing_count} días no procesados. "
+                    "Verifique los parámetros o logs para más detalles."
+                )
 
         # Guardar reporte de convergencia
         if convergence_report is not None:

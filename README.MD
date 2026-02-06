@@ -317,6 +317,41 @@ pytest tests/ --cov=src/intrinseca --cov-report=term-missing
 pytest tests/ -v -m "not slow"
 ```
 
+### Data Quality Framework
+
+El proyecto incluye un framework exhaustivo de validación de calidad para datos Silver:
+
+```bash
+# Validar un mes de datos
+python -m tests.quality --year 2025 --month 11
+
+# Modo estricto (falla en cualquier warning)
+python -m tests.quality --year 2025 --month 11 --level strict
+
+# Modo permisivo (solo reporta, nunca falla)
+python -m tests.quality --year 2025 --month 11 --level permissive
+
+# Generar reporte JSON
+python -m tests.quality --year 2025 --month 11 --output quality_report.json
+
+# Ticker y theta personalizados
+python -m tests.quality --year 2025 --month 11 --ticker BTCUSDT --theta 0.005
+```
+
+**Niveles de validación (9 validadores):**
+
+| Nivel | Validador   | Propósito                                   |
+| ----- | ----------- | ------------------------------------------- |
+| 1     | structural  | Schema, columnas requeridas, tipos de datos |
+| 2     | intra_event | Consistencia interna de listas DC/OS        |
+| 3     | temporal    | Orden cronológico ref → confirm → extreme   |
+| 4     | price       | Coherencia de precios entre fases           |
+| 5     | threshold   | Cumplimiento de magnitud θ                  |
+| 6     | collision   | Detección de eventos duplicados             |
+| 7     | cross_day   | Continuidad entre días (stitching)          |
+| 8     | scale_laws  | Propiedades estadísticas esperadas          |
+| 9     | determinism | Reproducibilidad del kernel                 |
+
 ---
 
 ## Licencia

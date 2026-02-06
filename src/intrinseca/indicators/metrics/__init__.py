@@ -8,10 +8,18 @@ Contains all indicator implementations organized by category:
 - summary/stats: Summary statistics
 """
 
-from .event.price import DcMagnitude, DcReturn, OsMagnitude, OsReturn
+from .event.price import (
+    DcMagnitude,
+    DcReturn,
+    DcSlippage,
+    DcSlippageReal,
+    EventMagnitude,
+    OsMagnitude,
+    OsReturn,
+)
 from .event.tick import RunsCount
 from .event.time import DcTime, DcVelocity, EventTime, EventVelocity, OsTime, OsVelocity
-from .summary.stats import TMV, AvgDcTime, AvgOsMagnitude, AvgReturn, UpturnRatio, VolatilityDC
+from .summary.stats import TMV, AvgDcTime, AvgOsMagnitude, AvgReturn, VolatilityDC
 
 
 def register_all(registry):
@@ -19,8 +27,11 @@ def register_all(registry):
     # Event/Price (event-level)
     registry.register(DcMagnitude())
     registry.register(OsMagnitude())
+    registry.register(EventMagnitude())
     registry.register(DcReturn())
     registry.register(OsReturn())
+    registry.register(DcSlippage())  # Uses default theta=0.005
+    registry.register(DcSlippageReal())  # Uses default theta=0.005
 
     # Event/Time (event-level)
     registry.register(DcTime())
@@ -39,15 +50,17 @@ def register_all(registry):
     registry.register(AvgReturn())
     registry.register(AvgOsMagnitude())
     registry.register(VolatilityDC())
-    registry.register(UpturnRatio())
 
 
 __all__ = [
     # Event/Price
     "DcMagnitude",
     "OsMagnitude",
+    "EventMagnitude",
     "DcReturn",
     "OsReturn",
+    "DcSlippage",
+    "DcSlippageReal",
     # Event/Time
     "DcTime",
     "OsTime",
@@ -63,7 +76,6 @@ __all__ = [
     "AvgReturn",
     "AvgOsMagnitude",
     "VolatilityDC",
-    "UpturnRatio",
     # Registration
     "register_all",
 ]

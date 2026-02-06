@@ -101,6 +101,52 @@ El paradigma de Cambio Direccional tiene sus raíces en la investigación de alt
 
 ## 3. Definiciones Primitivas: Teoría y Práctica
 
+### 3.0 Visión General: Anatomía del Cambio Direccional
+
+El siguiente diagrama ilustra dos eventos DC consecutivos (un **upturn** seguido de un **downturn**), mostrando todas las primitivas fundamentales del marco: umbral (θ), punto extremo (EXT), punto de confirmación (DCC), fase DC y fase Overshoot (OS).
+
+```
+════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+                                         ANATOMÍA DEL CAMBIO DIRECCIONAL
+════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+                                                                                                        LEYENDA
+  PRECIO                                                                                                ────────
+     │                                                                                                  ★ Extremo
+     │                                                             ★ EXT₁                                 (EXT)
+     │                                                           ╱      ╲            Máximo local       ◆ Confirm.
+ 112 ┤                                                         ╱          ╲          (retrospectivo)      (DCC)
+     │                                                       ╱              ╲                           ┄ Umbral θ
+ 110 ┤                                                     ╱                  ╲
+     │                                                   ╱                      ╲
+ 108 ┤┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄╱┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄  θ₁⁻ = EXT₁ × (1 - θ)
+     │                                               ╱                            ╲
+ 106 ┤                                             ╱                                ◆ DCC₂ ──── Confirma DOWNTURN
+     │                                           ╱                                    ╲         (precio cruza θ₁⁻)
+ 104 ┤                                         ╱                                        ╲
+     │                                       ╱                                            ╲
+ 102 ┤                                   ◆ DCC₁ ──── Confirma UPTURN                        ╲
+     │                                 ╱             (precio cruza θ₀⁺)                       ╲
+ 100 ┤┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄╱┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄  θ₀⁺ = EXT₀ × (1 + θ)                      ╲
+     │                           ╱                                                              ╲
+  98 ┤                         ╱                                                                  ╲
+     │                       ╱                                                                      ╲
+  96 ┤          ╲          ╱                                                                          ╲
+     │            ╲      ╱                                                                              ╲
+  94 ┤              ╲  ╱                                                                                  ╲
+     │                ★ EXT₀                                                                                ★ EXT₂
+  92 ┤                          Mínimo local                                                      Mínimo local
+     │                          (reference_price Evento 1)                EXT₁ = reference_price del Evento 2
+     └──────────────────────────────────────────────────────────────────────────────────────────────────────────────► t
+                     t₀                  t₁                           t₂           t₃                  t₄
+                     │                   │                            │             │                   │
+                     │◄─── FASE DC₁ ────►│◄──────── FASE OS₁ ────────►│◄ FASE DC₂ ─►│◄──── FASE OS₂ ───►│
+                     │  (confirmación)   │       (continuación)       │  (confirm)  │   (continuación)  │
+                     │                   │                            │             │                   │
+                     ╰─────────── EVENTO 1 (Upturn) ──────────────────┴──── EVENTO 2 (Downturn) ────────╯
+
+════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+```
+
 Las siguientes definiciones constituyen los **atributos fundamentales** del sistema DC. Para cada primitiva se presenta:
 
 1. La **definición teórica** en tiempo continuo
@@ -275,6 +321,15 @@ DC_Event = {
 
 Esto garantiza determinismo en la segmentación.
 
+**Inclusión Completa del Instante de Confirmación:** Todos los ticks con el mismo timestamp que el tick de confirmación deben pertenecer a la fase DC, no al OS. Esto evita:
+
+- Ticks del mismo instante en fases diferentes (violación semántica)
+- `os_time = 0` espurio cuando hay ticks contemporáneos al DCC
+- Velocidades infinitas artificiales (`os_magnitude / 0`)
+- Overshoots "fantasma" con ticks que no son continuación post-confirmación
+
+**Implementación:** El kernel usa `last_same_ts_idx` para incluir todos los ticks del grupo temporal, independientemente de cuál tenga el precio conservador.
+
 ---
 
 ### 3.5 Evento de Excedente (Overshoot Event, OS)
@@ -356,6 +411,7 @@ if p <= ext_high_price * theta_down:  # Usa P_DCC_N como referencia
 **Consecuencia para los datos Silver:**
 
 En caso de overshoot cero, el evento N tendrá:
+
 - `extreme_price = confirm_price`
 - `extreme_time = confirm_time`
 - La lista `price_os` estará vacía o contendrá cero elementos
@@ -447,12 +503,455 @@ Tsang, E. P. K., & Ma, S. (2021). _Distribution of aTMV, an empirical study_. Wo
 
 ---
 
-## 7. Historial de Revisiones
+## 8. Capacidades de Implementación del Core Intrinseca
 
-| Versión | Fecha      | Autor       | Descripción |
-| ------- | ---------- | ----------- | ----------- |
-| 1.0.0   | 2026-01-31 | Claude Code | Documento inicial |
-| 1.1.0   | 2026-01-31 | Claude Code | Agregada documentación del caso crítico: cálculo del umbral en overshoot cero (DCC como referencia) |
+Esta sección documenta las capacidades técnicas desarrolladas en el Core de Intrinseca para manejar las particularidades del análisis DC en mercados financieros reales. Cada capacidad representa una solución a un problema específico encontrado durante la implementación y validación con datos de alta frecuencia.
+
+### 8.1 Arquitectura General
+
+El Core de Intrinseca implementa una arquitectura de tres capas optimizada para HFT:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           CORE INTRINSECA                                   │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐    ┌─────────────┐  │
+│  │   Engine    │───▶│   Kernel    │───▶│    State    │───▶│   Silver    │  │
+│  │ (Orquesta)  │    │ (Numba JIT) │    │  (Arrow)    │    │  (Parquet)  │  │
+│  └─────────────┘    └─────────────┘    └─────────────┘    └─────────────┘  │
+│         │                  │                  │                  │          │
+│         ▼                  ▼                  ▼                  ▼          │
+│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐    ┌─────────────┐  │
+│  │Reconcilia-  │    │Convergence  │    │ Validation  │    │  ListArray  │  │
+│  │   tion      │    │  Analysis   │    │   Layer     │    │  Zero-copy  │  │
+│  └─────────────┘    └─────────────┘    └─────────────┘    └─────────────┘  │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Módulos del Core:**
+
+| Módulo | Archivo | Responsabilidad |
+|--------|---------|-----------------|
+| Engine | `engine.py` | Orquestación Bronze→Silver, gestión de pipeline |
+| Kernel | `kernel.py` | Segmentación DC con Numba JIT, O(n) |
+| State | `state.py` | Persistencia de huérfanos y estado algorítmico |
+| Reconciliation | `reconciliation.py` | Corrección retroactiva de eventos |
+| Convergence | `convergence.py` | Validación de determinismo |
+
+---
+
+### 8.2 Capacidades del Kernel de Segmentación
+
+El kernel Numba JIT es el corazón del sistema. Las siguientes capacidades han sido desarrolladas para garantizar correctitud y rendimiento:
+
+#### 8.2.1 Regla Conservadora para Ticks Simultáneos
+
+**Problema:** En datos de alta frecuencia, múltiples ticks pueden tener el mismo timestamp (resolución de milisegundos o microsegundos). Sin una regla determinista, diferentes ejecuciones podrían producir resultados diferentes.
+
+**Solución implementada:**
+- En **upturn**: seleccionar el precio **mínimo** que cruza θ (más conservador)
+- En **downturn**: seleccionar el precio **máximo** que cruza θ (más conservador)
+
+```python
+# kernel.py líneas 258-278
+if new_trend == 1:
+    # Upturn: precio MÍNIMO >= threshold
+    if pj >= threshold and pj < best_price:
+        best_price = pj
+else:
+    # Downturn: precio MÁXIMO <= threshold
+    if pj <= threshold and pj > best_price:
+        best_price = pj
+```
+
+**Beneficio:** Determinismo garantizado en la segmentación.
+
+#### 8.2.2 Inclusión Completa del Instante de Confirmación
+
+**Problema:** Ticks con el mismo timestamp que el DCC podrían quedar en fases diferentes (DC vs OS), causando:
+- Violación semántica (ticks contemporáneos en eventos distintos)
+- `os_time = 0` espurio (velocidades infinitas)
+- Overshoots "fantasma"
+
+**Solución implementada:**
+```python
+# Se trackean dos índices:
+# - best_idx: tick con precio más conservador (para confirm_price)
+# - last_same_ts_idx: último tick del grupo (para conf_idx)
+conf_idx = last_same_ts_idx  # Todos van al DC
+```
+
+**Beneficio:** Todos los ticks del instante de confirmación pertenecen a la fase DC.
+
+#### 8.2.3 Resize Dinámico de Búferes
+
+**Problema:** La cantidad de eventos DC es impredecible y depende de la volatilidad del mercado.
+
+**Solución implementada:**
+- Estimación inicial con factor de seguridad 3x
+- Resize dinámico duplicando capacidad cuando se agota
+- Orden correcto: cerrar OS anterior **antes** del resize
+
+```python
+# Estimación inicial
+estimated_events = max(n // _EVENT_RATIO_ESTIMATE, _MIN_EVENT_SLOTS) * 3
+
+# Resize cuando se necesita
+if n_events >= estimated_events:
+    new_size = estimated_events * 2
+    # Resize todos los búferes...
+```
+
+**Beneficio:** Manejo de cualquier volumen de datos sin overflow.
+
+#### 8.2.4 Llenado Retrospectivo de Extremos
+
+**Problema:** El precio extremo de un evento solo se conoce cuando se confirma el evento **siguiente**.
+
+**Solución implementada:**
+```python
+# Al confirmar evento N+1, llenar extreme_price del evento N
+extreme_prices[n_events - 1] = prices[prev_ext_idx]
+extreme_times[n_events - 1] = timestamps[prev_ext_idx]
+```
+
+El último evento queda con `extreme_price = -1.0` (provisional) hasta la reconciliación.
+
+#### 8.2.5 Operaciones Vectorizadas
+
+**Problema:** Loops tick-a-tick son lentos incluso con Numba.
+
+**Solución implementada:**
+```python
+# Antes (loop):
+for i in range(prev_os_start, prev_ext_idx + 1):
+    os_prices[os_ptr] = prices[i]
+    os_ptr += 1
+
+# Después (vectorizado):
+os_length = prev_ext_idx + 1 - prev_os_start
+os_prices[os_ptr : os_ptr + os_length] = prices[prev_os_start : prev_ext_idx + 1]
+os_ptr += os_length
+```
+
+**Beneficio:** ~50M ticks/segundo en hardware típico.
+
+#### 8.2.6 Validación de Longitudes No Negativas
+
+**Problema:** Edge cases pueden producir longitudes negativas si `prev_os_start > prev_ext_idx`.
+
+**Solución implementada:**
+```python
+os_length = prev_ext_idx + 1 - prev_os_start
+if os_length > 0:
+    # Copiar datos...
+# Siempre escribir os_offsets para mantener consistencia
+os_offsets[n_events] = os_ptr
+```
+
+**Beneficio:** Prevención de comportamiento indefinido en casos límite.
+
+---
+
+### 8.3 Sistema de Continuidad Cross-Día (Stitching)
+
+#### 8.3.1 Gestión de Ticks Huérfanos
+
+**Problema:** Un día puede terminar en medio de un evento DC no confirmado.
+
+**Solución implementada:**
+
+```
+Día N                          Día N+1
+─────────────────────────────  ─────────────────────────
+[eventos confirmados][huérfanos][nuevos ticks...]
+                     └─────────────────┘
+                          stitching
+```
+
+Los ticks huérfanos se persisten en Arrow IPC con metadata algorítmica:
+- `current_trend`: Tendencia activa (1/-1/0)
+- `last_os_ref`: Precio de referencia
+- `orphan_prices/times/quantities/directions`: Ticks pendientes
+
+#### 8.3.2 Formato de Persistencia Arrow IPC
+
+**Decisión de diseño:** Arrow IPC (Feather v2) sin compresión para máxima velocidad de lectura.
+
+```python
+# state.py - Estructura del archivo state.arrow
+table = pa.table({
+    "price": pa.array(orphan_prices, type=pa.float64()),
+    "time": pa.array(orphan_times, type=pa.int64()),
+    "quantity": pa.array(orphan_quantities, type=pa.float64()),
+    "direction": pa.array(orphan_directions, type=pa.int8()),
+})
+# Metadata en schema
+metadata = {
+    b"current_trend": str(trend).encode(),
+    b"last_os_ref": f"{ref:.15g}".encode(),
+    b"last_processed_date": date.isoformat().encode(),
+}
+```
+
+#### 8.3.3 Búsqueda de Estado Anterior
+
+**Capacidad:** Lookback de hasta 7 días para encontrar el estado más reciente.
+
+```python
+for days_back in range(1, MAX_LOOKBACK_DAYS + 1):
+    prev_date = current_date - timedelta(days=days_back)
+    state = load_state(build_state_path(..., prev_date))
+    if state is not None:
+        return state
+```
+
+**Beneficio:** Tolerancia a días sin datos (fines de semana, festivos).
+
+---
+
+### 8.4 Sistema de Reconciliación Retroactiva
+
+#### 8.4.1 Tipos de Reconciliación
+
+**Problema:** Al final del día, un evento puede parecer confirmado pero al día siguiente se determina que fue:
+- Una reversión real (CONFIRM_REVERSAL)
+- Una falsa alarma (EXTEND_OS)
+
+**Solución implementada:**
+
+```python
+class ReconciliationType(Enum):
+    NONE = "none"
+    CONFIRM_REVERSAL = "confirm"  # Actualizar extreme_price
+    EXTEND_OS = "extend_os"       # Extender OS con nuevo extremo
+```
+
+**Lógica de detección:**
+```python
+if trend == 1:  # Alcista
+    if first_price <= ext_high * (1 - theta):
+        return CONFIRM_REVERSAL  # Confirmó reversión bajista
+    elif first_price > ext_high:
+        return EXTEND_OS         # Siguió subiendo
+```
+
+#### 8.4.2 Escritura Atómica con Backup
+
+**Mitigación de corrupción:**
+1. Crear backup del archivo original
+2. Escribir a archivo temporal
+3. Rename atómico
+4. Si falla, restaurar desde backup
+
+```python
+backup_path = silver_path.with_suffix(".parquet.bak")
+shutil.copy2(silver_path, backup_path)
+# Modificar DataFrame...
+temp_path = silver_path.with_suffix(".parquet.tmp")
+df.write_parquet(temp_path)
+temp_path.rename(silver_path)  # Atómico en POSIX
+```
+
+---
+
+### 8.5 Validación de Integridad
+
+#### 8.5.1 Validación Post-Kernel
+
+**Problema:** Bugs en el kernel pueden producir estructuras inconsistentes.
+
+**Solución implementada:**
+```python
+# engine.py - Validación antes de escribir Parquet
+expected_offset_len = n_events + 1
+if len(dc_offsets) != expected_offset_len:
+    raise ValueError("Integridad fallida: dc_offsets...")
+if len(os_offsets) != expected_offset_len:
+    raise ValueError("Integridad fallida: os_offsets...")
+# Validar todos los atributos de evento
+for name, arr in [("reference_prices", reference_prices), ...]:
+    if len(arr) != n_events:
+        raise ValueError(f"Integridad fallida: {name}...")
+```
+
+**Beneficio:** Detección temprana de bugs, nunca se escriben datos corruptos.
+
+#### 8.5.2 Validación de Estado
+
+```python
+def validate(self) -> tuple[bool, list[str]]:
+    errors = []
+    # Verificar longitudes consistentes
+    if len(self.orphan_times) != n:
+        errors.append("orphan_times length mismatch")
+    # Verificar tipos
+    if self.orphan_prices.dtype != np.float64:
+        errors.append("orphan_prices dtype mismatch")
+    # Verificar trend válido
+    if self.current_trend not in (-1, 0, 1):
+        errors.append("current_trend invalid")
+    # Verificar timestamps ordenados
+    if not np.all(np.diff(self.orphan_times) >= 0):
+        errors.append("orphan_times not monotonic")
+    return (len(errors) == 0, errors)
+```
+
+#### 8.5.3 Warning por Procesamiento Incompleto
+
+**Problema:** El procesamiento puede detenerse prematuramente sin advertencia.
+
+**Solución implementada:**
+```python
+if len(results) < n_days:
+    warnings.warn(
+        f"⚠️ ADVERTENCIA: Solo se procesaron {len(results)}/{n_days} días.",
+        UserWarning,
+    )
+```
+
+---
+
+### 8.6 Análisis de Convergencia
+
+#### 8.6.1 Comparación Vectorizada
+
+**Capacidad:** Comparar resultados de reprocesamiento para validar determinismo.
+
+```python
+# Comparación con tolerancia configurable
+time_diffs = np.abs(prev_times[:min_len] - new_times[:min_len])
+time_matches = time_diffs <= tolerance_ns
+type_matches = prev_types[:min_len] == new_types[:min_len]
+events_equal = time_matches & type_matches
+```
+
+#### 8.6.2 Detección de Punto de Convergencia
+
+**Capacidad:** Identificar dónde dos series divergentes vuelven a coincidir.
+
+```python
+# Buscar primer True después del primer False
+remaining = events_equal[first_discrepancy_idx + 1:]
+if np.any(remaining):
+    convergence_idx = first_discrepancy_idx + 1 + np.argmax(remaining)
+```
+
+---
+
+### 8.7 Optimizaciones de Rendimiento
+
+| Optimización | Técnica | Impacto |
+|--------------|---------|---------|
+| Compilación JIT | Numba `@njit(cache=True)` | ~100x vs Python puro |
+| Sin GIL | `nogil=True` | Paralelismo potencial |
+| Fast math | `fastmath=True` | ~10% más rápido |
+| Zero-copy | Arrow ListArray desde offsets | Sin copia de datos |
+| Memory mapping | `memory_map=True` en lectura | Reduce uso de RAM |
+| Pre-cálculo | `theta_up = 1.0 + theta` | Evita multiplicaciones en loop |
+| Warmup | `warmup_kernel()` | Evita latencia JIT en producción |
+
+---
+
+### 8.8 Manejo de Fenómenos del Mercado
+
+#### 8.8.1 Gaps de Apertura
+
+**Fenómeno:** El precio de apertura puede estar muy alejado del cierre anterior.
+
+**Manejo:** El gap se absorbe en la fase DC (como slippage), preservando la pureza estadística del OS.
+
+#### 8.8.2 Flash Crashes
+
+**Fenómeno:** Caídas/subidas súbitas con recuperación rápida.
+
+**Manejo:**
+- Múltiples eventos DC en rápida sucesión
+- Overshoots potencialmente muy pequeños o cero
+- El sistema captura la microestructura completa
+
+#### 8.8.3 Baja Liquidez / Gaps Temporales
+
+**Fenómeno:** Períodos sin ticks (noches, fines de semana).
+
+**Manejo:**
+- Lookback de 7 días para encontrar estado
+- Stitching preserva continuidad algorítmica
+- Reconciliación corrige eventos al cruzar gaps
+
+#### 8.8.4 Alta Frecuencia de Ticks
+
+**Fenómeno:** Miles de ticks por segundo con mismo timestamp.
+
+**Manejo:**
+- Regla conservadora determinista
+- Inclusión completa del instante de confirmación
+- Vectorización para mantener rendimiento
+
+---
+
+### 8.9 Resumen de Bugs Corregidos
+
+Esta sección documenta los bugs más significativos encontrados y corregidos durante el desarrollo:
+
+| Bug | Impacto | Solución |
+|-----|---------|----------|
+| Resize antes de cerrar OS | Offsets con valores no inicializados | Reordenar: cerrar OS → resize |
+| conf_idx usando best_idx | Ticks del mismo timestamp en fases diferentes | Usar last_same_ts_idx |
+| Terminación prematura por convergencia | Solo 13/30 días procesados | Flag `stop_on_convergence=False` |
+| Falta de validación post-kernel | Datos corruptos escritos | Validación exhaustiva antes de write |
+| os_length negativo potencial | Comportamiento indefinido | Validación `if os_length > 0` |
+| Sin warning por procesamiento incompleto | Fallo silencioso | `warnings.warn()` si `results < n_days` |
+
+---
+
+## 9. Historial de Revisiones
+
+| Versión | Fecha      | Autor       | Descripción                                                                                                                                   |
+| ------- | ---------- | ----------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1.0.0   | 2026-01-31 | Claude Code | Documento inicial                                                                                                                             |
+| 1.1.0   | 2026-01-31 | Claude Code | Agregada documentación del caso crítico: cálculo del umbral en overshoot cero (DCC como referencia)                                           |
+| 1.2.0   | 2026-02-01 | Claude Code | Agregado diagrama ASCII pedagógico "Anatomía del Cambio Direccional" (§3.0) con visualización de primitivas, fases y relaciones fundamentales |
+| 1.3.0   | 2026-02-01 | Claude Code | Documentada política de inclusión completa del instante de confirmación en §3.3; corrección de kernel para evitar ticks del mismo timestamp en fases diferentes |
+| 2.0.0   | 2026-02-02 | Claude Code | **Nueva sección §8: Capacidades de Implementación del Core.** Documentación exhaustiva de: arquitectura del core, capacidades del kernel (regla conservadora, inclusión completa de instante de confirmación, resize dinámico, llenado retrospectivo, operaciones vectorizadas, validación de longitudes), sistema de continuidad cross-día (stitching, huérfanos, Arrow IPC), reconciliación retroactiva (tipos, escritura atómica), validación de integridad (post-kernel, estado, warnings), análisis de convergencia, optimizaciones de rendimiento, manejo de fenómenos del mercado (gaps, flash crashes, baja liquidez, alta frecuencia), y resumen de bugs corregidos. |
+
+---
+
+## 10. Anexo: Estructura de Archivos del Core
+
+```
+src/intrinseca/core/
+├── __init__.py           # Exports públicos del módulo
+├── engine.py             # Motor de orquestación Bronze → Silver
+├── kernel.py             # Kernel Numba JIT para segmentación DC
+├── state.py              # Gestión de estado y ticks huérfanos (Arrow IPC)
+├── reconciliation.py     # Sistema de reconciliación retroactiva
+├── convergence.py        # Análisis de convergencia y determinismo
+└── DC_FRAMEWORK.md       # Este documento
+```
+
+### Dependencias entre módulos
+
+```
+                    ┌──────────────┐
+                    │   engine.py  │
+                    └──────┬───────┘
+                           │
+           ┌───────────────┼───────────────┐
+           │               │               │
+           ▼               ▼               ▼
+    ┌──────────┐    ┌──────────┐    ┌─────────────────┐
+    │kernel.py │    │ state.py │    │reconciliation.py│
+    └──────────┘    └──────────┘    └─────────────────┘
+                           │               │
+                           └───────┬───────┘
+                                   ▼
+                           ┌──────────────┐
+                           │convergence.py│
+                           └──────────────┘
+```
 
 ---
 

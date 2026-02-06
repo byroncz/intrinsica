@@ -137,7 +137,7 @@ class OsVelocity(BaseIndicator):
 class EventVelocity(BaseIndicator):
     """Event Velocity: Speed of price change for the complete event.
 
-    Formula: (dc_magnitude[N] + os_magnitude[N]) / event_time[N]
+    Formula: event_magnitude[N] / event_time[N]
            = (extreme_price[N] - reference_price[N]) / event_time[N]
 
     Measures the rate of total price change per unit time across
@@ -146,14 +146,17 @@ class EventVelocity(BaseIndicator):
 
     name = "event_velocity"
     metadata = IndicatorMetadata(
-        description="Speed of total event price change (Total magnitude / Event time).",
+        description="Speed of total event price change (Event magnitude / Event time).",
         category="event/time",
     )
-    dependencies = ["event_time", "dc_magnitude", "os_magnitude"]
+    dependencies = ["event_time", "event_magnitude"]
 
     def get_expression(self) -> pl.Expr:
         """Return Polars expression for event velocity calculation."""
         event_time_sec = pl.col("event_time") / 1_000_000_000.0
-        total_magnitude = pl.col("dc_magnitude") + pl.col("os_magnitude")
 
-        return pl.when(event_time_sec > 0).then(total_magnitude / event_time_sec).otherwise(0.0)
+        return (
+            pl.when(event_time_sec > 0)
+            .then(pl.col("event_magnitude") / event_time_sec)
+            .otherwise(0.0)
+        )

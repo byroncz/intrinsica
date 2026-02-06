@@ -44,15 +44,23 @@ Los indicadores event-level se computan mediante `with_columns()` en Polars; los
 Los indicadores forman un **grafo acíclico dirigido (DAG)** de dependencias. El `IndicatorRegistry` resuelve estas dependencias topológicamente para garantizar el orden correcto de cómputo.
 
 ```
-dc_return ─────────────────────────┬─→ tmv
-                                   ├─→ avg_return
-                                   └─→ volatility_dc
+dc_magnitude ──────────────────────┬─→ dc_return ─────────┬─→ tmv
+                                   │                      ├─→ avg_return
+                                   │                      └─→ volatility_dc
+                                   ├─→ dc_velocity
+                                   └─→ event_magnitude ───┬─→ event_velocity
 
-overshoot ─────────────────────────┬─→ os_return
-                                   └─→ avg_overshoot
+os_magnitude ──────────────────────┬─→ os_return
+                                   ├─→ avg_os_magnitude
+                                   ├─→ os_velocity
+                                   └─→ event_magnitude ───┘
 
-duration_ns ───────────────────────┬─→ velocity
-                                   └─→ avg_duration
+dc_time ───────────────────────────┬─→ dc_velocity
+                                   ├─→ avg_dc_time
+                                   └─→ event_time ────────→ event_velocity
+
+os_time ───────────────────────────┬─→ os_velocity
+                                   └─→ event_time
 ```
 
 ---
@@ -169,7 +177,66 @@ def get_expression(self) -> pl.Expr:
 
 ---
 
-#### 2.1.3 DC Return
+#### 2.1.3 Event Magnitude
+
+| Atributo           | Valor                               |
+| ------------------ | ----------------------------------- |
+| **Nombre interno** | `event_magnitude`                   |
+| **Módulo**         | `indicators/metrics/event/price.py` |
+| **Estado**         | ✅ Implementado                     |
+| **Categoría**      | `event/price`                       |
+| **Dependencias**   | `dc_magnitude`, `os_magnitude`      |
+
+##### Definición Teórica
+
+El Event Magnitude mide el cambio de precio total absoluto a lo largo del evento completo (fases DC + OS), desde el punto de referencia hasta el punto extremo.
+
+**Fórmula canónica:**
+
+$$\text{Event Magnitude}_N = P_{EXT,N} - P_{REF,N}$$
+
+Equivalentemente, por la estructura aditiva de las fases:
+
+$$\text{Event Magnitude}_N = \text{DC Magnitude}_N + \text{OS Magnitude}_N$$
+
+Donde:
+
+- $P_{EXT,N}$ es el precio extremo del evento $N$ (`extreme_price`)
+- $P_{REF,N}$ es el precio de referencia del evento $N$ (`reference_price`)
+
+**Unidades:** Unidades de precio del activo subyacente.
+
+**Interpretación:** El signo indica la dirección del movimiento total:
+
+- Positivo para upturns
+- Negativo para downturns
+
+##### Implementación Práctica
+
+```python
+def get_expression(self) -> pl.Expr:
+    return pl.col("dc_magnitude") + pl.col("os_magnitude")
+```
+
+**Dependencias:** Requiere que `dc_magnitude` y `os_magnitude` estén calculados previamente.
+
+**Relación con otros indicadores:**
+
+- `event_magnitude / reference_price` = retorno total del evento
+- `event_magnitude / event_time` = `event_velocity`
+
+##### Salvedades
+
+| Caso              | Comportamiento                                                  |
+| ----------------- | --------------------------------------------------------------- |
+| Último evento     | `os_magnitude` puede ser inválido → `event_magnitude` inválido  |
+| Evento sin OS     | `event_magnitude = dc_magnitude` exactamente                    |
+
+**Referencias:** Extensión Intrinseca basada en Glattfelder et al. (2011).
+
+---
+
+#### 2.1.4 DC Return
 
 | Atributo           | Valor                               |
 | ------------------ | ----------------------------------- |
@@ -211,7 +278,7 @@ def get_expression(self) -> pl.Expr:
 
 ---
 
-#### 2.1.4 OS Return
+#### 2.1.5 OS Return
 
 | Atributo           | Valor                               |
 | ------------------ | ----------------------------------- |
@@ -258,7 +325,150 @@ def get_expression(self) -> pl.Expr:
 
 ---
 
-#### 2.1.5 DC Time
+#### 2.1.6 DC Slippage (Facial)
+
+| Atributo           | Valor                               |
+| ------------------ | ----------------------------------- |
+| **Nombre interno** | `dc_slippage`                       |
+| **Módulo**         | `indicators/metrics/event/price.py` |
+| **Estado**         | ✅ Implementado                     |
+| **Categoría**      | `event/price`                       |
+| **Parámetros**     | `theta` (default: 0.005)            |
+
+##### Definición Teórica
+
+El DC Slippage (Facial) cuantifica la diferencia entre el precio de confirmación real observado y el precio de confirmación teórico (exactamente en el umbral θ).
+
+**Fórmula canónica:**
+
+Para un upturn (+1):
+$$\text{Slippage}_N = P_{DCC,N} - P_{REF,N} \times (1 + \theta)$$
+
+Para un downturn (-1):
+$$\text{Slippage}_N = P_{DCC,N} - P_{REF,N} \times (1 - \theta)$$
+
+**Fórmula combinada:**
+$$\text{Slippage}_N = P_{DCC,N} - P_{REF,N} \times (1 + \text{event\_type} \times \theta)$$
+
+**Unidades:** Unidades de precio del activo subyacente.
+
+**Interpretación:**
+- Slippage positivo → El precio "saltó" más allá del umbral teórico
+- Slippage ≈ 0 → Mercado continuo con alta liquidez
+- Slippage alto → Gaps, flash events, o baja liquidez
+
+##### Implementación Práctica
+
+```python
+def __init__(self, theta: float = 0.005):
+    self.theta = theta
+
+def get_expression(self) -> pl.Expr:
+    theoretical_confirm = pl.col("reference_price") * (
+        1.0 + pl.col("event_type").cast(pl.Float64) * self.theta
+    )
+    return pl.col("confirm_price") - theoretical_confirm
+```
+
+**Columnas Silver utilizadas:**
+- `confirm_price`: Precio real de confirmación (conservador)
+- `reference_price`: Precio extremo del evento anterior
+- `event_type`: Dirección del evento (+1 upturn, -1 downturn)
+
+##### Salvedades
+
+| Aspecto                | Comportamiento                                           |
+| ---------------------- | -------------------------------------------------------- |
+| Slippage siempre ≥ 0   | Por construcción (política conservadora selecciona el mejor precio) |
+| Dependencia de θ       | Debe coincidir con el θ usado en el procesamiento        |
+
+**Referencias:** Extensión Intrinseca.
+
+---
+
+#### 2.1.7 DC Slippage (Real)
+
+| Atributo           | Valor                               |
+| ------------------ | ----------------------------------- |
+| **Nombre interno** | `dc_slippage_real`                  |
+| **Módulo**         | `indicators/metrics/event/price.py` |
+| **Estado**         | ✅ Implementado                     |
+| **Categoría**      | `event/price`                       |
+| **Parámetros**     | `theta` (default: 0.005)            |
+
+##### Definición Teórica
+
+El DC Slippage (Real) cuantifica el **peor caso** de slippage: la diferencia entre el precio más lejano del umbral teórico (entre todos los ticks del instante de confirmación) y el precio teórico.
+
+A diferencia del Slippage Facial que usa el precio conservador (`confirm_price`), este indicador busca el precio que maximiza la desviación del umbral.
+
+**Fórmula:**
+
+Para un upturn (+1):
+$$P_{worst} = \max\{P_i : T_i = T_{DCC}\}$$
+$$\text{Slippage Real}_N = P_{worst} - P_{REF,N} \times (1 + \theta)$$
+
+Para un downturn (-1):
+$$P_{worst} = \min\{P_i : T_i = T_{DCC}\}$$
+$$\text{Slippage Real}_N = P_{worst} - P_{REF,N} \times (1 - \theta)$$
+
+**Unidades:** Unidades de precio del activo subyacente.
+
+**Interpretación:**
+- Mide el máximo slippage posible que un trader pudo haber experimentado
+- La diferencia `(Slippage Real - Slippage Facial)` indica la **dispersión de precios** en el instante de confirmación (ruido de microestructura)
+- Si `Real == Facial`, había un solo precio en el instante de confirmación
+
+##### Implementación Práctica
+
+```python
+def _compute_worst_confirm_price(price_dc, time_dc, confirm_time, event_type):
+    prices_at_confirm = [p for p, t in zip(price_dc, time_dc) if t == confirm_time]
+    if not prices_at_confirm:
+        return None
+    return max(prices_at_confirm) if event_type == 1 else min(prices_at_confirm)
+
+def get_expression(self) -> pl.Expr:
+    worst_price = pl.struct(["price_dc", "time_dc", "confirm_time", "event_type"]).map_elements(
+        lambda row: _compute_worst_confirm_price(
+            row["price_dc"], row["time_dc"], row["confirm_time"], row["event_type"]
+        ),
+        return_dtype=pl.Float64,
+    )
+    theoretical_confirm = pl.col("reference_price") * (
+        1.0 + pl.col("event_type").cast(pl.Float64) * self.theta
+    )
+    return worst_price - theoretical_confirm
+```
+
+**Columnas Silver utilizadas:**
+- `price_dc`: Lista de precios durante la fase DC
+- `time_dc`: Lista de timestamps durante la fase DC
+- `confirm_time`: Timestamp de confirmación
+- `reference_price`: Precio extremo del evento anterior
+- `event_type`: Dirección del evento (+1 upturn, -1 downturn)
+
+##### Salvedades
+
+| Aspecto                  | Comportamiento                                           |
+| ------------------------ | -------------------------------------------------------- |
+| Requiere corrección kernel | El kernel debe incluir TODOS los ticks del instante de confirmación en `price_dc` (corregido via `last_same_ts_idx`) |
+| Rendimiento              | Usa `map_elements` (Python puro), más lento que expresiones nativas |
+| Dependencia de θ         | Debe coincidir con el θ usado en el procesamiento        |
+
+##### Relación con Slippage Facial
+
+| Escenario                        | Slippage Facial | Slippage Real |
+| -------------------------------- | --------------- | ------------- |
+| Un solo tick en confirmación     | X               | X (iguales)   |
+| Múltiples ticks, mismo precio    | X               | X (iguales)   |
+| Múltiples ticks, precios diversos| Conservador     | Peor caso     |
+
+**Referencias:** Extensión Intrinseca.
+
+---
+
+#### 2.1.8 DC Time
 
 | Atributo           | Valor                              |
 | ------------------ | ---------------------------------- |
@@ -310,7 +520,7 @@ def get_expression(self) -> pl.Expr:
 
 ---
 
-#### 2.1.5 OS Time
+#### 2.1.9 OS Time
 
 | Atributo           | Valor                              |
 | ------------------ | ---------------------------------- |
@@ -360,7 +570,7 @@ def get_expression(self) -> pl.Expr:
 
 ---
 
-#### 2.1.6 Event Time
+#### 2.1.10 Event Time
 
 | Atributo           | Valor                              |
 | ------------------ | ---------------------------------- |
@@ -399,7 +609,7 @@ def get_expression(self) -> pl.Expr:
 
 ---
 
-#### 2.1.8 DC Velocity (A3)
+#### 2.1.11 DC Velocity (A3)
 
 | Atributo           | Valor                              |
 | ------------------ | ---------------------------------- |
@@ -445,7 +655,7 @@ def get_expression(self) -> pl.Expr:
 
 ---
 
-#### 2.1.9 OS Velocity
+#### 2.1.12 OS Velocity
 
 | Atributo           | Valor                              |
 | ------------------ | ---------------------------------- |
@@ -489,7 +699,7 @@ def get_expression(self) -> pl.Expr:
 
 ---
 
-#### 2.1.10 Event Velocity
+#### 2.1.13 Event Velocity
 
 | Atributo           | Valor                              |
 | ------------------ | ---------------------------------- |
@@ -538,7 +748,7 @@ def get_expression(self) -> pl.Expr:
 
 ---
 
-#### 2.1.6 Runs Count
+#### 2.1.14 Runs Count
 
 | Atributo           | Valor                              |
 | ------------------ | ---------------------------------- |
@@ -816,52 +1026,6 @@ def get_expression(self) -> pl.Expr:
 **Nota:** Por construcción, $|\text{DC Return}| \geq \theta$, por lo que la volatilidad tiene un piso implícito relacionado con el umbral.
 
 **Referencias:** Guillaume et al. (1997).
-
----
-
-#### 2.2.6 Upturn Ratio
-
-| Atributo           | Valor                                 |
-| ------------------ | ------------------------------------- |
-| **Nombre interno** | `upturn_ratio`                        |
-| **Módulo**         | `indicators/metrics/summary/stats.py` |
-| **Estado**         | ✅ Implementado                       |
-| **Categoría**      | `summary/stats`                       |
-
-##### Definición Teórica
-
-Proporción de eventos que son upturns respecto al total de eventos.
-
-**Fórmula:**
-
-$$\text{Upturn Ratio} = \frac{|\{i : \text{event\_type}_i = 1\}|}{n}$$
-
-**Rango:** [0, 1]
-
-**Interpretación:** Un valor de 0.5 indica perfecta simetría direccional. Valores superiores sugieren predominancia alcista; valores inferiores, predominancia bajista.
-
-##### Implementación Práctica
-
-```python
-def get_expression(self) -> pl.Expr:
-    return (pl.col("event_type") == 1).mean()
-```
-
-**Columna Silver utilizada:**
-
-- `event_type`: Tipo de evento (1 = upturn, -1 = downturn)
-
-**Unidades:** Adimensional (Float64).
-
-##### Salvedades
-
-| Aspecto      | Comportamiento                               |
-| ------------ | -------------------------------------------- |
-| Mecánica     | Convierte booleano a 1/0 y calcula promedio  |
-| Eventos null | No deberían existir; si existen, se excluyen |
-| Complemento  | Downturn Ratio = 1 - Upturn Ratio            |
-
-**Nota:** Este indicador no aparece explícitamente en la literatura DC pero es útil para detectar sesgos direccionales en el régimen de mercado.
 
 ---
 
@@ -1212,11 +1376,19 @@ $$\text{SMQ} = \frac{|\text{OS}|}{|\text{DC}|}$$
 
 | Indicador        | Literatura | Implementado | Prioridad |
 | ---------------- | ---------- | ------------ | --------- |
-| Overshoot        | ✅         | ✅           | -         |
+| DC Magnitude     | ✅         | ✅           | -         |
+| OS Magnitude     | ✅         | ✅           | -         |
+| Event Magnitude  | ❌         | ✅           | -         |
 | DC Return        | ✅         | ✅           | -         |
 | OS Return        | ✅         | ✅           | -         |
-| Duration (A2)    | ✅         | ✅           | -         |
-| Velocity (A3)    | ✅         | ✅           | -         |
+| DC Slippage      | ❌         | ✅           | -         |
+| DC Slippage Real | ❌         | ✅           | -         |
+| DC Time (A2)     | ✅         | ✅           | -         |
+| OS Time          | ❌         | ✅           | -         |
+| Event Time       | ❌         | ✅           | -         |
+| DC Velocity (A3) | ✅         | ✅           | -         |
+| OS Velocity      | ❌         | ✅           | -         |
+| Event Velocity   | ❌         | ✅           | -         |
 | Runs Count       | ❌         | ✅           | -         |
 | TMV (agregado)   | ⚠️         | ⚠️           | Alta      |
 | Avg Duration     | ❌         | ✅           | -         |
@@ -1277,6 +1449,9 @@ Tsang, E. P. K., & Ma, S. (2021). _Distribution of aTMV, an empirical study_. Wo
 | 1.0.0   | 2026-01-31 | Claude Code | Documento inicial                                                                                               |
 | 1.1.0   | 2026-01-31 | Claude Code | Refactorización: primitivas movidas a `core/DC_FRAMEWORK.md`; nueva introducción orientada a indicadores        |
 | 1.2.0   | 2026-01-31 | Claude Code | Agregada estructura Teoría/Práctica/Salvedades a cada indicador implementado; código de implementación incluido |
+| 1.3.0   | 2026-02-01 | Claude Code | Agregado Event Magnitude (§2.1.3); actualizado DAG de dependencias y matriz de cobertura; renumeración de secciones |
+| 1.4.0   | 2026-02-01 | Claude Code | Agregado DC Slippage Facial (§2.1.6); documentación de viabilidad de Slippage Real |
+| 1.5.0   | 2026-02-01 | Claude Code | Agregado DC Slippage Real (§2.1.7) tras corrección de kernel para incluir todos los ticks del instante de confirmación |
 
 ---
 
