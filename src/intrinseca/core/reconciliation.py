@@ -232,3 +232,140 @@ def cleanup_backup(backup_path: Path) -> None:
     """Elimina el archivo de backup después de una reconciliación exitosa."""
     if backup_path and backup_path.exists():
         backup_path.unlink()
+
+
+def reconcile_previous_month(
+    silver_base_path: Path,
+    ticker: str,
+    theta: float,
+    prev_year: int,
+    prev_month: int,
+    new_extreme_price: float,
+    new_extreme_time: int,
+) -> ReconciliationResult:
+    """Actualiza el Parquet del mes anterior con el extremo definitivo.
+
+    Similar a reconcile_previous_day pero opera sobre archivos mensuales.
+    Busca el archivo mensual: .../month={MM}/data.parquet (sin day=)
+
+    Mitigaciones:
+    - Backup del archivo original antes de modificar
+    - Escritura a archivo temporal, luego rename atómico
+
+    Args:
+    ----
+        silver_base_path: Ruta base del Silver layer
+        ticker: Ticker del activo
+        theta: Umbral DC
+        prev_year: Año del mes anterior
+        prev_month: Mes anterior (1-12)
+        new_extreme_price: Nuevo precio extremo definitivo
+        new_extreme_time: Nuevo timestamp del extremo (nanosegundos)
+
+    Returns:
+    -------
+        ReconciliationResult con el resultado de la operación
+
+    """
+    # Construir ruta al archivo mensual
+    theta_str = f"{theta:.6f}".rstrip("0").rstrip(".")
+    silver_path = (
+        silver_base_path
+        / ticker
+        / f"theta={theta_str}"
+        / f"year={prev_year}"
+        / f"month={prev_month:02d}"
+        / "data.parquet"
+    )
+
+    if not silver_path.exists():
+        return ReconciliationResult(
+            reconciliation_type=ReconciliationType.CONFIRM_REVERSAL,
+            previous_parquet_path=silver_path,
+            backup_path=None,
+            success=False,
+            error=f"Archivo mensual no encontrado: {silver_path}",
+        )
+
+    # 1. Crear backup
+    backup_path = silver_path.with_suffix(".parquet.bak")
+    try:
+        shutil.copy2(silver_path, backup_path)
+    except Exception as e:
+        return ReconciliationResult(
+            reconciliation_type=ReconciliationType.CONFIRM_REVERSAL,
+            previous_parquet_path=silver_path,
+            backup_path=None,
+            success=False,
+            error=f"Error creando backup: {e}",
+        )
+
+    try:
+        # 2. Cargar DataFrame
+        df = pl.read_parquet(silver_path)
+
+        if df.is_empty():
+            # Archivo vacío, nada que reconciliar
+            cleanup_backup(backup_path)
+            return ReconciliationResult(
+                reconciliation_type=ReconciliationType.CONFIRM_REVERSAL,
+                previous_parquet_path=silver_path,
+                backup_path=None,
+                success=True,
+            )
+
+        # 3. Verificar si el último evento tiene extremo provisional (-1.0)
+        last_extreme = df["extreme_price"][-1]
+        if last_extreme > 0:
+            # Ya tiene extremo válido, no necesita reconciliación
+            cleanup_backup(backup_path)
+            return ReconciliationResult(
+                reconciliation_type=ReconciliationType.NONE,
+                previous_parquet_path=silver_path,
+                backup_path=None,
+                success=True,
+            )
+
+        # 4. Actualizar extreme_price del último evento
+        df = df.with_columns(
+            [
+                pl.when(pl.arange(0, df.height) == df.height - 1)
+                .then(pl.lit(new_extreme_price))
+                .otherwise(pl.col("extreme_price"))
+                .alias("extreme_price"),
+                pl.when(pl.arange(0, df.height) == df.height - 1)
+                .then(pl.lit(new_extreme_time))
+                .otherwise(pl.col("extreme_time"))
+                .alias("extreme_time"),
+            ]
+        )
+
+        # 5. Escribir a archivo temporal
+        temp_path = silver_path.with_suffix(".parquet.tmp")
+        df.write_parquet(temp_path, compression="zstd", compression_level=3)
+
+        # 6. Rename atómico
+        temp_path.rename(silver_path)
+
+        # 7. Limpiar backup
+        cleanup_backup(backup_path)
+
+        return ReconciliationResult(
+            reconciliation_type=ReconciliationType.CONFIRM_REVERSAL,
+            previous_parquet_path=silver_path,
+            backup_path=None,
+            success=True,
+        )
+
+    except Exception as e:
+        # Restaurar backup si algo falla
+        if backup_path.exists():
+            shutil.copy2(backup_path, silver_path)
+
+        return ReconciliationResult(
+            reconciliation_type=ReconciliationType.CONFIRM_REVERSAL,
+            previous_parquet_path=silver_path,
+            backup_path=backup_path,
+            success=False,
+            error=f"Error durante reconciliación mensual: {e}",
+        )

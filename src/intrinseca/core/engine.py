@@ -1229,21 +1229,35 @@ class Engine:
             prev_state.last_os_ref,
         )
 
+        # Desempaquetar resultado (23 elementos)
         (
+            dc_prices,
+            dc_times,
+            dc_quantities,
+            dc_directions,
+            os_prices,
+            os_times,
+            os_quantities,
+            os_directions,
             event_types,
-            dc_indices,
-            os_indices,
-            os_start_indices,
-            dcc_indices,
-            extreme_indices,
-            confirm_indices,
-            reference_indices,
+            dc_offsets,
+            os_offsets,
+            # Atributos de evento (escalares, zero indirection)
+            reference_prices,
+            reference_times,
+            extreme_prices,
+            extreme_times,
+            confirm_prices,
+            confirm_times,
+            # Estado final
+            n_events,
             final_trend,
-            final_os_ref,
+            final_ext_high,
+            final_ext_low,
+            final_last_os_ref,
             orphan_start_idx,
         ) = kernel_result
 
-        n_events = len(event_types)
         self._log(f"  ⚡ Kernel: {n_events} eventos detectados")
 
         if n_events == 0:
@@ -1258,8 +1272,8 @@ class Engine:
                 orphan_times=orphan_times,
                 orphan_quantities=orphan_quantities,
                 orphan_directions=orphan_directions,
-                current_trend=final_trend,
-                last_os_ref=final_os_ref,
+                current_trend=np.int8(final_trend),
+                last_os_ref=np.float64(final_last_os_ref),
                 last_processed_date=date(year, month, monthrange(year, month)[1]),
             )
 
@@ -1283,33 +1297,58 @@ class Engine:
                 output_path=output_path,
             )
 
+        # 5.5 Reconciliar mes anterior si había huérfanos
+        if prev_state.n_orphans > 0:
+            from .reconciliation import reconcile_previous_month
+
+            # El reference_price del primer evento es el extremo del mes anterior
+            first_ref_price = float(reference_prices[0])
+            first_ref_time = int(reference_times[0])
+
+            recon_result = reconcile_previous_month(
+                silver_base_path=self.config.silver_base_path,
+                ticker=ticker,
+                theta=self.config.theta,
+                prev_year=prev_year,
+                prev_month=prev_month,
+                new_extreme_price=first_ref_price,
+                new_extreme_time=first_ref_time,
+            )
+
+            if recon_result.success:
+                if recon_result.reconciliation_type.value != "none":
+                    self._log(f"  🔄 Reconciliado: {prev_year}-{prev_month:02d}")
+            else:
+                self._log(f"  ⚠️ Reconciliación fallida: {recon_result.error}")
+
         # 6. Construir listas Arrow
-        arrow_lists = self._build_arrow_lists(
-            stitched_prices,
-            stitched_times,
-            stitched_quantities,
-            stitched_directions,
-            dc_indices,
-            os_indices,
-            os_start_indices,
-            dcc_indices,
-            extreme_indices,
-            confirm_indices,
-            reference_indices,
+        list_columns = self._build_arrow_lists(
+            dc_prices,
+            dc_times,
+            dc_quantities,
+            dc_directions,
+            os_prices,
+            os_times,
+            os_quantities,
+            os_directions,
+            dc_offsets,
+            os_offsets,
         )
 
         # 7. Construir tabla Arrow con estructura anidada
-        arrow_table = self._build_arrow_table(
-            n_events,
-            event_types,
-            stitched_prices,
-            stitched_times,
-            stitched_quantities,
-            extreme_indices,
-            confirm_indices,
-            reference_indices,
-            dcc_indices,
-            arrow_lists,
+        arrow_table = pa.table(
+            {
+                "event_type": pa.array(event_types, type=pa.int8()),
+                # Atributos de evento (escalares, zero indirection)
+                "reference_price": pa.array(reference_prices, type=pa.float64()),
+                "reference_time": pa.array(reference_times, type=pa.int64()),
+                "extreme_price": pa.array(extreme_prices, type=pa.float64()),
+                "extreme_time": pa.array(extreme_times, type=pa.int64()),
+                "confirm_price": pa.array(confirm_prices, type=pa.float64()),
+                "confirm_time": pa.array(confirm_times, type=pa.int64()),
+                # Arrays anidados (microestructura)
+                **list_columns,
+            }
         )
 
         # 8. Escribir Parquet
@@ -1330,8 +1369,8 @@ class Engine:
             orphan_times=orphan_times,
             orphan_quantities=orphan_quantities,
             orphan_directions=orphan_directions,
-            current_trend=final_trend,
-            last_os_ref=final_os_ref,
+            current_trend=np.int8(final_trend),
+            last_os_ref=np.float64(final_last_os_ref),
             last_processed_date=date(year, month, monthrange(year, month)[1]),
         )
 
@@ -1353,7 +1392,8 @@ class Engine:
             self.stats.kernel_calls += 1
 
         elapsed_ms = (time.perf_counter() - start_time) * 1000
-        self.stats.total_time_ms += elapsed_ms if self.stats else 0
+        if self.stats:
+            self.stats.total_time_ms += elapsed_ms
 
         self._log(f"  ✅ Completado en {elapsed_ms:.0f}ms")
 
