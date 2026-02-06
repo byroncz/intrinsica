@@ -233,7 +233,7 @@ def _compute_worst_confirm_price(
         return None
 
     # Filter prices at confirmation timestamp
-    prices_at_confirm = [p for p, t in zip(price_dc, time_dc) if t == confirm_time]
+    prices_at_confirm = [p for p, t in zip(price_dc, time_dc, strict=True) if t == confirm_time]
 
     if not prices_at_confirm:
         return None
@@ -336,8 +336,8 @@ class TotalMove(BaseIndicator):
         return pl.col("event_magnitude").abs()
 
 
-class TmvEvent(BaseIndicator):
-    """TMV per Event: Total Move normalized by threshold theta.
+class Tmv(BaseIndicator):
+    """TMV: Total Movement Value normalized by threshold theta.
 
     Formula: TMV[N] = |event_magnitude[N]| / (reference_price[N] × θ)
                     = total_move[N] / (reference_price[N] × θ)
@@ -347,21 +347,20 @@ class TmvEvent(BaseIndicator):
     - TMV = 2.0 → Movement is double the threshold
     - TMV > 1 indicates overshoot occurred
 
-    Note: This is the CANONICAL TMV per Tsang et al. (2015), different from
-    the summary-level TMV that sums returns.
+    This is the CANONICAL TMV definition per Tsang et al. (2015).
 
     References: Tsang et al. (2015)
     """
 
-    name = "tmv_event"
+    name = "tmv"
     metadata = IndicatorMetadata(
-        description="Total Movement Value per event (|movement| / (price × θ)).",
+        description="Total Movement Value (|movement| / (price × θ)). Canonical.",
         category="event/price",
     )
     dependencies = ["total_move"]
 
     def __init__(self, theta: float = 0.005):
-        """Initialize TMV Event indicator.
+        """Initialize TMV indicator.
 
         Args:
             theta: DC threshold used in processing (default: 0.5%)

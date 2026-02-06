@@ -24,19 +24,19 @@ from .event.price import (
     OsMagnitude,
     OsReturn,
     OsvEvent,
-    TmvEvent,
+    Tmv,
     TotalMove,
 )
 from .event.tick import RunsCount
 from .event.time import DcTime, DcVelocity, EventTime, EventVelocity, OsTime, OsVelocity
 from .summary.stats import (
-    TMV,
     AccumulatedTime,
     AvgDcTime,
     AvgOsMagnitude,
     AvgReturn,
     Cdc,
     Ndc,
+    TmvAggregated,
     VolatilityDC,
 )
 
@@ -58,7 +58,7 @@ def create_registry(theta: float) -> IndicatorRegistry:
         >>> from intrinseca.core import read_dc_month
         >>> dataset = read_dc_month(data_path, "BTCUSDT", 2025, 11)
         >>> registry = create_registry(dataset.theta)
-        >>> result = registry.compute(dataset.df.lazy(), ["tmv_event"]).collect()
+        >>> result = registry.compute(dataset.df.lazy(), ["tmv"]).collect()
     """
     registry = IndicatorRegistry()
 
@@ -74,7 +74,7 @@ def create_registry(theta: float) -> IndicatorRegistry:
     # Event/Price (event-level) - theta-dependent
     registry.register(DcSlippage(theta=theta))
     registry.register(DcSlippageReal(theta=theta))
-    registry.register(TmvEvent(theta=theta))
+    registry.register(Tmv(theta=theta))
     registry.register(OsvEvent(theta=theta))
 
     # Event/Time (event-level)
@@ -94,7 +94,7 @@ def create_registry(theta: float) -> IndicatorRegistry:
     registry.register(A6FlashEvent())
 
     # Summary/Stats (aggregation)
-    registry.register(TMV())
+    registry.register(TmvAggregated())
     registry.register(AvgDcTime())
     registry.register(AvgReturn())
     registry.register(AvgOsMagnitude())
@@ -131,7 +131,7 @@ def register_all(registry: IndicatorRegistry) -> None:
     registry.register(DcSlippage(theta=default_theta))
     registry.register(DcSlippageReal(theta=default_theta))
     registry.register(TotalMove())
-    registry.register(TmvEvent(theta=default_theta))
+    registry.register(Tmv(theta=default_theta))
     registry.register(OsvEvent(theta=default_theta))
     registry.register(A1DcPriceAbs())
 
@@ -152,7 +152,7 @@ def register_all(registry: IndicatorRegistry) -> None:
     registry.register(A6FlashEvent())
 
     # Summary/Stats (aggregation)
-    registry.register(TMV())
+    registry.register(TmvAggregated())
     registry.register(AvgDcTime())
     registry.register(AvgReturn())
     registry.register(AvgOsMagnitude())

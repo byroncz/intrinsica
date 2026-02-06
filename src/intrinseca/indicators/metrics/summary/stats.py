@@ -9,20 +9,29 @@ import polars as pl
 from intrinseca.indicators.base import BaseIndicator, IndicatorMetadata
 
 
-class TMV(BaseIndicator):
-    """Total Movement Value - sum of absolute DC returns."""
+class TmvAggregated(BaseIndicator):
+    """TMV Aggregated: Sum of absolute TMV values across all events.
 
-    name = "tmv"
+    Formula: TMV_aggregated = sum(|tmv|)
+
+    This represents the total "movement energy" in the period,
+    measured in units of threshold θ. Equivalent to CDC but using
+    the canonical TMV definition.
+
+    References: Tsang et al. (2015)
+    """
+
+    name = "tmv_aggregated"
     metadata = IndicatorMetadata(
-        description="Total Movement Value - sum of absolute returns.",
+        description="Sum of absolute TMV values (canonical aggregation).",
         category="summary/stats",
         is_event_level=False,
     )
-    dependencies = ["dc_return"]
+    dependencies = ["tmv"]
 
     def get_expression(self) -> pl.Expr:
-        """Return Polars expression for TMV calculation."""
-        return pl.col("dc_return").abs().sum()
+        """Return Polars expression for aggregated TMV calculation."""
+        return pl.col("tmv").abs().sum()
 
 
 class AvgDcTime(BaseIndicator):
@@ -112,7 +121,7 @@ class Ndc(BaseIndicator):
 class Cdc(BaseIndicator):
     """CDC (Coastline): Sum of absolute TMV values.
 
-    Formula: CDC = sum(|tmv_event|)
+    Formula: CDC = sum(|tmv|)
 
     Inspired by Mandelbrot's fractal coastline paradox.
     Represents the total "energy" dissipated by the market
@@ -127,11 +136,11 @@ class Cdc(BaseIndicator):
         category="summary/stats",
         is_event_level=False,
     )
-    dependencies = ["tmv_event"]
+    dependencies = ["tmv"]
 
     def get_expression(self) -> pl.Expr:
         """Return Polars expression for CDC calculation."""
-        return pl.col("tmv_event").abs().sum()
+        return pl.col("tmv").abs().sum()
 
 
 class AccumulatedTime(BaseIndicator):
