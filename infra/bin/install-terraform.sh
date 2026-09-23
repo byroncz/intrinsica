@@ -3,7 +3,7 @@
 # por HashiCorp. Idempotente: si ya está la versión fijada, no hace nada.
 set -euo pipefail
 
-TERRAFORM_VERSION="1.12.2"
+TERRAFORM_VERSION="1.16.4"
 
 BIN_DIR="${HOME}/.local/bin"
 BASE_URL="https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}"
