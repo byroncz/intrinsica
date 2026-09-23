@@ -118,13 +118,17 @@ terraform {
 data "terraform_remote_state" "data" {
   backend = "gcs"
   config = {
-    bucket = "<project_id>-tfstate"
+    bucket = var.tfstate_bucket
     prefix = "stacks/batch/data"
   }
 }
 ```
 
+- El bucket de estado no admite variables en `backend`, pero sí en
+  `terraform_remote_state`: cada stack de capa declara `variable "tfstate_bucket"`.
 - Se inicializa con `terraform init -backend-config="bucket=<project_id>-tfstate"`.
+- Plan y apply piden la variable:
+  `terraform plan -var tfstate_bucket=<project_id>-tfstate` (igual con `apply`).
 - Consume solo los outputs de `data` (`project_id`, `project_number`,
   `region`, `buckets`), por ejemplo `data.terraform_remote_state.data.outputs.buckets["landing"]`.
 - Un stack de capa nunca crea buckets: son datos y `data` es su único dueño.
