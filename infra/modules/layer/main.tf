@@ -46,6 +46,9 @@ locals {
 }
 
 # Acceso solo a los prefijos recibidos. Requiere UBLA activo en el bucket.
+# La condición tiene dos ramas porque GCS evalúa storage.objects.list sobre el
+# bucket, no sobre el objeto: leer y escribir casan por la ruta del objeto, y
+# listar casa por el bucket con el prefijo de listado dentro del permitido.
 resource "google_storage_bucket_iam_member" "prefix" {
   for_each = local.grants
 
@@ -56,6 +59,6 @@ resource "google_storage_bucket_iam_member" "prefix" {
   condition {
     title       = "${var.layer}-${replace(each.key, "/", "-")}"
     description = "Acceso de ${var.layer} solo bajo ${each.value.prefix}"
-    expression  = "resource.name.startsWith(\"projects/_/buckets/${each.value.bucket}/objects/${each.value.prefix}\")"
+    expression  = "resource.name.startsWith(\"projects/_/buckets/${each.value.bucket}/objects/${each.value.prefix}\") || (resource.name == \"projects/_/buckets/${each.value.bucket}\" && api.getAttribute(\"storage.googleapis.com/objectListPrefix\", \"\").startsWith(\"${each.value.prefix}\"))"
   }
 }
