@@ -215,26 +215,7 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
-# Playground
-playground*.py
-
-# Datalake
-datalake/
-
-# Antigravity Test Files
-repro_*.py
-verify_*.py
-debug_*.py
-manual_*.py
-inspect_*.py
-check_*.py
-*_example.py
-*_test.py
-dummy/
-output/
-docs/
-CLAUDE.md
-
 # macOS
 .DS_Store
 /.claude/
+CLAUDE.md
