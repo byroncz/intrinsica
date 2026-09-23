@@ -25,3 +25,18 @@ output "buckets" {
     "manifest"    = google_storage_bucket.manifest.name
   }
 }
+
+output "artifact_registry" {
+  description = "Ruta del repositorio Docker: us-east1-docker.pkg.dev/<project_id>/<repo>."
+  value       = "${var.region}-docker.pkg.dev/${var.project_id}/${google_artifact_registry_repository.images.repository_id}"
+}
+
+output "wif_provider_name" {
+  description = "Nombre completo del provider WIF (projects/<número>/locations/global/workloadIdentityPools/<pool>/providers/<provider>)."
+  value       = google_iam_workload_identity_pool_provider.github.name
+}
+
+output "ci_service_account_email" {
+  description = "Email de la service account que asume GitHub Actions."
+  value       = google_service_account.ci.email
+}
