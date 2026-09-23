@@ -4,6 +4,7 @@ on:
   pull_request:
   push:
     branches: [main]
+  workflow_dispatch: # run manual en main: construye todas las capas
 
 jobs:
   lint-test:
@@ -15,3 +16,60 @@ jobs:
       - run: uv run ruff check .
       - run: uv run ruff format --check .
       - run: uv run pytest
+
+  # Decide qué capas construir. Una capa se construye si cambió layers/<capa>/**;
+  # todas se construyen si cambió shared/** o .github/workflows/** (o en un run manual).
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    env:
+      # ÚNICO lugar donde se declaran las capas (JSON). Para agregar una capa:
+      # añade su nombre aquí (por ejemplo '["l1_ingest","l2_dc_events"]') y
+      # crea layers/<capa>/Dockerfile y layers/<capa>/VERSION. El filtro y la
+      # matriz se derivan de esta lista; no hay nada más que editar.
+      LAYERS: '[]'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generar filtros por capa
+        run: |
+          {
+            echo "shared:"
+            echo "  - 'shared/**'"
+            echo "  - '.github/workflows/**'"
+            jq -r '.[] | "\(.):\n  - '"'"'layers/\(.)/**'"'"'"' <<< "$LAYERS"
+          } > "$RUNNER_TEMP/filters.yml"
+          cat "$RUNNER_TEMP/filters.yml"
+
+      - id: filter
+        if: github.event_name != 'workflow_dispatch'
+        uses: dorny/paths-filter@v3
+        with:
+          filters: ${{ runner.temp }}/filters.yml
+
+      - name: Calcular matriz de capas
+        id: matrix
+        env:
+          CHANGED: ${{ steps.filter.outputs.changes || '[]' }}
+          ALL: ${{ github.event_name == 'workflow_dispatch' }}
+        run: |
+          matrix="$(jq -cn --argjson layers "$LAYERS" --argjson changed "$CHANGED" --arg all "$ALL" '
+            if $all == "true" or ($changed | index("shared")) then $layers
+            else $layers | map(select(. as $l | $changed | index($l)))
+            end')"
+          echo "matrix=${matrix}" | tee -a "$GITHUB_OUTPUT"
+
+  build:
+    needs: changes
+    if: needs.changes.outputs.matrix != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        layer: ${{ fromJSON(needs.changes.outputs.matrix) }}
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/_build-layer.yml
+    with:
+      layer: ${{ matrix.layer }}
