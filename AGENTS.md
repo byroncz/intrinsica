@@ -1,0 +1,88 @@
+# intrinsica
+
+Instrucciones para cualquier agente que trabaje en este repo. `CLAUDE.md`
+importa este archivo; Codex lo lee directamente. Es la única fuente.
+
+## Qué es este proyecto
+
+<!-- Dos o tres líneas. Qué hace y para quién. Completar al crear el proyecto. -->
+
+## Cómo se trabaja aquí
+
+- Código del proyecto en Notion: el valor `project` de `.devkit/devkit.toml`.
+  Cada tarea es una card con Clave `<CÓDIGO>-<n>`. Las skills en
+  `.claude/skills/` definen cada paso.
+- Una card activa por sesión. Rama `<tipo>/<CÓDIGO>-<n>-slug` desde `main`
+  (`feat/`, `fix/` o `chore/` según el Tipo de la card), PR a `main` con
+  auto-merge. Nunca push directo a `main`. Nunca force push.
+- Sin una card activa en `En progreso` sobre la rama actual, la sesión no
+  edita archivos de código. Puede crear cards (`task-create`), comentar,
+  revisar (`pr-review`) y escribir Documentación. Todo cambio de código
+  entra por una card y su rama; el ciclo automático lo revisa y lo mergea.
+  Única excepción: autorización expresa del humano en la conversación.
+- Commits con Conventional Commits y la Clave como ámbito:
+  `feat(<CÓDIGO>-42): agregar carga incremental`.
+- `sandbox.local/` es un espacio de pruebas respaldado en Dropbox y fuera de
+  git. Cualquier otro directorio `*.local` no se respalda y muere en el
+  rebuild: no guardes ahí nada que importe.
+- Python lo gestiona `uv`. Versión en `.devkit/devkit.toml` (clave `python`).
+  Dependencias con `uv add`, entorno con `uv sync`, ejecutar con `uv run`.
+- Sin `sudo`. Si falta un paquete de sistema, se declara en
+  `.devkit/devkit.toml` (`apt`) y se reconstruye la imagen con
+  `devkit rebuild`.
+- Si una conexión falla con "connection refused", el dominio no está en la
+  lista blanca del proxy. Ejecuta `devkit-net-denied`, añádelo a `domains`
+  en `.devkit/devkit.toml` y aplica con `devkit recreate`.
+
+## Notion y skills
+
+- Notion es el centro de tareas. Identificadores de las bases (Proyectos,
+  Tareas, Documentación) en `.claude/devkit-notion.json`. Accede con el
+  plugin oficial de Notion; si no responde, avisa al humano y no improvises.
+  Para encontrar una card por Clave, filtra por `ID` y `Proyecto`, no por
+  la fórmula `Clave`: el MCP no la devuelve. Detalle en `.claude/skills/README.md`.
+- Cada skill en `.claude/skills/` es un paso del flujo. Las principales:
+  `/project-status` dice en qué va el proyecto, `/task-start` toma una card
+  libre, `/task-submit` entrega el trabajo y abre el PR, `/task-document`
+  escribe la entrada de Documentación al aprobar. Cerrar y bloquear no son
+  skills sino scripts bash: `task-close.sh` tras el merge y `task-block.sh
+  <Clave> "<motivo>"` cuando necesitas al humano, ambos en
+  `${DEVKIT_SCRIPTS_DIR:-/opt/devkit/scripts}`. Lee `.claude/skills/README.md`
+  para el resto.
+- Una skill se edita en el repo del template (DEVKIT), por su ruta real
+  `devkit/agents/skills/<skill>/SKILL.md`, nunca por `.claude/skills/`: ese
+  directorio es un enlace al template y Claude Code no acepta escrituras bajo
+  `.claude/` sin confirmación del humano, que en headless nadie da.
+- El humano decide dos cosas: mover cards de Por refinar a Backlog o Lista
+  (y Épicas de Backlog a Lista) y aprobar el PR. Todo lo demás lo haces tú,
+  sin preguntar, siguiendo las skills.
+- En modo headless (`claude -p`) no hay quien responda: una pregunta al
+  humano equivale a bloquear la card. Nunca termines con una pregunta
+  abierta. Si falta algo, ejecuta `task-block.sh` con el motivo "Qué intenté:
+  ... Qué necesito: ..." y la petición concreta (o comenta en
+  la card, si no hay card que bloquear) y termina. Toda ejecución headless
+  cierra en un estado observable de la card, nunca a la espera.
+
+## Guía de redacción
+
+Aplica a todo texto que escribas: descripciones, comentarios, respuestas,
+PRs y entradas de Documentación. Sin excepción.
+
+- Español latino neutro.
+- Conciso, simple, autoexplicativo y pedagógico. Escribe para un ingeniero
+  de datos de primer año que llega hoy al proyecto.
+- Respeta los tecnicismos y las definiciones.
+- Cuando expliques una decisión, toma posición crítica y técnica, con
+  evidencia contrastada.
+- Profundidad proporcional al artefacto:
+  - Comentario de avance en una card: dos a cuatro líneas. Qué se hizo y qué
+    sigue.
+  - Descripción de PR: qué cambia, cómo probarlo, enlace a la card.
+  - Entrada de Documentación: completa. Qué cambió, por qué, cómo probarlo,
+    cambios requeridos, enlaces. El porqué de cada decisión se escribe aquí
+    una sola vez; los demás textos enlazan.
+
+## Reglas del proyecto
+
+<!-- Todo lo de arriba es del template: `template-update` lo reemplaza en cada versión nueva. Esta sección y lo que sigue es del proyecto y se conserva tal cual. -->
+
