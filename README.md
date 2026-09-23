@@ -13,3 +13,18 @@ framework de calidad, quedó congelada como referencia en la rama
 y en el tag [`v0.2.0-legacy`](https://github.com/byroncz/intrinsica/releases/tag/v0.2.0-legacy).
 No es la base de código del rediseño: se conserva solo para consultar
 decisiones y resultados previos.
+
+## Estructura del monorepo
+
+Diseño fijado en el [TRD maestro §8.1](docs/TRD/plataforma_directional_change.md)
+y en el [TRD de la capa 1](docs/TRD/l1.md). Cada carpeta trae un README que
+dice qué va y qué no.
+
+```
+intrinsica/
+├── shared/            # código compartido (dc_core, dc_pyo3, pyutils, dq)
+├── layers/            # una carpeta por capa, una imagen por capa
+├── infra/             # Terraform: modules/ y stacks/
+├── scaffold/          # plantilla para capas nuevas
+└── docs/              # TRD, data-contracts.md
+```
