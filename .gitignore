@@ -219,3 +219,9 @@ __marimo__/
 .DS_Store
 /.claude/
 CLAUDE.md
+
+# Terraform (.terraform.lock.hcl sí se versiona)
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
