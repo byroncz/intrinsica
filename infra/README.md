@@ -33,11 +33,12 @@ terraform version
 
 ## Bootstrap del stack `batch/data`
 
-`stacks/batch/data` posee lo que nunca se destruye: el GCP project, las APIs
+`stacks/batch/data` posee lo que nunca se destruye: el GCP project, las APIs,
+el repositorio de imágenes (Artifact Registry), Workload Identity Federation
 y los buckets (incluido el de estado de Terraform). Como el bucket de estado
 lo crea el propio stack, el primer `apply` usa estado local y después el
 estado se migra al bucket. Solo lo ejecuta el humano; cuesta 0 USD (buckets
-vacíos y un project sin cómputo).
+vacíos, un repositorio sin imágenes y un project sin cómputo).
 
 ### 1. Cuenta y facturación
 
@@ -103,7 +104,33 @@ terraform init -migrate-state -backend-config="bucket=<project_id>-tfstate"
 Responde `yes` a copiar el estado. Verifica con `terraform plan` (sin
 cambios) y borra `terraform.tfstate*` locales (están en `.gitignore`).
 
-### 4. Agregar un stack de capa
+### 4. Conectar GitHub Actions (Artifact Registry y WIF)
+
+Tras el apply, el stack publica tres outputs. Cárgalos en GitHub, en
+*Settings → Secrets and variables → Actions → Variables*, como variables de
+repositorio (no son secretos):
+
+| Variable de GitHub       | Output de Terraform        |
+| ------------------------ | -------------------------- |
+| `GCP_ARTIFACT_REGISTRY`  | `artifact_registry`        |
+| `GCP_WIF_PROVIDER`       | `wif_provider_name`        |
+| `GCP_CI_SERVICE_ACCOUNT` | `ci_service_account_email` |
+
+```bash
+cd infra/stacks/batch/data
+terraform output
+```
+
+- No hay llaves de service account: el CI se autentica con Workload
+  Identity Federation y solo el repositorio `github_repo` (por defecto
+  `byroncz/intrinsica`) puede actuar como la service account `ci`.
+- `ci` solo escribe en el repositorio de imágenes, no a nivel de project.
+- La política de limpieza borra toda versión y conserva las
+  `keep_tagged_versions` (10) más recientes, con o sin tag (la KEEP tiene
+  precedencia sobre la DELETE); así el repositorio se mantiene dentro del
+  free tier de 0,5 GB.
+
+### 5. Agregar un stack de capa
 
 Cada stack de capa es una carpeta `infra/stacks/batch/<capa>/` con su propio
 estado en el mismo bucket, con prefix distinto:
@@ -126,6 +153,7 @@ data "terraform_remote_state" "data" {
 
 - Se inicializa con `terraform init -backend-config="bucket=<project_id>-tfstate"`.
 - Consume solo los outputs de `data` (`project_id`, `project_number`,
-  `region`, `buckets`), por ejemplo `data.terraform_remote_state.data.outputs.buckets["landing"]`.
+  `region`, `buckets`, `artifact_registry`, `wif_provider_name`,
+  `ci_service_account_email`), por ejemplo `data.terraform_remote_state.data.outputs.buckets["landing"]`.
 - Un stack de capa nunca crea buckets: son datos y `data` es su único dueño.
 - Los módulos hijo no declaran `provider` (TRD maestro §8.2).
