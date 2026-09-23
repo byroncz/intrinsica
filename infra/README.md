@@ -60,12 +60,17 @@ vacíos y un project sin cómputo).
 ```bash
 cd infra/stacks/batch/data
 export CHECKPOINT_DISABLE=1
+cat > terraform.tfvars <<'TFVARS'
+project_id      = "<project_id>"
+billing_account = "<XXXXXX-XXXXXX-XXXXXX>"
+TFVARS
 mv backend.tf backend.tf.off          # sin backend: estado local
 terraform init
-terraform apply \
-  -var project_id=<project_id> \
-  -var billing_account=<XXXXXX-XXXXXX-XXXXXX>
+terraform apply
 ```
+
+`terraform.tfvars` está en `.gitignore` (`*.tfvars`) y Terraform lo lee solo:
+así ningún `plan` ni `apply` del stack vuelve a pedir las variables.
 
 Crea el project, habilita las APIs y crea los buckets.
 
@@ -76,7 +81,7 @@ autenticar. A esa altura ya existe, así que asígnalo y repite el apply:
 
 ```bash
 gcloud auth application-default set-quota-project <project_id>
-terraform apply -var project_id=<project_id> -var billing_account=<XXXXXX-XXXXXX-XXXXXX>
+terraform apply
 ```
 
 Si el provider
@@ -85,8 +90,7 @@ exigiera `org_id` para crear el project, créalo a mano e impórtalo:
 ```bash
 gcloud projects create <project_id>
 gcloud billing projects link <project_id> --billing-account=<billing_account>
-terraform import -var project_id=<project_id> -var billing_account=<billing_account> \
-  google_project.this projects/<project_id>
+terraform import google_project.this projects/<project_id>
 ```
 
 ### 3. Migrar el estado al bucket `tfstate`
