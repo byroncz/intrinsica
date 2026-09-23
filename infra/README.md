@@ -67,7 +67,19 @@ terraform apply \
   -var billing_account=<XXXXXX-XXXXXX-XXXXXX>
 ```
 
-Crea el project, habilita las APIs y crea los buckets. Si el provider
+Crea el project, habilita las APIs y crea los buckets.
+
+Si el apply falla en `google_project_service` con un 403 de
+`serviceusage.googleapis.com` ("requires a quota project"), es porque las
+credenciales de usuario aún no tienen quota project: el project no existía al
+autenticar. A esa altura ya existe, así que asígnalo y repite el apply:
+
+```bash
+gcloud auth application-default set-quota-project <project_id>
+terraform apply -var project_id=<project_id> -var billing_account=<XXXXXX-XXXXXX-XXXXXX>
+```
+
+Si el provider
 exigiera `org_id` para crear el project, créalo a mano e impórtalo:
 
 ```bash
