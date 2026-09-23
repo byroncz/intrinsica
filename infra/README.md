@@ -33,11 +33,12 @@ terraform version
 
 ## Bootstrap del stack `batch/data`
 
-`stacks/batch/data` posee lo que nunca se destruye: el GCP project, las APIs
+`stacks/batch/data` posee lo que nunca se destruye: el GCP project, las APIs,
+el repositorio de imágenes (Artifact Registry), Workload Identity Federation
 y los buckets (incluido el de estado de Terraform). Como el bucket de estado
 lo crea el propio stack, el primer `apply` usa estado local y después el
 estado se migra al bucket. Solo lo ejecuta el humano; cuesta 0 USD (buckets
-vacíos y un project sin cómputo).
+vacíos, un repositorio sin imágenes y un project sin cómputo).
 
 ### 1. Cuenta y facturación
 
@@ -152,6 +153,7 @@ data "terraform_remote_state" "data" {
 
 - Se inicializa con `terraform init -backend-config="bucket=<project_id>-tfstate"`.
 - Consume solo los outputs de `data` (`project_id`, `project_number`,
-  `region`, `buckets`), por ejemplo `data.terraform_remote_state.data.outputs.buckets["landing"]`.
+  `region`, `buckets`, `artifact_registry`, `wif_provider_name`,
+  `ci_service_account_email`), por ejemplo `data.terraform_remote_state.data.outputs.buckets["landing"]`.
 - Un stack de capa nunca crea buckets: son datos y `data` es su único dueño.
 - Los módulos hijo no declaran `provider` (TRD maestro §8.2).
