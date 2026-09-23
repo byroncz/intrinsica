@@ -30,3 +30,86 @@ terraform version
 - Los dominios `releases.hashicorp.com` y `registry.terraform.io` están en
   `domains` de `.devkit/devkit.toml`; aplican tras `devkit recreate`.
 - `~/.local/bin` no sobrevive a `devkit rebuild`: se repite el script.
+
+## Bootstrap del stack `batch/data`
+
+`stacks/batch/data` posee lo que nunca se destruye: el GCP project, las APIs
+y los buckets (incluido el de estado de Terraform). Como el bucket de estado
+lo crea el propio stack, el primer `apply` usa estado local y después el
+estado se migra al bucket. Solo lo ejecuta el humano; cuesta 0 USD (buckets
+vacíos y un project sin cómputo).
+
+### 1. Cuenta y facturación
+
+1. Crea la cuenta de Google Cloud y activa el free trial en
+   <https://console.cloud.google.com/freetrial>. Es una cuenta personal, sin
+   organización: el project no lleva `org_id` ni `folder_id`.
+2. Obtén el `billing_account`:
+
+   ```bash
+   gcloud auth login
+   gcloud billing accounts list   # columna ACCOUNT_ID: XXXXXX-XXXXXX-XXXXXX
+   ```
+
+3. Elige un `project_id` único globalmente (6 a 30 caracteres, minúsculas,
+   dígitos y guiones). Prefija todos los buckets: `<project_id>-<sufijo>`.
+4. Autentica Terraform: `gcloud auth application-default login`.
+
+### 2. Primer apply con backend local
+
+```bash
+cd infra/stacks/batch/data
+export CHECKPOINT_DISABLE=1
+mv backend.tf backend.tf.off          # sin backend: estado local
+terraform init
+terraform apply \
+  -var project_id=<project_id> \
+  -var billing_account=<XXXXXX-XXXXXX-XXXXXX>
+```
+
+Crea el project, habilita las APIs y crea los buckets. Si el provider
+exigiera `org_id` para crear el project, créalo a mano e impórtalo:
+
+```bash
+gcloud projects create <project_id>
+gcloud billing projects link <project_id> --billing-account=<billing_account>
+terraform import -var project_id=<project_id> -var billing_account=<billing_account> \
+  google_project.this projects/<project_id>
+```
+
+### 3. Migrar el estado al bucket `tfstate`
+
+```bash
+mv backend.tf.off backend.tf
+terraform init -migrate-state -backend-config="bucket=<project_id>-tfstate"
+```
+
+Responde `yes` a copiar el estado. Verifica con `terraform plan` (sin
+cambios) y borra `terraform.tfstate*` locales (están en `.gitignore`).
+
+### 4. Agregar un stack de capa
+
+Cada stack de capa es una carpeta `infra/stacks/batch/<capa>/` con su propio
+estado en el mismo bucket, con prefix distinto:
+
+```hcl
+terraform {
+  backend "gcs" {
+    prefix = "stacks/batch/<capa>"
+  }
+}
+
+data "terraform_remote_state" "data" {
+  backend = "gcs"
+  config = {
+    bucket = "<project_id>-tfstate"
+    prefix = "stacks/batch/data"
+  }
+}
+```
+
+- Se inicializa con `terraform init -backend-config="bucket=<project_id>-tfstate"`.
+- Consume solo los outputs de `data` (`project_id`, `project_number`,
+  `region`, `buckets`), por ejemplo `data.terraform_remote_state.data.outputs.buckets["landing"]`.
+- Un stack de capa nunca crea buckets: son datos y `data` es su único dueño.
+- Los módulos hijo no declaran `provider` (TRD maestro §8.2).
