@@ -10,18 +10,21 @@ resource "google_artifact_registry_repository" "images" {
 
   cleanup_policy_dry_run = false
 
-  # Borra toda imagen sin tag.
+  # Una política KEEP solo protege frente a una DELETE que coincida: sin una
+  # DELETE que abarque las versiones con tag, nada las borraría nunca. Por eso
+  # la DELETE cubre todas las versiones (con y sin tag) y la KEEP, que tiene
+  # precedencia, decide cuáles sobreviven.
   cleanup_policies {
-    id     = "delete-untagged"
+    id     = "delete-all"
     action = "DELETE"
     condition {
-      tag_state = "UNTAGGED"
+      tag_state = "ANY"
     }
   }
 
-  # Conserva las N versiones con tag más recientes.
+  # Conserva las N versiones más recientes (cuenta todas, con o sin tag).
   cleanup_policies {
-    id     = "keep-recent-tagged"
+    id     = "keep-recent"
     action = "KEEP"
     most_recent_versions {
       keep_count = var.keep_tagged_versions

@@ -15,7 +15,7 @@ variable "region" {
 }
 
 variable "keep_tagged_versions" {
-  description = "Cantidad de versiones con tag más recientes que conserva la política de limpieza de Artifact Registry."
+  description = "Cantidad de versiones más recientes que conserva la política de limpieza de Artifact Registry."
   type        = number
   default     = 10
 }

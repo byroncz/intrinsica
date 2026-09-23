@@ -124,9 +124,10 @@ terraform output
   Identity Federation y solo el repositorio `github_repo` (por defecto
   `byroncz/intrinsica`) puede actuar como la service account `ci`.
 - `ci` solo escribe en el repositorio de imágenes, no a nivel de project.
-- La política de limpieza borra imágenes sin tag y conserva las
-  `keep_tagged_versions` (10) versiones con tag más recientes; así el
-  repositorio se mantiene dentro del free tier de 0,5 GB.
+- La política de limpieza borra toda versión y conserva las
+  `keep_tagged_versions` (10) más recientes, con o sin tag (la KEEP tiene
+  precedencia sobre la DELETE); así el repositorio se mantiene dentro del
+  free tier de 0,5 GB.
 
 ### 5. Agregar un stack de capa
 
