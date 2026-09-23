@@ -2,3 +2,4 @@
 template = "1.1.0"
 project  = "ITSC"
 python   = "3.14"
+domains  = ["releases.hashicorp.com", "registry.terraform.io"]
