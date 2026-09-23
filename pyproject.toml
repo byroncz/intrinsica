@@ -1,0 +1,28 @@
+[project]
+name = "intrinsica"
+version = "0.0.0"
+description = "Motor de análisis Directional Change (DC) para mercados financieros."
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "ruff",
+]
+
+[tool.uv]
+package = false
+
+[tool.uv.workspace]
+members = ["shared/*", "layers/*"]
+
+[tool.ruff]
+line-length = 88
+
+[tool.ruff.lint]
+extend-select = ["I"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
