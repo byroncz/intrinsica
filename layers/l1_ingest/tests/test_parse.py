@@ -56,6 +56,12 @@ def test_rechaza_zip_con_dos_miembros():
         read_zip(data)
 
 
+def test_rechaza_zip_con_csv_y_otro_miembro():
+    data = make_zip(("a.csv", csv_text(False)), ("LEEME.txt", "x"))
+    with pytest.raises(ValueError, match="exactamente un .csv"):
+        read_zip(data)
+
+
 def test_rechaza_zip_sin_csv():
     with pytest.raises(ValueError, match="exactamente un .csv"):
         read_zip(make_zip(("a.txt", "x")))

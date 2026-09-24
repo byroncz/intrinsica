@@ -31,8 +31,8 @@ def _has_header(first_line: str) -> bool:
 def read_zip(data: bytes) -> tuple[pa.Table, CheckResult]:
     """Decodifica un ZIP de aggTrades en RAM; no escribe archivos."""
     with zipfile.ZipFile(io.BytesIO(data)) as zf:
-        members = [n for n in zf.namelist() if n.lower().endswith(".csv")]
-        if len(members) != 1:
+        members = zf.namelist()
+        if len(members) != 1 or not members[0].lower().endswith(".csv"):
             raise ValueError(f"el ZIP debe traer exactamente un .csv, trae {members}")
         csv_bytes = zf.read(members[0])
 
