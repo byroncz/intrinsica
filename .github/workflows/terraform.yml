@@ -1,0 +1,103 @@
+# Terraform en PRs: fmt, validate y plan de los stacks de capa afectados.
+# Nunca aplica: apply y destroy viven en otro job de este archivo (workflow_dispatch).
+name: Terraform
+
+on:
+  pull_request:
+    paths:
+      - "infra/**"
+      - ".github/workflows/terraform.yml"
+
+env:
+  CHECKPOINT_DISABLE: "1"
+
+jobs:
+  # Calcula los stacks de capa afectados. `data` nunca entra: lo aplica el humano.
+  changes:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Calcular matriz de stacks
+        id: matrix
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          changed="$(git diff --name-only "${BASE_SHA}...HEAD")"
+          layers="$(find infra/stacks/batch -mindepth 1 -maxdepth 1 -type d ! -name data -printf '%f\n' | sort)"
+          if grep -qE '^(infra/modules/|\.github/workflows/terraform\.yml$)' <<< "$changed"; then
+            selected="$layers"
+          else
+            selected="$(grep -E '^infra/stacks/batch/[^/]+/' <<< "$changed" | cut -d/ -f4 | sort -u | grep -Fxf <(echo "$layers") || true)"
+          fi
+          matrix="$(jq -Rsc 'split("\n") | map(select(. != ""))' <<< "$selected")"
+          echo "matrix=${matrix}" | tee -a "$GITHUB_OUTPUT"
+
+  stack:
+    needs: changes
+    if: needs.changes.outputs.matrix != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        layer: ${{ fromJSON(needs.changes.outputs.matrix) }}
+    permissions:
+      contents: read
+      id-token: write # WIF: el token OIDC de GitHub se canjea por credenciales de GCP
+    env:
+      STACK_DIR: infra/stacks/batch/${{ matrix.layer }}
+      # Plan solo si WIF ya está configurado (tras aplicar deploy-github).
+      PLAN: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT != '' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.16.4 # misma versión que infra/bin/install-terraform.sh
+          terraform_wrapper: false
+
+      - name: terraform fmt
+        run: terraform fmt -check -recursive -diff infra/
+
+      - name: terraform init (sin backend)
+        run: terraform -chdir="$STACK_DIR" init -backend=false -input=false
+
+      - name: terraform validate
+        run: terraform -chdir="$STACK_DIR" validate
+
+      - name: Autenticar en GCP (WIF, sin llaves)
+        if: env.PLAN == 'true'
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+
+      - name: terraform init (backend GCS)
+        if: env.PLAN == 'true'
+        run: |
+          terraform -chdir="$STACK_DIR" init -reconfigure -input=false \
+            -backend-config="bucket=${{ vars.GCP_PROJECT_ID }}-tfstate"
+
+      - name: terraform plan
+        if: env.PLAN == 'true'
+        run: |
+          set -o pipefail
+          terraform -chdir="$STACK_DIR" plan -input=false -no-color \
+            -var "tfstate_bucket=${{ vars.GCP_PROJECT_ID }}-tfstate" | tee "$RUNNER_TEMP/plan.txt"
+
+      # Se publica aunque el plan falle; el paso anterior ya deja el check en rojo.
+      - name: Publicar plan en el resumen
+        if: always() && env.PLAN == 'true'
+        run: |
+          {
+            echo "## terraform plan: ${{ matrix.layer }}"
+            echo '```'
+            cat "$RUNNER_TEMP/plan.txt" 2>/dev/null || echo "(sin salida)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
