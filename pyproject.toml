@@ -4,7 +4,7 @@ version = "0.0.0"
 description = "Motor de análisis Directional Change (DC) para mercados financieros."
 readme = "README.md"
 requires-python = ">=3.14"
-dependencies = ["dq[reader]"]
+dependencies = ["dq[reader]", "l1_ingest"]
 
 [dependency-groups]
 dev = [
@@ -17,6 +17,7 @@ package = false
 
 [tool.uv.sources]
 dq = { workspace = true }
+l1_ingest = { workspace = true }
 
 [tool.uv.workspace]
 members = ["shared/*", "layers/*"]
@@ -28,4 +29,4 @@ line-length = 88
 extend-select = ["I"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests", "shared/dq/tests"]
+testpaths = ["tests", "shared/dq/tests", "layers/l1_ingest/tests"]
