@@ -21,7 +21,7 @@ variable "keep_tagged_versions" {
 }
 
 variable "github_repo" {
-  description = "Repositorio de GitHub (owner/nombre) al que Workload Identity Federation permite actuar como la service account ci."
+  description = "Repositorio de GitHub (owner/nombre) al que Workload Identity Federation permite actuar como las service accounts ci-github y deploy-github."
   type        = string
   default     = "byroncz/intrinsica"
 }
