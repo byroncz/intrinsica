@@ -5,6 +5,9 @@ description = "Contrato del hallazgo de calidad de datos (DQ) de intrinsica."
 requires-python = ">=3.14"
 dependencies = ["pyarrow"]
 
+[project.optional-dependencies]
+reader = ["duckdb"]
+
 [build-system]
 requires = ["uv_build"]
 build-backend = "uv_build"
