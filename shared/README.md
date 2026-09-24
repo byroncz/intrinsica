@@ -7,6 +7,12 @@ Código compartido entre capas. Definido en el
 
 Un paquete por subcarpeta, cada uno con su `pyproject.toml` (o `Cargo.toml`).
 
+## Paquetes
+
+| Paquete | Qué es |
+|---|---|
+| [`dq`](dq/) | Contrato del hallazgo de DQ (esquema Arrow) |
+
 ## Nombres reservados (aún no existen)
 
 | Nombre | Qué será | Épica |
@@ -14,7 +20,6 @@ Un paquete por subcarpeta, cada uno con su `pyproject.toml` (o `Cargo.toml`).
 | `dc_core` | Crate Rust del núcleo de Directional Change | E4 |
 | `dc_pyo3` | Bindings PyO3 sobre `dc_core` | E4 |
 | `pyutils` | Utilidades Python comunes | E1 |
-| `dq` | `emit_findings()` y contrato del hallazgo de DQ | E1 |
 
 ## Qué no contiene
 
