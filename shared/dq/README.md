@@ -5,7 +5,7 @@ para escribirlo y leerlo.
 
 ## Qué contiene
 
-- `dq.FINDING_SCHEMA` (en `dq.schema`): esquema Arrow de las 17 columnas.
+- `dq.schema.FINDING_SCHEMA`: esquema Arrow de las 17 columnas.
 - `dq.Finding`: dataclass validada, con los enumerados `Severity`, `Stage` y
   `Status`.
 - `dq.emit_findings(findings, root)`: escribe los hallazgos como Parquet en
@@ -15,24 +15,22 @@ para escribirlo y leerlo.
 
 ## Cómo lo instala una capa
 
-En el `pyproject.toml` de la capa:
-
-```toml
-[tool.uv.sources]
-dq = { workspace = true }
-```
-
-Luego, desde la raíz del repo:
+Desde la raíz del repo, indica la capa con `--package`:
 
 ```bash
-uv add dq
+uv add --package <capa> dq
 ```
+
+Es equivalente a correr `uv add dq` dentro de `layers/<capa>/`. Sin
+`--package`, `uv add` modifica el `pyproject.toml` de la raíz, no el de la
+capa. Como `dq` es miembro del workspace, `uv add` agrega solo
+`dq = { workspace = true }` en `[tool.uv.sources]` de la capa.
 
 ## Extra `reader`
 
 `emit_findings` solo necesita `pyarrow`. El lector usa DuckDB, que pesa más y
 no todas las capas lo necesitan, por eso vive en un extra opcional:
-`uv add "dq[reader]"`.
+`uv add --package <capa> "dq[reader]"`.
 
 ## Contrato
 
