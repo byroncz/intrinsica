@@ -117,4 +117,49 @@ caminos:
 
 ## Manifiesto de checksums
 
-Ver [TRD-L1 §7.4](TRD/l1.md#74-manifiesto-de-checksums).
+Registro de procedencia de L1: una fila por archivo ingerido, con su SHA-256.
+Fuente de diseño: [TRD-L1 §7.4](TRD/l1.md#74-manifiesto-de-checksums).
+Fuente en código: `MANIFEST_SCHEMA` en
+[`layers/l1_ingest/src/l1_ingest/manifest.py`](../layers/l1_ingest/src/l1_ingest/manifest.py).
+
+### Esquema
+
+| Columna | Tipo Arrow/Parquet | Nulable | Descripción |
+|---|---|---|---|
+| `provider` | string | no | Proveedor del archivo, p. ej. `binance` |
+| `market` | string | no | Mercado del archivo, p. ej. `spot` |
+| `asset` | string | no | Activo del archivo, p. ej. `BTCUSDT` |
+| `year` | int32 | no | Año del dato |
+| `month` | int32 | no | Mes del dato (1 a 12) |
+| `granularity` | string | no | `monthly` o `daily` |
+| `source_url` | string | no | URL de la que se descargó el archivo |
+| `sha256` | string | no | SHA-256 del archivo, en hexadecimal |
+| `downloaded_at` | int64 | no | Momento de la descarga, en microsegundos desde la época (UTC) |
+| `file_bytes` | int64 | no | Tamaño del archivo en bytes |
+| `image_version` | string | no | semver + git SHA de la imagen que lo ingirió |
+
+### Disposición física
+
+- **Raíz**: una ruta local o `gs://<bucket>/<prefijo>`.
+- **Partición**:
+  `<raíz>/provider=<p>/market=<m>/asset=<a>/year=YYYY/month=MM/`, por el
+  scope del archivo y no por la fecha de descarga. Así el cierre mensual
+  detecta una republicación comparando el `sha256` nuevo con los anteriores
+  leyendo un solo prefijo.
+- **Archivo**: `<run_id>-<uuid4>.parquet`. El nombre es único por llamada y
+  lleva el `run_id` para cruzarlo con los hallazgos del mismo run; el
+  esquema no lo incluye.
+- **Formato**: Parquet con compresión ZSTD nivel 3 y estadísticas de columna.
+- **Append-only**: una fila nunca se actualiza ni se borra. Descargar de nuevo
+  el mismo archivo agrega otra fila.
+
+### Escribir
+
+```python
+from l1_ingest.manifest import ManifestEntry, write_manifest
+
+entry = ManifestEntry(provider="binance", ...)  # campos del esquema
+write_manifest([entry], "gs://<bucket>/<prefijo>", run_id)
+```
+
+En GCS usa Application Default Credentials; no hay credenciales en código.
