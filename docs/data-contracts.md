@@ -106,10 +106,14 @@ caminos:
   `emit_findings` y del camino pyarrow, que usan Application Default
   Credentials, `httpfs` no las acepta. Luego ejecuta `CURRENT_FINDINGS_SQL` con
   `$pattern = "gs://<project_id>-dq-findings/detected_date=*/*.parquet"`.
-- **pyarrow**: lee con `pyarrow.dataset.dataset(raíz, filesystem=GcsFileSystem(),
+- **pyarrow**: lee con
+  `pyarrow.dataset.dataset("<project_id>-dq-findings", filesystem=GcsFileSystem(),
   partitioning="hive")` y registra el resultado en DuckDB con
-  `con.register("findings", ds)`. La consulta es la misma, pero cambia
-  `read_parquet($pattern, hive_partitioning = true)` por `findings`.
+  `con.register("findings", ds)`. Con `filesystem` explícito la ruta va sin
+  `gs://` (`GcsFileSystem` rechaza URIs); si omites `filesystem`, pasa la URI
+  `gs://<project_id>-dq-findings` y pyarrow resuelve el sistema de archivos. La
+  consulta es la misma, pero cambia `read_parquet($pattern, hive_partitioning =
+  true)` por `findings`.
 
 ## Manifiesto de checksums
 
