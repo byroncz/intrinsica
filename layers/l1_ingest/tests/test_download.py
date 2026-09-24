@@ -67,9 +67,11 @@ def test_fetch_persistent_checksum_failure(http_server):
 
 def test_fetch_missing_file_raises_download_error(http_server):
     _, base = http_server
+    waits = []
     with pytest.raises(DownloadError) as info:
-        fetch(f"{base}/nope.zip", sleep=lambda s: None)
+        fetch(f"{base}/nope.zip", sleep=waits.append)
     assert isinstance(info.value, L1DownloadError)
+    assert waits == [2.0, 4.0]
 
 
 def test_fetch_truncated_body_is_retried():
