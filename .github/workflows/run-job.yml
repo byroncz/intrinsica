@@ -78,6 +78,7 @@ jobs:
           fi
           # --args reemplaza los argumentos del contenedor, no el ENTRYPOINT.
           # Con --format, gcloud imprime el nombre de la ejecución al terminar.
+          inicio="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           set +e
           execution="$(gcloud run jobs execute "$JOB" \
             --project "$GCP_PROJECT_ID" --region "$GCP_REGION" \
@@ -86,9 +87,11 @@ jobs:
           status=$?
           set -e
           if [[ -z "$execution" ]]; then
-            # Si la ejecución falló, gcloud no imprime el nombre: toma la más reciente.
+            # Si la ejecución falló, gcloud no imprime el nombre: toma la más reciente
+            # creada desde $inicio. Si no hay ninguna, nunca se creó y name queda vacío.
             execution="$(gcloud run jobs executions list --job "$JOB" \
               --project "$GCP_PROJECT_ID" --region "$GCP_REGION" \
+              --filter="metadata.creationTimestamp>=${inicio}" \
               --sort-by='~metadata.creationTimestamp' --limit 1 \
               --format='value(metadata.name)')"
           fi
