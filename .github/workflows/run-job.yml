@@ -105,7 +105,7 @@ jobs:
         run: |
           gcloud logging read \
             "resource.type=\"cloud_run_job\" AND resource.labels.job_name=\"${JOB}\" AND labels.\"run.googleapis.com/execution_name\"=\"${EXECUTION}\"" \
-            --project "$GCP_PROJECT_ID" --order=asc \
+            --project "$GCP_PROJECT_ID" --order=asc --freshness=7d \
             --format='value(timestamp,severity,textPayload,jsonPayload.message)'
 
       - name: Resumen de la ejecución
