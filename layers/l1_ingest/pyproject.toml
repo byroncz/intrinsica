@@ -7,6 +7,7 @@ dependencies = [
     "dq",
     "duckdb>=1.5.5",
     "fsspec>=2026.9.0",
+    "pyarrow>=25.0.1",
 ]
 
 [build-system]
