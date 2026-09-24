@@ -101,12 +101,15 @@ historia.
 Sobre `gs://`, `current_findings` todavía no acepta esa raíz. Hay dos
 caminos:
 
-- **DuckDB**: instala y carga la extensión `httpfs`, configura las credenciales
-  de GCS y ejecuta `CURRENT_FINDINGS_SQL` con
+- **DuckDB**: instala y carga la extensión `httpfs` y crea un secreto HMAC de
+  GCS (`CREATE SECRET (TYPE gcs, KEY_ID ..., SECRET ...)`). A diferencia de
+  `emit_findings` y del camino pyarrow, que usan Application Default
+  Credentials, `httpfs` no las acepta. Luego ejecuta `CURRENT_FINDINGS_SQL` con
   `$pattern = "gs://<project_id>-dq-findings/detected_date=*/*.parquet"`.
 - **pyarrow**: lee con `pyarrow.dataset.dataset(raíz, filesystem=GcsFileSystem(),
-  partitioning="hive")`, registra el resultado en DuckDB y aplica la misma
-  consulta.
+  partitioning="hive")` y registra el resultado en DuckDB con
+  `con.register("findings", ds)`. La consulta es la misma, pero cambia
+  `read_parquet($pattern, hive_partitioning = true)` por `findings`.
 
 ## Manifiesto de checksums
 
