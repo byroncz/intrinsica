@@ -1,0 +1,126 @@
+# Ejecución manual de un Cloud Run Job, genérica para todas las capas. Lanza
+# una tarea por unidad del rango (mes o día, según mode); cada tarea toma
+# from + CLOUD_RUN_TASK_INDEX. Corre el workflow de la rama elegida en el botón.
+# Regla: no lanzar a mano el mismo mes y modo que Scheduler esté ejecutando.
+name: Run job
+
+on:
+  workflow_dispatch:
+    inputs:
+      job:
+        description: Cloud Run Job a ejecutar
+        type: choice
+        options:
+          - l1-job
+        required: true
+      mode:
+        description: Modo del job
+        type: choice
+        options:
+          - backfill
+          - daily
+          - monthly-close
+          - seam-check
+        required: true
+      from:
+        description: "Inicio: YYYY-MM (backfill, monthly-close) o YYYY-MM-DD (daily)"
+        type: string
+        required: true
+      to:
+        description: Fin inclusivo, mismo formato que from (por defecto, igual a from)
+        type: string
+        required: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    environment: gcp
+    permissions:
+      contents: read
+      id-token: write # WIF: el token OIDC de GitHub se canjea por credenciales de GCP
+    env:
+      JOB: ${{ inputs.job }}
+      MODE: ${{ inputs.mode }}
+      FROM: ${{ inputs.from }}
+      TO: ${{ inputs.to }}
+      GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+      GCP_REGION: ${{ vars.GCP_REGION }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Contar las tareas del rango
+        id: tasks
+        run: |
+          units="$(.github/scripts/run-job-tasks.sh "$MODE" "$FROM" ${TO:+"$TO"})" || {
+            echo "::error::Rango inválido, ver el mensaje anterior"
+            exit 1
+          }
+          echo "tasks=$(wc -l <<< "$units")" >> "$GITHUB_OUTPUT"
+          echo "Unidades:"
+          echo "$units"
+
+      - name: Autenticar en GCP (WIF, sin llaves)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Ejecutar el job y esperar
+        id: execute
+        env:
+          TASKS: ${{ steps.tasks.outputs.tasks }}
+        run: |
+          args="--mode,${MODE},--from,${FROM}"
+          if [[ -n "$TO" ]]; then
+            args="${args},--to,${TO}"
+          fi
+          # --args reemplaza los argumentos del contenedor, no el ENTRYPOINT.
+          # Con --format, gcloud imprime el nombre de la ejecución al terminar.
+          set +e
+          execution="$(gcloud run jobs execute "$JOB" \
+            --project "$GCP_PROJECT_ID" --region "$GCP_REGION" \
+            --wait --tasks "$TASKS" --args="$args" \
+            --format='value(metadata.name)')"
+          status=$?
+          set -e
+          if [[ -z "$execution" ]]; then
+            # Si la ejecución falló, gcloud no imprime el nombre: toma la más reciente.
+            execution="$(gcloud run jobs executions list --job "$JOB" \
+              --project "$GCP_PROJECT_ID" --region "$GCP_REGION" \
+              --sort-by='~metadata.creationTimestamp' --limit 1 \
+              --format='value(metadata.name)')"
+          fi
+          echo "name=${execution}" >> "$GITHUB_OUTPUT"
+          exit "$status"
+
+      - name: Logs de la ejecución
+        if: always() && steps.execute.outputs.name != ''
+        env:
+          EXECUTION: ${{ steps.execute.outputs.name }}
+        run: |
+          gcloud logging read \
+            "resource.type=\"cloud_run_job\" AND resource.labels.job_name=\"${JOB}\" AND labels.\"run.googleapis.com/execution_name\"=\"${EXECUTION}\"" \
+            --project "$GCP_PROJECT_ID" --order=asc \
+            --format='value(timestamp,severity,textPayload,jsonPayload.message)'
+
+      - name: Resumen de la ejecución
+        if: always() && steps.execute.outputs.name != ''
+        env:
+          EXECUTION: ${{ steps.execute.outputs.name }}
+        run: |
+          gcloud run jobs executions describe "$EXECUTION" \
+            --project "$GCP_PROJECT_ID" --region "$GCP_REGION" --format=json |
+            jq -r '
+              (.status.conditions // [] | map(select(.type == "Completed")) | first) as $done
+              | "### \(.metadata.name)",
+                "",
+                "| Campo | Valor |",
+                "| --- | --- |",
+                "| Estado | \(if $done.status == "True" then "Exitosa" elif $done.status == "False" then "Fallida" else "En curso" end) |",
+                "| Tareas completadas | \(.status.succeededCount // 0) |",
+                "| Tareas fallidas | \(.status.failedCount // 0) |",
+                "| Inicio | \(.status.startTime // "-") |",
+                "| Fin | \(.status.completionTime // "-") |"
+            ' >> "$GITHUB_STEP_SUMMARY"
