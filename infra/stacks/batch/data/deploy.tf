@@ -29,14 +29,33 @@ resource "google_project_iam_member" "deploy_run_developer" {
   member  = local.deploy_member
 }
 
-# Crear y borrar las service accounts de capa (<capa>-job).
-resource "google_project_iam_member" "deploy_sa_admin" {
+# Crear, actualizar y borrar las service accounts de capa (<capa>-job). Rol
+# personalizado en vez de roles/iam.serviceAccountAdmin: ese incluye
+# setIamPolicy, disable y enable, con los que deploy-github podría darse
+# permisos sobre sí misma o sobre ci-github, o deshabilitarla.
+resource "google_project_iam_custom_role" "sa_manager" {
+  project     = google_project.this.project_id
+  role_id     = "serviceAccountManager"
+  title       = "Gestor de service accounts de capa"
+  description = "Crea, lee, actualiza y borra service accounts, sin tocar su política IAM."
+  permissions = [
+    "iam.serviceAccounts.create",
+    "iam.serviceAccounts.delete",
+    "iam.serviceAccounts.get",
+    "iam.serviceAccounts.list",
+    "iam.serviceAccounts.update",
+  ]
+}
+
+resource "google_project_iam_member" "deploy_sa_manager" {
   project = google_project.this.project_id
-  role    = "roles/iam.serviceAccountAdmin"
+  role    = google_project_iam_custom_role.sa_manager.id
   member  = local.deploy_member
 }
 
 # Actuar como (actAs) las service accounts de capa al crear su Cloud Run Job.
+# El alcance es todo el project: incluye ci-github y deploy-github. Acotarlo por
+# service account exigiría setIamPolicy sobre ellas, que se evita arriba.
 resource "google_project_iam_member" "deploy_sa_user" {
   project = google_project.this.project_id
   role    = "roles/iam.serviceAccountUser"
