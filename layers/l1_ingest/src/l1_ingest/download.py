@@ -1,8 +1,8 @@
 """Descarga en RAM de un archivo de Binance con verificación SHA-256."""
 
 import hashlib
+import http.client
 import time
-import urllib.error
 import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -63,7 +63,7 @@ def _attempt(url: str) -> Download:
     try:
         data = _get(url)
         checksum = _get(url + ".CHECKSUM")
-    except (OSError, urllib.error.URLError) as exc:
+    except (OSError, http.client.HTTPException) as exc:
         raise DownloadError(f"{url}: {exc}") from exc
     # Formato de sha256sum: "<sha256>  <nombre>"
     fields = checksum.decode("ascii", errors="replace").split()

@@ -1,4 +1,6 @@
 import hashlib
+import http.server
+import threading
 
 import pytest
 from l1_ingest.download import (
@@ -68,3 +70,27 @@ def test_fetch_missing_file_raises_download_error(http_server):
     with pytest.raises(DownloadError) as info:
         fetch(f"{base}/nope.zip", sleep=lambda s: None)
     assert isinstance(info.value, L1DownloadError)
+
+
+def test_fetch_truncated_body_is_retried():
+    class Truncating(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Length", "1000")
+            self.end_headers()
+            self.wfile.write(b"corto")
+            self.close_connection = True
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Truncating)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    waits = []
+    try:
+        with pytest.raises(DownloadError):
+            fetch(f"http://127.0.0.1:{server.server_port}/x.zip", sleep=waits.append)
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert waits == [2.0, 4.0]
