@@ -70,6 +70,8 @@ def _attempt(url: str) -> Download:
     if not fields:
         raise DownloadError(f"{url}.CHECKSUM está vacío")
     published = fields[0].lower()
+    if len(published) != 64 or any(c not in "0123456789abcdef" for c in published):
+        raise DownloadError(f"{url}.CHECKSUM no contiene un SHA-256 válido")
     actual = hashlib.sha256(data).hexdigest()
     if actual != published:
         raise ChecksumError(f"{url}: SHA-256 {actual} != publicado {published}")

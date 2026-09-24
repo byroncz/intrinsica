@@ -94,3 +94,10 @@ def test_fetch_truncated_body_is_retried():
         server.shutdown()
         server.server_close()
     assert waits == [2.0, 4.0]
+
+
+def test_fetch_invalid_checksum_content_is_download_error(http_server):
+    root, base = http_server
+    name = publish(root, checksum="<html>no es un hash</html>")
+    with pytest.raises(DownloadError):
+        fetch(f"{base}/{name}", sleep=lambda s: None)
