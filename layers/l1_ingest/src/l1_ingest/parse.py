@@ -37,7 +37,7 @@ def read_zip(data: bytes) -> tuple[pa.Table, CheckResult]:
         csv_bytes = zf.read(members[0])
 
     # Solo la primera línea se mira en Python; el resto lo decodifica DuckDB.
-    first_line = csv_bytes[: csv_bytes.find(b"\n")].decode("utf-8", "replace").strip()
+    first_line = csv_bytes.split(b"\n", 1)[0].decode("utf-8", "replace").strip()
     if not first_line:
         raise ValueError("el CSV está vacío")
     header = _has_header(first_line)

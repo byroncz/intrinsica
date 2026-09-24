@@ -50,6 +50,11 @@ def test_first_line_se_recorta_a_80_caracteres():
     assert len(check.details["first_line"]) == 80
 
 
+def test_first_line_sin_salto_final_no_pierde_el_ultimo_byte():
+    _, check = read_zip(make_zip(("a.csv", ROWS[0])))
+    assert check.details["first_line"] == ROWS[0]
+
+
 def test_rechaza_zip_con_dos_miembros():
     data = make_zip(("a.csv", csv_text(False)), ("b.csv", csv_text(False)))
     with pytest.raises(ValueError, match="exactamente un .csv"):
