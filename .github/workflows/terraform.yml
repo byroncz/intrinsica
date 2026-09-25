@@ -1,5 +1,6 @@
-# Terraform en PRs: fmt, validate y plan de los stacks de capa afectados.
-# Nunca aplica: apply y destroy viven en otro job de este archivo (workflow_dispatch).
+# Terraform de los stacks de capa. En PRs: fmt, validate y plan de los afectados,
+# sin aplicar nunca. Manual (workflow_dispatch): apply o destroy de un stack de
+# capa dentro del environment gcp, que exige la aprobación del humano.
 name: Terraform
 
 on:
@@ -7,6 +8,24 @@ on:
     paths:
       - "infra/**"
       - ".github/workflows/terraform.yml"
+  workflow_dispatch:
+    inputs:
+      stack:
+        description: Stack de capa (la rama la elige el botón de GitHub)
+        type: choice
+        options:
+          - l1
+          - l2
+          - l3
+          - l4
+        required: true
+      action:
+        description: Acción de Terraform
+        type: choice
+        options:
+          - apply
+          - destroy
+        required: true
 
 env:
   CHECKPOINT_DISABLE: "1"
@@ -14,6 +33,7 @@ env:
 jobs:
   # Calcula los stacks de capa afectados. `data` nunca entra: lo aplica el humano.
   changes:
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -41,7 +61,7 @@ jobs:
 
   stack:
     needs: changes
-    if: needs.changes.outputs.matrix != '[]'
+    if: github.event_name == 'pull_request' && needs.changes.outputs.matrix != '[]'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -100,4 +120,61 @@ jobs:
             echo '```'
             cat "$RUNNER_TEMP/plan.txt" 2>/dev/null || echo "(sin salida)"
             echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # Camino manual: apply o destroy de un stack de capa. `data` no está entre las
+  # opciones y lo aplica el humano; el environment gcp exige su aprobación.
+  deploy:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    environment: gcp
+    permissions:
+      contents: read
+      id-token: write # WIF: el token OIDC de GitHub se canjea por credenciales de GCP
+    env:
+      STACK: ${{ inputs.stack }}
+      ACTION: ${{ inputs.action }}
+      TFSTATE_BUCKET: ${{ vars.GCP_PROJECT_ID }}-tfstate
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validar el stack
+        run: |
+          if [[ "$STACK" == "data" || ! -d "infra/stacks/batch/${STACK}" ]]; then
+            echo "::error::Stack inválido: '${STACK}'. data no se despliega aquí y infra/stacks/batch/${STACK} debe existir."
+            exit 1
+          fi
+          echo "STACK_DIR=infra/stacks/batch/${STACK}" >> "$GITHUB_ENV"
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.16.4 # misma versión que infra/bin/install-terraform.sh
+          terraform_wrapper: false
+
+      - name: Autenticar en GCP (WIF, sin llaves)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+
+      - name: terraform init
+        run: |
+          terraform -chdir="$STACK_DIR" init -input=false \
+            -backend-config="bucket=${TFSTATE_BUCKET}"
+
+      - name: terraform ${{ inputs.action }}
+        run: |
+          terraform -chdir="$STACK_DIR" "$ACTION" -auto-approve -input=false -no-color \
+            -var "tfstate_bucket=${TFSTATE_BUCKET}"
+
+      # Se publica aunque el paso anterior falle. La salida completa queda en el log del run.
+      - name: Publicar resumen
+        if: always()
+        env:
+          RESULT: ${{ job.status }}
+        run: |
+          {
+            echo "## terraform ${ACTION}: ${STACK}"
+            echo "- Rama: \`${GITHUB_REF_NAME}\`"
+            echo "- Resultado: ${RESULT}"
           } >> "$GITHUB_STEP_SUMMARY"
