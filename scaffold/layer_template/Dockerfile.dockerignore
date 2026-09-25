@@ -1,0 +1,8 @@
+# BuildKit lee <Dockerfile>.dockerignore junto al Dockerfile; un .dockerignore
+# aquí no se aplicaría porque el contexto es la raíz del workspace.
+.git
+.venv
+**/tests
+sandbox.local
+**/*.local
+**/__pycache__
