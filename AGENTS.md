@@ -98,4 +98,13 @@ PRs y entradas de Documentación. Sin excepción.
 - El stack (lenguajes, librerías, motor de cómputo, almacenamiento) lo fija
   la entrada de Documentación tipo decisión correspondiente. Por ahora no
   existe esa entrada; cuando se cree, enlazarla aquí.
+- Los agentes solo abren PRs. No disparan `terraform.yml`, `run-job.yml` ni
+  ningún `workflow_dispatch`. `apply`, `destroy` y la ejecución de jobs los
+  dispara y aprueba el humano en el environment `gcp`; el stack `data` lo
+  aplica solo el humano desde Cloud Shell. Ningún agente instala `gcloud` ni
+  guarda credenciales de GCP: la única identidad es WIF, dentro de Actions.
+  Leer runs y logs con `gh run list` y `gh run view --log` sí está permitido.
+  Decisión y porqué: [Decisión: despliegue de stacks de capa por GitHub
+  Actions con WIF](https://app.notion.com/p/3e527957d23d810e9401d9d941d17f83)
+  (2026-09-24).
 
