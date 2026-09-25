@@ -2,7 +2,7 @@
 #   docker build -f layers/l1_ingest/Dockerfile --build-arg VERSION=... --build-arg GIT_SHA=... .
 FROM python:3.14-slim AS build
 
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+COPY --from=ghcr.io/astral-sh/uv:0.12.7 /uv /usr/local/bin/uv
 
 ENV UV_PYTHON_DOWNLOADS=0 \
     UV_COMPILE_BYTECODE=1 \
