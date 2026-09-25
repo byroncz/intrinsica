@@ -39,6 +39,23 @@ def partition_path(
     )
 
 
+def _is_sorted(table: pa.Table) -> bool:
+    """Verifica el orden con una pasada lineal sobre las dos claves, sin ordenar."""
+    if table.num_rows < 2:
+        return True
+    time = table["transact_time"].combine_chunks()
+    trade_id = table["agg_trade_id"].combine_chunks()
+    prev_time, next_time = time[:-1], time[1:]
+    out_of_order = pc.or_(
+        pc.less(next_time, prev_time),
+        pc.and_(
+            pc.equal(next_time, prev_time),
+            pc.less(trade_id[1:], trade_id[:-1]),
+        ),
+    )
+    return not pc.any(out_of_order).as_py()
+
+
 def write_partition(table: pa.Table, path: str) -> str:
     """Escribe `table` en `path` con las propiedades físicas de §7.2.
 
@@ -50,9 +67,7 @@ def write_partition(table: pa.Table, path: str) -> str:
         raise ValueError(
             f"el esquema no es OUTPUT_SCHEMA:\n{table.schema}\n!=\n{OUTPUT_SCHEMA}"
         )
-    if not table.select([name for name, _ in SORT_ORDER]).equals(
-        table.sort_by(SORT_ORDER).select([name for name, _ in SORT_ORDER])
-    ):
+    if not _is_sorted(table):
         raise ValueError(f"la tabla no está ordenada por {SORT_ORDER}")
     fs, target = resolve_fs(path)
     options = {

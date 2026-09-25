@@ -125,3 +125,10 @@ def test_write_partition_rejects_unsorted_table(tmp_path):
     with pytest.raises(ValueError, match="ordenada"):
         write_partition(table, str(tmp_path / "c.parquet"))
     assert list(tmp_path.iterdir()) == []
+
+
+def test_write_partition_rejects_unsorted_agg_trade_id_on_equal_time(tmp_path):
+    table = _table(3).set_column(5, OUTPUT_SCHEMA.field(5), pa.array([1, 1, 2]))
+    with pytest.raises(ValueError, match="ordenada"):
+        write_partition(table.take([1, 0, 2]), str(tmp_path / "c.parquet"))
+
