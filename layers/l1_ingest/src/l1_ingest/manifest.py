@@ -51,7 +51,7 @@ class ManifestEntry:
             )
 
 
-def _resolve(root: str | Path) -> tuple[pafs.FileSystem, str]:
+def resolve_fs(root: str | Path) -> tuple[pafs.FileSystem, str]:
     """Devuelve el sistema de archivos y la ruta base dentro de él."""
     if isinstance(root, str) and root.startswith("gs://"):
         return pafs.FileSystem.from_uri(root)
@@ -83,7 +83,7 @@ def write_manifest(
     """
     if not entries:
         return []
-    fs, base = _resolve(root)
+    fs, base = resolve_fs(root)
 
     by_scope: dict[tuple, list[ManifestEntry]] = defaultdict(list)
     for entry in entries:
