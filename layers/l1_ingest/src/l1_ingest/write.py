@@ -6,6 +6,7 @@ import uuid
 from pathlib import Path
 
 import pyarrow as pa
+import pyarrow.compute as pc
 import pyarrow.fs as pafs
 import pyarrow.parquet as pq
 
@@ -79,7 +80,16 @@ def content_hash(table: pa.Table) -> str:
     No depende del chunking ni de los bytes del Parquet: dos escrituras con las
     mismas filas dan el mismo hash aunque el archivo difiera.
     """
+    # Los bool se pasan a uint8: el escritor IPC serializa el bitmap de un slice
+    # con los bits vecinos, y esos bits no son parte del contenido lógico.
+    columns = [
+        pc.cast(col, pa.uint8()) if pa.types.is_boolean(col.type) else col
+        for col in table.columns
+    ]
+    flat = pa.table(columns, names=table.schema.names).combine_chunks()
     sink = pa.BufferOutputStream()
-    with pa.ipc.new_stream(sink, table.schema) as writer:
-        writer.write_table(table.combine_chunks())
-    return hashlib.sha256(sink.getvalue()).hexdigest()
+    with pa.ipc.new_stream(sink, flat.schema) as writer:
+        writer.write_table(flat)
+    digest = hashlib.sha256(table.schema.serialize().to_pybytes())
+    digest.update(sink.getvalue())
+    return digest.hexdigest()

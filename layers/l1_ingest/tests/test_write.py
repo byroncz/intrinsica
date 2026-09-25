@@ -106,3 +106,16 @@ def test_content_hash_survives_roundtrip(tmp_path):
     assert content_hash(pq.read_table(path, schema=OUTPUT_SCHEMA)) == content_hash(
         table
     )
+
+
+def test_content_hash_ignores_bits_outside_a_slice(tmp_path):
+    flags = [True, False, True, True, True, False, True, False, True, True]
+    big = _table(10).set_column(6, OUTPUT_SCHEMA.field(6), pa.array(flags, pa.bool_()))
+    sliced = big.slice(0, 3)
+    fresh = _table(3).set_column(
+        6, OUTPUT_SCHEMA.field(6), pa.array(flags[:3], pa.bool_())
+    )
+    path = str(tmp_path / "c.parquet")
+    write_partition(sliced, path)
+    roundtrip = pq.read_table(path, schema=OUTPUT_SCHEMA)
+    assert content_hash(sliced) == content_hash(fresh) == content_hash(roundtrip)
