@@ -26,5 +26,5 @@ intrinsica/
 ├── layers/            # una carpeta por capa, una imagen por capa
 ├── infra/             # Terraform: modules/ y stacks/
 ├── scaffold/          # plantilla para capas nuevas
-└── docs/              # TRD, data-contracts.md
+└── docs/              # TRD, data-contracts.md, runbooks/ (procedimientos manuales)
 ```
