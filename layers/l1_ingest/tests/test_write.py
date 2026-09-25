@@ -132,3 +132,9 @@ def test_write_partition_rejects_unsorted_agg_trade_id_on_equal_time(tmp_path):
     with pytest.raises(ValueError, match="ordenada"):
         write_partition(table.take([1, 0, 2]), str(tmp_path / "c.parquet"))
 
+
+def test_content_hash_ignores_schema_metadata():
+    table = _table()
+    assert content_hash(table.replace_schema_metadata({b"x": b"y"})) == content_hash(
+        table
+    )

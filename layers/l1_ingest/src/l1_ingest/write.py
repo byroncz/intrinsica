@@ -102,6 +102,8 @@ def content_hash(table: pa.Table) -> str:
     No depende del chunking ni de los bytes del Parquet: dos escrituras con las
     mismas filas dan el mismo hash aunque el archivo difiera.
     """
+    # La metadata del esquema (clave-valor) no es contenido lógico.
+    table = table.replace_schema_metadata(None)
     # Los bool se pasan a uint8: el escritor IPC serializa el bitmap de un slice
     # con los bits vecinos, y esos bits no son parte del contenido lógico.
     columns = [
