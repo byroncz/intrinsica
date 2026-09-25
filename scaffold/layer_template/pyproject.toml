@@ -1,0 +1,15 @@
+[project]
+name = "l<N>_<nombre>"
+version = "0.1.0"
+description = "Capa L<N> de intrinsica: <descripción>."
+requires-python = ">=3.14"
+dependencies = [
+    "dq",
+]
+
+[build-system]
+requires = ["uv_build"]
+build-backend = "uv_build"
+
+[tool.uv.sources]
+dq = { workspace = true }
