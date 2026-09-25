@@ -39,16 +39,13 @@ Anota la fecha de consulta y los tres meses mayores:
 
 | Puesto | Mes (YYYY-MM) | Bytes del ZIP |
 | --- | --- | --- |
-| 1 | _pendiente_ | _pendiente_ |
-| 2 | _pendiente_ | _pendiente_ |
-| 3 | _pendiente_ | _pendiente_ |
+| 1 | 2023-03 | 2.658.089.884 |
+| 2 | 2023-02 | 2.624.704.281 |
+| 3 | 2022-11 | 2.460.042.801 |
 
-Fecha de consulta: _pendiente_. Mes elegido: **el puesto 1** (`<MES>` abajo).
-
-> Nota de la card ITSC-212: `data.binance.vision` respondió `403 Filtered` del
-> proxy del contenedor, y no hubo otra fuente pública verificable, así que el
-> mes no se pudo determinar al escribir este runbook. Lo completa el humano
-> con el comando anterior.
+Fecha de consulta: 2026-09-25 (HEAD a los 109 meses, de 2017-08 a 2026-08).
+Mes elegido: **2023-03**. Si un mes posterior supera esos bytes, repite la
+consulta.
 
 Ejecuta *Actions → Run job → Run workflow* con estos inputs exactos:
 
@@ -56,8 +53,8 @@ Ejecuta *Actions → Run job → Run workflow* con estos inputs exactos:
 | --- | --- |
 | `job` | `l1-job` |
 | `mode` | `backfill` |
-| `from` | `<MES>` |
-| `to` | `<MES>` |
+| `from` | `2023-03` |
+| `to` | `2023-03` |
 
 ## Qué leer y qué anotar
 
@@ -101,7 +98,7 @@ archivo y funciona con o sin él.
 
 Los llena la card hija 8.
 
-**Sonda (mes `<MES>`)**
+**Sonda (mes 2023-03)**
 
 | Fecha de la corrida | URL del run | Config | RSS pico (MiB) | Pared (s) | Estado | GiB-s ×96 | vCPU-s ×96 | Config final |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
