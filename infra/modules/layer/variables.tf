@@ -35,6 +35,12 @@ variable "memory" {
   default     = "16Gi"
 }
 
+variable "env" {
+  description = "Variables de entorno del contenedor del job: mapa nombre → valor."
+  type        = map(string)
+  default     = {}
+}
+
 variable "bucket_prefixes" {
   description = "Acceso de la capa a los datos: mapa nombre de bucket → lista de prefijos de objeto donde puede leer y escribir."
   type        = map(list(string))

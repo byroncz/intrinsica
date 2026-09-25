@@ -18,7 +18,8 @@ jobs:
       - run: uv run pytest
 
   # Decide qué capas construir. Una capa se construye si cambió layers/<capa>/**;
-  # todas se construyen si cambió shared/** o .github/workflows/** (o en un run manual).
+  # todas se construyen si cambió shared/**, uv.lock, pyproject.toml o .github/workflows/**
+  # (o en un run manual): el Dockerfile copia el lock y pyproject a la imagen.
   changes:
     runs-on: ubuntu-latest
     outputs:
@@ -28,7 +29,7 @@ jobs:
       # añade su nombre aquí (por ejemplo '["l1_ingest","l2_dc_events"]') y
       # crea layers/<capa>/Dockerfile y layers/<capa>/VERSION. El filtro y la
       # matriz se derivan de esta lista; no hay nada más que editar.
-      LAYERS: '[]'
+      LAYERS: '["l1_ingest"]'
     steps:
       - uses: actions/checkout@v4
 
@@ -37,6 +38,8 @@ jobs:
           {
             echo "shared:"
             echo "  - 'shared/**'"
+            echo "  - 'uv.lock'"
+            echo "  - 'pyproject.toml'"
             echo "  - '.github/workflows/**'"
             jq -r '.[] | "\(.):\n  - '"'"'layers/\(.)/**'"'"'"' <<< "$LAYERS"
           } > "$RUNNER_TEMP/filters.yml"

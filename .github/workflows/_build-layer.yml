@@ -61,6 +61,16 @@ jobs:
           context: .
           file: layers/${{ inputs.layer }}/Dockerfile
           push: ${{ env.PUBLISH == 'true' }}
+          # Sin publicar, la imagen queda en el daemon para la prueba de humo.
+          load: ${{ env.PUBLISH != 'true' }}
+          build-args: |
+            VERSION=${{ steps.version.outputs.value }}
+            GIT_SHA=${{ github.sha }}
           tags: |
             ${{ vars.GCP_ARTIFACT_REGISTRY || 'local' }}/${{ inputs.layer }}:${{ steps.version.outputs.value }}
             ${{ vars.GCP_ARTIFACT_REGISTRY || 'local' }}/${{ inputs.layer }}:${{ github.sha }}
+
+      # Si la capa trae layers/<capa>/smoke.sh, corre un día real en el contenedor.
+      - name: Humo de la imagen
+        if: env.PUBLISH != 'true' && hashFiles(format('layers/{0}/smoke.sh', inputs.layer)) != ''
+        run: layers/${{ inputs.layer }}/smoke.sh "${{ vars.GCP_ARTIFACT_REGISTRY || 'local' }}/${{ inputs.layer }}:${{ steps.version.outputs.value }}"
