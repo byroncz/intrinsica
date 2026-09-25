@@ -1,7 +1,11 @@
+import logging
+import re
+
 import pyarrow.parquet as pq
 import pytest
 from dq.reader import current_findings
 from l1_ingest.cli import UsageError, main, resolve_unit
+from l1_ingest.download import ChecksumError
 from l1_ingest.schema import OUTPUT_SCHEMA
 
 
@@ -120,3 +124,37 @@ def test_main_usage_errors(tmp_path, capsys):
     del env["L1_DQ_ROOT"]
     assert main(["--mode", "backfill", "--from", "2024-03"], env) == 2
     assert "L1_DQ_ROOT" in capsys.readouterr().err
+
+
+PROBE = re.compile(r"sonda: unit=(\S+) mode=(\S+) rss_peak_mib=(\d+) wall_s=(\d+\.\d)")
+
+
+def _probe_lines(caplog):
+    return [m for m in caplog.messages if m.startswith("sonda:")]
+
+
+def test_main_probe_line_after_final_line(tmp_path, publish_zip, caplog):
+    publish, base = publish_zip
+    publish(day=6)
+    caplog.set_level(logging.INFO)
+    argv = ["--mode", "daily", "--from", "2024-03-06"]
+    assert main(argv, _env(tmp_path, base)) == 0
+
+    assert len(_probe_lines(caplog)) == 1
+    assert caplog.messages[-1].startswith("sonda:")
+    assert caplog.messages[-2].startswith("fin unidad=")
+    unit, mode, rss, wall = PROBE.fullmatch(caplog.messages[-1]).groups()
+    assert (unit, mode) == ("binance/spot/BTCUSDT/2024-03-06", "daily")
+    assert int(rss) > 0
+    assert float(wall) > 0
+
+
+def test_main_probe_line_on_checksum_abort(tmp_path, publish_zip, caplog):
+    publish, base = publish_zip
+    publish(checksum="0" * 64)
+    caplog.set_level(logging.INFO)
+    with pytest.raises(ChecksumError):
+        main(["--mode", "backfill", "--from", "2024-03"], _env(tmp_path, base))
+
+    assert len(_probe_lines(caplog)) == 1
+    assert caplog.messages[-1].startswith("sonda:")

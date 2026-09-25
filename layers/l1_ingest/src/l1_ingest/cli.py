@@ -2,9 +2,12 @@
 
 import argparse
 import logging
+import math
 import os
 import re
+import resource
 import sys
+import time
 import uuid
 from collections.abc import Mapping, Sequence
 from datetime import date, timedelta
@@ -17,6 +20,8 @@ NOT_IMPLEMENTED = ("monthly-close", "seam-check")
 EXIT_USAGE = 2
 EXIT_NOT_IMPLEMENTED = 3
 ROOT_VARS = ("L1_LANDING_ROOT", "L1_DQ_ROOT", "L1_MANIFEST_ROOT")
+
+logger = logging.getLogger(__name__)
 
 _MONTH = re.compile(r"(\d{4})-(\d{2})")
 _DAY = re.compile(r"(\d{4})-(\d{2})-(\d{2})")
@@ -106,9 +111,26 @@ def _index(env: Mapping[str, str]) -> int:
         raise UsageError(f"CLOUD_RUN_TASK_INDEX={raw!r} no es un entero") from None
 
 
+def _log_probe(unit: Unit, mode: str, started: float) -> None:
+    """Línea de cierre de la sonda §14.1: RSS pico (KiB en Linux → MiB) y pared.
+
+    La pared se redondea hacia arriba a 0.1 s para que nunca salga 0.0.
+    """
+    rss_mib = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss // 1024
+    wall_s = math.ceil((time.monotonic() - started) * 10) / 10
+    logger.info(
+        "sonda: unit=%s mode=%s rss_peak_mib=%d wall_s=%.1f",
+        unit,
+        mode,
+        rss_mib,
+        wall_s,
+    )
+
+
 def main(
     argv: Sequence[str] | None = None, env: Mapping[str, str] | None = None
 ) -> int:
+    started = time.monotonic()
     env = os.environ if env is None else env
     parser = argparse.ArgumentParser(prog="l1_ingest")
     parser.add_argument("--mode", required=True, choices=MODES)
@@ -131,5 +153,9 @@ def main(
         print(f"l1_ingest: {exc}", file=sys.stderr)
         return EXIT_USAGE
 
-    process_unit(Unit(year, month, day, asset=args.asset), ctx)
+    unit = Unit(year, month, day, asset=args.asset)
+    try:
+        process_unit(unit, ctx)
+    finally:
+        _log_probe(unit, args.mode, started)
     return 0
