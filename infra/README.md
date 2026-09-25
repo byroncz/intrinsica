@@ -106,15 +106,21 @@ cambios) y borra `terraform.tfstate*` locales (están en `.gitignore`).
 
 ### 4. Conectar GitHub Actions (Artifact Registry y WIF)
 
-Tras el apply, el stack publica tres outputs. Cárgalos en GitHub, en
+Tras el apply, el stack publica estos outputs. Las tres últimas filas
+(`GCP_DEPLOY_SERVICE_ACCOUNT`, `GCP_PROJECT_ID`, `GCP_REGION`) se cargan al
+final, siguiendo "Habilitar el despliegue desde GitHub Actions", después de
+crear el environment `gcp`. Cárgalos en GitHub, en
 *Settings → Secrets and variables → Actions → Variables*, como variables de
 repositorio (no son secretos):
 
-| Variable de GitHub       | Output de Terraform        |
-| ------------------------ | -------------------------- |
-| `GCP_ARTIFACT_REGISTRY`  | `artifact_registry`        |
-| `GCP_WIF_PROVIDER`       | `wif_provider_name`        |
-| `GCP_CI_SERVICE_ACCOUNT` | `ci_service_account_email` |
+| Variable de GitHub           | Output de Terraform            |
+| ---------------------------- | ------------------------------ |
+| `GCP_ARTIFACT_REGISTRY`      | `artifact_registry`            |
+| `GCP_WIF_PROVIDER`           | `wif_provider_name`            |
+| `GCP_CI_SERVICE_ACCOUNT`     | `ci_service_account_email`     |
+| `GCP_DEPLOY_SERVICE_ACCOUNT` | `deploy_service_account_email` |
+| `GCP_PROJECT_ID`             | `project_id`                   |
+| `GCP_REGION`                 | `region`                       |
 
 ```bash
 cd infra/stacks/batch/data
@@ -123,12 +129,38 @@ terraform output
 
 - No hay llaves de service account: el CI se autentica con Workload
   Identity Federation y solo el repositorio `github_repo` (por defecto
-  `byroncz/intrinsica`) puede actuar como la service account `ci`.
+  `byroncz/intrinsica`) puede actuar como las service accounts `ci-github` y
+  `deploy-github`.
 - `ci` solo escribe en el repositorio de imágenes, no a nivel de project.
 - La política de limpieza borra toda versión y conserva las
   `keep_tagged_versions` (10) más recientes, con o sin tag (la KEEP tiene
   precedencia sobre la DELETE); así el repositorio se mantiene dentro del
   free tier de 0,5 GB.
+
+### Habilitar el despliegue desde GitHub Actions
+
+Lo hace el humano, en este orden. Ningún agente ejecuta el apply.
+
+1. Aplica el stack `data` desde Cloud Shell. Crea la service account
+   `deploy-github`, ligada al mismo pool WIF que `ci-github`. Actualiza antes
+   el checkout a `main` y comprueba que `terraform.tfvars` (está en
+   `.gitignore`) sigue en la carpeta; si no, recréalo como en la sección 2:
+
+   ```bash
+   git pull
+   cd infra/stacks/batch/data
+   terraform init -backend-config="bucket=<project_id>-tfstate"
+   terraform plan
+   terraform apply
+   ```
+
+2. Crea el environment `gcp` del repositorio (*Settings → Environments →
+   New environment*) con tu usuario como revisor requerido. Debe existir
+   antes del paso 3: un `workflow_dispatch` que referencia un environment
+   inexistente lo crea sin protección.
+3. Carga como variables de repositorio `GCP_DEPLOY_SERVICE_ACCOUNT`
+   (output `deploy_service_account_email`), `GCP_PROJECT_ID` (output
+   `project_id`) y `GCP_REGION` (output `region`), como en la sección 4.
 
 ### 5. Agregar un stack de capa
 

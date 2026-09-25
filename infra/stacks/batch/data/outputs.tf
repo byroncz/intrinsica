@@ -40,3 +40,8 @@ output "ci_service_account_email" {
   description = "Email de la service account que asume GitHub Actions."
   value       = google_service_account.ci.email
 }
+
+output "deploy_service_account_email" {
+  description = "Email de la service account con la que GitHub Actions aplica stacks de capa y ejecuta jobs."
+  value       = google_service_account.deploy.email
+}
