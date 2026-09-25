@@ -5,7 +5,68 @@ sección lo escriben E1 y E2; por ahora cada una solo enlaza al TRD.
 
 ## Salida Parquet de L1
 
-Contrato hacia L2. Ver [TRD-L1 §7.2](TRD/l1.md#72-salida--parquet-conformado-de-l1-contrato-hacia-l2).
+Contrato hacia L2: el Parquet conformado de L1, una partición por mes.
+Fuente de diseño: [TRD-L1 §7.2](TRD/l1.md#72-salida--parquet-conformado-de-l1-contrato-hacia-l2).
+Fuente en código: `OUTPUT_SCHEMA` en
+[`layers/l1_ingest/src/l1_ingest/schema.py`](../layers/l1_ingest/src/l1_ingest/schema.py)
+y `write_partition` en
+[`layers/l1_ingest/src/l1_ingest/write.py`](../layers/l1_ingest/src/l1_ingest/write.py).
+Una prueba (`layers/l1_ingest/tests/test_output_contract_doc.py`) rompe el CI si esta
+tabla se desvía del código.
+
+### Esquema
+
+| Columna | Tipo Arrow/Parquet | Nulable | Descripción |
+|---|---|---|---|
+| `agg_trade_id` | int64 | no | Id del trade agregado; clave de orden secundaria |
+| `price` | decimal128(18, 8) | no | Precio exacto, escala 8 (ADR-L1-03) |
+| `quantity` | decimal128(18, 8) | no | Cantidad exacta, escala 8 (ADR-L1-03) |
+| `first_trade_id` | int64 | no | Primer trade individual del agregado |
+| `last_trade_id` | int64 | no | Último trade individual del agregado |
+| `transact_time` | int64 | no | Momento del trade en microsegundos desde la época (UTC); clave de orden primaria |
+| `is_buyer_maker` | bool | no | Si el comprador fue el maker |
+| `is_best_match` | bool | no | Si el precio fue el mejor del libro; se conserva del proveedor |
+
+### Disposición física
+
+- **Raíz**: una ruta local o `gs://<bucket landing>/l1`. El stack `l1` solo
+  tiene acceso bajo el prefijo `l1/`; la ruta hive va debajo.
+- **Partición**:
+  `<raíz>/provider=<p>/market=<m>/asset=<a>/year=YYYY/month=MM/`, con el mes
+  a dos dígitos.
+- **Archivo**: `consolidated.parquet` para un mes cerrado;
+  `provisional-day=DD.parquet` para un día del mes en curso. El lector
+  prefiere `consolidated.parquet` si existe.
+- **Formato**: Parquet con compresión ZSTD nivel 3, estadísticas (min/max) por
+  columna, row groups de 1 millón de filas y `sorting_columns`
+  (`transact_time`, `agg_trade_id`) en los metadatos.
+- **Sobrescritura atómica**: en local se escribe a un temporal del mismo
+  directorio y se renombra; en GCS reemplazar el objeto ya es atómico. Nunca
+  queda un archivo a medias.
+- **Idempotencia**: es contenido idéntico, no bytes idénticos. Se mide con
+  `content_hash(table)`, el SHA-256 del flujo IPC de la tabla (esquema más
+  filas en orden, sin importar el chunking). Se hashea el contenido lógico y
+  no el archivo porque el Parquet puede diferir en bytes entre versiones de
+  la librería sin que cambien los datos.
+
+### Escribir
+
+```python
+from l1_ingest.write import day_filename, partition_path, write_partition
+
+path = partition_path(
+    "gs://<bucket landing>/l1",
+    "binance",
+    "spot",
+    "BTCUSDT",
+    2024,
+    3,
+    "consolidated.parquet",  # o day_filename(15)
+)
+write_partition(table, path)  # table.schema debe ser OUTPUT_SCHEMA
+```
+
+En GCS usa Application Default Credentials; no hay credenciales en código.
 
 ## Lago de hallazgos de calidad de datos
 
