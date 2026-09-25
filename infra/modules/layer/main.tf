@@ -22,6 +22,14 @@ resource "google_cloud_run_v2_job" "this" {
       containers {
         image = var.image
 
+        dynamic "env" {
+          for_each = var.env
+          content {
+            name  = env.key
+            value = env.value
+          }
+        }
+
         resources {
           limits = {
             cpu    = var.cpu
