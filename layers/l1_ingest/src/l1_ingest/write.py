@@ -10,7 +10,7 @@ import pyarrow.compute as pc
 import pyarrow.fs as pafs
 import pyarrow.parquet as pq
 
-from l1_ingest.manifest import _resolve
+from l1_ingest.manifest import resolve_fs
 from l1_ingest.schema import OUTPUT_SCHEMA
 
 CONSOLIDATED = "consolidated.parquet"
@@ -50,9 +50,12 @@ def write_partition(table: pa.Table, path: str) -> str:
         raise ValueError(
             f"el esquema no es OUTPUT_SCHEMA:\n{table.schema}\n!=\n{OUTPUT_SCHEMA}"
         )
-    fs, target = _resolve(path)
+    if not table.select([name for name, _ in SORT_ORDER]).equals(
+        table.sort_by(SORT_ORDER).select([name for name, _ in SORT_ORDER])
+    ):
+        raise ValueError(f"la tabla no está ordenada por {SORT_ORDER}")
+    fs, target = resolve_fs(path)
     options = {
-        "filesystem": fs,
         "compression": "zstd",
         "compression_level": 3,
         "write_statistics": True,
@@ -60,7 +63,11 @@ def write_partition(table: pa.Table, path: str) -> str:
         "sorting_columns": pq.SortingColumn.from_ordering(OUTPUT_SCHEMA, SORT_ORDER),
     }
     if isinstance(fs, pafs.GcsFileSystem):
-        pq.write_table(table, target, **options)
+        # Se escribe a memoria primero: si falla, el objeto anterior no se toca.
+        sink = pa.BufferOutputStream()
+        pq.write_table(table, sink, **options)
+        with fs.open_output_stream(target) as out:
+            out.write(sink.getvalue())
         return path
 
     directory = Path(target).parent

@@ -39,7 +39,8 @@ tabla se desvía del código.
   prefiere `consolidated.parquet` si existe.
 - **Formato**: Parquet con compresión ZSTD nivel 3, estadísticas (min/max) por
   columna, row groups de 1 millón de filas y `sorting_columns`
-  (`transact_time`, `agg_trade_id`) en los metadatos.
+  (`transact_time`, `agg_trade_id`) en los metadatos. `write_partition`
+  rechaza una tabla que no llegue ordenada por esas claves.
 - **Sobrescritura atómica**: en local se escribe a un temporal del mismo
   directorio y se renombra; en GCS reemplazar el objeto ya es atómico. Nunca
   queda un archivo a medias.
@@ -52,7 +53,12 @@ tabla se desvía del código.
 ### Escribir
 
 ```python
-from l1_ingest.write import day_filename, partition_path, write_partition
+from l1_ingest.write import (
+    CONSOLIDATED,
+    day_filename,
+    partition_path,
+    write_partition,
+)
 
 path = partition_path(
     "gs://<bucket landing>/l1",
@@ -61,7 +67,7 @@ path = partition_path(
     "BTCUSDT",
     2024,
     3,
-    "consolidated.parquet",  # o day_filename(15)
+    CONSOLIDATED,  # o day_filename(15)
 )
 write_partition(table, path)  # table.schema debe ser OUTPUT_SCHEMA
 ```

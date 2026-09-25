@@ -5,6 +5,7 @@ import pyarrow.parquet as pq
 import pytest
 from l1_ingest.schema import OUTPUT_SCHEMA
 from l1_ingest.write import (
+    CONSOLIDATED,
     content_hash,
     day_filename,
     partition_path,
@@ -29,9 +30,7 @@ def _table(n: int = 5) -> pa.Table:
 
 
 def test_partition_path(tmp_path):
-    path = partition_path(
-        tmp_path, "binance", "spot", "BTCUSDT", 2024, 3, "consolidated.parquet"
-    )
+    path = partition_path(tmp_path, "binance", "spot", "BTCUSDT", 2024, 3, CONSOLIDATED)
     assert path == (
         f"{tmp_path}/provider=binance/market=spot/asset=BTCUSDT"
         "/year=2024/month=03/consolidated.parquet"
@@ -119,3 +118,10 @@ def test_content_hash_ignores_bits_outside_a_slice(tmp_path):
     write_partition(sliced, path)
     roundtrip = pq.read_table(path, schema=OUTPUT_SCHEMA)
     assert content_hash(sliced) == content_hash(fresh) == content_hash(roundtrip)
+
+
+def test_write_partition_rejects_unsorted_table(tmp_path):
+    table = _table(3).take([2, 0, 1])
+    with pytest.raises(ValueError, match="ordenada"):
+        write_partition(table, str(tmp_path / "c.parquet"))
+    assert list(tmp_path.iterdir()) == []
