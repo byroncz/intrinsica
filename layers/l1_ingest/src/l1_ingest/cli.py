@@ -1,0 +1,135 @@
+"""Punto de entrada de la imagen: `python -m l1_ingest --mode ... --from ...`."""
+
+import argparse
+import logging
+import os
+import re
+import sys
+import uuid
+from collections.abc import Mapping, Sequence
+from datetime import date, timedelta
+from pathlib import Path
+
+from l1_ingest.pipeline import RunContext, Unit, process_unit
+
+MODES = ("backfill", "daily", "monthly-close", "seam-check")
+NOT_IMPLEMENTED = ("monthly-close", "seam-check")
+EXIT_USAGE = 2
+EXIT_NOT_IMPLEMENTED = 3
+ROOT_VARS = ("L1_LANDING_ROOT", "L1_DQ_ROOT", "L1_MANIFEST_ROOT")
+
+_MONTH = re.compile(r"(\d{4})-(\d{2})")
+_DAY = re.compile(r"(\d{4})-(\d{2})-(\d{2})")
+
+
+class UsageError(ValueError):
+    """Argumento o entorno inválido: el proceso termina con código 2."""
+
+
+def _parse(mode: str, text: str) -> tuple[int, int, int | None]:
+    daily = mode == "daily"
+    match = (_DAY if daily else _MONTH).fullmatch(text)
+    if match is None:
+        raise UsageError(
+            f"{text!r} no cumple {'YYYY-MM-DD' if daily else 'YYYY-MM'} "
+            f"para --mode {mode}"
+        )
+    try:
+        day = date(*map(int, match.groups()), *([1] if not daily else []))
+    except ValueError as exc:
+        raise UsageError(f"{text!r} no es una fecha válida: {exc}") from exc
+    return day.year, day.month, day.day if daily else None
+
+
+def _ordinal(year: int, month: int, day: int | None) -> int:
+    """Posición de la unidad: días desde 0001-01-01 o meses desde el año 0."""
+    if day is None:
+        return year * 12 + month - 1
+    return date(year, month, day).toordinal()
+
+
+def resolve_unit(
+    mode: str, from_: str, to: str | None, index: int
+) -> tuple[int, int, int | None]:
+    """Devuelve (año, mes, día) de la unidad `from_ + index` dentro de [from_, to].
+
+    `day` es None en los modos mensuales. Pura: no lee entorno ni reloj.
+    """
+    start = _parse(mode, from_)
+    end = _parse(mode, to or from_)
+    first, last = _ordinal(*start), _ordinal(*end)
+    if last < first:
+        raise UsageError(f"--to {to} es anterior a --from {from_}")
+    if not 0 <= index <= last - first:
+        raise UsageError(
+            f"CLOUD_RUN_TASK_INDEX={index} fuera del rango de {last - first + 1} "
+            "unidades"
+        )
+    if mode == "daily":
+        day = date.fromordinal(first) + timedelta(days=index)
+        return day.year, day.month, day.day
+    year, month = divmod(first + index, 12)
+    return year, month + 1, None
+
+
+def _image_version(env: Mapping[str, str]) -> str:
+    if env.get("IMAGE_VERSION"):
+        return env["IMAGE_VERSION"]
+    version_file = Path(__file__).resolve().parents[2] / "VERSION"
+    version = version_file.read_text().strip() if version_file.exists() else "unknown"
+    return f"{version}+local"
+
+
+def _context(mode: str, env: Mapping[str, str]) -> RunContext:
+    missing = [name for name in ROOT_VARS if not env.get(name)]
+    if missing:
+        raise UsageError(f"falta la variable de entorno {', '.join(missing)}")
+    extra = {}
+    if env.get("L1_SOURCE_BASE_URL"):
+        extra["source_base_url"] = env["L1_SOURCE_BASE_URL"]
+    return RunContext(
+        mode=mode,
+        run_id=str(uuid.uuid4()),
+        image_version=_image_version(env),
+        landing_root=env["L1_LANDING_ROOT"],
+        dq_root=env["L1_DQ_ROOT"],
+        manifest_root=env["L1_MANIFEST_ROOT"],
+        **extra,
+    )
+
+
+def _index(env: Mapping[str, str]) -> int:
+    raw = env.get("CLOUD_RUN_TASK_INDEX", "0")
+    try:
+        return int(raw)
+    except ValueError:
+        raise UsageError(f"CLOUD_RUN_TASK_INDEX={raw!r} no es un entero") from None
+
+
+def main(
+    argv: Sequence[str] | None = None, env: Mapping[str, str] | None = None
+) -> int:
+    env = os.environ if env is None else env
+    parser = argparse.ArgumentParser(prog="l1_ingest")
+    parser.add_argument("--mode", required=True, choices=MODES)
+    parser.add_argument("--from", dest="from_", required=True, metavar="DESDE")
+    parser.add_argument("--to", metavar="HASTA")
+    parser.add_argument("--asset", default="BTCUSDT")
+    try:
+        args = parser.parse_args(argv)
+    except SystemExit as exc:  # argparse ya imprimió el motivo
+        return int(exc.code or 0)
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
+    try:
+        year, month, day = resolve_unit(args.mode, args.from_, args.to, _index(env))
+        if args.mode in NOT_IMPLEMENTED:
+            print(f"--mode {args.mode}: no implementado hasta E3", file=sys.stderr)
+            return EXIT_NOT_IMPLEMENTED
+        ctx = _context(args.mode, env)
+    except UsageError as exc:
+        print(f"l1_ingest: {exc}", file=sys.stderr)
+        return EXIT_USAGE
+
+    process_unit(Unit(year, month, day, asset=args.asset), ctx)
+    return 0
