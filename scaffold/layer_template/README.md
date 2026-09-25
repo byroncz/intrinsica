@@ -28,15 +28,18 @@ La plantilla queda fuera de ruff (`extend-exclude`): sus nombres no son módulos
 
 `<N>` es el número de la capa (`2`) y `<nombre>` su nombre en minúsculas
 (`transform`). Ambos marcadores aparecen en nombres de carpeta y en el
-contenido de los archivos.
+contenido de los archivos. `<descripción>` es un tercer marcador, solo en el
+`pyproject.toml`: una frase sobre qué hace la capa.
 
 ## Cómo instanciarla
 
 1. Copia la carpeta a `layers/l<N>_<nombre>/`.
 2. Reemplaza `<N>` y `<nombre>` en nombres y contenidos, y renombra
-   `src/l<N>_<nombre>/`. Comprueba con `grep -rn '<N>\|<nombre>' layers/l<N>_<nombre>`.
+   `src/l<N>_<nombre>/`. Comprueba con `grep -rn '<N>\|<nombre>\|<descripción>' layers/l<N>_<nombre>`.
 3. Completa `pyproject.toml` (descripción y dependencias), y los `TODO` de
-   `smoke.sh` (variables de entorno, modo y salidas a verificar). Quita
+   `smoke.sh` (variables de entorno, modo, rutas de salida y salidas a
+   verificar). El humo falla a propósito hasta que lo completes: así el CI no
+   da un "humo OK" sin verificar nada. Quita
    `.gitkeep` de `tests/` y `config/` cuando agregues archivos.
 4. Agrega `l<N>_<nombre>` a `LAYERS` en `.github/workflows/ci.yml`.
 5. Agrega `layers/l<N>_<nombre>/tests` a `testpaths` en el `pyproject.toml` de
