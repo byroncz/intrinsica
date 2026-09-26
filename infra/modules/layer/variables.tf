@@ -3,8 +3,8 @@ variable "layer" {
   type        = string
 
   validation {
-    condition     = can(regex("^[a-z][a-z0-9-]{1,25}$", var.layer))
-    error_message = "layer debe tener 2 a 26 caracteres, empezar con letra minúscula y usar solo [a-z0-9-]."
+    condition     = can(regex("^[a-z][a-z0-9]{1,25}$", var.layer))
+    error_message = "layer debe tener 2 a 26 caracteres, empezar con letra minúscula y usar solo [a-z0-9] (sin guiones: run-job.yml deriva el modo del sufijo tras el primer guion)."
   }
 }
 

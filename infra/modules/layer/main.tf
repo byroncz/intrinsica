@@ -24,6 +24,15 @@ resource "google_service_account" "job" {
   project      = var.project_id
   account_id   = "${var.layer}-${each.key}"
   display_name = "Job ${each.key} de la capa ${var.layer}"
+
+  # Terraform >= 1.6 no valida entre variables: el largo de <capa>-<modo> se
+  # comprueba aquí y no en el apply.
+  lifecycle {
+    precondition {
+      condition     = can(regex("^[a-z][a-z0-9-]{4,28}[a-z0-9]$", "${var.layer}-${each.key}"))
+      error_message = "${var.layer}-${each.key} no es un account_id válido: 6 a 30 caracteres, empieza con letra y termina en letra o dígito."
+    }
+  }
 }
 
 # Un job por modo: la service account se fija en la plantilla, no en la
