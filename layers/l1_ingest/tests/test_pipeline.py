@@ -220,3 +220,19 @@ def test_drift_reports_the_sha_the_manifest_registers(
 
     drift = [f for f in result.findings if f.check_type == "checksum_drift"]
     assert drift[0].details["new_sha256"] == new
+
+
+def test_existing_partition_without_manifest_row_reprocesses_without_drift(
+    tmp_path, publish_zip
+):
+    publish, base = publish_zip
+    publish()
+    unit = Unit(2024, 3)
+    process_unit(unit, _ctx(tmp_path, base))
+    for row in _files(tmp_path / "manifest"):
+        row.unlink()
+
+    result = process_unit(unit, _ctx(tmp_path, base))
+
+    assert not result.skipped
+    assert not [f for f in result.findings if f.check_type == "checksum_drift"]

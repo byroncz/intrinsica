@@ -144,8 +144,7 @@ def process_unit(unit: Unit, ctx: RunContext) -> Result:
         filename,
     )
     previous = None
-    existed = _exists(path)
-    if existed:
+    if _exists(path):
         published = fetch_checksum(url)
         previous = last_sha256(
             ctx.manifest_root,
@@ -169,7 +168,8 @@ def process_unit(unit: Unit, ctx: RunContext) -> Result:
         raise
 
     checks = []
-    if existed and previous != download.sha256:
+    if previous is not None and previous != download.sha256:
+        # Sin fila previa (partición anterior al manifiesto) no hay republicación.
         checks.append(
             CheckResult(
                 "checksum_drift",
