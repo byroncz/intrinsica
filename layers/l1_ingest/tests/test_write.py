@@ -6,6 +6,7 @@ import pytest
 from l1_ingest.schema import OUTPUT_SCHEMA
 from l1_ingest.write import (
     CONSOLIDATED,
+    PartitionWriter,
     content_hash,
     day_filename,
     partition_path,
@@ -138,3 +139,38 @@ def test_content_hash_ignores_schema_metadata():
     assert content_hash(table.replace_schema_metadata({b"x": b"y"})) == content_hash(
         table
     )
+
+
+class _FsWithoutTmpDelete:
+    """Como GCS tras `move`: borrar lo que no existe lanza un OSError genérico."""
+
+    def __init__(self, fs):
+        self._fs = fs
+        self.deleted = []
+
+    def __getattr__(self, name):
+        return getattr(self._fs, name)
+
+    def delete_file(self, path):
+        self.deleted.append(path)
+        raise OSError("object does not exist")
+
+
+def test_commit_exitoso_no_intenta_borrar_el_temporal(tmp_path):
+    path = str(tmp_path / "c.parquet")
+    with PartitionWriter(path) as writer:
+        writer._fs = fake = _FsWithoutTmpDelete(writer._fs)
+        writer.write_table(_table(3))
+        writer.commit()
+    assert fake.deleted == []
+    assert pq.read_table(path).num_rows == 3
+
+
+def test_error_de_borrado_no_oculta_la_excepcion_original(tmp_path):
+    path = str(tmp_path / "c.parquet")
+    with (
+        pytest.raises(RuntimeError, match="original"),
+        PartitionWriter(path) as writer,
+    ):
+        writer._fs = _FsWithoutTmpDelete(writer._fs)
+        raise RuntimeError("original")

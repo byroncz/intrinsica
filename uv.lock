@@ -104,7 +104,6 @@ version = "0.1.0"
 source = { editable = "layers/l1_ingest" }
 dependencies = [
     { name = "dq" },
-    { name = "duckdb" },
     { name = "fsspec" },
     { name = "pyarrow" },
 ]
@@ -112,7 +111,6 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "dq", editable = "shared/dq" },
-    { name = "duckdb", specifier = ">=1.5.5" },
     { name = "fsspec", specifier = ">=2026.9.0" },
     { name = "pyarrow", specifier = ">=25.0.1" },
 ]

@@ -38,15 +38,20 @@ tabla se desvía del código.
   `provisional-day=DD.parquet` para un día del mes en curso. El lector
   prefiere `consolidated.parquet` si existe.
 - **Formato**: Parquet con compresión ZSTD nivel 3, estadísticas (min/max) por
-  columna, row groups de 1 millón de filas y `sorting_columns`
+  columna, un row group por bloque de CSV de 64 MiB (~800k filas) y `sorting_columns`
   (`transact_time`, `agg_trade_id`) en los metadatos. `write_partition`
   rechaza una tabla que no llegue ordenada por esas claves.
-- **Sobrescritura atómica**: en local se escribe a un temporal del mismo
-  directorio y se renombra; en GCS reemplazar el objeto ya es atómico. Nunca
-  queda un archivo a medias.
+- **Sobrescritura atómica**: `PartitionWriter` escribe a un temporal
+  `.<nombre>.<uuid>.tmp` en el mismo directorio (o prefijo de GCS) y lo
+  mueve sobre el destino: `os.replace` en local; en GCS, `move` (copia más
+  borrado). Nunca queda un archivo a medias. Si el proceso muere sin pasar
+  por `__exit__` (SIGKILL por OOM), el temporal queda huérfano: los lectores
+  lo ignoran porque su nombre empieza por `.` y no es un `.parquet`
+  de la partición, y se limpia a mano borrando los `.*.tmp` del prefijo.
 - **Idempotencia**: es contenido idéntico, no bytes idénticos. Se mide con
-  `content_hash(table)`, el SHA-256 del flujo IPC de la tabla (esquema más
-  filas en orden, sin importar el chunking). Se hashea el contenido lógico y
+  `content_hash(table)` (o `ContentHasher`, que lo calcula lote a lote): el
+  SHA-256 del esquema más un SHA-256 por columna sobre los bytes de sus
+  valores en orden, sin importar el chunking. Se hashea el contenido lógico y
   no el archivo porque el Parquet puede diferir en bytes entre versiones de
   la librería sin que cambien los datos.
 
