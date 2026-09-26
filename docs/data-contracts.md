@@ -38,7 +38,7 @@ tabla se desvía del código.
   `provisional-day=DD.parquet` para un día del mes en curso. El lector
   prefiere `consolidated.parquet` si existe.
 - **Formato**: Parquet con compresión ZSTD nivel 3, estadísticas (min/max) por
-  columna, row groups de 1 millón de filas y `sorting_columns`
+  columna, un row group por bloque de CSV de 64 MiB (~800k filas) y `sorting_columns`
   (`transact_time`, `agg_trade_id`) en los metadatos. `write_partition`
   rechaza una tabla que no llegue ordenada por esas claves.
 - **Sobrescritura atómica**: `PartitionWriter` escribe a un temporal
