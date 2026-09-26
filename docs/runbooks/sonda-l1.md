@@ -137,9 +137,12 @@ Verlo en el log exigiría registrar `metric_value` en `dq/emit.py`: es un
 cambio de código, va por una card aparte.
 
 Al terminar las tres corridas, borra los objetos `provisional-day` que dejaron
-en el bucket landing. Están dentro de meses cerrados y `monthly-close` aún no
-existe, así que el `consolidated.parquet` del backfill quedaría duplicado con
-ellos para quien lea la partición entera:
+en el bucket landing. Están dentro de meses cerrados y el `consolidated.parquet`
+del backfill quedaría duplicado con ellos para quien lea la partición entera.
+Lo normal es correr `monthly-close` sobre esos meses: con el consolidado ya
+presente no descarga nada, compara los provisionales contra él, emite
+`daily_monthly_drift` y los borra. El borrado manual solo hace falta si
+`monthly-close` no puede limpiar ese mes:
 
 ```bash
 B=gs://<bucket landing>/l1/provider=binance/market=spot/asset=BTCUSDT

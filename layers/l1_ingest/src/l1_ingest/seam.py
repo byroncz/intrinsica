@@ -25,37 +25,51 @@ CHECK_TYPE = "seam_discontinuity"
 _PROVISIONAL = re.compile(r"provisional-day=(\d{2})\.parquet")
 
 
-def find_partition(root: str, unit: Unit, *, last: bool) -> str | None:
-    """Ruta del archivo que representa el mes, o None si no existe.
-
-    Prefiere `consolidated.parquet`; si no, el último (`last`) o el primer
-    `provisional-day=DD.parquet`, ordenados por el día del nombre.
-    """
+def list_provisionals(root: str, unit: Unit) -> dict[int, str]:
+    """Día → ruta de cada `provisional-day=DD.parquet` de la partición del mes."""
 
     def path(name: str) -> str:
         return partition_path(
             root, unit.provider, unit.market, unit.asset, unit.year, unit.month, name
         )
 
-    consolidated = path(CONSOLIDATED)
+    fs, resolved = resolve_fs(path(CONSOLIDATED))
+    directory = resolved.rsplit("/", 1)[0]
+    if fs.get_file_info(directory).type == pafs.FileType.NotFound:
+        return {}
+    return {
+        int(m.group(1)): path(info.base_name)
+        for info in fs.get_file_info(pafs.FileSelector(directory))
+        if (m := _PROVISIONAL.fullmatch(info.base_name))
+    }
+
+
+def find_partition(root: str, unit: Unit, *, last: bool) -> str | None:
+    """Ruta del archivo que representa el mes, o None si no existe.
+
+    Prefiere `consolidated.parquet`; si no, el último (`last`) o el primer
+    `provisional-day=DD.parquet`, ordenados por el día del nombre.
+    """
+    consolidated = partition_path(
+        root,
+        unit.provider,
+        unit.market,
+        unit.asset,
+        unit.year,
+        unit.month,
+        CONSOLIDATED,
+    )
     fs, resolved = resolve_fs(consolidated)
     if fs.get_file_info(resolved).type == pafs.FileType.File:
         return consolidated
-    directory = resolved.rsplit("/", 1)[0]
-    if fs.get_file_info(directory).type == pafs.FileType.NotFound:
+    provisionals = list_provisionals(root, unit)
+    if not provisionals:
         return None
-    days = sorted(
-        int(m.group(1))
-        for info in fs.get_file_info(pafs.FileSelector(directory))
-        if (m := _PROVISIONAL.fullmatch(info.base_name))
-    )
-    if not days:
-        return None
-    return path(f"provisional-day={days[-1 if last else 0]:02d}.parquet")
+    return provisionals[max(provisionals) if last else min(provisionals)]
 
 
-def id_bounds(path: str) -> tuple[int, int]:
-    """(min, max) de `agg_trade_id` según las estadísticas de los row groups."""
+def footer_stats(path: str) -> tuple[int, int, int]:
+    """(num_rows, min, max) de `agg_trade_id` según el footer, sin leer datos."""
     fs, resolved = resolve_fs(path)
     meta = pq.ParquetFile(resolved, filesystem=fs).metadata
     column = meta.schema.names.index("agg_trade_id")
@@ -64,7 +78,13 @@ def id_bounds(path: str) -> tuple[int, int]:
     ]
     if not stats or any(s is None or not s.has_min_max for s in stats):
         raise ValueError(f"{path} no trae estadísticas de agg_trade_id")
-    return min(s.min for s in stats), max(s.max for s in stats)
+    return meta.num_rows, min(s.min for s in stats), max(s.max for s in stats)
+
+
+def id_bounds(path: str) -> tuple[int, int]:
+    """(min, max) de `agg_trade_id` según las estadísticas de los row groups."""
+    _, low, high = footer_stats(path)
+    return low, high
 
 
 def check_seam(
