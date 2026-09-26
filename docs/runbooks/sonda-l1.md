@@ -162,6 +162,13 @@ Los llenó la card ITSC-213.
 - Ejecución Cloud Run `l1-job-dvwz4`, 1 tarea. Salida:
   `gs://intrinsica-dc-landing/l1/provider=binance/market=spot/asset=BTCUSDT/year=2023/month=03/consolidated.parquet`,
   `content_hash=35a8f396db7f0f57ff6cad58adde412a61bb82b30cc5240ceecba60569a69996`.
+- **Fila del manifiesto:** el código no la registra en el log. Evidencia
+  indirecta: `write_manifest` corre antes de la línea `fin`
+  (`pipeline.py:135` frente a `:183`) y lanza excepción si falla, así que la
+  línea `fin` implica la fila escrita. Para confirmarla, toma el `run_id` de
+  la línea `inicio` del log (`gh run view 36248786009 --log | grep 'inicio unidad=binance/spot/BTCUSDT/2023-03'`)
+  y lista el bucket:
+  `gcloud storage ls gs://intrinsica-dc-manifest/l1/provider=binance/market=spot/asset=BTCUSDT/year=2023/month=03/<run_id>-*.parquet`.
 - Por corrida: 16 × 577 = 9.232 GiB-s y 4 × 577 = 2.308 vCPU-s.
 - **Extrapolación contra el cupo gratis mensual** (360.000 GiB-s y 180.000
   vCPU-s): ×96 meses son 886.272 GiB-s (2,46 veces el cupo) y 221.568 vCPU-s
@@ -174,8 +181,8 @@ Los llenó la card ITSC-213.
 - Intento previo con la imagen 0.1.0: OOM a 16 GiB (run 36220593271). Lo
   resolvió ITSC-215 (memoria acotada); la 0.1.1 es la medida.
 - **Margen de timeout:** 577 s de pared contra los 600 s por tarea de Cloud
-  Run Jobs dejan 23 s. Es riesgo de timeout, no de memoria: hace falta una
-  card para fijar `timeout` en el módulo `layer` (ver "Regla de decisión").
+  Run Jobs dejan 23 s. Es riesgo de timeout, no de memoria: la card ITSC-219
+  fija `timeout` en el módulo `layer` (ver "Regla de decisión").
 
 **Header**
 
