@@ -14,9 +14,10 @@ from datetime import date, timedelta
 from pathlib import Path
 
 from l1_ingest.pipeline import RunContext, Unit, process_unit
+from l1_ingest.seam import run_seam_check
 
 MODES = ("backfill", "daily", "monthly-close", "seam-check")
-NOT_IMPLEMENTED = ("monthly-close", "seam-check")
+NOT_IMPLEMENTED = ("monthly-close",)
 EXIT_USAGE = 2
 EXIT_NOT_IMPLEMENTED = 3
 ROOT_VARS = ("L1_LANDING_ROOT", "L1_DQ_ROOT", "L1_MANIFEST_ROOT")
@@ -128,6 +129,21 @@ def _log_probe(unit: Unit, mode: str, started: float) -> None:
     )
 
 
+def _seam_check(args: argparse.Namespace, env: Mapping[str, str]) -> int:
+    """Una sola tarea recorre todos los bordes del rango; ignora el índice."""
+    try:
+        start = _parse(args.mode, args.from_)[:2]
+        end = _parse(args.mode, args.to or args.from_)[:2]
+        if end < start:
+            raise UsageError(f"--to {args.to} es anterior a --from {args.from_}")
+        ctx = _context(args.mode, env, args.force)
+    except UsageError as exc:
+        print(f"l1_ingest: {exc}", file=sys.stderr)
+        return EXIT_USAGE
+    run_seam_check(start, end, args.asset, ctx)
+    return 0
+
+
 def main(
     argv: Sequence[str] | None = None, env: Mapping[str, str] | None = None
 ) -> int:
@@ -149,6 +165,8 @@ def main(
         return int(exc.code or 0)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
+    if args.mode == "seam-check":
+        return _seam_check(args, env)
     try:
         year, month, day = resolve_unit(args.mode, args.from_, args.to, _index(env))
         if args.mode in NOT_IMPLEMENTED:

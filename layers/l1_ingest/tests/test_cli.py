@@ -117,7 +117,7 @@ def test_main_force_flag(tmp_path, publish_zip):
     assert len(list((tmp_path / "manifest").rglob("*.parquet"))) == 2
 
 
-@pytest.mark.parametrize("mode", ["monthly-close", "seam-check"])
+@pytest.mark.parametrize("mode", ["monthly-close"])
 def test_main_not_implemented(tmp_path, capsys, mode):
     env = _env(tmp_path, "http://127.0.0.1:1")
     assert main(["--mode", mode, "--from", "2024-03"], env) == 3
