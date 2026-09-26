@@ -46,10 +46,10 @@ module "layer" {
   # backfill y monthly-close heredan este valor.
   timeout = 3600
 
-  # Un fallo real (OOM, timeout, checksum) no mejora repitiendo tres veces y
-  # cada reintento se paga completo. La reanudación no es por reintento: el
-  # modo backfill salta lo que ya existe con el mismo .CHECKSUM, así que el
-  # humano relanza el rango y solo se procesan los meses que faltan.
+  # 1 y no 0: el reintento cubre fallos transitorios de infraestructura. Un
+  # fallo determinista (OOM, timeout, checksum) no lo arregla repetir, y cada
+  # reintento se paga completo: lo resuelve el humano relanzando el rango, que
+  # se reanuda porque backfill salta lo que ya existe con el mismo .CHECKSUM.
   max_retries = 1
 
   env = {

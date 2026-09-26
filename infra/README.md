@@ -220,11 +220,12 @@ valores por defecto 3600 s y 1; el stack `l1` solo sobrescribe el timeout en dai
 | `l1-seam-check` | 900 s | 1 |
 
 3600 s es 6× la pared de la sonda (577 s, mes 2023-03); el tope por defecto de
-Cloud Run (600 s) dejaba 23 s de margen. Un fallo real (OOM, timeout,
-checksum) no mejora repitiendo, así que se reintenta una sola vez. La
-reanudación no es por reintento: el modo backfill salta lo que ya existe con
-el mismo `.CHECKSUM`; si falla, relanza el rango y solo se procesan los meses
-que faltan.
+Cloud Run (600 s) dejaba 23 s de margen. Se reintenta una vez y no cero
+porque el reintento cubre fallos transitorios de infraestructura; un fallo
+determinista (OOM, timeout, checksum) no lo arregla repetir y lo resuelve el
+humano. La reanudación no es por reintento: el modo backfill salta lo que ya
+existe con el mismo `.CHECKSUM`; si falla, relanza el rango y solo se procesan
+los meses que faltan.
 
 ## Desplegar un cambio de capa
 

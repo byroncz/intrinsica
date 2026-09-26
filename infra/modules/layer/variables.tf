@@ -53,7 +53,7 @@ variable "timeout" {
 }
 
 variable "max_retries" {
-  description = "Reintentos de una tarea fallida. Con 1, un fallo real (OOM, timeout, checksum) se repite una sola vez."
+  description = "Reintentos de una tarea fallida. Con 1, el reintento cubre fallos transitorios de infraestructura; un fallo determinista (OOM, timeout, checksum) lo resuelve el humano relanzando."
   type        = number
   default     = 1
 
