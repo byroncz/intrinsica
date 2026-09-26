@@ -157,14 +157,30 @@ def test_close_repeated_does_not_rewrite(tmp_path, publish_zip, caplog):
     consolidated = next((tmp_path / "landing").rglob("consolidated.parquet"))
     before = consolidated.stat().st_mtime_ns
     findings = len(current_findings(tmp_path / "dq").to_pylist())
-    _seed_days(tmp_path, [1])  # un provisional tardío no se toca
 
     with caplog.at_level(logging.INFO):
         assert _close(tmp_path, "http://127.0.0.1:1") == 0  # sin descargar
     assert any("mes ya cerrado" in m for m in caplog.messages)
     assert consolidated.stat().st_mtime_ns == before
     assert len(current_findings(tmp_path / "dq").to_pylist()) == findings
-    assert len(_provisionals(tmp_path)) == 1
+
+
+def test_close_repairs_leftover_provisionals(tmp_path, publish_zip, caplog):
+    _, base = publish_zip
+    _publish_month(tmp_path, 2024, 3, 31)
+    assert _close(tmp_path, base) == 0
+    consolidated = next((tmp_path / "landing").rglob("consolidated.parquet"))
+    before = consolidated.stat().st_mtime_ns
+    _seed_days(tmp_path, [1])  # cierre interrumpido: quedó un provisional
+
+    with caplog.at_level(logging.INFO):
+        assert _close(tmp_path, "http://127.0.0.1:1") == 0  # sin descargar
+    assert any("cierre completado" in m for m in caplog.messages)
+    assert consolidated.stat().st_mtime_ns == before
+    assert _provisionals(tmp_path) == []
+    rows = current_findings(tmp_path / "dq").to_pylist()
+    drift = [r for r in rows if r["check_type"] == "daily_monthly_drift"]
+    assert [r["status"] for r in drift].count("fail") == 1
 
 
 def test_close_force_reprocesses_closed_month(tmp_path, publish_zip):

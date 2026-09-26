@@ -104,24 +104,34 @@ def _seam_with_previous(ctx: RunContext, unit: Unit) -> CheckResult:
 def run_monthly_close(unit: Unit, ctx: RunContext) -> list[Finding]:
     """Cierra el mes: consolidado, drift, costura con M-1 y borrado de provisionales.
 
-    Si consolidated.parquet ya existe la partición está cerrada: no se descarga
-    ni se escribe, salvo `force`. Los provisionales se borran solo después del
-    commit del consolidado y del hallazgo de drift (RL1-08).
+    Si consolidated.parquet ya existe no se descarga ni se escribe, salvo
+    `force`; si además quedan provisionales (cierre interrumpido o backfill),
+    se comparan, se borran y se emiten los hallazgos. Los provisionales se
+    borran solo después del commit del consolidado y del hallazgo de drift
+    (RL1-08).
     """
     consolidated = _path(ctx, unit, CONSOLIDATED)
+    findings: list[Finding] = []
     if _exists(consolidated) and not ctx.force:
-        logger.info("mes ya cerrado unidad=%s: existe %s", unit, consolidated)
-        return []
-    result = process_unit(unit, ctx)
+        if not list_provisionals(ctx, unit):
+            logger.info("mes ya cerrado unidad=%s: existe %s", unit, consolidated)
+            return []
+        # Cierre a medias (reintento o backfill con provisionales): se repara.
+    else:
+        findings = process_unit(unit, ctx).findings
     provisionals = list_provisionals(ctx, unit)
     days = calendar.monthrange(unit.year, unit.month)[1]
     extra = [
-        _finding(check_drift(result.path, provisionals, days), unit, ctx),
+        _finding(check_drift(consolidated, provisionals, days), unit, ctx),
         _finding(_seam_with_previous(ctx, unit), unit, ctx),
     ]
     emit_findings(extra, ctx.dq_root)
     fs, _ = resolve_fs(consolidated)
     for path in provisionals.values():
         fs.delete_file(resolve_fs(path)[1])
-    logger.info("cierre unidad=%s: %d provisionales borrados", unit, len(provisionals))
-    return [*result.findings, *extra]
+    logger.info(
+        "cierre completado unidad=%s: %d provisionales borrados",
+        unit,
+        len(provisionals),
+    )
+    return [*findings, *extra]
