@@ -7,6 +7,7 @@ Módulos Terraform reutilizables. Definido en el
 
 - `layer/`: módulo parametrizable (bucket/prefijo GCS, ruta de imagen, IAM
   mínimo, plantilla de job), se instancia una vez por capa.
+- `orchestration/`: workflow y schedulers de una capa (ver su README).
 - `registry/` y `observability/`.
 
 ## Variable `modes` del módulo `layer`
