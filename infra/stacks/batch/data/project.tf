@@ -16,6 +16,9 @@ locals {
     "cloudresourcemanager.googleapis.com",
     "storage.googleapis.com",
     "serviceusage.googleapis.com",
+    "workflows.googleapis.com",
+    "workflowexecutions.googleapis.com",
+    "cloudscheduler.googleapis.com",
   ]
 }
 

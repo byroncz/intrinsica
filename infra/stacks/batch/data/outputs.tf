@@ -41,6 +41,11 @@ output "ci_service_account_email" {
   value       = google_service_account.ci.email
 }
 
+output "scheduler_invoker_service_account_email" {
+  description = "Email de la service account con la que los schedulers de todas las capas inician ejecuciones de Workflows."
+  value       = google_service_account.scheduler_invoker.email
+}
+
 output "deploy_service_account_email" {
   description = "Email de la service account con la que GitHub Actions aplica stacks de capa y ejecuta jobs."
   value       = google_service_account.deploy.email

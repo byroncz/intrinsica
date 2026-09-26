@@ -32,6 +32,34 @@ resource "google_storage_bucket" "landing" {
     enabled = true
   }
 
+  # Conserva la versión vigente y las 2 no vigentes más recientes. En GCS,
+  # num_newer_versions cuenta también la vigente, por eso el valor es 3.
+  lifecycle_rule {
+    action {
+      type = "Delete"
+    }
+    condition {
+      with_state                 = "ARCHIVED"
+      num_newer_versions         = 3
+      days_since_noncurrent_time = 30
+    }
+  }
+
+  # Nearline y no Coldline: L2 relee el histórico completo, y Nearline cobra
+  # menos por recuperación. Los 30 días respetan su mínimo de permanencia.
+  lifecycle_rule {
+    action {
+      type          = "SetStorageClass"
+      storage_class = "NEARLINE"
+    }
+    condition {
+      with_state     = "LIVE"
+      age            = 30
+      matches_prefix = ["l1/"]
+      matches_suffix = ["consolidated.parquet"]
+    }
+  }
+
   lifecycle {
     prevent_destroy = true
   }
