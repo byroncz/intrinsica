@@ -13,13 +13,12 @@ from collections.abc import Mapping, Sequence
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
+from l1_ingest.close import run_monthly_close
 from l1_ingest.pipeline import RunContext, Unit, process_unit
 from l1_ingest.seam import run_daily_seam, run_seam_check
 
 MODES = ("backfill", "daily", "monthly-close", "seam-check")
-NOT_IMPLEMENTED = ("monthly-close",)
 EXIT_USAGE = 2
-EXIT_NOT_IMPLEMENTED = 3
 ROOT_VARS = ("L1_LANDING_ROOT", "L1_DQ_ROOT", "L1_MANIFEST_ROOT")
 
 logger = logging.getLogger(__name__)
@@ -166,21 +165,24 @@ def main(
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
     if args.from_ is None:
-        if args.mode != "daily" or args.to is not None:
+        if args.mode not in ("daily", "monthly-close") or args.to is not None:
             print(
-                "l1_ingest: --from es obligatorio (solo daily sin --to lo omite)",
+                "l1_ingest: --from es obligatorio "
+                "(solo daily y monthly-close sin --to lo omiten)",
                 file=sys.stderr,
             )
             return EXIT_USAGE
-        # El día por defecto se resuelve aquí para que resolve_unit siga pura.
-        args.from_ = (datetime.now(UTC).date() - timedelta(days=1)).isoformat()
+        # El valor por defecto se resuelve aquí para que resolve_unit siga pura.
+        today = datetime.now(UTC).date()
+        if args.mode == "daily":
+            args.from_ = (today - timedelta(days=1)).isoformat()
+        else:
+            last_month = today.replace(day=1) - timedelta(days=1)
+            args.from_ = f"{last_month.year:04d}-{last_month.month:02d}"
     if args.mode == "seam-check":
         return _seam_check(args, env)
     try:
         year, month, day = resolve_unit(args.mode, args.from_, args.to, _index(env))
-        if args.mode in NOT_IMPLEMENTED:
-            print(f"--mode {args.mode}: no implementado hasta E3", file=sys.stderr)
-            return EXIT_NOT_IMPLEMENTED
         ctx = _context(args.mode, env, args.force)
     except UsageError as exc:
         print(f"l1_ingest: {exc}", file=sys.stderr)
@@ -188,9 +190,12 @@ def main(
 
     unit = Unit(year, month, day, asset=args.asset)
     try:
-        result = process_unit(unit, ctx)
-        if args.mode == "daily" and not result.skipped:
-            run_daily_seam(unit, ctx)
+        if args.mode == "monthly-close":
+            run_monthly_close(unit, ctx)
+        else:
+            result = process_unit(unit, ctx)
+            if args.mode == "daily" and not result.skipped:
+                run_daily_seam(unit, ctx)
     finally:
         _log_probe(unit, args.mode, started)
     return 0
