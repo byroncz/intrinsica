@@ -1,6 +1,7 @@
 """Escritura del Parquet de salida de L1 (§7.2 del TRD-L1, paso 9 del §8.1)."""
 
 import hashlib
+import logging
 import os
 import uuid
 from pathlib import Path
@@ -14,6 +15,8 @@ import pyarrow.parquet as pq
 
 from l1_ingest.manifest import resolve_fs
 from l1_ingest.schema import OUTPUT_SCHEMA
+
+logger = logging.getLogger(__name__)
 
 CONSOLIDATED = "consolidated.parquet"
 ROW_GROUP_SIZE = 1_000_000
@@ -81,6 +84,7 @@ class PartitionWriter:
         self._tmp = f"{parent}/.{name}.{uuid.uuid4().hex}.tmp"
         self._sink: pa.NativeFile | None = None
         self._writer: pq.ParquetWriter | None = None
+        self._committed = False
 
     def __enter__(self) -> Self:
         if not isinstance(self._fs, pafs.GcsFileSystem):
@@ -104,6 +108,7 @@ class PartitionWriter:
             self._fs.move(self._tmp, self._target)
         else:
             os.replace(self._tmp, self._target)
+        self._committed = True
         return self.path
 
     @staticmethod
@@ -128,10 +133,16 @@ class PartitionWriter:
         tb: TracebackType | None,
     ) -> None:
         self._close()
+        if self._committed:
+            return  # el temporal ya no existe: `commit` lo movió
         try:
             self._fs.delete_file(self._tmp)
-        except FileNotFoundError:
-            pass  # ya se renombró en `commit`
+        except OSError:
+            # Sin excepción previa, un temporal que no se pudo borrar es un
+            # fallo real; con ella, no debe ocultarla.
+            if exc is None:
+                raise
+            logger.warning("no se pudo borrar el temporal %s", self._tmp)
 
 
 def write_partition(table: pa.Table, path: str) -> str:
