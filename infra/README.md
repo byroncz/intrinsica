@@ -210,7 +210,7 @@ data "terraform_remote_state" "data" {
 ## Timeouts y reintentos de los jobs de l1
 
 Cada job fija `timeout` y `max_retries` de forma explícita (módulo `layer`,
-valores por defecto 3600 s y 1; el stack `l1` los fija por modo):
+valores por defecto 3600 s y 1; el stack `l1` solo sobrescribe el timeout en daily y seam-check):
 
 | Job | timeout | max_retries |
 |---|---|---|

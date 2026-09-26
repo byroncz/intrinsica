@@ -42,7 +42,8 @@ module "layer" {
 
   # Timeout por defecto: 3600 s. Sobre la pared de 577 s de la sonda (2023-03)
   # el margen es 6x; con los 600 s por defecto de Cloud Run quedaban 23 s y un
-  # mes más pesado moría por timeout. daily y seam-check lo bajan a 900 s.
+  # mes más pesado moría por timeout. daily y seam-check lo bajan a 900 s;
+  # backfill y monthly-close heredan este valor.
   timeout = 3600
 
   # Un fallo real (OOM, timeout, checksum) no mejora repitiendo tres veces y
@@ -60,10 +61,10 @@ module "layer" {
   # TRD-L1 §11: una service account por modo. monthly-close borra provisionales,
   # por eso escribe igual que backfill y daily; seam-check solo lee landing.
   modes = {
-    backfill = { timeout = 3600, access = local.writer_access }
+    backfill = { access = local.writer_access }
     daily    = { timeout = 900, access = local.writer_access }
-    # El consolidado mensual es la unidad más pesada: mismo tope que backfill.
-    monthly-close = { timeout = 3600, access = local.writer_access }
+    # El consolidado mensual es la unidad más pesada: hereda el tope de 3600 s.
+    monthly-close = { access = local.writer_access }
     seam-check = {
       timeout = 900
       access = {
