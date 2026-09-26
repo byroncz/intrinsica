@@ -74,6 +74,42 @@ resource "google_artifact_registry_repository_iam_member" "deploy_images_reader"
   member     = local.deploy_member
 }
 
+# Crear, actualizar y borrar los workflows de las capas desde su stack.
+# roles/workflows.editor basta: no incluye setIamPolicy ni ejecutar workflows.
+resource "google_project_iam_member" "deploy_workflows_editor" {
+  project = google_project.this.project_id
+  role    = "roles/workflows.editor"
+  member  = local.deploy_member
+}
+
+# Crear, actualizar y borrar los schedulers que disparan los workflows. No hay
+# un rol menor que cubra las tres operaciones (roles/cloudscheduler.admin es
+# el único que incluye delete).
+resource "google_project_iam_member" "deploy_scheduler_admin" {
+  project = google_project.this.project_id
+  role    = "roles/cloudscheduler.admin"
+  member  = local.deploy_member
+}
+
+# Identidad con la que los schedulers de todas las capas inician ejecuciones de
+# Workflows. Vive aquí y no en el stack de capa porque Workflows no tiene IAM
+# por recurso (el provider no ofrece google_workflows_workflow_iam_*): el rol
+# se da a nivel de project, y deploy-github no puede fijar IAM de project.
+resource "google_service_account" "scheduler_invoker" {
+  project      = google_project.this.project_id
+  account_id   = "scheduler-invoker"
+  display_name = "Invocador de Workflows para Cloud Scheduler"
+
+  depends_on = [google_project_service.apis]
+}
+
+# Solo puede iniciar ejecuciones de Workflows; no lee ni modifica nada más.
+resource "google_project_iam_member" "scheduler_invoker_workflows" {
+  project = google_project.this.project_id
+  role    = "roles/workflows.invoker"
+  member  = "serviceAccount:${google_service_account.scheduler_invoker.email}"
+}
+
 # Leer los logs de la ejecución de un job.
 resource "google_project_iam_member" "deploy_logging_viewer" {
   project = google_project.this.project_id

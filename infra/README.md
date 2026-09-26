@@ -160,6 +160,13 @@ Lo hace el humano, en este orden. Ningún agente ejecuta el apply.
    imagen real). Después, relanza desde Actions el workflow que había
    fallado (Terraform → capa → apply).
 
+   Aplica `data` desde Cloud Shell también antes del apply de `l1` con la
+   orquestación (Workflows y Scheduler): habilita sus APIs, da a
+   `deploy-github` los roles para gestionarlos, crea la service account
+   `scheduler-invoker` (output `scheduler_invoker_service_account_email`) y
+   aplica las reglas de ciclo de vida del bucket landing. Sin este apply, el
+   de `l1` falla con 403 o con la API deshabilitada.
+
 2. Crea el environment `gcp` del repositorio (*Settings → Environments →
    New environment*) con tu usuario como revisor requerido. Debe existir
    antes del paso 3: un `workflow_dispatch` que referencia un environment
