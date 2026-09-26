@@ -3,6 +3,8 @@
 
 locals {
   modes = keys(var.schedules)
+  # Misma fuente que el IAM: el workflow no reconstruye el nombre del job.
+  job_names = { for m in local.modes : m => var.job_names[m] }
 }
 
 # Identidad propia del workflow. Solo puede ejecutar los jobs de schedules
@@ -40,9 +42,12 @@ resource "google_workflows_workflow" "run_job" {
     main:
       params: [args]
       steps:
+        - mapa_jobs:
+            assign:
+              - jobs: ${jsonencode(local.job_names)}
         - validar_modo:
             switch:
-              - condition: $${default(map.get(args, "mode"), "") in ${jsonencode(local.modes)}}
+              - condition: $${default(map.get(args, "mode"), "") in keys(jobs)}
                 next: ejecutar_job
             next: modo_invalido
         - modo_invalido:
@@ -50,7 +55,7 @@ resource "google_workflows_workflow" "run_job" {
         - ejecutar_job:
             call: http.post
             args:
-              url: $${"https://run.googleapis.com/v2/projects/${var.project_id}/locations/${var.region}/jobs/${var.layer}-" + args.mode + ":run"}
+              url: $${"https://run.googleapis.com/v2/projects/${var.project_id}/locations/${var.region}/jobs/" + jobs[args.mode] + ":run"}
               auth:
                 type: OAuth2
             result: ejecucion
