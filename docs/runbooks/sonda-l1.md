@@ -2,7 +2,8 @@
 
 Lo ejecuta el humano; ningún agente dispara `terraform.yml` ni `run-job.yml`.
 Mide cuánta memoria y tiempo necesita el mes más pesado de BTCUSDT y con eso
-fija la configuración de Cloud Run del job `l1-job`. Referencia:
+fija la configuración de Cloud Run de los jobs `l1-<modo>` (la sonda usa
+`l1-backfill`). Referencia:
 [TRD-L1 §14.1 y §14.2](../TRD/l1.md). La medición y la configuración final
 las registró la card ITSC-213 (ver "Resultados"); aquí solo se explica
 cómo obtenerlas.
@@ -52,8 +53,7 @@ Ejecuta *Actions → Run job → Run workflow* con estos inputs exactos:
 
 | Input | Valor |
 | --- | --- |
-| `job` | `l1-job` |
-| `mode` | `backfill` |
+| `job` | `l1-backfill` |
 | `from` | `2023-03` |
 | `to` | `2023-03` |
 
@@ -102,7 +102,7 @@ tarea y 3 reintentos). Distingue la causa en el log volcado:
 
 ## Caracterización de header (§14.2)
 
-Tres ejecuciones `run-job.yml` con `job` = `l1-job`, `mode` = `daily` y
+Tres ejecuciones `run-job.yml` con `job` = `l1-daily` y
 `from` = `to` = un día por época:
 
 | Época | Día |

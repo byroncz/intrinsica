@@ -1,5 +1,6 @@
-# Ejecución manual de un Cloud Run Job, genérica para todas las capas. Lanza
-# una tarea por unidad del rango (mes o día, según mode); cada tarea toma
+# Ejecución manual de un Cloud Run Job, genérica para todas las capas. Hay un
+# job por modo (<capa>-<modo>); el modo se deriva del nombre del job. Lanza
+# una tarea por unidad del rango (mes o día, según el modo); cada tarea toma
 # from + CLOUD_RUN_TASK_INDEX. Corre el workflow de la rama elegida en el botón.
 # Regla: no lanzar a mano el mismo mes y modo que Scheduler esté ejecutando.
 name: Run job
@@ -11,16 +12,10 @@ on:
         description: Cloud Run Job a ejecutar
         type: choice
         options:
-          - l1-job
-        required: true
-      mode:
-        description: Modo del job
-        type: choice
-        options:
-          - backfill
-          - daily
-          - monthly-close
-          - seam-check
+          - l1-backfill
+          - l1-daily
+          - l1-monthly-close
+          - l1-seam-check
         required: true
       from:
         description: "Inicio: YYYY-MM (backfill, monthly-close) o YYYY-MM-DD (daily)"
@@ -44,7 +39,6 @@ jobs:
       id-token: write # WIF: el token OIDC de GitHub se canjea por credenciales de GCP
     env:
       JOB: ${{ inputs.job }}
-      MODE: ${{ inputs.mode }}
       FROM: ${{ inputs.from }}
       TO: ${{ inputs.to }}
       FORCE: ${{ inputs.force }}
@@ -52,6 +46,9 @@ jobs:
       GCP_REGION: ${{ vars.GCP_REGION }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Derivar el modo del nombre del job
+        run: echo "MODE=${JOB#*-}" >> "$GITHUB_ENV" # <capa>-<modo>: la capa no lleva guion
 
       - name: Contar las tareas del rango
         id: tasks
