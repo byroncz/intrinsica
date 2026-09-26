@@ -69,9 +69,10 @@ En el log que vuelca el paso "Logs de la ejecución" del run:
 En el resumen del run ("Resumen de la ejecución"): el estado de la ejecución
 (Exitosa o Fallida) y las tareas fallidas.
 
-Una ejecución Fallida no siempre es un OOM. El módulo `layer` no fija
-`timeout` ni `max_retries`, así que valen los de Cloud Run Jobs (600 s por
-tarea y 3 reintentos). Distingue la causa en el log volcado:
+Una ejecución Fallida no siempre es un OOM. Los jobs de l1 fijan `timeout`
+(3600 s por tarea en backfill y monthly-close, 900 s en daily y seam-check) y
+1 reintento; ver "Timeouts y reintentos de los jobs de l1" en
+`infra/README.md`. Distingue la causa en el log volcado:
 
 - **OOM**: aparece "Memory limit of ... exceeded". El proceso muere con
   SIGKILL, el `finally` del CLI no corre y **no hay línea `sonda:`**.
@@ -97,8 +98,9 @@ tarea y 3 reintentos). Distingue la causa en el log volcado:
   `infra/modules/layer/variables.tf`). Entra por una card (`task-create`) y un
   PR mergeado a `main` antes de volver a aplicar `terraform.yml`; después se
   repite la corrida. ADR-L1-09: nunca disco ni Batch antes de agotar 32 GiB.
-- Timeout (no OOM): no cambies la memoria. Registra una card para fijar
-  `timeout` en el módulo `layer` (§14.1 exige "dentro del timeout") y repite.
+- Timeout (no OOM): no cambies la memoria. Sube el `timeout` del modo en
+  `infra/stacks/batch/l1/main.tf` (§14.1 exige "dentro del timeout"), por una
+  card y un PR, y repite.
 
 ## Caracterización de header (§14.2)
 
@@ -183,9 +185,9 @@ Los llenó la card ITSC-213.
   **4 vCPU y 16 GiB** (explícitos en `infra/stacks/batch/l1/main.tf`).
 - Intento previo con la imagen 0.1.0: OOM a 16 GiB (run 36220593271). Lo
   resolvió ITSC-215 (memoria acotada); la 0.1.1 es la medida.
-- **Margen de timeout:** 577 s de pared contra los 600 s por tarea de Cloud
-  Run Jobs dejan 23 s. Es riesgo de timeout, no de memoria: la card ITSC-219
-  fija `timeout` en el módulo `layer` (ver "Regla de decisión").
+- **Margen de timeout:** 577 s de pared contra los 600 s por defecto de
+  Cloud Run Jobs dejaban 23 s. Era riesgo de timeout, no de memoria: ITSC-219
+  fijó 3600 s por tarea en backfill (margen 6x).
 
 **Header**
 
