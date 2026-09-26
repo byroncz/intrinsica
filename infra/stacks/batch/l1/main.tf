@@ -12,6 +12,12 @@ data "terraform_remote_state" "data" {
 locals {
   data    = data.terraform_remote_state.data.outputs
   buckets = local.data.buckets
+
+  writer_access = {
+    (local.buckets["landing"])     = { role = "roles/storage.objectUser", prefixes = ["l1/"] }
+    (local.buckets["dq-findings"]) = { role = "roles/storage.objectUser", prefixes = ["l1/"] }
+    (local.buckets["manifest"])    = { role = "roles/storage.objectUser", prefixes = ["l1/"] }
+  }
 }
 
 provider "google" {
@@ -40,9 +46,17 @@ module "layer" {
     L1_MANIFEST_ROOT = "gs://${local.buckets["manifest"]}/l1"
   }
 
-  bucket_prefixes = {
-    (local.buckets["landing"])     = ["l1/"]
-    (local.buckets["dq-findings"]) = ["l1/"]
-    (local.buckets["manifest"])    = ["l1/"]
+  # TRD-L1 §11: una service account por modo. monthly-close borra provisionales,
+  # por eso escribe igual que backfill y daily; seam-check solo lee landing.
+  modes = {
+    backfill      = { access = local.writer_access }
+    daily         = { access = local.writer_access }
+    monthly-close = { access = local.writer_access }
+    seam-check = {
+      access = {
+        (local.buckets["landing"])     = { role = "roles/storage.objectViewer", prefixes = ["l1/"] }
+        (local.buckets["dq-findings"]) = { role = "roles/storage.objectUser", prefixes = ["l1/"] }
+      }
+    }
   }
 }
