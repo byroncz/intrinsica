@@ -207,6 +207,25 @@ data "terraform_remote_state" "data" {
 - Un stack de capa nunca crea buckets: son datos y `data` es su único dueño.
 - Los módulos hijo no declaran `provider` (TRD maestro §8.2).
 
+## Timeouts y reintentos de los jobs de l1
+
+Cada job fija `timeout` y `max_retries` de forma explícita (módulo `layer`,
+valores por defecto 3600 s y 1; el stack `l1` los fija por modo):
+
+| Job | timeout | max_retries |
+|---|---|---|
+| `l1-backfill` | 3600 s | 1 |
+| `l1-monthly-close` | 3600 s | 1 |
+| `l1-daily` | 900 s | 1 |
+| `l1-seam-check` | 900 s | 1 |
+
+3600 s es 6× la pared de la sonda (577 s, mes 2023-03); el tope por defecto de
+Cloud Run (600 s) dejaba 23 s de margen. Un fallo real (OOM, timeout,
+checksum) no mejora repitiendo, así que se reintenta una sola vez. La
+reanudación no es por reintento: el modo backfill salta lo que ya existe con
+el mismo `.CHECKSUM`; si falla, relanza el rango y solo se procesan los meses
+que faltan.
+
 ## Desplegar un cambio de capa
 
 Todo cambio de código de una capa (incluidos `shared/`, `uv.lock` y el

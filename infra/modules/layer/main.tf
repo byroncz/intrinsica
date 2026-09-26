@@ -51,6 +51,8 @@ resource "google_cloud_run_v2_job" "this" {
   template {
     template {
       service_account = google_service_account.job[each.key].email
+      timeout         = "${coalesce(each.value.timeout, var.timeout)}s"
+      max_retries     = var.max_retries
 
       containers {
         image = var.image

@@ -40,6 +40,17 @@ module "layer" {
   cpu    = "4"
   memory = "16Gi"
 
+  # Timeout por defecto: 3600 s. Sobre la pared de 577 s de la sonda (2023-03)
+  # el margen es 6x; con los 600 s por defecto de Cloud Run quedaban 23 s y un
+  # mes más pesado moría por timeout. daily y seam-check lo bajan a 900 s.
+  timeout = 3600
+
+  # Un fallo real (OOM, timeout, checksum) no mejora repitiendo tres veces y
+  # cada reintento se paga completo. La reanudación no es por reintento: el
+  # modo backfill salta lo que ya existe con el mismo .CHECKSUM, así que el
+  # humano relanza el rango y solo se procesan los meses que faltan.
+  max_retries = 1
+
   env = {
     L1_LANDING_ROOT  = "gs://${local.buckets["landing"]}/l1"
     L1_DQ_ROOT       = "gs://${local.buckets["dq-findings"]}/l1"
@@ -49,10 +60,12 @@ module "layer" {
   # TRD-L1 §11: una service account por modo. monthly-close borra provisionales,
   # por eso escribe igual que backfill y daily; seam-check solo lee landing.
   modes = {
-    backfill      = { access = local.writer_access }
-    daily         = { access = local.writer_access }
-    monthly-close = { access = local.writer_access }
+    backfill = { timeout = 3600, access = local.writer_access }
+    daily    = { timeout = 900, access = local.writer_access }
+    # El consolidado mensual es la unidad más pesada: mismo tope que backfill.
+    monthly-close = { timeout = 3600, access = local.writer_access }
     seam-check = {
+      timeout = 900
       access = {
         (local.buckets["landing"])     = { role = "roles/storage.objectViewer", prefixes = ["l1/"] }
         (local.buckets["dq-findings"]) = { role = "roles/storage.objectUser", prefixes = ["l1/"] }
