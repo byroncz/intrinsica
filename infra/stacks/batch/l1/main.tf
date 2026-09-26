@@ -27,6 +27,13 @@ module "layer" {
   region     = local.data.region
   image      = "${local.data.artifact_registry}/l1_ingest:${trimspace(file("${path.module}/../../../../layers/l1_ingest/VERSION"))}"
 
+  # Sonda §14.1 (docs/runbooks/sonda-l1.md): mes 2023-03, run del 2026-09-26
+  # (imagen 0.1.1), RSS pico 5622 MiB (34 % de 16 GiB; 46 % del umbral de
+  # 12.288 MiB), pared 577 s, sin OOM.
+  # Cumple la regla (<= 75 % y sin OOM): 4 vCPU y 16 GiB.
+  cpu    = "4"
+  memory = "16Gi"
+
   env = {
     L1_LANDING_ROOT  = "gs://${local.buckets["landing"]}/l1"
     L1_DQ_ROOT       = "gs://${local.buckets["dq-findings"]}/l1"
