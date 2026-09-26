@@ -6,21 +6,18 @@ comparación no depende del tamaño del mes; el núcleo del mes ya es O(lote).
 
 import calendar
 import logging
-import re
 
-import pyarrow.fs as pafs
 from dq import Finding, Severity, Status, emit_findings
 
 from l1_ingest.checks import CheckResult
 from l1_ingest.manifest import resolve_fs
 from l1_ingest.pipeline import RunContext, Unit, _exists, _finding, process_unit
-from l1_ingest.seam import check_seam, find_partition, footer_stats
+from l1_ingest.seam import check_seam, find_partition, footer_stats, list_provisionals
 from l1_ingest.write import CONSOLIDATED, partition_path
 
 logger = logging.getLogger(__name__)
 
 CHECK_TYPE = "daily_monthly_drift"
-_PROVISIONAL = re.compile(r"provisional-day=(\d{2})\.parquet")
 
 
 def _path(ctx: RunContext, unit: Unit, name: str) -> str:
@@ -33,20 +30,6 @@ def _path(ctx: RunContext, unit: Unit, name: str) -> str:
         unit.month,
         name,
     )
-
-
-def list_provisionals(ctx: RunContext, unit: Unit) -> dict[int, str]:
-    """Día → ruta de cada `provisional-day=DD.parquet` de la partición del mes."""
-    fs, resolved = resolve_fs(_path(ctx, unit, CONSOLIDATED))
-    directory = resolved.rsplit("/", 1)[0]
-    if fs.get_file_info(directory).type == pafs.FileType.NotFound:
-        return {}
-    root = _path(ctx, unit, "").rstrip("/")
-    return {
-        int(m.group(1)): f"{root}/{info.base_name}"
-        for info in fs.get_file_info(pafs.FileSelector(directory))
-        if (m := _PROVISIONAL.fullmatch(info.base_name))
-    }
 
 
 def check_drift(
@@ -93,11 +76,13 @@ def _seam_with_previous(ctx: RunContext, unit: Unit) -> CheckResult:
         market=unit.market,
         asset=unit.asset,
     )
-    expected = {"prev": _path(ctx, previous, CONSOLIDATED)}
     return check_seam(
         find_partition(str(ctx.landing_root), previous, last=True),
         _path(ctx, unit, CONSOLIDATED),
-        {**expected, "next": _path(ctx, unit, CONSOLIDATED)},
+        {
+            "prev": _path(ctx, previous, CONSOLIDATED),
+            "next": _path(ctx, unit, CONSOLIDATED),
+        },
     )
 
 
@@ -113,13 +98,13 @@ def run_monthly_close(unit: Unit, ctx: RunContext) -> list[Finding]:
     consolidated = _path(ctx, unit, CONSOLIDATED)
     findings: list[Finding] = []
     if _exists(consolidated) and not ctx.force:
-        if not list_provisionals(ctx, unit):
+        if not list_provisionals(str(ctx.landing_root), unit):
             logger.info("mes ya cerrado unidad=%s: existe %s", unit, consolidated)
             return []
         # Cierre a medias (reintento o backfill con provisionales): se repara.
     else:
         findings = process_unit(unit, ctx).findings
-    provisionals = list_provisionals(ctx, unit)
+    provisionals = list_provisionals(str(ctx.landing_root), unit)
     days = calendar.monthrange(unit.year, unit.month)[1]
     extra = [
         _finding(check_drift(consolidated, provisionals, days), unit, ctx),
