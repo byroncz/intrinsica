@@ -7,6 +7,7 @@ partición y la memoria no depende del tamaño del mes.
 
 import logging
 import re
+from datetime import date, timedelta
 from itertools import pairwise
 
 import pyarrow.fs as pafs
@@ -16,7 +17,7 @@ from dq import Finding, Severity, Status, emit_findings
 from l1_ingest.checks import CheckResult
 from l1_ingest.manifest import resolve_fs
 from l1_ingest.pipeline import RunContext, Unit, _finding
-from l1_ingest.write import CONSOLIDATED, partition_path
+from l1_ingest.write import CONSOLIDATED, day_filename, partition_path
 
 logger = logging.getLogger(__name__)
 
@@ -140,3 +141,43 @@ def run_seam_check(
         findings.append(_finding(result, next_unit, ctx))
     emit_findings(findings, ctx.dq_root)
     return findings
+
+
+def run_daily_seam(unit: Unit, ctx: RunContext) -> Finding | None:
+    """Costura del día recién escrito con su día previo, solo por los footers.
+
+    El previo es `provisional-day=DD-1` del mismo mes o, el día 1, la última
+    partición de M-1 (su consolidated si existe; si no, su último provisional).
+    Si no existe no hay hallazgo: se deja un WARNING con la ruta que faltó.
+    """
+
+    def path(u: Unit, name: str) -> str:
+        return partition_path(
+            ctx.landing_root, u.provider, u.market, u.asset, u.year, u.month, name
+        )
+
+    next_path = path(unit, day_filename(unit.day))
+    if unit.day > 1:
+        expected = path(unit, day_filename(unit.day - 1))
+        fs, resolved = resolve_fs(expected)
+        found = fs.get_file_info(resolved).type == pafs.FileType.File
+        prev_path = expected if found else None
+    else:
+        before = date(unit.year, unit.month, 1) - timedelta(days=1)
+        prev_unit = Unit(
+            before.year,
+            before.month,
+            provider=unit.provider,
+            market=unit.market,
+            asset=unit.asset,
+        )
+        expected = path(prev_unit, CONSOLIDATED)
+        prev_path = find_partition(str(ctx.landing_root), prev_unit, last=True)
+    if prev_path is None:
+        logger.warning("costura omitida unidad=%s: no existe %s", unit, expected)
+        return None
+    result = check_seam(prev_path, next_path, {})
+    logger.info("costura %s -> %s: %s", prev_path, next_path, result.status.value)
+    finding = _finding(result, unit, ctx)
+    emit_findings([finding], ctx.dq_root)
+    return finding

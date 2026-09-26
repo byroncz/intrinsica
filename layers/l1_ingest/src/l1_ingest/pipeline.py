@@ -128,6 +128,9 @@ def process_unit(unit: Unit, ctx: RunContext) -> Result:
     sin descargar ni escribir. Si difiere, se emite `checksum_drift` y se
     reprocesa completa. Sin partición se procesa siempre.
 
+    En `daily`, si el mes ya tiene consolidated.parquet no se descarga ni se
+    escribe, tampoco con `force`.
+
     Si aborta por checksum o por unidad temporal, emite antes el hallazgo
     error/fail y relanza. Un fallo de red no es un chequeo: se relanza sin más.
     """
@@ -143,6 +146,20 @@ def process_unit(unit: Unit, ctx: RunContext) -> Result:
         unit.month,
         filename,
     )
+    if unit.day is not None and ctx.mode == "daily":
+        closed = partition_path(
+            ctx.landing_root,
+            unit.provider,
+            unit.market,
+            unit.asset,
+            unit.year,
+            unit.month,
+            CONSOLIDATED,
+        )
+        if _exists(closed):
+            # Partición cerrada inmutable: ni con `force` (para eso, backfill).
+            logger.warning("mes cerrado unidad=%s: existe %s", unit, closed)
+            return Result(path, "", [], skipped=True)
     previous = None
     if _exists(path):
         published = fetch_checksum(url)

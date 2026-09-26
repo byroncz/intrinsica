@@ -1,12 +1,16 @@
 import logging
 import re
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 
+import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 from dq.reader import current_findings
 from l1_ingest.cli import UsageError, main, resolve_unit
 from l1_ingest.download import ChecksumError
 from l1_ingest.schema import OUTPUT_SCHEMA
+from l1_ingest.write import partition_path, write_partition
 
 
 def _env(tmp_path, base, **extra):
@@ -153,7 +157,9 @@ def test_main_probe_line_after_final_line(tmp_path, publish_zip, caplog):
 
     assert len(_probe_lines(caplog)) == 1
     assert caplog.messages[-1].startswith("sonda:")
-    assert caplog.messages[-2].startswith("fin unidad=")
+    # La costura diaria (aquí sin día previo) corre entre "fin unidad" y la sonda.
+    assert caplog.messages[-2].startswith("costura omitida")
+    assert caplog.messages[-3].startswith("fin unidad=")
     unit, mode, rss, wall = PROBE.fullmatch(caplog.messages[-1]).groups()
     assert (unit, mode) == ("binance/spot/BTCUSDT/2024-03-06", "daily")
     assert int(rss) > 0
@@ -169,3 +175,110 @@ def test_main_probe_line_on_checksum_abort(tmp_path, publish_zip, caplog):
 
     assert len(_probe_lines(caplog)) == 1
     assert caplog.messages[-1].startswith("sonda:")
+
+
+def _seed(tmp_path, year, month, name, first, last):
+    """Escribe una partición previa con ids first..last."""
+    n = last - first + 1
+    table = pa.table(
+        {
+            "agg_trade_id": list(range(first, last + 1)),
+            "price": [Decimal(1)] * n,
+            "quantity": [Decimal(1)] * n,
+            "first_trade_id": list(range(first, last + 1)),
+            "last_trade_id": list(range(first, last + 1)),
+            "transact_time": list(range(n)),
+            "is_buyer_maker": [True] * n,
+            "is_best_match": [True] * n,
+        },
+        schema=OUTPUT_SCHEMA,
+    )
+    path = partition_path(
+        tmp_path / "landing", "binance", "spot", "BTCUSDT", year, month, name
+    )
+    write_partition(table, path)
+
+
+def _daily(tmp_path, base, day):
+    date = f"2024-03-{day:02d}"
+    return main(["--mode", "daily", "--from", date], _env(tmp_path, base))
+
+
+def _seams(tmp_path):
+    rows = current_findings(tmp_path / "dq").to_pylist()
+    return [r for r in rows if r["check_type"] == "seam_discontinuity"]
+
+
+def test_daily_seam_pass(tmp_path, publish_zip):
+    publish, base = publish_zip
+    publish(day=6)
+    _seed(tmp_path, 2024, 3, "provisional-day=05.parquet", -4, 0)
+    assert _daily(tmp_path, base, 6) == 0
+    (seam,) = _seams(tmp_path)
+    assert (seam["mode"], seam["stage"], seam["status"]) == (
+        "daily",
+        "provisional",
+        "pass",
+    )
+
+
+def test_daily_seam_fail_on_id_gap(tmp_path, publish_zip):
+    publish, base = publish_zip
+    publish(day=6)
+    _seed(tmp_path, 2024, 3, "provisional-day=05.parquet", -10, -5)
+    assert _daily(tmp_path, base, 6) == 0
+    (seam,) = _seams(tmp_path)
+    assert seam["status"] == "fail"
+    assert seam["metric_value"] == 5
+
+
+def test_daily_seam_first_day_uses_last_provisional_of_previous_month(
+    tmp_path, publish_zip
+):
+    publish, base = publish_zip
+    publish(day=1)
+    _seed(tmp_path, 2024, 2, "provisional-day=28.parquet", -9, -1)
+    _seed(tmp_path, 2024, 2, "provisional-day=29.parquet", -4, 0)
+    assert _daily(tmp_path, base, 1) == 0
+    (seam,) = _seams(tmp_path)
+    assert seam["status"] == "pass"
+
+
+def test_daily_missing_previous_day_warns_without_finding(
+    tmp_path, publish_zip, caplog
+):
+    publish, base = publish_zip
+    publish(day=6)
+    with caplog.at_level(logging.WARNING):
+        assert _daily(tmp_path, base, 6) == 0
+    assert _seams(tmp_path) == []
+    assert any("provisional-day=05.parquet" in m for m in caplog.messages)
+
+
+def test_daily_closed_month_neither_downloads_nor_writes(tmp_path, publish_zip, caplog):
+    publish, base = publish_zip
+    publish(day=6)
+    _seed(tmp_path, 2024, 3, "consolidated.parquet", 1, 5)
+    argv = ["--mode", "daily", "--from", "2024-03-06", "--force"]
+    with caplog.at_level(logging.WARNING):
+        assert main(argv, _env(tmp_path, base)) == 0
+    assert any("mes cerrado" in m for m in caplog.messages)
+    assert not list((tmp_path / "landing").rglob("provisional-day=06.parquet"))
+    assert not (tmp_path / "manifest").exists()
+    assert not (tmp_path / "dq").exists()
+
+
+def test_daily_defaults_to_previous_utc_day(tmp_path, publish_zip):
+    publish, base = publish_zip
+    yesterday = datetime.now(UTC).date() - timedelta(days=1)
+    publish(yesterday.year, yesterday.month, yesterday.day)
+    assert main(["--mode", "daily"], _env(tmp_path, base)) == 0
+    name = f"provisional-day={yesterday.day:02d}.parquet"
+    assert next((tmp_path / "landing").rglob(name))
+
+
+def test_to_without_from_is_usage_error(tmp_path, capsys):
+    env = _env(tmp_path, "http://127.0.0.1:1")
+    assert main(["--mode", "daily", "--to", "2024-03-07"], env) == 2
+    assert main(["--mode", "backfill"], env) == 2
+    assert "--from" in capsys.readouterr().err
