@@ -199,3 +199,15 @@ data "terraform_remote_state" "data" {
   `ci_service_account_email`), por ejemplo `data.terraform_remote_state.data.outputs.buckets["landing"]`.
 - Un stack de capa nunca crea buckets: son datos y `data` es su único dueño.
 - Los módulos hijo no declaran `provider` (TRD maestro §8.2).
+
+## Desplegar un cambio de capa
+
+Todo cambio de código de una capa (incluidos `shared/`, `uv.lock` y el
+`pyproject.toml` raíz, que entran en cada imagen) sube su `layers/<capa>/VERSION`
+(estrictamente mayor que la de `main`) y CI
+publica la imagen con ese tag al mergear. El job de Cloud Run no la toma solo:
+el humano espera a que el run de CI en `main` termine de publicar
+`<capa>:<versión>` y, recién entonces, lanza desde Actions
+*Terraform → `<capa>` → apply* para que el job pase al tag nuevo. Un apply
+anterior falla porque el tag aún no existe. El plan debe mostrar
+`image: ...:<versión anterior> -> ...:<versión nueva>`.
