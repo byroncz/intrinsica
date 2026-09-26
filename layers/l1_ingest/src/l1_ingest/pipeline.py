@@ -188,6 +188,25 @@ def process_unit(unit: Unit, ctx: RunContext) -> Result:
             {"sha256": download.sha256, "source_url": download.source_url},
         )
     ]
+    try:
+        with open_zip_batches(download.data) as (header, batches):
+            checks.append(header)
+            try:
+                rest, digest = stream_partition(batches, path)
+            except NotStreamable:
+                rest = None
+            # El generador suspendido retendría el lector de Arrow y sus bloques.
+            del batches
+        if rest is None:
+            # Fuera del `except`: su traceback retendría el generador y el lote.
+            logger.warning("unidad=%s sin orden creciente: ruta materializada", unit)
+            rest, digest = _materialized(download.data, path)
+    except TimestampUnitError as exc:
+        _emit([*checks, exc.check], unit, ctx)
+        raise
+    # El manifiesto se registra tras la escritura atómica: si la unidad se corta
+    # antes, la siguiente corrida ve drift y reprocesa en vez de saltar una
+    # partición desactualizada.
     write_manifest(
         [
             ManifestEntry(
@@ -207,23 +226,6 @@ def process_unit(unit: Unit, ctx: RunContext) -> Result:
         ctx.manifest_root,
         ctx.run_id,
     )
-
-    try:
-        with open_zip_batches(download.data) as (header, batches):
-            checks.append(header)
-            try:
-                rest, digest = stream_partition(batches, path)
-            except NotStreamable:
-                rest = None
-            # El generador suspendido retendría el lector de Arrow y sus bloques.
-            del batches
-        if rest is None:
-            # Fuera del `except`: su traceback retendría el generador y el lote.
-            logger.warning("unidad=%s sin orden creciente: ruta materializada", unit)
-            rest, digest = _materialized(download.data, path)
-    except TimestampUnitError as exc:
-        _emit([*checks, exc.check], unit, ctx)
-        raise
     checks += rest
     findings = _emit(checks, unit, ctx)
     logger.info("fin unidad=%s ruta=%s content_hash=%s", unit, path, digest)

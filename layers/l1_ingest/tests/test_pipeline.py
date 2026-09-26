@@ -236,3 +236,36 @@ def test_existing_partition_without_manifest_row_reprocesses_without_drift(
 
     assert not result.skipped
     assert not [f for f in result.findings if f.check_type == "checksum_drift"]
+
+
+def test_drift_with_failed_write_does_not_skip_next_run(
+    tmp_path, publish_zip, monkeypatch
+):
+    publish, base = publish_zip
+    publish()
+    unit = Unit(2024, 3)
+    process_unit(unit, _ctx(tmp_path, base))
+    url = f"{base}/data/spot/monthly/aggTrades/BTCUSDT/BTCUSDT-aggTrades-2024-03.zip"
+    old = last_sha256(tmp_path / "manifest", "binance", "spot", "BTCUSDT", 2024, 3, url)
+    zip_path = tmp_path / "data/spot/monthly/aggTrades/BTCUSDT" / url.rsplit("/", 1)[1]
+    data = zip_path.read_bytes() + b"\0"
+    zip_path.write_bytes(data)
+    new = hashlib.sha256(data).hexdigest()
+    zip_path.with_name(zip_path.name + ".CHECKSUM").write_text(f"{new}  x.zip\n")
+
+    def boom(*args, **kwargs):
+        raise MemoryError
+
+    with monkeypatch.context() as m:
+        m.setattr(pipeline, "stream_partition", boom)
+        with pytest.raises(MemoryError):
+            process_unit(unit, _ctx(tmp_path, base))
+    assert (
+        last_sha256(tmp_path / "manifest", "binance", "spot", "BTCUSDT", 2024, 3, url)
+        == old
+    )
+
+    result = process_unit(unit, _ctx(tmp_path, base))
+
+    assert not result.skipped
+    assert [f for f in result.findings if f.check_type == "checksum_drift"]
