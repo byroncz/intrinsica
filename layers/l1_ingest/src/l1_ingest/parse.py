@@ -1,24 +1,22 @@
-"""Paso 4 y 5 del núcleo: ZIP en RAM a tabla Arrow con RAW_SCHEMA."""
+"""Paso 4 y 5 del núcleo: ZIP en RAM a lotes Arrow con RAW_SCHEMA."""
 
 import io
 import zipfile
 from collections.abc import Iterator
+from contextlib import contextmanager
+from typing import IO
 
-import duckdb
 import pyarrow as pa
+import pyarrow.csv as pacsv
 from dq import Severity, Status
 
 from l1_ingest.checks import CheckResult
 from l1_ingest.schema import RAW_SCHEMA
 
 FIRST_LINE_MAX = 80
-BATCH_ROWS = 1_000_000
-
-_DUCKDB_TYPES = {
-    pa.int64(): "BIGINT",
-    pa.string(): "VARCHAR",
-    pa.bool_(): "BOOLEAN",
-}
+# Unos 70 bytes por fila de aggTrades: 64 MiB dan lotes de cerca de 1M de filas,
+# el tamaño del row group de §7.2.
+BLOCK_SIZE = 64 * 1024 * 1024
 
 
 def _has_header(first_line: str) -> bool:
@@ -30,53 +28,73 @@ def _has_header(first_line: str) -> bool:
     return False
 
 
-def extract_csv(data: bytes) -> bytes:
-    """Extrae el único .csv de un ZIP en RAM; el llamador suelta el ZIP después."""
-    with zipfile.ZipFile(io.BytesIO(data)) as zf:
-        members = zf.namelist()
-        if len(members) != 1 or not members[0].lower().endswith(".csv"):
-            raise ValueError(f"el ZIP debe traer exactamente un .csv, trae {members}")
-        return zf.read(members[0])
+def _only_csv(zf: zipfile.ZipFile) -> str:
+    members = zf.namelist()
+    if len(members) != 1 or not members[0].lower().endswith(".csv"):
+        raise ValueError(f"el ZIP debe traer exactamente un .csv, trae {members}")
+    return members[0]
 
 
-def detect_header(csv_bytes: bytes) -> tuple[bool, CheckResult]:
-    """Mira solo la primera línea; el resto lo decodifica DuckDB."""
-    first_line = csv_bytes.split(b"\n", 1)[0].decode("utf-8", "replace").strip()
-    if not first_line:
+def detect_header(first_line: bytes) -> tuple[bool, CheckResult]:
+    """Mira solo la primera línea; el resto lo decodifica pyarrow."""
+    line = first_line.split(b"\n", 1)[0].decode("utf-8", "replace").strip()
+    if not line:
         raise ValueError("el CSV está vacío")
-    header = _has_header(first_line)
+    header = _has_header(line)
     check = CheckResult(
         check_type="header_detected",
         severity=Severity.INFO,
         status=Status.PASS,
         metric_value=1.0 if header else 0.0,
-        details={"first_line": first_line[:FIRST_LINE_MAX]},
+        details={"first_line": line[:FIRST_LINE_MAX]},
     )
     return header, check
 
 
 def iter_batches(
-    csv_bytes: bytes, header: bool, batch_rows: int = BATCH_ROWS
+    source: IO[bytes], header: bool, block_size: int = BLOCK_SIZE
 ) -> Iterator[pa.RecordBatch]:
-    """Decodifica el CSV en lotes de a lo más `batch_rows` filas con RAW_SCHEMA.
+    """Decodifica el CSV en lotes de unos `block_size` bytes con RAW_SCHEMA.
 
-    Nunca materializa la tabla completa: en RAM viven el CSV y un lote.
+    Lee `source` de forma incremental: en RAM vive un bloque, no el CSV.
     """
-    # Con un objeto en memoria DuckDB necesita fsspec.
-    relation = duckdb.read_csv(
-        io.BytesIO(csv_bytes),
-        header=False,
-        skiprows=1 if header else 0,
-        names=RAW_SCHEMA.names,
-        dtype={f.name: _DUCKDB_TYPES[f.type] for f in RAW_SCHEMA},
+    reader = pacsv.open_csv(
+        source,
+        read_options=pacsv.ReadOptions(
+            block_size=block_size,
+            skip_rows=1 if header else 0,
+            column_names=RAW_SCHEMA.names,
+        ),
+        convert_options=pacsv.ConvertOptions(
+            column_types=RAW_SCHEMA,
+            # Un campo vacío es un error, no un nulo: OUTPUT_SCHEMA no admite nulos.
+            null_values=[],
+            strings_can_be_null=False,
+        ),
     )
-    for batch in relation.to_arrow_reader(batch_rows):
+    for batch in reader:
         yield batch.cast(RAW_SCHEMA)
+
+
+@contextmanager
+def open_zip_batches(
+    data: bytes, block_size: int = BLOCK_SIZE
+) -> Iterator[tuple[CheckResult, Iterator[pa.RecordBatch]]]:
+    """Abre el único .csv de un ZIP en RAM y lo entrega en lotes, sin descomprimirlo entero.
+
+    Devuelve el hallazgo del header y los lotes; en RAM solo viven el ZIP
+    comprimido y un bloque. Los lotes se consumen dentro del bloque `with`.
+    """
+    with zipfile.ZipFile(io.BytesIO(data)) as zf:
+        member = _only_csv(zf)
+        with zf.open(member) as head:
+            header, check = detect_header(head.readline())
+        with zf.open(member) as source:
+            yield check, iter_batches(source, header, block_size)
 
 
 def read_zip(data: bytes) -> tuple[pa.Table, CheckResult]:
     """Decodifica un ZIP de aggTrades a una tabla completa (ruta materializada)."""
-    csv_bytes = extract_csv(data)
-    header, check = detect_header(csv_bytes)
-    table = pa.Table.from_batches(iter_batches(csv_bytes, header), schema=RAW_SCHEMA)
+    with open_zip_batches(data) as (check, batches):
+        table = pa.Table.from_batches(batches, schema=RAW_SCHEMA)
     return table, check

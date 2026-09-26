@@ -1,10 +1,9 @@
 """Núcleo de una unidad de L1: un día o un mes de punta a punta (§8.1 del TRD-L1)."""
 
 import logging
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 
-import pyarrow as pa
 from dq import Finding, Severity, Stage, Status, emit_findings
 
 from l1_ingest.checks import CheckResult
@@ -12,8 +11,7 @@ from l1_ingest.conform import TimestampUnitError, conform
 from l1_ingest.download import BASE_URL, ChecksumError, fetch, source_url
 from l1_ingest.integrity import check_agg_trade_id, ensure_order
 from l1_ingest.manifest import ManifestEntry, write_manifest
-from l1_ingest.parse import detect_header, extract_csv, iter_batches
-from l1_ingest.schema import RAW_SCHEMA
+from l1_ingest.parse import open_zip_batches, read_zip
 from l1_ingest.stream import NotStreamable, stream_partition
 from l1_ingest.write import (
     CONSOLIDATED,
@@ -95,11 +93,9 @@ def _emit(checks: list[CheckResult], unit: Unit, ctx: RunContext) -> list[Findin
     return findings
 
 
-def _materialized(
-    csv_bytes: bytes, header: bool, path: str
-) -> tuple[list[CheckResult], str]:
+def _materialized(data: bytes, path: str) -> tuple[list[CheckResult], str]:
     """Ruta O(mes) para datos desordenados: hay que ordenar la unidad completa."""
-    table = pa.Table.from_batches(iter_batches(csv_bytes, header), schema=RAW_SCHEMA)
+    table, _ = read_zip(data)
     table, time_check = conform(table)
     table, reorder = ensure_order(table)
     write_partition(table, path)
@@ -109,8 +105,9 @@ def _materialized(
 def process_unit(unit: Unit, ctx: RunContext) -> Result:
     """Procesa la unidad; todo lo crudo vive en RAM y solo se persiste el resultado.
 
-    Cada dato se suelta en cuanto se aprovecha: el ZIP al extraer el CSV, el CSV
-    al decodificarlo y cada lote al escribirse, así que el pico es O(lote).
+    El CSV nunca existe entero: se descomprime y decodifica por bloques desde el
+    ZIP y cada lote se suelta al escribirse, así que en RAM conviven solo el ZIP
+    comprimido y un lote. La ruta materializada (datos desordenados) es O(mes).
 
     Si aborta por checksum o por unidad temporal, emite antes el hallazgo
     error/fail y relanza. Un fallo de red no es un chequeo: se relanza sin más.
@@ -155,12 +152,6 @@ def process_unit(unit: Unit, ctx: RunContext) -> Result:
         ctx.run_id,
     )
 
-    csv_bytes = extract_csv(download.data)
-    # El ZIP ya cumplió: solo el CSV sigue en RAM.
-    download = replace(download, data=b"")
-    header_found, header = detect_header(csv_bytes)
-    checks.append(header)
-
     filename = CONSOLIDATED if unit.day is None else day_filename(unit.day)
     path = partition_path(
         ctx.landing_root,
@@ -172,15 +163,19 @@ def process_unit(unit: Unit, ctx: RunContext) -> Result:
         filename,
     )
     try:
-        try:
-            rest, digest = stream_partition(iter_batches(csv_bytes, header_found), path)
-        except NotStreamable:
+        with open_zip_batches(download.data) as (header, batches):
+            checks.append(header)
+            try:
+                rest, digest = stream_partition(batches, path)
+            except NotStreamable:
+                rest = None
+        if rest is None:
+            # Fuera del `except`: su traceback retendría el generador y el lote.
             logger.warning("unidad=%s sin orden creciente: ruta materializada", unit)
-            rest, digest = _materialized(csv_bytes, header_found, path)
+            rest, digest = _materialized(download.data, path)
     except TimestampUnitError as exc:
         _emit([*checks, exc.check], unit, ctx)
         raise
-    del csv_bytes
     checks += rest
     findings = _emit(checks, unit, ctx)
     logger.info("fin unidad=%s ruta=%s content_hash=%s", unit, path, digest)
