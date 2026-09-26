@@ -1,10 +1,10 @@
 variable "layer" {
-  description = "Nombre corto de la capa (por ejemplo l1). Nombra la service account <layer>-job y el job."
+  description = "Nombre corto de la capa (por ejemplo l1). Prefija los jobs y las service accounts como <layer>-<modo>."
   type        = string
 
   validation {
-    condition     = can(regex("^[a-z][a-z0-9-]{1,25}$", var.layer))
-    error_message = "layer debe tener 2 a 26 caracteres, empezar con letra minúscula y usar solo [a-z0-9-]."
+    condition     = can(regex("^[a-z][a-z0-9]{1,25}$", var.layer))
+    error_message = "layer debe tener 2 a 26 caracteres, empezar con letra minúscula y usar solo [a-z0-9] (sin guiones: run-job.yml deriva el modo del sufijo tras el primer guion)."
   }
 }
 
@@ -41,12 +41,26 @@ variable "env" {
   default     = {}
 }
 
-variable "bucket_prefixes" {
-  description = "Acceso de la capa a los datos: mapa nombre de bucket → lista de prefijos de objeto donde puede leer y escribir."
-  type        = map(list(string))
+variable "modes" {
+  description = "Modos de la capa: mapa modo → acceso. Cada modo crea el job <layer>-<modo> y la service account <layer>-<modo>. access es un mapa nombre de bucket → {role, prefixes}: el rol de storage y los prefijos de objeto donde lo tiene."
+  type = map(object({
+    access = map(object({
+      role     = string
+      prefixes = list(string)
+    }))
+  }))
 
   validation {
-    condition     = alltrue([for prefixes in values(var.bucket_prefixes) : alltrue([for p in prefixes : length(p) > 1 && endswith(p, "/")])])
+    condition     = length(var.modes) > 0 && alltrue([for m in keys(var.modes) : can(regex("^[a-z][a-z0-9-]{1,25}$", m))])
+    error_message = "modes no puede estar vacío y cada modo debe usar [a-z0-9-] y empezar con letra minúscula."
+  }
+
+  validation {
+    condition = alltrue([
+      for cfg in values(var.modes) : alltrue([
+        for grant in values(cfg.access) : alltrue([for p in grant.prefixes : length(p) > 1 && endswith(p, "/")])
+      ])
+    ])
     error_message = "Cada prefijo debe ser no vacío y terminar en \"/\" (por ejemplo \"l1/\")."
   }
 }
