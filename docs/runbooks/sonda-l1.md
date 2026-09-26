@@ -150,18 +150,38 @@ gcloud storage rm \
 
 ## Resultados
 
-Los llena la card hija 8.
+Los llenó la card ITSC-213.
 
 **Sonda (mes 2023-03)**
 
 | Fecha de la corrida | URL del run | Config | RSS pico (MiB) | Pared (s) | Estado | GiB-s ×96 | vCPU-s ×96 | Config final |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-|  |  |  |  |  |  |  |  |  |
+| 2026-09-26 | [36248786009](https://github.com/byroncz/intrinsica/actions/runs/36248786009) | 4 vCPU, 16 GiB, imagen 0.1.1 | 5622 (46 % de 16 GiB) | 577,0 | Exitosa, sin OOM | 886.272 | 221.568 | 4 vCPU y 16 GiB |
+
+- Ejecución Cloud Run `l1-job-dvwz4`, 1 tarea. Salida:
+  `gs://intrinsica-dc-landing/l1/provider=binance/market=spot/asset=BTCUSDT/year=2023/month=03/consolidated.parquet`,
+  `content_hash=35a8f396db7f0f57ff6cad58adde412a61bb82b30cc5240ceecba60569a69996`.
+- Por corrida: 16 × 577 = 9.232 GiB-s y 4 × 577 = 2.308 vCPU-s.
+- **Extrapolación contra el cupo gratis mensual** (360.000 GiB-s y 180.000
+  vCPU-s): ×96 meses son 886.272 GiB-s (2,46 veces el cupo) y 221.568 vCPU-s
+  (1,23 veces). ×109 meses son 1.006.288 GiB-s y 251.572 vCPU-s. El backfill
+  completo **no cabe** en un solo mes de cupo: el excedente se factura o el
+  backfill se reparte en varios meses calendario. Es un peor caso: 2023-03 es
+  el mes más pesado y los demás tardan menos.
+- Regla del runbook: RSS pico 5622 MiB ≤ 12.288 MiB y sin OOM, así que se fija
+  **4 vCPU y 16 GiB** (explícitos en `infra/stacks/batch/l1/main.tf`).
+- Intento previo con la imagen 0.1.0: OOM a 16 GiB (run 36220593271). Lo
+  resolvió ITSC-215 (memoria acotada); la 0.1.1 es la medida.
+- **Margen de timeout:** 577 s de pared contra los 600 s por tarea de Cloud
+  Run Jobs dejan 23 s. Es riesgo de timeout, no de memoria: hace falta una
+  card para fijar `timeout` en el módulo `layer` (ver "Regla de decisión").
 
 **Header**
 
+Sin corrida todavía; no bloquea la sonda.
+
 | Época | Día | Header (sí/no) |
 | --- | --- | --- |
-| 2017 | 2017-08-17 |  |
-| 2020 | 2020-01-01 |  |
-| 2025 | 2025-01-01 |  |
+| 2017 | 2017-08-17 | pendiente |
+| 2020 | 2020-01-01 | pendiente |
+| 2025 | 2025-01-01 | pendiente |
