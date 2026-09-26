@@ -28,7 +28,8 @@ module "layer" {
   image      = "${local.data.artifact_registry}/l1_ingest:${trimspace(file("${path.module}/../../../../layers/l1_ingest/VERSION"))}"
 
   # Sonda §14.1 (docs/runbooks/sonda-l1.md): mes 2023-03, run del 2026-09-26
-  # (imagen 0.1.1), RSS pico 5622 MiB (46 % de 16 GiB), pared 577 s, sin OOM.
+  # (imagen 0.1.1), RSS pico 5622 MiB (34 % de 16 GiB; 46 % del umbral de
+  # 12.288 MiB), pared 577 s, sin OOM.
   # Cumple la regla (<= 75 % y sin OOM): 4 vCPU y 16 GiB.
   cpu    = "4"
   memory = "16Gi"

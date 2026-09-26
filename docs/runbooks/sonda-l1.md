@@ -4,7 +4,8 @@ Lo ejecuta el humano; ningún agente dispara `terraform.yml` ni `run-job.yml`.
 Mide cuánta memoria y tiempo necesita el mes más pesado de BTCUSDT y con eso
 fija la configuración de Cloud Run del job `l1-job`. Referencia:
 [TRD-L1 §14.1 y §14.2](../TRD/l1.md). La medición y la configuración final
-las registra la card hija 8; aquí solo se explica cómo obtenerlas.
+las registró la card ITSC-213 (ver "Resultados"); aquí solo se explica
+cómo obtenerlas.
 
 ## Antes de empezar
 
@@ -156,7 +157,7 @@ Los llenó la card ITSC-213.
 
 | Fecha de la corrida | URL del run | Config | RSS pico (MiB) | Pared (s) | Estado | GiB-s ×96 | vCPU-s ×96 | Config final |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 2026-09-26 | [36248786009](https://github.com/byroncz/intrinsica/actions/runs/36248786009) | 4 vCPU, 16 GiB, imagen 0.1.1 | 5622 (46 % de 16 GiB) | 577,0 | Exitosa, sin OOM | 886.272 | 221.568 | 4 vCPU y 16 GiB |
+| 2026-09-26 | [36248786009](https://github.com/byroncz/intrinsica/actions/runs/36248786009) | 4 vCPU, 16 GiB, imagen 0.1.1 | 5622 (34 % de 16 GiB; 46 % del umbral de 12.288 MiB) | 577,0 | Exitosa, sin OOM | 886.272 | 221.568 | 4 vCPU y 16 GiB |
 
 - Ejecución Cloud Run `l1-job-dvwz4`, 1 tarea. Salida:
   `gs://intrinsica-dc-landing/l1/provider=binance/market=spot/asset=BTCUSDT/year=2023/month=03/consolidated.parquet`,
