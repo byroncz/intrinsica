@@ -29,7 +29,7 @@ resource "google_project_iam_member" "deploy_run_developer" {
   member  = local.deploy_member
 }
 
-# Crear, actualizar y borrar las service accounts de capa (<capa>-job). Rol
+# Crear, actualizar y borrar las service accounts de capa (<capa>-<modo>). Rol
 # personalizado en vez de roles/iam.serviceAccountAdmin: ese incluye
 # setIamPolicy, disable y enable, con los que deploy-github podría darse
 # permisos sobre sí misma o sobre ci-github, o deshabilitarla.
