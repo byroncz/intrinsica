@@ -96,7 +96,7 @@ desvía del código.
 | `finding_id` | string (UUID) | no | Identidad del hallazgo; se repite en todos los eventos del mismo hallazgo |
 | `detected_at` | int64 | no | Marca del evento, en microsegundos desde la época (UTC) |
 | `layer` | string | no | Capa que emite el hallazgo, p. ej. `l1` |
-| `mode` | string | no | Modo de ejecución: `backfill`, `daily` o `monthly-close` |
+| `mode` | string | no | Modo de ejecución: `backfill`, `daily`, `monthly-close` o `seam-check` |
 | `check_type` | string | no | Chequeo que lo generó (ver TRD-L1 §9) |
 | `severity` | string | no | `info`, `warning` o `error` |
 | `stage` | string | no | `provisional` o `canonical` |

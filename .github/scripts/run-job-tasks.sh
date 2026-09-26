@@ -58,10 +58,8 @@ case "$mode" in
     done
     ;;
   seam-check)
-    # Formato de from/to pendiente de ITSC-203: se acepta mes o día, sin comas.
-    for v in "$from" "$to"; do
-      [[ $v =~ ^[0-9]{4}-[0-9]{2}(-[0-9]{2})?$ ]] || fail "'$v' inválido: se espera YYYY-MM o YYYY-MM-DD"
-    done
+    valid_month "$from" || fail "from inválido '$from': se espera YYYY-MM"
+    valid_month "$to" || fail "to inválido '$to': se espera YYYY-MM"
     [[ "$to" < "$from" ]] && fail "to '$to' es menor que from '$from'"
     echo 1
     ;;
