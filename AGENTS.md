@@ -95,6 +95,11 @@ PRs y entradas de Documentación. Sin excepción.
 - `legacy/v0-local` es solo lectura y referencia. No se importa ni se porta
   código desde ahí a menos que una card lo pida explícitamente.
 - No se versionan binarios ni wheels en el repo.
+- Todo cambio de código de una capa sube su `layers/<capa>/VERSION` (semver:
+  parche para fixes, menor para features). El tag de la imagen y el stack de
+  la capa se derivan de ella; sin tag nuevo, Cloud Run sigue con el digest
+  viejo. CI lo exige en cada PR (`.github/scripts/check-layer-versions.sh`);
+  `README.md`, `tests/` y el propio `VERSION` no cuentan como código.
 - Eficiencia de memoria ante todo: todo dato alojado en RAM se libera en cuanto
   fue aprovechado; nunca conviven dos representaciones del mismo dato; el pico
   de memoria de una unidad es O(lote), no O(unidad). Aplica a todas las capas.

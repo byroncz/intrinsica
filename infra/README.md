@@ -168,6 +168,14 @@ Lo hace el humano, en este orden. Ningún agente ejecuta el apply.
    (output `deploy_service_account_email`), `GCP_PROJECT_ID` (output
    `project_id`) y `GCP_REGION` (output `region`), como en la sección 4.
 
+### Desplegar un cambio de capa
+
+Todo cambio de código de una capa sube su `layers/<capa>/VERSION` y CI
+publica la imagen con ese tag al mergear. El job de Cloud Run no la toma solo:
+tras el merge, el humano lanza desde Actions *Terraform → `<capa>` → apply*
+para que el job pase al tag nuevo. El plan debe mostrar
+`image: ...:<versión anterior> -> ...:<versión nueva>`.
+
 ### 5. Agregar un stack de capa
 
 Cada stack de capa es una carpeta `infra/stacks/batch/<capa>/` con su propio
