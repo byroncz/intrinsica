@@ -41,9 +41,32 @@ variable "env" {
   default     = {}
 }
 
+variable "timeout" {
+  description = "Timeout por defecto de cada tarea del job, en segundos. Un modo puede sobrescribirlo con su propio timeout."
+  type        = number
+  default     = 3600
+
+  validation {
+    condition     = var.timeout >= 1 && var.timeout <= 86400
+    error_message = "timeout debe estar entre 1 y 86400 segundos."
+  }
+}
+
+variable "max_retries" {
+  description = "Reintentos de una tarea fallida. Con 1, el reintento cubre fallos transitorios de infraestructura; un fallo determinista (OOM, timeout, checksum) lo resuelve el humano relanzando."
+  type        = number
+  default     = 1
+
+  validation {
+    condition     = var.max_retries >= 0 && var.max_retries <= 10
+    error_message = "max_retries debe estar entre 0 y 10."
+  }
+}
+
 variable "modes" {
-  description = "Modos de la capa: mapa modo → acceso. Cada modo crea el job <layer>-<modo> y la service account <layer>-<modo>. access es un mapa nombre de bucket → {role, prefixes}: el rol de storage y los prefijos de objeto donde lo tiene."
+  description = "Modos de la capa: mapa modo → acceso. Cada modo crea el job <layer>-<modo> y la service account <layer>-<modo>. access es un mapa nombre de bucket → {role, prefixes}: el rol de storage y los prefijos de objeto donde lo tiene. timeout (opcional, segundos) sobrescribe var.timeout para ese modo."
   type = map(object({
+    timeout = optional(number)
     access = map(object({
       role     = string
       prefixes = list(string)
@@ -53,6 +76,11 @@ variable "modes" {
   validation {
     condition     = length(var.modes) > 0 && alltrue([for m in keys(var.modes) : can(regex("^[a-z][a-z0-9-]{1,25}$", m))])
     error_message = "modes no puede estar vacío y cada modo debe usar [a-z0-9-] y empezar con letra minúscula."
+  }
+
+  validation {
+    condition     = alltrue([for m in values(var.modes) : m.timeout == null || (m.timeout >= 1 && m.timeout <= 86400)])
+    error_message = "El timeout de cada modo debe estar entre 1 y 86400 segundos."
   }
 
   validation {
