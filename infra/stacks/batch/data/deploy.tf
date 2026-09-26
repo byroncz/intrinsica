@@ -62,6 +62,18 @@ resource "google_project_iam_member" "deploy_sa_user" {
   member  = local.deploy_member
 }
 
+# Leer las imágenes del repositorio. Cloud Run valida el acceso a la imagen de
+# un job con la identidad que despliega, no con la del job: sin este rol el
+# apply falla con 403 (artifactregistry.repositories.downloadArtifacts). Solo
+# lectura y solo sobre este repositorio, nunca a nivel de project.
+resource "google_artifact_registry_repository_iam_member" "deploy_images_reader" {
+  project    = google_artifact_registry_repository.images.project
+  location   = google_artifact_registry_repository.images.location
+  repository = google_artifact_registry_repository.images.name
+  role       = "roles/artifactregistry.reader"
+  member     = local.deploy_member
+}
+
 # Leer los logs de la ejecución de un job.
 resource "google_project_iam_member" "deploy_logging_viewer" {
   project = google_project.this.project_id

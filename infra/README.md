@@ -154,6 +154,12 @@ Lo hace el humano, en este orden. Ningún agente ejecuta el apply.
    terraform apply
    ```
 
+   Este paso se repite cada vez que cambian los permisos de `deploy-github`
+   (por ejemplo, al darle `roles/artifactregistry.reader` sobre el
+   repositorio de imágenes, que Cloud Run exige para desplegar un job con
+   imagen real). Después, relanza desde Actions el workflow que había
+   fallado (Terraform → capa → apply).
+
 2. Crea el environment `gcp` del repositorio (*Settings → Environments →
    New environment*) con tu usuario como revisor requerido. Debe existir
    antes del paso 3: un `workflow_dispatch` que referencia un environment
