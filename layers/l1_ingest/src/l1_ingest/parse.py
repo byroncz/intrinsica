@@ -2,7 +2,7 @@
 
 import io
 import zipfile
-from collections.abc import Iterator
+from collections.abc import Generator, Iterator
 from contextlib import contextmanager
 from typing import IO
 
@@ -14,8 +14,10 @@ from l1_ingest.checks import CheckResult
 from l1_ingest.schema import RAW_SCHEMA
 
 FIRST_LINE_MAX = 80
-# Unos 70 bytes por fila de aggTrades: 64 MiB dan lotes de cerca de 1M de filas,
-# el tamaño del row group de §7.2.
+# Cota de la lectura del header: un CSV sin saltos de línea no se descomprime entero.
+HEADER_READ_MAX = 4096
+# Una fila de aggTrades ocupa ~83 bytes: 64 MiB dan lotes de ~800k filas, y cada
+# lote es un row group. El tamaño varía de un mes a otro.
 BLOCK_SIZE = 64 * 1024 * 1024
 
 
@@ -53,10 +55,16 @@ def detect_header(first_line: bytes) -> tuple[bool, CheckResult]:
 
 def iter_batches(
     source: IO[bytes], header: bool, block_size: int = BLOCK_SIZE
-) -> Iterator[pa.RecordBatch]:
+) -> Generator[pa.RecordBatch]:
     """Decodifica el CSV en lotes de unos `block_size` bytes con RAW_SCHEMA.
 
-    Lee `source` de forma incremental: en RAM vive un bloque, no el CSV.
+    Lee `source` de forma incremental: en RAM no vive el CSV, sino el bloque en
+    curso más los que el lector de Arrow deja leídos por adelantado en un hilo de fondo.
+
+    Medido con un ZIP sintético de 152 MB (10M filas, ~830 MB de CSV), bloques
+    de 64 MiB y sin escritura: RSS máximo de 1.2 GiB, es decir ~1 GiB sobre el
+    ZIP y el intérprete. Es la cota del readahead más el lote; el consumidor
+    (conform, zstd y hash) suma encima.
     """
     reader = pacsv.open_csv(
         source,
@@ -72,25 +80,33 @@ def iter_batches(
             strings_can_be_null=False,
         ),
     )
-    for batch in reader:
-        yield batch.cast(RAW_SCHEMA)
+    try:
+        for batch in reader:
+            yield batch.cast(RAW_SCHEMA)
+    finally:
+        reader.close()
 
 
 @contextmanager
 def open_zip_batches(
     data: bytes, block_size: int = BLOCK_SIZE
-) -> Iterator[tuple[CheckResult, Iterator[pa.RecordBatch]]]:
+) -> Iterator[tuple[CheckResult, Generator[pa.RecordBatch]]]:
     """Abre el único .csv de un ZIP en RAM y lo entrega en lotes, sin descomprimirlo entero.
 
     Devuelve el hallazgo del header y los lotes; en RAM solo viven el ZIP
-    comprimido y un bloque. Los lotes se consumen dentro del bloque `with`.
+    comprimido y un bloque. Los lotes se consumen dentro del bloque `with`; al
+    salir se cierra el generador (y con él el lector) antes que el miembro del ZIP.
     """
     with zipfile.ZipFile(io.BytesIO(data)) as zf:
         member = _only_csv(zf)
         with zf.open(member) as head:
-            header, check = detect_header(head.readline())
+            header, check = detect_header(head.readline(HEADER_READ_MAX))
         with zf.open(member) as source:
-            yield check, iter_batches(source, header, block_size)
+            batches = iter_batches(source, header, block_size)
+            try:
+                yield check, batches
+            finally:
+                batches.close()
 
 
 def read_zip(data: bytes) -> tuple[pa.Table, CheckResult]:

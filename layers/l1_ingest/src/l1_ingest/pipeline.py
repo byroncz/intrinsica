@@ -169,6 +169,8 @@ def process_unit(unit: Unit, ctx: RunContext) -> Result:
                 rest, digest = stream_partition(batches, path)
             except NotStreamable:
                 rest = None
+            # El generador suspendido retendría el lector de Arrow y sus bloques.
+            del batches
         if rest is None:
             # Fuera del `except`: su traceback retendría el generador y el lote.
             logger.warning("unidad=%s sin orden creciente: ruta materializada", unit)

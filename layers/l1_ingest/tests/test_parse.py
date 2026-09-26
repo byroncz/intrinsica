@@ -95,3 +95,23 @@ def test_check_result_valida_enumerados():
         CheckResult("x", "critico", "pass")
     ok = CheckResult("x", "info", "pass", 1.0)
     assert ok.details == {}
+
+
+def test_open_zip_batches_cierra_el_generador_al_salir():
+    import inspect
+
+    from l1_ingest.parse import open_zip_batches
+
+    data = make_zip(("BTCUSDT-aggTrades.csv", csv_text(True)))
+    with open_zip_batches(data) as (_, batches):
+        next(batches)
+        assert inspect.getgeneratorstate(batches) == inspect.GEN_SUSPENDED
+    assert inspect.getgeneratorstate(batches) == inspect.GEN_CLOSED
+
+
+def test_header_sin_salto_de_linea_no_se_descomprime_entero():
+    from l1_ingest.parse import HEADER_READ_MAX, open_zip_batches
+
+    data = make_zip(("BTCUSDT-aggTrades.csv", "x" * (HEADER_READ_MAX * 10)))
+    with open_zip_batches(data) as (check, _):
+        assert len(check.details["first_line"]) <= 80
