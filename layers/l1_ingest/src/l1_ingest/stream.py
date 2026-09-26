@@ -65,8 +65,11 @@ class _SequenceCheck:
         is_gap = pc.greater(step, 1)
         self.n_gaps += pc.sum(is_gap).as_py() or 0
         if len(self.gaps) < DETAILS_MAX:
-            gap_from = pc.add(pc.filter(i_prev, is_gap), 1).to_pylist()
-            gap_to = pc.subtract(pc.filter(i_next, is_gap), 1).to_pylist()
+            room = DETAILS_MAX - len(self.gaps)
+            gap_from = pc.add(pc.filter(i_prev, is_gap).slice(0, room), 1).to_pylist()
+            gap_to = pc.subtract(
+                pc.filter(i_next, is_gap).slice(0, room), 1
+            ).to_pylist()
             self.gaps += [list(g) for g in zip(gap_from, gap_to)]
 
         # Un id repetido k veces deja k-1 pasos en cero y cuenta una sola vez.
@@ -75,7 +78,10 @@ class _SequenceCheck:
         first_repeat = pc.and_(repeat, pc.invert(before))
         self.n_duplicates += pc.sum(first_repeat).as_py() or 0
         if len(self.duplicates) < DETAILS_MAX:
-            self.duplicates += pc.filter(i_next, first_repeat).to_pylist()
+            room = DETAILS_MAX - len(self.duplicates)
+            self.duplicates += (
+                pc.filter(i_next, first_repeat).slice(0, room).to_pylist()
+            )
         self._last_was_repeat = repeat[-1].as_py()
 
     def results(self) -> list[CheckResult]:
