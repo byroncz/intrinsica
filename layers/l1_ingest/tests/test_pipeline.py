@@ -1,5 +1,6 @@
 import functools
 import hashlib
+import shutil
 
 import pytest
 from l1_ingest import download, pipeline
@@ -229,8 +230,7 @@ def test_existing_partition_without_manifest_row_reprocesses_without_drift(
     publish()
     unit = Unit(2024, 3)
     process_unit(unit, _ctx(tmp_path, base))
-    for row in _files(tmp_path / "manifest"):
-        row.unlink()
+    shutil.rmtree(tmp_path / "manifest")
 
     result = process_unit(unit, _ctx(tmp_path, base))
 
