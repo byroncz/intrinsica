@@ -85,7 +85,7 @@ def _image_version(env: Mapping[str, str]) -> str:
     return f"{version}+local"
 
 
-def _context(mode: str, env: Mapping[str, str]) -> RunContext:
+def _context(mode: str, env: Mapping[str, str], force: bool) -> RunContext:
     missing = [name for name in ROOT_VARS if not env.get(name)]
     if missing:
         raise UsageError(f"falta la variable de entorno {', '.join(missing)}")
@@ -99,6 +99,7 @@ def _context(mode: str, env: Mapping[str, str]) -> RunContext:
         landing_root=env["L1_LANDING_ROOT"],
         dq_root=env["L1_DQ_ROOT"],
         manifest_root=env["L1_MANIFEST_ROOT"],
+        force=force,
         **extra,
     )
 
@@ -137,6 +138,11 @@ def main(
     parser.add_argument("--from", dest="from_", required=True, metavar="DESDE")
     parser.add_argument("--to", metavar="HASTA")
     parser.add_argument("--asset", default="BTCUSDT")
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="reprocesa aunque el .CHECKSUM coincida con el manifiesto",
+    )
     try:
         args = parser.parse_args(argv)
     except SystemExit as exc:  # argparse ya imprimió el motivo
@@ -148,7 +154,7 @@ def main(
         if args.mode in NOT_IMPLEMENTED:
             print(f"--mode {args.mode}: no implementado hasta E3", file=sys.stderr)
             return EXIT_NOT_IMPLEMENTED
-        ctx = _context(args.mode, env)
+        ctx = _context(args.mode, env, args.force)
     except UsageError as exc:
         print(f"l1_ingest: {exc}", file=sys.stderr)
         return EXIT_USAGE

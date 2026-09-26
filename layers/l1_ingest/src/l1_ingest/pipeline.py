@@ -4,13 +4,20 @@ import logging
 from dataclasses import dataclass
 from pathlib import Path
 
+import pyarrow.fs as pafs
 from dq import Finding, Severity, Stage, Status, emit_findings
 
 from l1_ingest.checks import CheckResult
 from l1_ingest.conform import TimestampUnitError, conform
-from l1_ingest.download import BASE_URL, ChecksumError, fetch, source_url
+from l1_ingest.download import (
+    BASE_URL,
+    ChecksumError,
+    fetch,
+    fetch_checksum,
+    source_url,
+)
 from l1_ingest.integrity import check_agg_trade_id, ensure_order
-from l1_ingest.manifest import ManifestEntry, write_manifest
+from l1_ingest.manifest import ManifestEntry, last_sha256, resolve_fs, write_manifest
 from l1_ingest.parse import open_zip_batches, read_zip
 from l1_ingest.stream import NotStreamable, stream_partition
 from l1_ingest.write import (
@@ -58,6 +65,7 @@ class RunContext:
     dq_root: str | Path
     manifest_root: str | Path
     source_base_url: str = BASE_URL
+    force: bool = False
 
 
 @dataclass(frozen=True)
@@ -65,6 +73,7 @@ class Result:
     path: str
     content_hash: str
     findings: list[Finding]
+    skipped: bool = False
 
 
 def _finding(check: CheckResult, unit: Unit, ctx: RunContext) -> Finding:
@@ -102,6 +111,11 @@ def _materialized(data: bytes, path: str) -> tuple[list[CheckResult], str]:
     return [time_check, reorder, *check_agg_trade_id(table)], content_hash(table)
 
 
+def _exists(path: str) -> bool:
+    fs, resolved = resolve_fs(path)
+    return fs.get_file_info(resolved).type != pafs.FileType.NotFound
+
+
 def process_unit(unit: Unit, ctx: RunContext) -> Result:
     """Procesa la unidad; todo lo crudo vive en RAM y solo se persiste el resultado.
 
@@ -109,11 +123,49 @@ def process_unit(unit: Unit, ctx: RunContext) -> Result:
     ZIP y cada lote se suelta al escribirse, así que en RAM conviven solo el ZIP
     comprimido y un lote. La ruta materializada (datos desordenados) es O(mes).
 
+    Regla de sobrescritura: si la partición ya existe se lee solo el .CHECKSUM
+    publicado. Si coincide con el manifiesto y no hay `force`, se salta la unidad
+    sin descargar ni escribir. Si difiere, se emite `checksum_drift` y se
+    reprocesa completa. Sin partición se procesa siempre.
+
     Si aborta por checksum o por unidad temporal, emite antes el hallazgo
     error/fail y relanza. Un fallo de red no es un chequeo: se relanza sin más.
     """
     logger.info("inicio unidad=%s modo=%s run_id=%s", unit, ctx.mode, ctx.run_id)
     url = source_url(unit.asset, unit.year, unit.month, unit.day, ctx.source_base_url)
+    filename = CONSOLIDATED if unit.day is None else day_filename(unit.day)
+    path = partition_path(
+        ctx.landing_root,
+        unit.provider,
+        unit.market,
+        unit.asset,
+        unit.year,
+        unit.month,
+        filename,
+    )
+    drift = None
+    if _exists(path):
+        published = fetch_checksum(url)
+        previous = last_sha256(
+            ctx.manifest_root,
+            unit.provider,
+            unit.market,
+            unit.asset,
+            unit.year,
+            unit.month,
+            url,
+        )
+        if previous == published and not ctx.force:
+            logger.info("salto unidad=%s sha256=%s", unit, published)
+            return Result(path, "", [], skipped=True)
+        if previous != published:
+            drift = CheckResult(
+                "checksum_drift",
+                Severity.WARNING,
+                Status.CORRECTED,
+                1.0,
+                {"previous_sha256": previous, "new_sha256": published},
+            )
     try:
         download = fetch(url)
     except ChecksumError as exc:
@@ -123,7 +175,8 @@ def process_unit(unit: Unit, ctx: RunContext) -> Result:
         _emit([fail], unit, ctx)
         raise
 
-    checks = [
+    checks = [] if drift is None else [drift]
+    checks += [
         CheckResult(
             "checksum_fail",
             Severity.INFO,
@@ -152,16 +205,6 @@ def process_unit(unit: Unit, ctx: RunContext) -> Result:
         ctx.run_id,
     )
 
-    filename = CONSOLIDATED if unit.day is None else day_filename(unit.day)
-    path = partition_path(
-        ctx.landing_root,
-        unit.provider,
-        unit.market,
-        unit.asset,
-        unit.year,
-        unit.month,
-        filename,
-    )
     try:
         with open_zip_batches(download.data) as (header, batches):
             checks.append(header)

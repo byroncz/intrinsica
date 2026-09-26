@@ -106,6 +106,17 @@ def test_main_month_backfill(tmp_path, publish_zip):
     assert {f["mode"] for f in findings} == {"backfill"}
 
 
+def test_main_force_flag(tmp_path, publish_zip):
+    publish, base = publish_zip
+    publish()
+    argv = ["--mode", "backfill", "--from", "2024-03"]
+    assert main(argv, _env(tmp_path, base)) == 0
+    assert main(argv, _env(tmp_path, base)) == 0  # salta
+    assert len(list((tmp_path / "manifest").rglob("*.parquet"))) == 1
+    assert main([*argv, "--force"], _env(tmp_path, base)) == 0
+    assert len(list((tmp_path / "manifest").rglob("*.parquet"))) == 2
+
+
 @pytest.mark.parametrize("mode", ["monthly-close", "seam-check"])
 def test_main_not_implemented(tmp_path, capsys, mode):
     env = _env(tmp_path, "http://127.0.0.1:1")

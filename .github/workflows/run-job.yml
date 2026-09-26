@@ -30,6 +30,10 @@ on:
         description: Fin inclusivo, mismo formato que from (por defecto, igual a from)
         type: string
         required: false
+      force:
+        description: Reprocesar aunque el .CHECKSUM coincida con el manifiesto (úsalo si cambió el código de L1)
+        type: boolean
+        default: false
 
 jobs:
   run:
@@ -43,6 +47,7 @@ jobs:
       MODE: ${{ inputs.mode }}
       FROM: ${{ inputs.from }}
       TO: ${{ inputs.to }}
+      FORCE: ${{ inputs.force }}
       GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
       GCP_REGION: ${{ vars.GCP_REGION }}
     steps:
@@ -75,6 +80,9 @@ jobs:
           args="--mode,${MODE},--from,${FROM}"
           if [[ -n "$TO" ]]; then
             args="${args},--to,${TO}"
+          fi
+          if [[ "$FORCE" == "true" ]]; then
+            args="${args},--force"
           fi
           # --args reemplaza los argumentos del contenedor, no el ENTRYPOINT.
           # Con --format, gcloud imprime el nombre de la ejecución al terminar.
