@@ -79,6 +79,11 @@ variable "modes" {
   }
 
   validation {
+    condition     = alltrue([for m in values(var.modes) : m.timeout == null || (m.timeout >= 1 && m.timeout <= 86400)])
+    error_message = "El timeout de cada modo debe estar entre 1 y 86400 segundos."
+  }
+
+  validation {
     condition = alltrue([
       for cfg in values(var.modes) : alltrue([
         for grant in values(cfg.access) : alltrue([for p in grant.prefixes : length(p) > 1 && endswith(p, "/")])
