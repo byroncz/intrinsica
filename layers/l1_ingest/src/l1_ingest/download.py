@@ -59,12 +59,7 @@ def _get(url: str) -> bytes:
         return response.read()
 
 
-def _attempt(url: str) -> Download:
-    try:
-        data = _get(url)
-        checksum = _get(url + ".CHECKSUM")
-    except (OSError, http.client.HTTPException) as exc:
-        raise DownloadError(f"{url}: {exc}") from exc
+def _parse_checksum(url: str, checksum: bytes) -> str:
     # Formato de sha256sum: "<sha256>  <nombre>"
     fields = checksum.decode("ascii", errors="replace").split()
     if not fields:
@@ -72,10 +67,52 @@ def _attempt(url: str) -> Download:
     published = fields[0].lower()
     if len(published) != 64 or any(c not in "0123456789abcdef" for c in published):
         raise DownloadError(f"{url}.CHECKSUM no contiene un SHA-256 válido")
+    return published
+
+
+def _get_checksum(url: str) -> str:
+    try:
+        return _parse_checksum(url, _get(url + ".CHECKSUM"))
+    except (OSError, http.client.HTTPException) as exc:
+        raise DownloadError(f"{url}.CHECKSUM: {exc}") from exc
+
+
+def _attempt(url: str) -> Download:
+    try:
+        data = _get(url)
+    except (OSError, http.client.HTTPException) as exc:
+        raise DownloadError(f"{url}: {exc}") from exc
+    published = _get_checksum(url)
     actual = hashlib.sha256(data).hexdigest()
     if actual != published:
         raise ChecksumError(f"{url}: SHA-256 {actual} != publicado {published}")
     return Download(data, actual, len(data), url, datetime.now(UTC))
+
+
+def _retry[T](
+    call: Callable[[], T], attempts: int, backoff: float, sleep: Callable[[float], None]
+) -> T:
+    for n in range(1, attempts + 1):
+        try:
+            return call()
+        except L1DownloadError:
+            if n == attempts:
+                raise
+            sleep(backoff * 2 ** (n - 1))
+    raise AssertionError("attempts debe ser >= 1")
+
+
+def fetch_checksum(
+    url: str,
+    attempts: int = ATTEMPTS,
+    backoff: float = BACKOFF_SECONDS,
+    sleep: Callable[[float], None] = time.sleep,
+) -> str:
+    """SHA-256 publicado en el .CHECKSUM de `url`, sin descargar el ZIP.
+
+    Mismos reintentos que `fetch`.
+    """
+    return _retry(lambda: _get_checksum(url), attempts, backoff, sleep)
 
 
 def fetch(
@@ -89,11 +126,4 @@ def fetch(
     Reintenta hasta `attempts` intentos con espera creciente (backoff, 2 x
     backoff, ...). Si el último falla, lanza su excepción sin devolver datos.
     """
-    for n in range(1, attempts + 1):
-        try:
-            return _attempt(url)
-        except L1DownloadError:
-            if n == attempts:
-                raise
-            sleep(backoff * 2 ** (n - 1))
-    raise AssertionError("attempts debe ser >= 1")
+    return _retry(lambda: _attempt(url), attempts, backoff, sleep)

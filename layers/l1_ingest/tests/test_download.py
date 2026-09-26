@@ -3,6 +3,7 @@ import http.server
 import threading
 
 import pytest
+from l1_ingest import download
 from l1_ingest.download import (
     ChecksumError,
     DownloadError,
@@ -103,3 +104,23 @@ def test_fetch_invalid_checksum_content_is_download_error(http_server):
     name = publish(root, checksum="<html>no es un hash</html>")
     with pytest.raises(DownloadError):
         fetch(f"{base}/{name}", sleep=lambda s: None)
+
+
+def test_fetch_checksum_reads_only_the_checksum_file(publish_zip, monkeypatch):
+    publish, base = publish_zip
+    publish()
+    urls = []
+    real = download._get
+    monkeypatch.setattr(download, "_get", lambda u: (urls.append(u), real(u))[1])
+    url = source_url("BTCUSDT", 2024, 3, base_url=base)
+
+    assert len(download.fetch_checksum(url)) == 64
+    assert urls == [url + ".CHECKSUM"]
+
+
+def test_fetch_checksum_missing_is_download_error(http_server):
+    _, base = http_server
+    with pytest.raises(DownloadError):
+        download.fetch_checksum(
+            source_url("BTCUSDT", 2024, 3, base_url=base), sleep=lambda s: None
+        )

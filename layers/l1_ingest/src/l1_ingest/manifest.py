@@ -6,6 +6,7 @@ from dataclasses import astuple, dataclass, fields
 from pathlib import Path
 
 import pyarrow as pa
+import pyarrow.dataset as ds
 import pyarrow.fs as pafs
 import pyarrow.parquet as pq
 
@@ -110,3 +111,34 @@ def write_manifest(
         )
         paths.append(path)
     return paths
+
+
+def last_sha256(
+    root: str | Path,
+    provider: str,
+    market: str,
+    asset: str,
+    year: int,
+    month: int,
+    source_url: str,
+) -> str | None:
+    """SHA-256 de la última fila del manifiesto para `source_url`, o None.
+
+    Lee solo el prefijo del scope del mes (no hay columna día: la fila se
+    ubica por `source_url`) y solo las columnas necesarias.
+    """
+    fs, base = resolve_fs(root)
+    directory = (
+        f"{base}/provider={provider}/market={market}/asset={asset}"
+        f"/year={year:04d}/month={month:02d}"
+    )
+    if fs.get_file_info(directory).type == pafs.FileType.NotFound:
+        return None
+    table = ds.dataset(directory, filesystem=fs, format="parquet").to_table(
+        columns=["sha256", "downloaded_at"],
+        filter=ds.field("source_url") == source_url,
+    )
+    if table.num_rows == 0:
+        return None
+    latest = table.sort_by([("downloaded_at", "descending")]).slice(0, 1)
+    return latest["sha256"][0].as_py()
