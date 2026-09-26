@@ -39,6 +39,22 @@ def ensure_order(table: pa.Table) -> tuple[pa.Table, CheckResult]:
     return table.take(order), check
 
 
+def aggid_results(
+    n_gaps: int, gaps: list[list[int]], n_duplicates: int, duplicates: list[int]
+) -> list[CheckResult]:
+    """Hallazgos de huecos y duplicados; `gaps` y `duplicates` pueden venir recortados."""
+
+    def result(check_type: str, n: int, details: dict) -> CheckResult:
+        if n == 0:
+            return CheckResult(check_type, Severity.INFO, Status.PASS, 0.0)
+        return CheckResult(check_type, Severity.WARNING, Status.FAIL, float(n), details)
+
+    return [
+        result("aggid_gap", n_gaps, {"gaps": gaps[:DETAILS_MAX]}),
+        result("aggid_duplicate", n_duplicates, {"ids": duplicates[:DETAILS_MAX]}),
+    ]
+
+
 def check_agg_trade_id(table: pa.Table) -> list[CheckResult]:
     """Huecos y duplicados de agg_trade_id (log-and-continue, §9.2).
 
@@ -56,20 +72,9 @@ def check_agg_trade_id(table: pa.Table) -> list[CheckResult]:
     gap_from = pc.add(pc.filter(prev, is_gap), 1).to_pylist()
     gap_to = pc.subtract(pc.filter(nxt, is_gap), 1).to_pylist()
 
-    def result(check_type: str, n: int, details: dict) -> CheckResult:
-        if n == 0:
-            return CheckResult(check_type, Severity.INFO, Status.PASS, 0.0)
-        return CheckResult(check_type, Severity.WARNING, Status.FAIL, float(n), details)
-
-    return [
-        result(
-            "aggid_gap",
-            len(gap_from),
-            {"gaps": [list(g) for g in zip(gap_from, gap_to)][:DETAILS_MAX]},
-        ),
-        result(
-            "aggid_duplicate",
-            len(repeated),
-            {"ids": repeated.to_pylist()[:DETAILS_MAX]},
-        ),
-    ]
+    return aggid_results(
+        len(gap_from),
+        [list(g) for g in zip(gap_from, gap_to)],
+        len(repeated),
+        repeated.to_pylist(),
+    )

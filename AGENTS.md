@@ -95,6 +95,11 @@ PRs y entradas de Documentación. Sin excepción.
 - `legacy/v0-local` es solo lectura y referencia. No se importa ni se porta
   código desde ahí a menos que una card lo pida explícitamente.
 - No se versionan binarios ni wheels en el repo.
+- Eficiencia de memoria ante todo: todo dato alojado en RAM se libera en cuanto
+  fue aprovechado; nunca conviven dos representaciones del mismo dato; el pico
+  de memoria de una unidad es O(lote), no O(unidad). Aplica a todas las capas.
+  Decisión y porqué: [Decisión: eficiencia de memoria ante todo](https://app.notion.com/p/3e727957d23d811887eaf14c886b9a0c)
+  (2026-09-26).
 - El stack (lenguajes, librerías, motor de cómputo, almacenamiento) lo fija
   la entrada de Documentación tipo decisión correspondiente. Por ahora no
   existe esa entrada; cuando se cree, enlazarla aquí.

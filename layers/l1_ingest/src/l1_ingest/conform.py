@@ -25,40 +25,63 @@ def _in_band(value: int, band: tuple[int, int]) -> bool:
     return band[0] <= value < band[1]
 
 
-def _normalize_time(times: pa.ChunkedArray) -> tuple[pa.ChunkedArray, CheckResult]:
-    """La unidad se decide por la magnitud de mín y máx, nunca por la fecha."""
-    bounds = pc.min_max(times)
-    lo, hi = bounds["min"].as_py(), bounds["max"].as_py()
+def classify_unit(lo: int | None, hi: int | None) -> str | None:
+    """`"ms"` o `"us"` si mín y máx caen en la misma banda; si no, None."""
+    if lo is None or hi is None:
+        return None
+    if _in_band(lo, MS_BAND) and _in_band(hi, MS_BAND):
+        return "ms"
+    if _in_band(lo, US_BAND) and _in_band(hi, US_BAND):
+        return "us"
+    return None
 
-    if lo is not None and hi is not None:
-        if _in_band(lo, MS_BAND) and _in_band(hi, MS_BAND):
-            check = CheckResult(
-                CHECK_TYPE,
-                Severity.INFO,
-                Status.CORRECTED,
-                details={"unit": "ms", "min": lo, "max": hi},
-            )
-            return pc.multiply(times, MS_TO_US), check
-        if _in_band(lo, US_BAND) and _in_band(hi, US_BAND):
-            check = CheckResult(
-                CHECK_TYPE,
-                Severity.INFO,
-                Status.PASS,
-                details={"unit": "us", "min": lo, "max": hi},
-            )
-            return times, check
 
+def unit_check(unit: str, lo: int, hi: int) -> CheckResult:
+    """Hallazgo de una unidad válida: ms se corrige a µs, µs pasa tal cual."""
+    status = Status.CORRECTED if unit == "ms" else Status.PASS
+    return CheckResult(
+        CHECK_TYPE,
+        Severity.INFO,
+        status,
+        details={"unit": unit, "min": lo, "max": hi},
+    )
+
+
+def unit_error(lo: int | None, hi: int | None) -> TimestampUnitError:
     check = CheckResult(
         CHECK_TYPE,
         Severity.ERROR,
         Status.FAIL,
         details={"min": lo, "max": hi},
     )
-    raise TimestampUnitError(
+    return TimestampUnitError(
         f"transact_time fuera de las bandas de 13 (ms) o 16 (µs) dígitos: "
         f"min={lo}, max={hi}",
         check,
     )
+
+
+def _normalize_time(times: pa.ChunkedArray) -> tuple[pa.ChunkedArray, CheckResult]:
+    """La unidad se decide por la magnitud de mín y máx, nunca por la fecha."""
+    bounds = pc.min_max(times)
+    lo, hi = bounds["min"].as_py(), bounds["max"].as_py()
+    unit = classify_unit(lo, hi)
+    if unit is None:
+        raise unit_error(lo, hi)
+    check = unit_check(unit, lo, hi)
+    return (pc.multiply(times, MS_TO_US) if unit == "ms" else times), check
+
+
+def conform_batch(batch: pa.RecordBatch, unit: str) -> pa.RecordBatch:
+    """Lote con OUTPUT_SCHEMA; la unidad ya se decidió sobre toda la unidad."""
+    if unit == "ms":
+        times = pc.multiply(batch.column("transact_time"), MS_TO_US)
+        batch = batch.set_column(
+            batch.schema.get_field_index("transact_time"),
+            batch.schema.field("transact_time"),
+            times,
+        )
+    return batch.cast(OUTPUT_SCHEMA)
 
 
 def conform(table: pa.Table) -> tuple[pa.Table, CheckResult]:
