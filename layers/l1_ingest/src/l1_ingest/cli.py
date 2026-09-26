@@ -10,11 +10,11 @@ import sys
 import time
 import uuid
 from collections.abc import Mapping, Sequence
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 from l1_ingest.pipeline import RunContext, Unit, process_unit
-from l1_ingest.seam import run_seam_check
+from l1_ingest.seam import run_daily_seam, run_seam_check
 
 MODES = ("backfill", "daily", "monthly-close", "seam-check")
 NOT_IMPLEMENTED = ("monthly-close",)
@@ -151,7 +151,7 @@ def main(
     env = os.environ if env is None else env
     parser = argparse.ArgumentParser(prog="l1_ingest")
     parser.add_argument("--mode", required=True, choices=MODES)
-    parser.add_argument("--from", dest="from_", required=True, metavar="DESDE")
+    parser.add_argument("--from", dest="from_", metavar="DESDE")
     parser.add_argument("--to", metavar="HASTA")
     parser.add_argument("--asset", default="BTCUSDT")
     parser.add_argument(
@@ -165,6 +165,15 @@ def main(
         return int(exc.code or 0)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
+    if args.from_ is None:
+        if args.mode != "daily" or args.to is not None:
+            print(
+                "l1_ingest: --from es obligatorio (solo daily sin --to lo omite)",
+                file=sys.stderr,
+            )
+            return EXIT_USAGE
+        # El día por defecto se resuelve aquí para que resolve_unit siga pura.
+        args.from_ = (datetime.now(UTC).date() - timedelta(days=1)).isoformat()
     if args.mode == "seam-check":
         return _seam_check(args, env)
     try:
@@ -179,7 +188,9 @@ def main(
 
     unit = Unit(year, month, day, asset=args.asset)
     try:
-        process_unit(unit, ctx)
+        result = process_unit(unit, ctx)
+        if args.mode == "daily" and not result.skipped:
+            run_daily_seam(unit, ctx)
     finally:
         _log_probe(unit, args.mode, started)
     return 0
