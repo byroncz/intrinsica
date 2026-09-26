@@ -110,6 +110,27 @@ resource "google_project_iam_member" "scheduler_invoker_workflows" {
   member  = "serviceAccount:${google_service_account.scheduler_invoker.email}"
 }
 
+# Dar roles/run.invoker por job a la service account de un workflow. Ni
+# roles/run.developer ni roles/workflows.editor incluyen setIamPolicy sobre
+# jobs; roles/run.admin sí, pero con mucho más alcance. Rol personalizado con
+# solo leer y fijar la política IAM de jobs.
+resource "google_project_iam_custom_role" "job_iam_manager" {
+  project     = google_project.this.project_id
+  role_id     = "runJobIamManager"
+  title       = "Gestor de IAM de Cloud Run Jobs"
+  description = "Lee y fija la política IAM de Cloud Run Jobs, sin tocar los jobs."
+  permissions = [
+    "run.jobs.getIamPolicy",
+    "run.jobs.setIamPolicy",
+  ]
+}
+
+resource "google_project_iam_member" "deploy_job_iam_manager" {
+  project = google_project.this.project_id
+  role    = google_project_iam_custom_role.job_iam_manager.id
+  member  = local.deploy_member
+}
+
 # Leer los logs de la ejecución de un job.
 resource "google_project_iam_member" "deploy_logging_viewer" {
   project = google_project.this.project_id

@@ -60,3 +60,32 @@ module "layer" {
     }
   }
 }
+
+# Orquestación del estado estacionario (TRD-L1 §10.1 y §11). Ambos schedulers
+# nacen en pausa; encenderlos es decisión del humano (README del módulo).
+module "orchestration" {
+  source = "../../../modules/orchestration"
+
+  layer                   = "l1"
+  project_id              = local.data.project_id
+  region                  = local.data.region
+  job_names               = module.layer.job_names
+  scheduler_invoker_email = local.data.scheduler_invoker_service_account_email
+
+  schedules = {
+    daily = {
+      # Binance publica el día D durante D+1 (UTC). 03:00 UTC deja margen tras
+      # el cierre de D y corre cuando el archivo de D ya está disponible.
+      schedule    = "0 3 * * *"
+      paused      = true
+      description = "Ingesta diaria de L1: el día D se publica en D+1."
+    }
+    monthly-close = {
+      # El primer lunes de M+1 cae entre el 1 y el 7, así que el día 8 siempre
+      # es posterior a él, a las 06:00 UTC.
+      schedule    = "0 6 8 * *"
+      paused      = true
+      description = "Cierre mensual de L1, tras el primer lunes de M+1."
+    }
+  }
+}
