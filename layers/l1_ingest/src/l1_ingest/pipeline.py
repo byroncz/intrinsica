@@ -143,8 +143,9 @@ def process_unit(unit: Unit, ctx: RunContext) -> Result:
         unit.month,
         filename,
     )
-    drift = None
-    if _exists(path):
+    previous = None
+    existed = _exists(path)
+    if existed:
         published = fetch_checksum(url)
         previous = last_sha256(
             ctx.manifest_root,
@@ -158,14 +159,6 @@ def process_unit(unit: Unit, ctx: RunContext) -> Result:
         if previous == published and not ctx.force:
             logger.info("salto unidad=%s sha256=%s", unit, published)
             return Result(path, "", [], skipped=True)
-        if previous != published:
-            drift = CheckResult(
-                "checksum_drift",
-                Severity.WARNING,
-                Status.CORRECTED,
-                1.0,
-                {"previous_sha256": previous, "new_sha256": published},
-            )
     try:
         download = fetch(url)
     except ChecksumError as exc:
@@ -175,7 +168,17 @@ def process_unit(unit: Unit, ctx: RunContext) -> Result:
         _emit([fail], unit, ctx)
         raise
 
-    checks = [] if drift is None else [drift]
+    checks = []
+    if existed and previous != download.sha256:
+        checks.append(
+            CheckResult(
+                "checksum_drift",
+                Severity.WARNING,
+                Status.CORRECTED,
+                1.0,
+                {"previous_sha256": previous, "new_sha256": download.sha256},
+            )
+        )
     checks += [
         CheckResult(
             "checksum_fail",

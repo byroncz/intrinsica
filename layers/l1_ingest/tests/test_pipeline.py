@@ -198,3 +198,25 @@ def test_force_reprocesses_when_checksum_matches(tmp_path, publish_zip, requeste
     assert not result.skipped
     assert any(u.endswith(".zip") for u in requested)
     assert not [f for f in result.findings if f.check_type == "checksum_drift"]
+
+
+def test_drift_reports_the_sha_the_manifest_registers(
+    tmp_path, publish_zip, monkeypatch
+):
+    publish, base = publish_zip
+    publish()
+    unit = Unit(2024, 3)
+    process_unit(unit, _ctx(tmp_path, base))
+    url = f"{base}/data/spot/monthly/aggTrades/BTCUSDT/BTCUSDT-aggTrades-2024-03.zip"
+    # El .CHECKSUM cambia entre la consulta previa y la descarga.
+    zip_path = tmp_path / "data/spot/monthly/aggTrades/BTCUSDT" / url.rsplit("/", 1)[1]
+    data = zip_path.read_bytes() + b"\0"
+    zip_path.write_bytes(data)
+    new = hashlib.sha256(data).hexdigest()
+    zip_path.with_name(zip_path.name + ".CHECKSUM").write_text(f"{new}  x.zip\n")
+    monkeypatch.setattr(pipeline, "fetch_checksum", lambda _url: "f" * 64)
+
+    result = process_unit(unit, _ctx(tmp_path, base))
+
+    drift = [f for f in result.findings if f.check_type == "checksum_drift"]
+    assert drift[0].details["new_sha256"] == new
