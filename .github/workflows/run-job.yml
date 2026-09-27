@@ -75,7 +75,11 @@ jobs:
           TASKS: ${{ steps.tasks.outputs.tasks }}
         run: |
           args="--mode,${MODE},--from,${FROM}"
-          if [[ -n "$TO" ]]; then
+          # gcloud rechaza un --args con un valor repetido en la lista: si
+          # to == from, agregar --to duplicaría ese valor y la ejecución
+          # nunca se crea. Se omite en ese caso; el CLI de la capa asume
+          # to = from cuando --to falta.
+          if [[ -n "$TO" && "$TO" != "$FROM" ]]; then
             args="${args},--to,${TO}"
           fi
           if [[ "$FORCE" == "true" ]]; then

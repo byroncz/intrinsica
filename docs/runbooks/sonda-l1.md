@@ -55,7 +55,12 @@ Ejecuta *Actions → Run job → Run workflow* con estos inputs exactos:
 | --- | --- |
 | `job` | `l1-backfill` |
 | `from` | `2023-03` |
-| `to` | `2023-03` |
+| `to` | (vacío) |
+
+Para una sola unidad basta con `from`: `to` por defecto es igual a `from`.
+Si igual completas `to` con el mismo valor de `from`, el workflow lo detecta
+y no lo repite en `--args` (ITSC-232); `gcloud` rechaza un valor duplicado en
+esa lista.
 
 ## Qué leer y qué anotar
 
@@ -104,8 +109,8 @@ Una ejecución Fallida no siempre es un OOM. Los jobs de l1 fijan `timeout`
 
 ## Caracterización de header (§14.2)
 
-Tres ejecuciones `run-job.yml` con `job` = `l1-daily` y
-`from` = `to` = un día por época:
+Tres ejecuciones `run-job.yml` con `job` = `l1-daily`, `from` = un día por
+época y `to` vacío (una sola unidad no necesita `to`):
 
 | Época | Día |
 | --- | --- |
