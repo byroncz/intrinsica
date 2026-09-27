@@ -257,7 +257,7 @@ filas que anotar en esta tabla para esta ejecución.
 
 | Verificación | Resultado |
 | --- | --- |
-| 31 provisionales tras daily | OK, 31/31; 6 costuras diarias no se pudieron evaluar por la carrera entre tareas paralelas (el día previo aún no estaba escrito) — hallazgo `seam_skipped`, `severity=info`, `status=pass` (ITSC-233), no es un error |
+| 31 provisionales tras daily | OK, 31/31; 6 costuras diarias (2026-08-04, 08, 12, 22, 25 y 27) no se pudieron evaluar por la carrera entre tareas paralelas (el día previo aún no estaba escrito). El daily corrió con `l1_ingest:0.5.1`, antes de ITSC-233: cada omisión solo dejó un WARNING "costura omitida" en el log, sin hallazgo en el lago. ITSC-233 (0.5.2) agrega el hallazgo `seam_skipped` (`severity=info`, `status=pass`) para las corridas futuras |
 | `consolidated.parquet` presente | OK, escrito por el `monthly-close` |
 | Sin provisionales tras el cierre | OK, los 31 `provisional-day=*.parquet` se borraron |
 | `daily_monthly_drift` | `pass` |
