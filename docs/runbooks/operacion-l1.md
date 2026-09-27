@@ -233,17 +233,24 @@ monthly-close" más abajo): no cubre estas corridas, solo las futuras.
 
 **Runs**
 
-| Paso | URL del run | Rango | Tareas OK / fallidas | Reintentos (meses) |
-| --- | --- | --- | --- | --- |
-| Backfill | [36283117940](https://github.com/byroncz/intrinsica/actions/runs/36283117940) | 2017-08 a 2026-07 | 106 OK, 1 saltado por checksum (2023-03), 1 fallido (2021-12) | 2021-12 → [36344381547](https://github.com/byroncz/intrinsica/actions/runs/36344381547), OK |
-| Seam-check | [36344788264](https://github.com/byroncz/intrinsica/actions/runs/36344788264) | 2017-08 a 2026-07 | 1 tarea, OK | - |
-| daily | [36345285379](https://github.com/byroncz/intrinsica/actions/runs/36345285379) | 2026-08-01 a 2026-08-31 | 31 OK | - |
-| monthly-close | [36346362202](https://github.com/byroncz/intrinsica/actions/runs/36346362202) | 2026-08 | 1 tarea, OK | - |
+| Paso | URL del run | Rango | Tareas OK / fallidas | Reintentos (meses) | Ejecución Cloud Run | Inicio → fin (run de Actions, UTC-5) |
+| --- | --- | --- | --- | --- | --- | --- |
+| Backfill | [36283117940](https://github.com/byroncz/intrinsica/actions/runs/36283117940) | 2017-08 a 2026-07 | 106 OK, 1 saltado por checksum (2023-03), 1 fallido (2021-12) | 2021-12 → [36344381547](https://github.com/byroncz/intrinsica/actions/runs/36344381547), OK | no reportada | 2026-09-26 19:38 → 21:35 |
+| Seam-check | [36344788264](https://github.com/byroncz/intrinsica/actions/runs/36344788264) | 2017-08 a 2026-07 | 1 tarea, OK | - | no reportada | 2026-09-27 14:33 → 14:36 |
+| daily | [36345285379](https://github.com/byroncz/intrinsica/actions/runs/36345285379) | 2026-08-01 a 2026-08-31 | 31 OK | - | no reportada | 2026-09-27 14:41 → 14:48 |
+| monthly-close | [36346362202](https://github.com/byroncz/intrinsica/actions/runs/36346362202) | 2026-08 | 1 tarea, OK | - | no reportada | 2026-09-27 14:59 → 15:02 |
+
+"Ejecución Cloud Run" queda como "no reportada": el paso 1 pide anotarla,
+pero el humano no la registró y el log del workflow no la deja en claro para
+una ejecución fallida. "Inicio → fin" es el del run de GitHub Actions (el
+único dato disponible sin credenciales de GCP), no el de la ejecución de
+Cloud Run Jobs en sí.
 
 2021-12 falló por un ZIP con dos CSV (el bug de ITSC-231, corregido antes del
-reintento); el reintento pasó el chequeo nuevo `zip_extra_members`. 2023-03,
-el mes más pesado según la sonda original, se saltó porque el `.CHECKSUM` ya
-coincidía con el manifiesto (ITSC-221): no hubo que reprocesarlo.
+reintento); el reintento (2026-09-27 14:26 → 14:30) pasó el chequeo nuevo
+`zip_extra_members`. 2023-03, el mes más pesado según la sonda original, se
+saltó porque el `.CHECKSUM` ya coincidía con el manifiesto (ITSC-221): no
+hubo que reprocesarlo.
 
 **Timeout por tarea:** aplicado (ITSC-219), 3600/900 s. Ningún mes se acercó
 al tope: la pared máxima medida (2026-02, backfill) fue 537 s, bien dentro
@@ -253,7 +260,7 @@ del margen.
 
 Los 107 bordes del rango 2017-08–2026-07 dieron `pass` en el `seam-check`
 histórico: sin huecos del proveedor ni solapamientos que explicar. No hay
-filas que anotar en esta tabla para esta ejecución.
+ningún borde `fail` que anotar para esta ejecución.
 
 **Ciclo daily a monthly-close (2026-08)**
 
@@ -302,8 +309,9 @@ La cota con máxima tampoco suma los reintentos automáticos del backfill
 original (`max_retries = 1`): 2021-12 falló y corrió dos veces antes de
 marcarse fallido, así que en el peor caso hay que sumarle hasta 537 s más
 (16×537 = 8.592 GiB-s, 4×537 = 2.148 vCPU-s), insignificante frente al
-total. La sonda original (TRD-L1 §10.2) estimó 886.272 GiB-s asumiendo el mes
-más pesado (2023-03, 577 s) repetido en los 96 meses del backfill original:
+total. La sonda ([`docs/runbooks/sonda-l1.md`](sonda-l1.md), extrapolación
+×96 meses) estimó 886.272 GiB-s asumiendo el mes más pesado (2023-03, 577 s)
+repetido en los 96 meses del backfill original:
 la cota con máxima de esta ejecución (927.936 GiB-s, con 2026-02 en vez de
 2023-03) confirma ese orden de magnitud.
 
