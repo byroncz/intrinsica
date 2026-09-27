@@ -72,6 +72,28 @@ def test_month_is_canonical(tmp_path, publish_zip):
     assert {f.mode for f in result.findings} == {"backfill"}
 
 
+def test_extra_members_pick_root_csv_and_emit_finding(tmp_path, publish_zip):
+    publish, base = publish_zip
+    publish()
+    clean = process_unit(Unit(2024, 3), _ctx(tmp_path, base))
+
+    # Binance 2021-12: el CSV oficial en la raíz, duplicado bajo una ruta
+    # interna de su colector; mismo checksum, ambos son el archivo publicado.
+    duplicate = (
+        "fsx-data/collector_data/data/spot/monthly/aggTrades/BTCUSDT/"
+        "BTCUSDT-aggTrades-2024-03.csv"
+    )
+    publish(extra_members=[duplicate])
+    result = process_unit(Unit(2024, 3), _ctx(tmp_path, base))
+
+    assert result.content_hash == clean.content_hash
+    extra = [f for f in result.findings if f.check_type == "zip_extra_members"]
+    assert len(extra) == 1
+    assert (extra[0].severity, extra[0].status) == ("warning", "pass")
+    assert extra[0].metric_value == 1.0
+    assert extra[0].details == {"members": [duplicate]}
+
+
 def test_only_partition_findings_and_manifest_touch_disk(tmp_path, publish_zip):
     publish, base = publish_zip
     publish()

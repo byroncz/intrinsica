@@ -102,9 +102,9 @@ def _emit(checks: list[CheckResult], unit: Unit, ctx: RunContext) -> list[Findin
     return findings
 
 
-def _materialized(data: bytes, path: str) -> tuple[list[CheckResult], str]:
+def _materialized(data: bytes, path: str, unit: Unit) -> tuple[list[CheckResult], str]:
     """Ruta O(mes) para datos desordenados: hay que ordenar la unidad completa."""
-    table, _ = read_zip(data)
+    table, _ = read_zip(data, unit.asset, unit.year, unit.month, unit.day)
     table, time_check = conform(table)
     table, reorder = ensure_order(table)
     write_partition(table, path)
@@ -206,8 +206,10 @@ def process_unit(unit: Unit, ctx: RunContext) -> Result:
         )
     ]
     try:
-        with open_zip_batches(download.data) as (header, batches):
-            checks.append(header)
+        with open_zip_batches(
+            download.data, unit.asset, unit.year, unit.month, unit.day
+        ) as (header_checks, batches):
+            checks.extend(header_checks)
             try:
                 rest, digest = stream_partition(batches, path)
             except NotStreamable:
@@ -217,7 +219,7 @@ def process_unit(unit: Unit, ctx: RunContext) -> Result:
         if rest is None:
             # Fuera del `except`: su traceback retendría el generador y el lote.
             logger.warning("unidad=%s sin orden creciente: ruta materializada", unit)
-            rest, digest = _materialized(download.data, path)
+            rest, digest = _materialized(download.data, path, unit)
     except TimestampUnitError as exc:
         _emit([*checks, exc.check], unit, ctx)
         raise
