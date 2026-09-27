@@ -38,6 +38,10 @@ resource "google_workflows_workflow" "run_job" {
   description     = "Ejecuta el Cloud Run Job ${var.layer}-<modo> (${join(" | ", local.modes)}) sin overrides."
   service_account = google_service_account.workflow.id
 
+  # Regla: toda expresión ${...} del YAML va entre comillas simples. Si contiene
+  # ": " y va sin comillas, el parser YAML de Workflows la corta y el apply falla
+  # (ITSC-230). Aquí se escribe $${...} por el escape de Terraform.
+  # .github/scripts/check-workflow-yaml.sh lo verifica en CI.
   source_contents = <<-EOT
     main:
       params: [args]
@@ -47,20 +51,20 @@ resource "google_workflows_workflow" "run_job" {
               - jobs: ${jsonencode(local.job_names)}
         - validar_modo:
             switch:
-              - condition: $${default(map.get(args, "mode"), "") in keys(jobs)}
+              - condition: '$${default(map.get(args, "mode"), "") in keys(jobs)}'
                 next: ejecutar_job
             next: modo_invalido
         - modo_invalido:
-            raise: $${"mode invalido: " + default(map.get(args, "mode"), "(ausente)")}
+            raise: '$${"mode invalido: " + default(map.get(args, "mode"), "(ausente)")}'
         - ejecutar_job:
             call: http.post
             args:
-              url: $${"https://run.googleapis.com/v2/projects/${var.project_id}/locations/${var.region}/jobs/" + jobs[args.mode] + ":run"}
+              url: '$${"https://run.googleapis.com/v2/projects/${var.project_id}/locations/${var.region}/jobs/" + jobs[args.mode] + ":run"}'
               auth:
                 type: OAuth2
             result: ejecucion
         - fin:
-            return: $${ejecucion.body.name}
+            return: '$${ejecucion.body.name}'
   EOT
 
   depends_on = [google_cloud_run_v2_job_iam_member.workflow_invoker]
