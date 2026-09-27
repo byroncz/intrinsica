@@ -152,6 +152,21 @@ En GCS usa Application Default Credentials; no hay credenciales en código.
 `daily_monthly_drift`. Los que se agregan después de un bug real se
 documentan aquí, con su porqué:
 
+- **`seam_skipped`** (ITSC-233): `daily` evalúa la costura del día recién
+  escrito contra su día previo apenas termina de procesar la unidad. Cloud
+  Run corre varias tareas del mismo Job en paralelo y no garantiza el orden:
+  si el día previo todavía no se escribió (terminó su tarea después), la
+  costura no tiene con qué compararse. No es un error de datos -el día
+  previo se escribe segundos más tarde, dentro de la misma corrida- así que
+  no vale un `warning` en `seam_discontinuity` (ese `check_type` es para
+  huecos o solapes reales de `agg_trade_id`). Antes de ITSC-233 la omisión
+  solo quedaba en el log (`costura omitida unidad=... no existe
+  provisional-day=NN.parquet`); ahora además se emite `severity = info`,
+  `status = pass`, `metric_value = null` y `details = {"reason":
+  "previous_missing", "expected_path": <ruta que faltó>}`, para que quede en
+  el lago y sea visible en BigQuery o Looker. En estado estacionario (una
+  tarea por corrida) no ocurre; `monthly-close` cubre el hueco al validar el
+  consolidado completo (`aggid_gap`) y la costura con M-1.
 - **`zip_extra_members`** (ITSC-231): un ZIP mensual o diario trae, además
   del CSV esperado, otros miembros. Caso real: Binance publicó el ZIP de
   2021-12 con el CSV oficial duplicado, una vez en la raíz y otra bajo una

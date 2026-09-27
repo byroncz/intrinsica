@@ -1,3 +1,4 @@
+import json
 import logging
 import re
 from datetime import UTC, datetime, timedelta
@@ -87,6 +88,7 @@ def test_main_day_end_to_end(tmp_path, publish_zip):
         "reorder_applied",
         "aggid_gap",
         "aggid_duplicate",
+        "seam_skipped",  # sin día previo: 2024-03-05 no existe en el landing
     }
     assert {f["layer"] for f in findings} == {"l1"}
     assert {f["stage"] for f in findings} == {"provisional"}
@@ -149,9 +151,12 @@ def test_main_probe_line_after_final_line(tmp_path, publish_zip, caplog):
 
     assert len(_probe_lines(caplog)) == 1
     assert caplog.messages[-1].startswith("sonda:")
-    # La costura diaria (aquí sin día previo) corre entre "fin unidad" y la sonda.
-    assert caplog.messages[-2].startswith("costura omitida")
-    assert caplog.messages[-3].startswith("fin unidad=")
+    # La costura diaria (aquí sin día previo) corre entre "fin unidad" y la
+    # sonda: WARNING del log más el INFO que deja emit_findings al persistir
+    # el hallazgo seam_skipped.
+    assert caplog.messages[-2].startswith("check_type=seam_skipped")
+    assert caplog.messages[-3].startswith("costura omitida")
+    assert caplog.messages[-4].startswith("fin unidad=")
     unit, mode, rss, wall = PROBE.fullmatch(caplog.messages[-1]).groups()
     assert (unit, mode) == ("binance/spot/BTCUSDT/2024-03-06", "daily")
     assert int(rss) > 0
@@ -236,15 +241,23 @@ def test_daily_seam_first_day_uses_last_provisional_of_previous_month(
     assert seam["status"] == "pass"
 
 
-def test_daily_missing_previous_day_warns_without_finding(
+def test_daily_missing_previous_day_emits_seam_skipped_finding(
     tmp_path, publish_zip, caplog
 ):
     publish, base = publish_zip
     publish(day=6)
     with caplog.at_level(logging.WARNING):
         assert _daily(tmp_path, base, 6) == 0
-    assert _seams(tmp_path) == []
+    assert _seams(tmp_path) == []  # no hay seam_discontinuity: no se evaluó
     assert any("provisional-day=05.parquet" in m for m in caplog.messages)
+
+    rows = current_findings(tmp_path / "dq").to_pylist()
+    (skipped,) = [r for r in rows if r["check_type"] == "seam_skipped"]
+    assert (skipped["severity"], skipped["status"]) == ("info", "pass")
+    assert skipped["metric_value"] is None
+    details = json.loads(skipped["details"])
+    assert details["reason"] == "previous_missing"
+    assert "provisional-day=05.parquet" in details["expected_path"]
 
 
 def test_daily_closed_month_neither_downloads_nor_writes(tmp_path, publish_zip, caplog):

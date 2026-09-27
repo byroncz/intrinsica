@@ -22,6 +22,7 @@ from l1_ingest.write import CONSOLIDATED, day_filename, partition_path
 logger = logging.getLogger(__name__)
 
 CHECK_TYPE = "seam_discontinuity"
+SEAM_SKIPPED = "seam_skipped"
 _PROVISIONAL = re.compile(r"provisional-day=(\d{2})\.parquet")
 
 
@@ -168,7 +169,10 @@ def run_daily_seam(unit: Unit, ctx: RunContext) -> Finding | None:
 
     El previo es `provisional-day=DD-1` del mismo mes o, el día 1, la última
     partición de M-1 (su consolidated si existe; si no, su último provisional).
-    Si no existe no hay hallazgo: se deja un WARNING con la ruta que faltó.
+    Con varias tareas corriendo en paralelo, el día previo puede no estar
+    escrito todavía (ITSC-233): no es un error de datos, la costura solo no
+    se puede evaluar. Se deja un WARNING en el log y se emite un hallazgo
+    `seam_skipped` (INFO, pass) para que quede en el lago de hallazgos.
     """
 
     def path(u: Unit, name: str) -> str:
@@ -195,7 +199,16 @@ def run_daily_seam(unit: Unit, ctx: RunContext) -> Finding | None:
         prev_path = find_partition(str(ctx.landing_root), prev_unit, last=True)
     if prev_path is None:
         logger.warning("costura omitida unidad=%s: no existe %s", unit, expected)
-        return None
+        skipped = CheckResult(
+            SEAM_SKIPPED,
+            Severity.INFO,
+            Status.PASS,
+            None,
+            {"reason": "previous_missing", "expected_path": expected},
+        )
+        finding = _finding(skipped, unit, ctx)
+        emit_findings([finding], ctx.dq_root)
+        return finding
     result = check_seam(prev_path, next_path, {})
     logger.info("costura %s -> %s: %s", prev_path, next_path, result.status.value)
     finding = _finding(result, unit, ctx)
