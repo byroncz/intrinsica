@@ -221,13 +221,15 @@ segundos:
 ## Resultados
 
 Ejecutados por el humano el 2026-09-27. Imagen `l1_ingest`, stack `l1` con
-4 vCPU / 16 GiB, timeout 3600/900 s y `max_retries = 1` (ITSC-219). Antes de
-estos runs ya estaban en `main` ITSC-229/230 (workflow), ITSC-231 (ZIP con
-CSV duplicado) e ITSC-232 (`from = to` en `run-job.yml`); ITSC-233 (hallazgo
-`seam_skipped`) se mergeó el mismo día, a partir de lo que el `daily` de este
-runbook encontró (ver más abajo). El backfill inicial corrió con
-`l1_ingest:0.5.0`; el reintento de 2021-12 y el resto de los pasos, ya con
-`0.5.1`.
+4 vCPU / 16 GiB, timeout 3600/900 s y `max_retries = 1` (ITSC-219). El
+backfill inicial corrió con `l1_ingest:0.5.0`, ya con ITSC-230 (workflow) en
+`main`. Antes del reintento de 2021-12 se mergeó ITSC-231 (ZIP con CSV
+duplicado, 0.5.1, 14:07): el reintento y el seam-check corrieron con
+`0.5.1`. Antes del daily se mergeó también ITSC-232 (`from = to` en
+`run-job.yml`, 14:35): el daily y el monthly-close corrieron con `0.5.1`
+igual. ITSC-233 (hallazgo `seam_skipped`, 0.5.2, 15:07) se mergeó después
+del daily, a partir de lo que este runbook encontró (ver "Ciclo daily a
+monthly-close" más abajo): no cubre estas corridas, solo las futuras.
 
 **Runs**
 
