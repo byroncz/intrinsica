@@ -276,22 +276,43 @@ RSS y pared por paso (de lo reportado por el humano desde Cloud Run):
 
 El humano no reportó la lista completa de paredes por tarea del backfill (el
 agente no puede leerla: `gcloud` no está instalado ni hay credenciales de GCP
-en esta sesión, por regla del proyecto). Con solo máxima y mediana, la Σ real
-de las 108 paredes queda entre dos cotas:
+en esta sesión, por regla del proyecto). Con solo máxima y mediana, esto es
+lo que se puede decir de la Σ real de las 108 paredes:
 
-| Concepto | Cota con mediana (108 × 80 s) | Cota con máxima (108 × 537 s) | §10.3 |
-| --- | --- | --- | --- |
-| Backfill, GiB-s | 138.240 (0,38× cupo) | 927.936 (2,58× cupo) | - |
-| Backfill, vCPU-s | 34.560 (0,19× cupo) | 231.984 (1,29× cupo) | - |
+| Concepto | Estimación con mediana (108 × 80 s) | Cota inferior válida (53 × 80 s + 537 s) | Cota con máxima (108 × 537 s) | §10.3 |
+| --- | --- | --- | --- | --- |
+| Backfill, GiB-s | 138.240 (0,38× cupo) | 76.432 (0,21× cupo) | 927.936 (2,58× cupo) | - |
+| Backfill, vCPU-s | 34.560 (0,19× cupo) | 19.108 (0,11× cupo) | 231.984 (1,29× cupo) | - |
+
+La columna "Estimación con mediana" no es una cota: es solo 108 × la
+mediana, y con cola derecha (2026-02 con 537 s empuja la media por encima de
+la mediana) no hay garantía de que el real quede cerca. La única cota
+inferior que sí se sostiene con los dos únicos datos medidos (mediana 80 s,
+máxima 537 s) sale de que al menos 54 de las 108 tareas —la mitad
+superior— duran ≥ 80 s, y de esas 54 ya conocemos la mayor (537 s, 2026-02):
+Σ ≥ 53×80 s + 537 s = 4.777 s. Las 54 tareas restantes no tienen piso
+conocido, así que no hay forma de acotar la Σ real por arriba de esta cifra
+sin medir cada tarea.
 
 Cupo gratis mensual: 360.000 GiB-s y 180.000 vCPU-s. El reintento de 2021-12
-agrega 1.821 GiB-s y 455 vCPU-s, insignificante frente a ambas cotas. La
-sonda original (TRD-L1 §10.2) estimó 886.272 GiB-s asumiendo el mes más
-pesado (2023-03, 577 s) repetido en los 96 meses del backfill original: la
-cota con máxima de esta ejecución (927.936 GiB-s, con 2026-02 en vez de
-2023-03) confirma ese orden de magnitud. Pero la mayoría de los meses corrió
-cerca de la mediana (80 s), muy por debajo del máximo: el real probablemente
-está más cerca de la cota con mediana que con la de máxima.
+agrega 1.821 GiB-s y 455 vCPU-s, insignificante frente a las tres columnas.
+La cota con máxima tampoco suma los reintentos automáticos del backfill
+original (`max_retries = 1`): 2021-12 falló y corrió dos veces antes de
+marcarse fallido, así que en el peor caso hay que sumarle hasta 537 s más
+(16×537 = 8.592 GiB-s, 4×537 = 2.148 vCPU-s), insignificante frente al
+total. La sonda original (TRD-L1 §10.2) estimó 886.272 GiB-s asumiendo el mes
+más pesado (2023-03, 577 s) repetido en los 96 meses del backfill original:
+la cota con máxima de esta ejecución (927.936 GiB-s, con 2026-02 en vez de
+2023-03) confirma ese orden de magnitud.
+
+**Σ real de las paredes:** ninguna de las tres columnas es el dato que pide
+[§10.3](../TRD/l1.md). Falta que el humano sume las 108 paredes reales, por
+ejemplo con
+`gcloud logging read 'resource.type="cloud_run_job" AND resource.labels.job_name="l1-backfill" AND textPayload:"sonda: unit="' --project <proyecto> --format='value(textPayload)'`
+sobre el run [36283117940](https://github.com/byroncz/intrinsica/actions/runs/36283117940)
+y sumando cada `wall_s`, o leyendo la duración de cada tarea en *Cloud Run →
+Jobs → l1-backfill → ejecución → Tareas*. Mientras llega, la fila §10.3
+queda sin veredicto.
 
 **Backfill, facturado (Billing):** pendiente. Billing tarda hasta 24 h en
 reflejar el consumo de Cloud Run; el humano lo agrega cuando esté disponible
