@@ -16,6 +16,8 @@ jobs:
       - run: uv run ruff check .
       - run: uv run ruff format --check .
       - run: uv run pytest
+      - run: uvx yamllint .
+      - run: .github/scripts/check-workflow-yaml.sh
 
   # Decide qué capas construir. Una capa se construye si cambió layers/<capa>/**;
   # todas se construyen si cambió shared/**, uv.lock, pyproject.toml o .github/workflows/**
