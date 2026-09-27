@@ -25,18 +25,18 @@ recalcula los rangos con la regla de la sección siguiente.
    Cloud Shell.
 2. Stack `l1` aplicado (*Actions → Terraform*, `stack` = `l1`, `action` =
    `apply`, aprobado en el environment `gcp`) con la imagen que incluye
-   ITSC-227 (`layers/l1_ingest/VERSION` ≥ 0.5.0) y los cuatro jobs de
-   ITSC-224: `l1-backfill`, `l1-daily`, `l1-monthly-close`, `l1-seam-check`.
-   Verifica que existen: `gcloud run jobs list --region <región>`.
-3. **Timeout por tarea revisado.** ITSC-219 sigue en Por refinar y el módulo
-   `layer` no fija `timeout`: vale el de Cloud Run Jobs, **600 s por tarea**
-   con 3 reintentos. 2023-03, el mes más pesado, tardó **577 s** (23 s de
-   margen). Una tarea que pasa de 600 s falla por timeout y se reintenta
-   igual de lenta. Antes de lanzar, elige una de estas dos:
-   - Fijar `timeout` en el módulo `layer` (card ITSC-219, PR y `apply`).
-     Es lo recomendado.
-   - Aceptar el riesgo y reintentar a mano los meses que fallen por timeout
-     (ver "Reintentar solo lo fallido"). Anota tu decisión en "Resultados".
+   ITSC-227 y, para evitar los problemas que este mismo runbook encontró,
+   también ITSC-231 (ZIP con CSV duplicado), ITSC-232 (`from = to` en
+   `run-job.yml`) e ITSC-233 (hallazgo `seam_skipped`):
+   `layers/l1_ingest/VERSION` ≥ 0.5.2. Los cuatro jobs de ITSC-224:
+   `l1-backfill`, `l1-daily`, `l1-monthly-close`, `l1-seam-check`. Verifica
+   que existen: `gcloud run jobs list --region <región>`.
+3. **Timeout por tarea.** Ya fijado por ITSC-219 en el módulo `layer`:
+   **3600 s** para `backfill` y `monthly-close`, **900 s** para `daily` y
+   `seam-check`, `max_retries = 1`. El mes más pesado medido hasta ahora
+   (2026-02, ver "Resultados") tardó 537 s: el margen sigue siendo amplio.
+   Si cambia la config de cómputo (vCPU/GiB) o aparece un mes claramente más
+   pesado, vuelve a comparar la pared contra estos topes antes de lanzar.
 4. **Cuota de Cloud Run.** Cada tarea pide 4 vCPU y 16 GiB. El módulo no fija
    `parallelism`, así que Cloud Run lanza todas las tareas que la cuota
    regional permita a la vez; el resto espera. La cuota de CPU y memoria
@@ -91,8 +91,8 @@ gcloud logging read \
 ```
 
 Distingue la causa como en la [sonda](sonda-l1.md#qué-leer-y-qué-anotar):
-OOM ("Memory limit exceeded"), timeout (tarea cortada a los 600 s) o error
-de datos. Luego relanza `l1-backfill` **con el mismo rango completo** o solo
+OOM ("Memory limit exceeded"), timeout (tarea cortada a los 3600 s de
+`backfill`, ITSC-219) o error de datos. Luego relanza `l1-backfill` **con el mismo rango completo** o solo
 con los meses fallidos (`from` = `to` = ese mes, un run por mes o tramo
 contiguo), sin `force`. Los meses ya procesados se saltan solos: la tarea
 compara el `.CHECKSUM` publicado con el del manifiesto (ITSC-221) y, si
@@ -220,44 +220,92 @@ segundos:
 
 ## Resultados
 
-Los llena la card ITSC-228 al desbloquearse; el humano entrega las URLs.
+Ejecutados por el humano el 2026-09-27. Imagen `l1_ingest`, stack `l1` con
+4 vCPU / 16 GiB, timeout 3600/900 s y `max_retries = 1` (ITSC-219). Antes de
+estos runs ya estaban en `main` ITSC-229/230 (workflow), ITSC-231 (ZIP con
+CSV duplicado) e ITSC-232 (`from = to` en `run-job.yml`); ITSC-233 (hallazgo
+`seam_skipped`) se mergeó el mismo día, a partir de lo que el `daily` de este
+runbook encontró (ver más abajo). El backfill inicial corrió con
+`l1_ingest:0.5.0`; el reintento de 2021-12 y el resto de los pasos, ya con
+`0.5.1`.
 
 **Runs**
 
 | Paso | URL del run | Rango | Tareas OK / fallidas | Reintentos (meses) |
 | --- | --- | --- | --- | --- |
-| Backfill | pendiente | 2017-08 a 2026-07 | pendiente | pendiente |
-| Seam-check | pendiente | 2017-08 a 2026-07 | pendiente | - |
-| daily | pendiente | 2026-08-01 a 2026-08-31 | pendiente | - |
-| monthly-close | pendiente | 2026-08 | pendiente | - |
+| Backfill | [36283117940](https://github.com/byroncz/intrinsica/actions/runs/36283117940) | 2017-08 a 2026-07 | 106 OK, 1 saltado por checksum (2023-03), 1 fallido (2021-12) | 2021-12 → [36344381547](https://github.com/byroncz/intrinsica/actions/runs/36344381547), OK |
+| Seam-check | [36344788264](https://github.com/byroncz/intrinsica/actions/runs/36344788264) | 2017-08 a 2026-07 | 1 tarea, OK | - |
+| daily | [36345285379](https://github.com/byroncz/intrinsica/actions/runs/36345285379) | 2026-08-01 a 2026-08-31 | 31 OK | - |
+| monthly-close | [36346362202](https://github.com/byroncz/intrinsica/actions/runs/36346362202) | 2026-08 | 1 tarea, OK | - |
 
-**Timeout por tarea:** pendiente (¿ITSC-219 aplicado o riesgo aceptado? ¿Algún
-mes por encima de 600 s?).
+2021-12 falló por un ZIP con dos CSV (el bug de ITSC-231, corregido antes del
+reintento); el reintento pasó el chequeo nuevo `zip_extra_members`. 2023-03,
+el mes más pesado según la sonda original, se saltó porque el `.CHECKSUM` ya
+coincidía con el manifiesto (ITSC-221): no hubo que reprocesarlo.
+
+**Timeout por tarea:** aplicado (ITSC-219), 3600/900 s. Ningún mes se acercó
+al tope: la pared máxima medida (2026-02, backfill) fue 537 s, bien dentro
+del margen.
 
 **seam_discontinuity**
 
-| Borde | Explicación | ¿Hueco del proveedor? |
-| --- | --- | --- |
-| pendiente | pendiente | pendiente |
+Los 107 bordes del rango 2017-08–2026-07 dieron `pass` en el `seam-check`
+histórico: sin huecos del proveedor ni solapamientos que explicar. No hay
+filas que anotar en esta tabla para esta ejecución.
 
 **Ciclo daily a monthly-close (2026-08)**
 
 | Verificación | Resultado |
 | --- | --- |
-| 31 provisionales tras daily | pendiente |
-| `consolidated.parquet` presente | pendiente |
-| Sin provisionales tras el cierre | pendiente |
-| `daily_monthly_drift` | pendiente |
-| Hallazgos canonical | pendiente |
+| 31 provisionales tras daily | OK, 31/31; 6 costuras diarias no se pudieron evaluar por la carrera entre tareas paralelas (el día previo aún no estaba escrito) — hallazgo `seam_skipped`, `severity=info`, `status=pass` (ITSC-233), no es un error |
+| `consolidated.parquet` presente | OK, escrito por el `monthly-close` |
+| Sin provisionales tras el cierre | OK, los 31 `provisional-day=*.parquet` se borraron |
+| `daily_monthly_drift` | `pass` |
+| Hallazgos canonical | Emitidos por el `monthly-close`; costura con 2026-07 también `pass` |
 
 **Costo**
 
-| Concepto | Medido | §10.3 |
-| --- | --- | --- |
-| Backfill, GiB-s | pendiente | - |
-| Backfill, vCPU-s | pendiente | - |
-| Backfill, facturado (Billing) | pendiente | ≈ 0–1 USD |
-| Estado estacionario, GiB-s/mes | pendiente | ≈ 0 (free tier) |
+RSS y pared por paso (de lo reportado por el humano desde Cloud Run):
+
+| Paso | Tareas | RSS pico máx. | RSS pico mediana | Pared máx. | Pared mediana |
+| --- | --- | --- | --- | --- | --- |
+| Backfill | 108 | 9.194 MiB (2026-02) | 2.568 MiB | 537 s (2026-02) | 80 s |
+| Backfill, reintento 2021-12 | 1 | 3.590 MiB | - | 113,8 s | - |
+| daily | 31 | 570 MiB | - | 11,1 s | - |
+| monthly-close | 1 | 2.347 MiB | - | 81,2 s | - |
+
+El humano no reportó la lista completa de paredes por tarea del backfill (el
+agente no puede leerla: `gcloud` no está instalado ni hay credenciales de GCP
+en esta sesión, por regla del proyecto). Con solo máxima y mediana, la Σ real
+de las 108 paredes queda entre dos cotas:
+
+| Concepto | Cota con mediana (108 × 80 s) | Cota con máxima (108 × 537 s) | §10.3 |
+| --- | --- | --- | --- |
+| Backfill, GiB-s | 138.240 (0,38× cupo) | 927.936 (2,58× cupo) | - |
+| Backfill, vCPU-s | 34.560 (0,19× cupo) | 231.984 (1,29× cupo) | - |
+
+Cupo gratis mensual: 360.000 GiB-s y 180.000 vCPU-s. El reintento de 2021-12
+agrega 1.821 GiB-s y 455 vCPU-s, insignificante frente a ambas cotas. La
+sonda original (TRD-L1 §10.2) estimó 886.272 GiB-s asumiendo el mes más
+pesado (2023-03, 577 s) repetido en los 96 meses del backfill original: la
+cota con máxima de esta ejecución (927.936 GiB-s, con 2026-02 en vez de
+2023-03) confirma ese orden de magnitud. Pero la mayoría de los meses corrió
+cerca de la mediana (80 s), muy por debajo del máximo: el real probablemente
+está más cerca de la cota con mediana que con la de máxima.
+
+**Backfill, facturado (Billing):** pendiente. Billing tarda hasta 24 h en
+reflejar el consumo de Cloud Run; el humano lo agrega cuando esté disponible
+(corrida el 2026-09-27).
+
+**Estado estacionario estimado**, con la máxima de `daily` (no se reportó
+mediana, así que esta es ya una cota conservadora) y el valor único de
+`monthly-close`:
+
+GiB-s/mes ≈ 16 × (31 × 11,1 s + 81,2 s) = 16 × 425,3 s ≈ 6.805 GiB-s/mes
+vCPU-s/mes ≈ 4 × 425,3 s ≈ 1.701 vCPU-s/mes
+
+Ambos muy por debajo del cupo gratis mensual: confirma §10.3 ("`daily` /
+`monthly-close` ≈ 0, free tier").
 
 **Estado del mes en curso:** sin provisionales hasta que el humano encienda
 los schedulers (ITSC-226) o lance `l1-daily` a mano con el rango de días
