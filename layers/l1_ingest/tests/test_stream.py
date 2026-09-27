@@ -4,10 +4,11 @@ import zipfile
 import pytest
 from l1_ingest.conform import TimestampUnitError
 from l1_ingest.parse import open_zip_batches
-from l1_ingest.pipeline import _materialized
+from l1_ingest.pipeline import Unit, _materialized
 from l1_ingest.stream import NotStreamable, stream_partition
 
 BLOCK = 64 * 1024  # unos mil filas por lote
+UNIT = Unit(2024, 3, asset="BTCUSDT")
 
 
 def _csv(n: int, unit: int = 1000, disorder_at: int | None = None) -> bytes:
@@ -29,19 +30,23 @@ def _csv(n: int, unit: int = 1000, disorder_at: int | None = None) -> bytes:
 def _zip(csv: bytes) -> bytes:
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr("BTCUSDT-aggTrades.csv", csv)
+        zf.writestr("BTCUSDT-aggTrades-2024-03.csv", csv)
     return buf.getvalue()
 
 
 def _stream(csv: bytes, path: str):
-    with open_zip_batches(_zip(csv), BLOCK) as (_, batches):
+    with open_zip_batches(
+        _zip(csv), UNIT.asset, UNIT.year, UNIT.month, block_size=BLOCK
+    ) as (_, batches):
         return stream_partition(batches, path)
 
 
 def test_lotes_dan_mismo_hash_y_hallazgos_que_la_ruta_materializada(tmp_path):
     csv = _csv(25_432)
     checks, digest = _stream(csv, str(tmp_path / "stream.parquet"))
-    old_checks, old_digest = _materialized(_zip(csv), str(tmp_path / "old.parquet"))
+    old_checks, old_digest = _materialized(
+        _zip(csv), str(tmp_path / "old.parquet"), UNIT
+    )
 
     assert digest == old_digest
     assert checks == old_checks
@@ -57,7 +62,7 @@ def test_lotes_dan_mismo_hash_y_hallazgos_que_la_ruta_materializada(tmp_path):
 def test_unidad_en_microsegundos_no_se_corrige(tmp_path):
     csv = _csv(3_500, unit=1)
     checks, digest = _stream(csv, str(tmp_path / "a.parquet"))
-    old_checks, old_digest = _materialized(_zip(csv), str(tmp_path / "b.parquet"))
+    old_checks, old_digest = _materialized(_zip(csv), str(tmp_path / "b.parquet"), UNIT)
     assert (checks, digest) == (old_checks, old_digest)
     assert checks[0].status == "pass"
 
@@ -75,7 +80,7 @@ def test_unidad_invalida_en_un_lote_tardio_reporta_rango_global_sin_archivo(tmp_
         _stream(csv, str(tmp_path / "a.parquet"))
     old = pytest.raises(TimestampUnitError)
     with old as old_exc:
-        _materialized(_zip(csv), str(tmp_path / "b.parquet"))
+        _materialized(_zip(csv), str(tmp_path / "b.parquet"), UNIT)
     assert exc.value.check == old_exc.value.check
     assert not (tmp_path / "a.parquet").exists()
     assert [p.name for p in tmp_path.iterdir()] == []

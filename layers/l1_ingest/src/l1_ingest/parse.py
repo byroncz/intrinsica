@@ -11,6 +11,7 @@ import pyarrow.csv as pacsv
 from dq import Severity, Status
 
 from l1_ingest.checks import CheckResult
+from l1_ingest.download import csv_filename
 from l1_ingest.schema import RAW_SCHEMA
 
 FIRST_LINE_MAX = 80
@@ -30,11 +31,33 @@ def _has_header(first_line: str) -> bool:
     return False
 
 
-def _only_csv(zf: zipfile.ZipFile) -> str:
+def _pick_csv(zf: zipfile.ZipFile, expected: str) -> tuple[str, CheckResult | None]:
+    """Elige el miembro cuyo nombre base es `expected`; el resto es sobrante.
+
+    Con varios candidatos (mismo nombre base, ruta distinta) prefiere el de
+    la raíz (sin `/`) y, si ninguno está en la raíz, el primero en el orden
+    del ZIP. Los miembros que no son el elegido -de cualquier tipo- generan
+    el hallazgo `zip_extra_members` en vez de abortar: Binance publicó el ZIP
+    mensual de 2021-12 con el CSV en la raíz y duplicado bajo una ruta interna
+    de su colector, ambos con el mismo checksum oficial (ITSC-231).
+    """
     members = zf.namelist()
-    if len(members) != 1 or not members[0].lower().endswith(".csv"):
-        raise ValueError(f"el ZIP debe traer exactamente un .csv, trae {members}")
-    return members[0]
+    candidates = [m for m in members if m.rsplit("/", 1)[-1] == expected]
+    if not candidates:
+        raise ValueError(f"el ZIP no trae {expected!r}, trae {members}")
+    in_root = [m for m in candidates if "/" not in m]
+    chosen = in_root[0] if in_root else candidates[0]
+    extra = [m for m in members if m != chosen]
+    if not extra:
+        return chosen, None
+    check = CheckResult(
+        check_type="zip_extra_members",
+        severity=Severity.WARNING,
+        status=Status.PASS,
+        metric_value=float(len(extra)),
+        details={"members": extra},
+    )
+    return chosen, check
 
 
 def detect_header(first_line: bytes) -> tuple[bool, CheckResult]:
@@ -89,28 +112,40 @@ def iter_batches(
 
 @contextmanager
 def open_zip_batches(
-    data: bytes, block_size: int = BLOCK_SIZE
-) -> Iterator[tuple[CheckResult, Generator[pa.RecordBatch]]]:
-    """Abre el único .csv de un ZIP en RAM y lo entrega en lotes, sin descomprimirlo entero.
+    data: bytes,
+    asset: str,
+    year: int,
+    month: int,
+    day: int | None = None,
+    block_size: int = BLOCK_SIZE,
+) -> Iterator[tuple[list[CheckResult], Generator[pa.RecordBatch]]]:
+    """Abre el CSV esperado de un ZIP en RAM y lo entrega en lotes, sin descomprimirlo entero.
 
-    Devuelve el hallazgo del header y los lotes; en RAM solo viven el ZIP
-    comprimido y un bloque. Los lotes se consumen dentro del bloque `with`; al
-    salir se cierra el generador (y con él el lector) antes que el miembro del ZIP.
+    `asset`/`year`/`month`/`day` fijan el nombre esperado (ver `csv_filename`);
+    con eso se elige el miembro entre varios y, si sobran, se hallazga en vez
+    de abortar (`_pick_csv`). Devuelve el hallazgo de header (y el de
+    sobrantes, si aplica) y los lotes; en RAM solo viven el ZIP comprimido y
+    un bloque. Los lotes se consumen dentro del bloque `with`; al salir se
+    cierra el generador (y con él el lector) antes que el miembro del ZIP.
     """
+    expected = csv_filename(asset, year, month, day)
     with zipfile.ZipFile(io.BytesIO(data)) as zf:
-        member = _only_csv(zf)
+        member, extra_check = _pick_csv(zf, expected)
         with zf.open(member) as head:
-            header, check = detect_header(head.readline(HEADER_READ_MAX))
+            header, header_check = detect_header(head.readline(HEADER_READ_MAX))
+        checks = [header_check] if extra_check is None else [header_check, extra_check]
         with zf.open(member) as source:
             batches = iter_batches(source, header, block_size)
             try:
-                yield check, batches
+                yield checks, batches
             finally:
                 batches.close()
 
 
-def read_zip(data: bytes) -> tuple[pa.Table, CheckResult]:
+def read_zip(
+    data: bytes, asset: str, year: int, month: int, day: int | None = None
+) -> tuple[pa.Table, list[CheckResult]]:
     """Decodifica un ZIP de aggTrades a una tabla completa (ruta materializada)."""
-    with open_zip_batches(data) as (check, batches):
+    with open_zip_batches(data, asset, year, month, day) as (checks, batches):
         table = pa.Table.from_batches(batches, schema=RAW_SCHEMA)
-    return table, check
+    return table, checks

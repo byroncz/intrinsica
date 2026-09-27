@@ -143,6 +143,29 @@ emit_findings([finding], "gs://<project_id>-dq-findings")
 
 En GCS usa Application Default Credentials; no hay credenciales en código.
 
+### Catálogo de hallazgos
+
+`check_type` de L1 definidos en el diseño original
+([TRD-L1 §9.3](TRD/l1.md#93-tipos-de-chequeo-check_type)): `checksum_fail`,
+`checksum_drift`, `header_detected`, `timestamp_unit_corrected`,
+`reorder_applied`, `aggid_gap`, `aggid_duplicate`, `seam_discontinuity`,
+`daily_monthly_drift`. Los que se agregan después de un bug real se
+documentan aquí, con su porqué:
+
+- **`zip_extra_members`** (ITSC-231): un ZIP mensual o diario trae, además
+  del CSV esperado, otros miembros. Caso real: Binance publicó el ZIP de
+  2021-12 con el CSV oficial duplicado, una vez en la raíz y otra bajo una
+  ruta interna de su colector (`fsx-data/collector_data/...`), ambas copias
+  con el mismo checksum publicado. L1 elige el miembro cuyo nombre base es
+  exactamente `<asset>-aggTrades-<YYYY-MM>.csv` (o `<YYYY-MM-DD>` en diario);
+  con varios candidatos, prefiere el de la raíz y, si ninguno está en la
+  raíz, el primero en el orden del ZIP (`_pick_csv` en
+  [`layers/l1_ingest/src/l1_ingest/parse.py`](../layers/l1_ingest/src/l1_ingest/parse.py)).
+  Si sobran miembros no aborta: emite `severity = warning`,
+  `status = pass`, `metric_value` = número de miembros sobrantes y
+  `details.members` con esa lista. Si ningún miembro coincide con el nombre
+  esperado, sigue abortando con `ValueError`, como antes de ITSC-231.
+
 ### Estado actual de un hallazgo
 
 El estado actual es el último evento por `finding_id`

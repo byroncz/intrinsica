@@ -35,6 +35,13 @@ class Download:
     downloaded_at: datetime
 
 
+def _stem(asset: str, year: int, month: int, day: int | None = None) -> str:
+    """Nombre base sin extensión, mensual o diario, que Binance publica."""
+    if day is None:
+        return f"{asset}-aggTrades-{year:04d}-{month:02d}"
+    return f"{asset}-aggTrades-{year:04d}-{month:02d}-{day:02d}"
+
+
 def source_url(
     asset: str,
     year: int,
@@ -43,15 +50,16 @@ def source_url(
     base_url: str = BASE_URL,
 ) -> str:
     """URL del ZIP de aggTrades: mensual si `day` es None, diario si no."""
-    if day is None:
-        return (
-            f"{base_url}/data/spot/monthly/aggTrades/{asset}/"
-            f"{asset}-aggTrades-{year:04d}-{month:02d}.zip"
-        )
+    kind = "monthly" if day is None else "daily"
     return (
-        f"{base_url}/data/spot/daily/aggTrades/{asset}/"
-        f"{asset}-aggTrades-{year:04d}-{month:02d}-{day:02d}.zip"
+        f"{base_url}/data/spot/{kind}/aggTrades/{asset}/"
+        f"{_stem(asset, year, month, day)}.zip"
     )
+
+
+def csv_filename(asset: str, year: int, month: int, day: int | None = None) -> str:
+    """Nombre esperado del único CSV dentro del ZIP de `source_url` (ITSC-231)."""
+    return f"{_stem(asset, year, month, day)}.csv"
 
 
 def _get(url: str) -> bytes:
