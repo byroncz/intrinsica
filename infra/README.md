@@ -207,39 +207,46 @@ data "terraform_remote_state" "data" {
 - Un stack de capa nunca crea buckets: son datos y `data` es su único dueño.
 - Los módulos hijo no declaran `provider` (TRD maestro §8.2).
 
-## Limpieza única de los `.tmp` huérfanos en `landing` (ITSC-234)
+## Limpieza única de los `.tmp` acumulados en `landing` (ITSC-234)
 
-Antes de ITSC-234, `PartitionWriter` escribía a un temporal y lo movía sobre
-el destino con `fs.move`: en GCS eso es copia más borrado, y con el bucket
-versionado cada `.tmp` borrado quedaba como versión no vigente del mismo
-tamaño que la partición, duplicando el almacenamiento (detalle completo en
-docs/data-contracts.md, "Sobrescritura atómica"). Tras aplicar la regla de
-ciclo de vida nueva del bucket `landing` (`matches_suffix = [".tmp"]`), esos
-restos siguen ahí hasta que la regla los alcanza. Para no esperar, bórralos a
-mano una sola vez desde Cloud Shell. Solo lo ejecuta el humano; el agente no
-tiene credenciales de GCP.
+`PartitionWriter` escribe a un temporal y lo mueve sobre el destino con
+`fs.move`: en GCS eso es copia más borrado, y con el bucket versionado cada
+`.tmp` borrado queda como versión no vigente del mismo tamaño que la
+partición, duplicando el almacenamiento (detalle completo en
+docs/data-contracts.md, "Sobrescritura atómica"). Antes de ITSC-234, esas
+versiones solo se borraban cuando se acumulaban 3 más nuevas y pasaban 30
+días (`num_newer_versions`/`days_since_noncurrent_time` de la primera regla
+de lifecycle). La regla nueva (`matches_suffix = [".tmp"]`,
+`days_since_noncurrent_time = 1`) baja esa espera a un día para lo que se
+escriba de ahora en más, pero los `.tmp` acumulados antes de aplicarla siguen
+ahí hasta que la regla los alcanza. Para no esperar, bórralos a mano una sola
+vez desde Cloud Shell. Solo lo ejecuta el humano; el agente no tiene
+credenciales de GCP.
 
-Primero verifica qué hay, filtrando solo las versiones no vigentes (`gsutil
-ls -a` lista todas; la vigente no lleva `#<generación>` al final del nombre
-sin más contexto, así que compara contra `gsutil ls` sin `-a`):
+Primero verifica qué hay, filtrando solo las versiones no vigentes:
+`gsutil ls -a` lista todas las versiones y les agrega `#<generación>` al
+nombre; comparar contra `gsutil ls` (sin `-a`, que solo lista la vigente) es
+lo que distingue una versión no vigente de la vigente:
 
 ```bash
-gsutil ls -a 'gs://<bucket landing>/l1/**/.*.tmp'
+gsutil ls -a 'gs://<project_id>-landing/l1/**/.*.tmp'
 ```
 
 Confirmado que son restos (no hay `.tmp` vigente: ningún `PartitionWriter`
 en curso los necesita), bórralos:
 
 ```bash
-gsutil rm -a 'gs://<bucket landing>/l1/**/.*.tmp'
+gsutil rm -a 'gs://<project_id>-landing/l1/**/.*.tmp'
 ```
 
 Verifica el resultado comparando el tamaño vigente contra el total con
-versiones; deberían quedar aproximadamente iguales:
+versiones; deberían quedar aproximadamente iguales (una diferencia pequeña es
+esperable: son los `.tmp` de escrituras recientes que la regla de un día
+todavía no alcanzó):
 
 ```bash
-gsutil du -sh 'gs://<bucket landing>/l1'
-gsutil du -sha 'gs://<bucket landing>/l1'
+gsutil du -sh 'gs://<project_id>-landing/l1'
+gsutil du -sha 'gs://<project_id>-landing/l1'
 ```
 
 ## Timeouts y reintentos de los jobs de l1
