@@ -318,10 +318,25 @@ la cota con máxima de esta ejecución (927.936 GiB-s, con 2026-02 en vez de
 **Σ real de las paredes:** ninguna de las tres columnas es el dato que pide
 [§10.3](../TRD/l1.md). Falta que el humano sume las 108 paredes reales, por
 ejemplo con
-`gcloud logging read 'resource.type="cloud_run_job" AND resource.labels.job_name="l1-backfill" AND textPayload:"sonda: unit="' --project <proyecto> --format='value(textPayload)'`
-sobre el run [36283117940](https://github.com/byroncz/intrinsica/actions/runs/36283117940)
-y sumando cada `wall_s`, o leyendo la duración de cada tarea en *Cloud Run →
-Jobs → l1-backfill → ejecución → Tareas*. El veredicto de la columna §10.3 no
+
+```sh
+gcloud logging read 'resource.type="cloud_run_job"
+  AND resource.labels.job_name="l1-backfill"
+  AND textPayload:"sonda: unit="
+  AND timestamp>="2026-09-27T00:38:00Z" AND timestamp<="2026-09-27T02:35:00Z"' \
+  --project <proyecto> --format='value(textPayload)'
+```
+
+y sumando cada `wall_s`. La ventana es la del run
+[36283117940](https://github.com/byroncz/intrinsica/actions/runs/36283117940)
+(2026-09-26 19:38 → 21:35, UTC-5) pasada a UTC. Sin ella, la suma mezclaría
+el reintento manual de 2021-12 y la sonda de ITSC-218, que usan el mismo job
+y el mismo formato de log. Si se conoce el nombre de la ejecución, filtrar
+por `labels."run.googleapis.com/execution_name"="<ejecución>"` es más
+preciso que la ventana. Dentro de la ventana sí entra el reintento
+automático de 2021-12 (`max_retries = 1`), y está bien que entre: también
+facturó. La otra vía es leer la duración de cada tarea en *Cloud Run → Jobs
+→ l1-backfill → ejecución → Tareas*. El veredicto de la columna §10.3 no
 depende de esa Σ: sale directo de lo facturado (abajo), que ya es el dato
 real y no una estimación a partir de las paredes.
 
