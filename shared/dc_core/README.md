@@ -1,9 +1,9 @@
 # dc_core
 
+Crate Rust del núcleo de Directional Change (DC). Definido en el
 [TRD maestro §8.1](../../docs/TRD/plataforma_directional_change.md#81-estrategia-de-repositorio-monorepo-políglota).
 Expone el detector de un solo θ, `Detector` (ITSC-239); el fan-out de 50 θ,
 el carry-over y los bindings se construyen encima.
-la lógica de detección de eventos DC llega en E4.
 
 ## Toolchain
 
