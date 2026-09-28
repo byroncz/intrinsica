@@ -290,8 +290,8 @@ lo que se puede decir de la Σ real de las 108 paredes:
 
 | Concepto | Estimación con mediana (108 × 80 s) | Cota inferior válida (53 × 80 s + 537 s) | Cota con máxima (108 × 537 s) | §10.3 |
 | --- | --- | --- | --- | --- |
-| Backfill, GiB-s | 138.240 (0,38× cupo) | 76.432 (0,21× cupo) | 927.936 (2,58× cupo) | - |
-| Backfill, vCPU-s | 34.560 (0,19× cupo) | 19.108 (0,11× cupo) | 231.984 (1,29× cupo) | - |
+| Backfill, GiB-s | 138.240 (0,38× cupo) | 76.432 (0,21× cupo) | 927.936 (2,58× cupo) | dentro (Billing: neto $0) |
+| Backfill, vCPU-s | 34.560 (0,19× cupo) | 19.108 (0,11× cupo) | 231.984 (1,29× cupo) | dentro (Billing: neto $0) |
 
 La columna "Estimación con mediana" no es una cota: es solo 108 × la
 mediana, y con cola derecha (2026-02 con 537 s empuja la media por encima de
@@ -321,12 +321,22 @@ ejemplo con
 `gcloud logging read 'resource.type="cloud_run_job" AND resource.labels.job_name="l1-backfill" AND textPayload:"sonda: unit="' --project <proyecto> --format='value(textPayload)'`
 sobre el run [36283117940](https://github.com/byroncz/intrinsica/actions/runs/36283117940)
 y sumando cada `wall_s`, o leyendo la duración de cada tarea en *Cloud Run →
-Jobs → l1-backfill → ejecución → Tareas*. Mientras llega, la fila §10.3
-queda sin veredicto.
+Jobs → l1-backfill → ejecución → Tareas*. El veredicto de la columna §10.3 no
+depende de esa Σ: sale directo de lo facturado (abajo), que ya es el dato
+real y no una estimación a partir de las paredes.
 
-**Backfill, facturado (Billing):** pendiente. Billing tarda hasta 24 h en
-reflejar el consumo de Cloud Run; el humano lo agrega cuando esté disponible
-(corrida el 2026-09-27).
+**Backfill, facturado (Billing):** rango 2026-09-26 a 2026-09-27, proyecto
+`intrinsica-dc`, cuenta en COP (≈4.000 COP/USD). Cubre el backfill (09-26)
+junto con el seam-check, el daily y el monthly-close (09-27), así que el
+monto es del rango completo, no solo del backfill: Cloud Run bruto 5.197 COP
+(~1,30 USD), crédito de prueba -5.197 COP, neto 0. Confirma §10.3 (backfill
+≈0-1 USD, `daily`/`monthly-close` ≈0): el crédito de prueba absorbió el
+excedente sobre el cupo gratis.
+
+**Cloud Storage:** sin cargo consolidado aún en el reporte de esos días
+(Cloud Storage factura por día con retraso, más que Cloud Run). 38,4 GiB
+vigentes en `landing`, estimado ~3.000 COP/mes en clase Standard antes de que
+el lifecycle del bucket (ITSC-222) los pase a Nearline.
 
 **Estado estacionario estimado**, con la máxima de `daily` (no se reportó
 mediana, así que esta es ya una cota conservadora) y el valor único de
