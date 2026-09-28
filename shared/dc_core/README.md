@@ -60,3 +60,12 @@ if let Some(event) = d.finish() { /* cierra un grupo de empate abierto */ }
 - `discarded()` cuenta los DC sin tick descartados (§9.1); con un θ válido es
   una guarda inalcanzable y debe quedar en cero.
 - No serializa el estado ni lo restaura: eso es del carry-over.
+
+## Equivalencia contra la v0
+
+`tests/equivalence_v0.rs` compara el detector con los eventos que el kernel de
+la v0 (`v0.2.0-legacy`) calcula sobre un día real de la landing, para cinco θ.
+Con θ = 2 % coinciden los 12 eventos campo a campo; con los demás, las únicas
+discrepancias son la divergencia declarada del instante de confirmación
+atómico (ADR-L2-04) y están fijadas en la prueba. Fixture, script y cómo
+regenerarlo: [`tests/fixtures/README.md`](tests/fixtures/README.md).
