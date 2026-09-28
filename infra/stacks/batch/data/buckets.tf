@@ -51,6 +51,8 @@ resource "google_storage_bucket" "landing" {
   # la partición. Esta regla lo borra al día siguiente sin esperar
   # num_newer_versions (un .tmp borrado no tiene versiones más nuevas y
   # nunca alcanza esa condición), evitando que la duplicación se acumule.
+  # Es la mitigación definitiva: se acepta un .tmp no vigente de hasta un
+  # día por escritura (docs/data-contracts.md, "Sobrescritura atómica").
   lifecycle_rule {
     action {
       type = "Delete"
