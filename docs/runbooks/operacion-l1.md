@@ -291,8 +291,8 @@ lo que se puede decir de la Σ real de las 108 paredes:
 
 | Concepto | Estimación con mediana (108 × 80 s) | Cota inferior válida (53 × 80 s + 537 s) | Cota con máxima (108 × 537 s) | §10.3 |
 | --- | --- | --- | --- | --- |
-| Backfill, GiB-s | 138.240 (0,38× cupo) | 76.432 (0,21× cupo) | 927.936 (2,58× cupo) | dentro (Billing: neto $0) |
-| Backfill, vCPU-s | 34.560 (0,19× cupo) | 19.108 (0,11× cupo) | 231.984 (1,29× cupo) | dentro (Billing: neto $0) |
+| Backfill, GiB-s | 138.240 (0,38× cupo) | 76.432 (0,21× cupo) | 927.936 (2,58× cupo) | ~1,30 USD bruto, algo por encima; neto $0 por crédito de prueba (ver Billing) |
+| Backfill, vCPU-s | 34.560 (0,19× cupo) | 19.108 (0,11× cupo) | 231.984 (1,29× cupo) | ~1,30 USD bruto, algo por encima; neto $0 por crédito de prueba (ver Billing) |
 
 La columna "Estimación con mediana" no es una cota: es solo 108 × la
 mediana, y con cola derecha (2026-02 con 537 s empuja la media por encima de
@@ -301,8 +301,8 @@ inferior que sí se sostiene con los dos únicos datos medidos (mediana 80 s,
 máxima 537 s) sale de que al menos 54 de las 108 tareas —la mitad
 superior— duran ≥ 80 s, y de esas 54 ya conocemos la mayor (537 s, 2026-02):
 Σ ≥ 53×80 s + 537 s = 4.777 s. Las 54 tareas restantes no tienen piso
-conocido, así que no hay forma de acotar la Σ real por arriba de esta cifra
-sin medir cada tarea.
+conocido, así que no se puede subir esta cota inferior sin medir cada tarea.
+La cota superior sí existe: la columna "Cota con máxima" (108 × 537 s).
 
 Cupo gratis mensual: 360.000 GiB-s y 180.000 vCPU-s. El reintento de 2021-12
 agrega 1.821 GiB-s y 455 vCPU-s, insignificante frente a las tres columnas.
@@ -345,9 +345,11 @@ real y no una estimación a partir de las paredes.
 `intrinsica-dc`, cuenta en COP (≈4.000 COP/USD). Cubre el backfill (09-26)
 junto con el seam-check, el daily y el monthly-close (09-27), así que el
 monto es del rango completo, no solo del backfill: Cloud Run bruto 5.197 COP
-(~1,30 USD), crédito de prueba -5.197 COP, neto 0. Confirma §10.3 (backfill
-≈0-1 USD, `daily`/`monthly-close` ≈0): el crédito de prueba absorbió el
-excedente sobre el cupo gratis.
+(~1,30 USD), crédito de prueba -5.197 COP, neto 0. Veredicto frente a §10.3:
+~1,30 USD bruto, algo por encima del ≈0–1 USD que prevé para el backfill, y
+eso aun cargándole al backfill el monto de los otros tres runs. El neto 0 no
+es mérito del diseño: lo absorbió un crédito de prueba temporal, que no
+estará en una cuenta de producción.
 
 **Cloud Storage:** sin cargo consolidado aún en el reporte de esos días
 (Cloud Storage factura por día con retraso, más que Cloud Run). 38,4 GiB
