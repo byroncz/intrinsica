@@ -59,12 +59,17 @@ def load_v0_kernel(repo: Path):
 def read_day(parquet: Path, day: dt.date):
     """Ticks del día UTC, ordenados por (transact_time, agg_trade_id)."""
     table = pq.read_table(parquet, columns=["agg_trade_id", "price", "transact_time"])
-    start = int(dt.datetime(day.year, day.month, day.day, tzinfo=dt.UTC).timestamp()) * 1_000_000
+    start = (
+        int(dt.datetime(day.year, day.month, day.day, tzinfo=dt.UTC).timestamp())
+        * 1_000_000
+    )
     mask = pc.and_(
         pc.greater_equal(table["transact_time"], start),
         pc.less(table["transact_time"], start + US_PER_DAY),
     )
-    table = table.filter(mask).sort_by([("transact_time", "ascending"), ("agg_trade_id", "ascending")])
+    table = table.filter(mask).sort_by(
+        [("transact_time", "ascending"), ("agg_trade_id", "ascending")]
+    )
     ids = table["agg_trade_id"].to_pylist()
     prices = [str(p) for p in table["price"].to_pylist()]  # Decimal exacto, 8 decimales
     times = table["transact_time"].to_pylist()
@@ -79,7 +84,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("parquet", type=Path, help="consolidated.parquet del mes")
     parser.add_argument("day", type=dt.date.fromisoformat, help="día UTC, YYYY-MM-DD")
-    parser.add_argument("--repo", type=Path, default=OUT.parents[3], help="raíz del repo (para git show)")
+    parser.add_argument(
+        "--repo",
+        type=Path,
+        default=OUT.parents[3],
+        help="raíz del repo (para git show)",
+    )
     args = parser.parse_args()
 
     kernel = load_v0_kernel(args.repo)
@@ -101,16 +111,29 @@ def main() -> None:
     dirs = np.zeros(n, dtype=np.int8)
     pos_of_id = {i: k for k, i in enumerate(ids)}
 
-    with (OUT / "events_v0.csv").open("w") as ev, (OUT / "final_state_v0.csv").open("w") as fs:
+    with (
+        (OUT / "events_v0.csv").open("w") as ev,
+        (OUT / "final_state_v0.csv").open("w") as fs,
+    ):
         ev.write(
             "theta,seq,direction,reference_price,reference_time,reference_agg_trade_id,"
             "confirm_price,confirm_time,confirm_agg_trade_id,"
             "extreme_price,extreme_time,extreme_agg_trade_id\n"
         )
-        fs.write("theta,n_events,trend,ext_high_price,ext_low_price,last_os_ref,orphan_start_idx\n")
+        fs.write(
+            "theta,n_events,trend,ext_high_price,ext_low_price,last_os_ref,orphan_start_idx\n"
+        )
         for theta_int in THETAS:
             r = kernel.segment_events_kernel(
-                p64, t64, id64, dirs, theta_int / SCALE, np.int8(0), np.float64(0), np.float64(0), np.float64(0)
+                p64,
+                t64,
+                id64,
+                dirs,
+                theta_int / SCALE,
+                np.int8(0),
+                np.float64(0),
+                np.float64(0),
+                np.float64(0),
             )
             (_, _, dc_q, _, _, _, _, _, types, dc_off, _) = r[:11]
             ref_p, ref_t, ext_p, ext_t, conf_p, conf_t = r[11:17]
@@ -122,11 +145,21 @@ def main() -> None:
             for k in range(n_events):
                 last = k == n_events - 1
                 # Extremo del evento k = referencia del k+1 (la v0 lo rellena igual).
-                ext = ["", "", ""] if last else [fmt(ext_p[k]), int(ext_t[k]), ref_id[k + 1]]
+                ext = (
+                    ["", "", ""]
+                    if last
+                    else [fmt(ext_p[k]), int(ext_t[k]), ref_id[k + 1]]
+                )
                 row = [
-                    theta_int, k, int(types[k]),
-                    fmt(ref_p[k]), int(ref_t[k]), ref_id[k],
-                    fmt(conf_p[k]), int(conf_t[k]), conf_id[k],
+                    theta_int,
+                    k,
+                    int(types[k]),
+                    fmt(ref_p[k]),
+                    int(ref_t[k]),
+                    ref_id[k],
+                    fmt(conf_p[k]),
+                    int(conf_t[k]),
+                    conf_id[k],
                     *ext,
                 ]
                 ev.write(",".join(str(c) for c in row) + "\n")
@@ -134,7 +167,9 @@ def main() -> None:
                 f"{theta_int},{int(n_events)},{int(trend)},{fmt(ext_high)},{fmt(ext_low)},"
                 f"{fmt(os_ref)},{int(orphan)}\n"
             )
-            print(f"theta={theta_int}: {int(n_events)} eventos, tendencia final {int(trend)}")
+            print(
+                f"theta={theta_int}: {int(n_events)} eventos, tendencia final {int(trend)}"
+            )
     print(f"{n} ticks de {args.day}")
 
 
