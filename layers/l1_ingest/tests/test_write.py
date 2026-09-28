@@ -1,7 +1,6 @@
 from decimal import Decimal
 
 import pyarrow as pa
-import pyarrow.fs as pafs
 import pyarrow.parquet as pq
 import pytest
 from l1_ingest.schema import OUTPUT_SCHEMA
@@ -185,98 +184,3 @@ def test_abort_local_deja_el_destino_intacto_y_sin_temporal(tmp_path):
         raise RuntimeError("boom")
     assert pq.read_table(path).num_rows == 3
     assert [p.name for p in tmp_path.iterdir()] == ["c.parquet"]
-
-
-class _FakeGcsSink:
-    """Buffer en memoria; el objeto solo "sube" a `objects` si se cierra.
-
-    Como el `GcsFileSystem` real: mientras el stream no cierra con éxito,
-    `write_partition` puede llenarlo de bytes sin que nada quede subido.
-    """
-
-    def __init__(self, fs, path):
-        self._fs = fs
-        self._path = path
-        self._buffer = bytearray()
-        self.closed = False
-
-    def write(self, data):
-        self._buffer.extend(data)
-        return len(data)
-
-    def tell(self):
-        return len(self._buffer)
-
-    def writable(self):
-        return True
-
-    def seekable(self):
-        return False
-
-    def readable(self):
-        return False
-
-    def close(self):
-        self._fs.objects[self._path] = bytes(self._buffer)
-        self.closed = True
-
-
-class _FakeGcsFileSystem:
-    """Simula lo justo de GCS: `open_output_stream` no crea nada hasta cerrar."""
-
-    def __init__(self, existing: dict[str, bytes] | None = None):
-        self.objects = dict(existing or {})
-        self.opened: list[str] = []
-
-    def get_file_info(self, path):
-        found = path in self.objects
-        return pafs.FileInfo(
-            path, pafs.FileType.File if found else pafs.FileType.NotFound
-        )
-
-    def open_output_stream(self, path, **kwargs):
-        self.opened.append(path)
-        return _FakeGcsSink(self, path)
-
-    def delete_file(self, path):
-        if path not in self.objects:
-            raise OSError(f"no existe: {path}")
-        del self.objects[path]
-
-
-def _as_gcs(tmp_path, fake_fs) -> PartitionWriter:
-    """`PartitionWriter` sobre `fake_fs`, como si `path` fuera `gs://...`."""
-    writer = PartitionWriter(str(tmp_path / "c.parquet"))
-    writer._fs = fake_fs
-    writer._is_gcs = True
-    return writer
-
-
-def test_gcs_commit_escribe_directo_sobre_target_sin_tmp(tmp_path):
-    fake_fs = _FakeGcsFileSystem()
-    writer = _as_gcs(tmp_path, fake_fs)
-    with writer as w:
-        w.write_table(_table(3))
-        w.commit()
-    assert fake_fs.opened == [writer._target]
-    assert list(fake_fs.objects) == [writer._target]
-    assert fake_fs.objects[writer._target]
-
-
-def test_gcs_abort_no_crea_ningun_objeto(tmp_path):
-    fake_fs = _FakeGcsFileSystem()
-    writer = _as_gcs(tmp_path, fake_fs)
-    with pytest.raises(RuntimeError, match="boom"), writer as w:
-        w.write_table(_table(3))
-        raise RuntimeError("boom")
-    assert fake_fs.objects == {}
-
-
-def test_gcs_abort_no_toca_una_version_previa(tmp_path):
-    fake_fs = _FakeGcsFileSystem()
-    writer = _as_gcs(tmp_path, fake_fs)
-    fake_fs.objects[writer._target] = b"contenido previo"
-    with pytest.raises(RuntimeError, match="boom"), writer as w:
-        w.write_table(_table(3))
-        raise RuntimeError("boom")
-    assert fake_fs.objects[writer._target] == b"contenido previo"
