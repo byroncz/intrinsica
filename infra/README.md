@@ -213,10 +213,11 @@ data "terraform_remote_state" "data" {
 `fs.move`: en GCS eso es copia más borrado, y con el bucket versionado cada
 `.tmp` borrado queda como versión no vigente del mismo tamaño que la
 partición, duplicando el almacenamiento (detalle completo en
-docs/data-contracts.md, "Sobrescritura atómica"). Antes de ITSC-234, esas
-versiones solo se borraban cuando se acumulaban 3 más nuevas y pasaban 30
-días (`num_newer_versions`/`days_since_noncurrent_time` de la primera regla
-de lifecycle). La regla nueva (`matches_suffix = [".tmp"]`,
+docs/data-contracts.md, "Sobrescritura atómica"). Antes de ITSC-234, la
+primera regla de lifecycle (`num_newer_versions`/`days_since_noncurrent_time`)
+nunca alcanzaba a estos `.tmp`: un `.tmp` borrado no vuelve a tener versiones
+más nuevas, así que la condición de `num_newer_versions` nunca se cumplía y
+se acumulaban para siempre. La regla nueva (`matches_suffix = [".tmp"]`,
 `days_since_noncurrent_time = 1`) baja esa espera a un día para lo que se
 escriba de ahora en más, pero los `.tmp` acumulados antes de aplicarla siguen
 ahí hasta que la regla los alcanza. Para no esperar, bórralos a mano una sola
