@@ -71,43 +71,34 @@ def _is_sorted(table: pa.Table) -> bool:
 class PartitionWriter:
     """Escribe el Parquet de salida por lotes, con las propiedades físicas de §7.2.
 
-    En GCS no hace falta temporal: un objeto solo existe cuando su subida
-    termina completa (`close()` exitoso), así que el stream se abre directo
-    sobre `target` y una subida interrumpida no deja nada ni toca la versión
-    anterior (docs/data-contracts.md, "Sobrescritura atómica"). Por eso, si
-    el bloque `with` no llega a `commit`, `__exit__` suelta las referencias
-    del escritor y el stream sin cerrarlos con éxito -cerrar es lo que
-    finalizaría el objeto- y, como red de seguridad ante una versión de
-    pyarrow que sí materializara algo a medio subir, borra `target` solo si
-    no existía antes de abrir el stream (así nunca destruye una versión
-    previa legítima).
+    El archivo se escribe a un temporal del mismo directorio (o del mismo
+    prefijo en GCS) y `commit` lo renombra sobre el destino: nunca queda un
+    archivo a medias ni se toca el anterior si algo falla. Sin `commit`, salir
+    del bloque `with` borra el temporal. El llamador garantiza el orden.
 
-    En local el filesystem no da esa atomicidad solo, así que sí se escribe
-    a un temporal `.<nombre>.<uuid>.tmp` del mismo directorio y `commit` lo
-    renombra sobre el destino con `os.replace`; abortar borra el temporal.
-    El llamador garantiza el orden.
+    En GCS, `commit` mueve el temporal con `fs.move` (copia más borrado): con
+    el bucket versionado, el `.tmp` borrado queda como versión no vigente
+    hasta que la regla de lifecycle de `landing` lo elimina
+    (`docs/data-contracts.md`, "Sobrescritura atómica"). Escribir directo
+    sobre `target` sin temporal no es seguro: `ParquetWriter.__del__` y los
+    destructores de `GcsOutputStream`/`ObjectWriteStream` finalizan la subida
+    aunque `close()` nunca se llame, así que abortar podía dejar el destino
+    sustituido por un Parquet con solo las filas ya escritas (ITSC-234, H1).
     """
 
     def __init__(self, path: str) -> None:
         self.path = path
         self._fs, self._target = resolve_fs(path)
-        self._is_gcs = isinstance(self._fs, pafs.GcsFileSystem)
         parent, _, name = self._target.rpartition("/")
         self._tmp = f"{parent}/.{name}.{uuid.uuid4().hex}.tmp"
         self._sink: pa.NativeFile | None = None
         self._writer: pq.ParquetWriter | None = None
         self._committed = False
-        self._target_existed = False
 
     def __enter__(self) -> Self:
-        if self._is_gcs:
-            self._target_existed = (
-                self._fs.get_file_info(self._target).type != pafs.FileType.NotFound
-            )
-            self._sink = self._fs.open_output_stream(self._target)
-        else:
+        if not isinstance(self._fs, pafs.GcsFileSystem):
             Path(self._target).parent.mkdir(parents=True, exist_ok=True)
-            self._sink = self._fs.open_output_stream(self._tmp)
+        self._sink = self._fs.open_output_stream(self._tmp)
         self._writer = pq.ParquetWriter(self._sink, OUTPUT_SCHEMA, **_WRITE_OPTIONS)
         return self
 
@@ -122,7 +113,9 @@ class PartitionWriter:
     def commit(self) -> str:
         """Cierra el archivo y lo deja en el destino. Devuelve `path`."""
         self._close()
-        if not self._is_gcs:
+        if isinstance(self._fs, pafs.GcsFileSystem):
+            self._fs.move(self._tmp, self._target)
+        else:
             os.replace(self._tmp, self._target)
         self._committed = True
         return self.path
@@ -148,12 +141,9 @@ class PartitionWriter:
         exc: BaseException | None,
         tb: TracebackType | None,
     ) -> None:
-        if self._committed:
-            return
-        if self._is_gcs:
-            self._abort_gcs()
-            return
         self._close()
+        if self._committed:
+            return  # el temporal ya no existe: `commit` lo movió
         try:
             self._fs.delete_file(self._tmp)
         except OSError:
@@ -162,23 +152,6 @@ class PartitionWriter:
             if exc is None:
                 raise
             logger.warning("no se pudo borrar el temporal %s", self._tmp)
-
-    def _abort_gcs(self) -> None:
-        """Aborta sin finalizar el objeto: soltar sin cerrar, y limpiar si hace falta.
-
-        No llama a `close()`: es justo lo que faltaría para que GCS diera por
-        terminada la subida. Solo suelta las referencias al escritor y al
-        stream. Si `target` no existía antes de abrir el stream, además
-        intenta borrarlo, por si alguna vez quedara algo a medio subir.
-        """
-        self._writer = None
-        self._sink = None
-        if self._target_existed:
-            return
-        try:
-            self._fs.delete_file(self._target)
-        except OSError:
-            pass  # lo esperado: abortar sin `close()` no crea nada que borrar
 
 
 def write_partition(table: pa.Table, path: str) -> str:

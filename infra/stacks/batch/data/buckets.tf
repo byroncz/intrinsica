@@ -45,10 +45,12 @@ resource "google_storage_bucket" "landing" {
     }
   }
 
-  # Red de seguridad (ITSC-234): PartitionWriter ya no escribe temporales en
-  # GCS, pero si alguna vez queda un `.tmp` como versión no vigente, esta
-  # regla lo borra al día siguiente sin esperar num_newer_versions (un .tmp
-  # borrado no tiene versiones más nuevas y nunca alcanza esa condición).
+  # ITSC-234: PartitionWriter escribe a un temporal `.tmp` y lo mueve sobre
+  # el destino con fs.move (copia más borrado); con el bucket versionado,
+  # cada `.tmp` borrado queda como versión no vigente del mismo tamaño que
+  # la partición. Esta regla lo borra al día siguiente sin esperar
+  # num_newer_versions (un .tmp borrado no tiene versiones más nuevas y
+  # nunca alcanza esa condición), evitando que la duplicación se acumule.
   lifecycle_rule {
     action {
       type = "Delete"
