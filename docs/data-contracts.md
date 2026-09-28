@@ -57,8 +57,10 @@ tabla se desvía del código.
   filas ya escritas. Por eso se mantiene el temporal en ambos filesystems. Si
   el proceso muere sin pasar por `__exit__` (SIGKILL por OOM), el temporal
   queda huérfano: los lectores lo ignoran porque su nombre empieza por `.` y
-  no es un `.parquet` de la partición, y la regla de lifecycle o una limpieza
-  a mano con `gsutil rm` lo retiran.
+  no es un `.parquet` de la partición, pero sigue vigente (LIVE) y la regla
+  de lifecycle nueva solo actúa sobre versiones no vigentes
+  (`with_state = "ARCHIVED"`): nunca lo alcanza. Solo una limpieza a mano con
+  `gsutil rm` lo retira.
 - **Idempotencia**: es contenido idéntico, no bytes idénticos. Se mide con
   `content_hash(table)` (o `ContentHasher`, que lo calcula lote a lote): el
   SHA-256 del esquema más un SHA-256 por columna sobre los bytes de sus
