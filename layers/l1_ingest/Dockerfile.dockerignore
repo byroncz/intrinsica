@@ -6,3 +6,4 @@
 sandbox.local
 **/*.local
 **/__pycache__
+**/target

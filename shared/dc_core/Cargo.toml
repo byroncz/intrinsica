@@ -1,0 +1,6 @@
+[package]
+name = "dc_core"
+version = "0.1.0"
+edition = "2021"
+description = "Núcleo de Directional Change (DC): detección de puntos de inflexión en series de precios."
+publish = false

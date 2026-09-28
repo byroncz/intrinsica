@@ -21,6 +21,9 @@ l1_ingest = { workspace = true }
 
 [tool.uv.workspace]
 members = ["shared/*", "layers/*"]
+# dc_core es un crate Rust, sin pyproject.toml: un directorio sin manifiesto
+# bajo shared/ rompe el workspace de uv (shared/README.md).
+exclude = ["shared/dc_core"]
 
 [tool.ruff]
 line-length = 88
