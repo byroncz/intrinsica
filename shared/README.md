@@ -12,7 +12,7 @@ Un paquete por subcarpeta, cada uno con su `pyproject.toml` (o `Cargo.toml`).
 | Paquete | Qué es |
 |---|---|
 | [`dq`](dq/) | Contrato del hallazgo de DQ (esquema Arrow) |
-| [`dc_core`](dc_core/) | Crate Rust del núcleo de Directional Change (mínimo, ITSC-238) |
+| [`dc_core`](dc_core/) | Crate Rust del núcleo de Directional Change: detector DC de un θ (ITSC-239) |
 
 ## Nombres reservados (aún no existen)
 

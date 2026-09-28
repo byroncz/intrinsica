@@ -1,8 +1,8 @@
 # dc_core
 
-Crate Rust del núcleo de Directional Change (DC). Definido en el
 [TRD maestro §8.1](../../docs/TRD/plataforma_directional_change.md#81-estrategia-de-repositorio-monorepo-políglota).
-Hoy (ITSC-238) es un crate mínimo que solo prueba que el toolchain compila;
+Expone el detector de un solo θ, `Detector` (ITSC-239); el fan-out de 50 θ,
+el carry-over y los bindings se construyen encima.
 la lógica de detección de eventos DC llega en E4.
 
 ## Toolchain
@@ -33,3 +33,30 @@ suma `gcc` (no `build-essential`) porque es lo mínimo que provee `cc`, y
 lo *recomienda*: sin él `cc` existe pero el enlace falla con `cannot find
 Scrt1.o` / `crti.o`. No hace falta `g++` ni `make` para un crate que aún no
 tiene dependencias con build scripts en C/C++.
+
+## Detector
+
+```rust
+let mut d = Detector::new(10_000_000)?;        // θ = 10 %: round(θ × 10⁸)
+for tick in ticks {                            // Point { price, time, agg_trade_id }
+    if let Some(event) = d.feed(tick) { /* evento cerrado */ }
+}
+if let Some(event) = d.finish() { /* cierra un grupo de empate abierto */ }
+```
+
+- **Sin float, estado O(1).** Precio y θ son enteros de escala `10⁸`; el
+  umbral se multiplica en `i128` (`ceil` en upturn, `floor` en downturn) y se
+  compara en `i64` (TRD-L2 ADR-L2-01/02). `State` son escalares: dirección,
+  ambos extremos, evento pendiente y grupo de empate abierto.
+- **Un evento sale al confirmar el siguiente**, porque su extremo se conoce
+  ahí (ADR-L2-05). `feed` devuelve a lo sumo uno.
+- **Instante de confirmación atómico** (ADR-L2-03/04): los ticks con el mismo
+  `time` que el de confirmación van al DC, el precio de confirmación es el más
+  conservador que cumple el umbral, y esos ticks no mueven extremos ni
+  evalúan reversión. El grupo se cierra con el primer tick de otro `time` o
+  con `finish()`.
+- **Contrato de entrada:** orden estricto por `(time, agg_trade_id)` y
+  `0 < price < PRICE_LIMIT`; `feed` entra en pánico si el precio lo viola.
+- `discarded()` cuenta los DC sin tick descartados (§9.1); con un θ válido es
+  una guarda inalcanzable y debe quedar en cero.
+- No serializa el estado ni lo restaura: eso es del carry-over.
