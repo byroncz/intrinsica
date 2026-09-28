@@ -236,14 +236,15 @@ monthly-close" más abajo): no cubre estas corridas, solo las futuras.
 
 | Paso | URL del run | Rango | Tareas OK / fallidas | Reintentos (meses) | Ejecución Cloud Run | Inicio → fin (run de Actions, UTC-5) |
 | --- | --- | --- | --- | --- | --- | --- |
-| Backfill | [36283117940](https://github.com/byroncz/intrinsica/actions/runs/36283117940) | 2017-08 a 2026-07 | 106 OK, 1 saltado por checksum (2023-03), 1 fallido (2021-12) | 2021-12 → [36344381547](https://github.com/byroncz/intrinsica/actions/runs/36344381547), OK | no reportada | 2026-09-26 19:38 → 21:35 |
+| Backfill | [36283117940](https://github.com/byroncz/intrinsica/actions/runs/36283117940) | 2017-08 a 2026-07 | 106 OK, 1 saltado por checksum (2023-03), 1 fallido (2021-12) | 2021-12 → [36344381547](https://github.com/byroncz/intrinsica/actions/runs/36344381547), OK | `l1-backfill-zzpft` | 2026-09-26 19:38 → 21:35 |
 | Seam-check | [36344788264](https://github.com/byroncz/intrinsica/actions/runs/36344788264) | 2017-08 a 2026-07 | 1 tarea, OK | - | no reportada | 2026-09-27 14:33 → 14:36 |
 | daily | [36345285379](https://github.com/byroncz/intrinsica/actions/runs/36345285379) | 2026-08-01 a 2026-08-31 | 31 OK | - | no reportada | 2026-09-27 14:41 → 14:48 |
 | monthly-close | [36346362202](https://github.com/byroncz/intrinsica/actions/runs/36346362202) | 2026-08 | 1 tarea, OK | - | no reportada | 2026-09-27 14:59 → 15:02 |
 
-"Ejecución Cloud Run" queda como "no reportada": el paso 1 pide anotarla,
-pero el humano no la registró y el log del workflow no la deja en claro para
-una ejecución fallida. "Inicio → fin" es el del run de GitHub Actions (el
+"Ejecución Cloud Run" queda como "no reportada" salvo en el backfill, cuyo
+nombre reportó el humano junto con la Σ de paredes (ver "Costo"): el paso 1
+pide anotarla, pero el log del workflow no la deja en claro para una
+ejecución fallida. "Inicio → fin" es el del run de GitHub Actions (el
 único dato disponible sin credenciales de GCP), no el de la ejecución de
 Cloud Run Jobs en sí.
 
@@ -284,72 +285,77 @@ RSS y pared por paso (de lo reportado por el humano desde Cloud Run):
 | daily | 31 | 570 MiB | - | 11,1 s | - |
 | monthly-close | 1 | 2.347 MiB | - | 81,2 s | - |
 
-El humano no reportó la lista completa de paredes por tarea del backfill (el
-agente no puede leerla: `gcloud` no está instalado ni hay credenciales de GCP
-en esta sesión, por regla del proyecto). Con solo máxima y mediana, esto es
-lo que se puede decir de la Σ real de las 108 paredes:
+**Σ real de las paredes del backfill**, el dato primario que pide
+[§10.3](../TRD/l1.md). La leyó el humano de la línea `sonda: ... wall_s=` de
+cada tarea, en el log de la ejecución `l1-backfill-zzpft` (run
+[36283117940](https://github.com/byroncz/intrinsica/actions/runs/36283117940))
+y del reproceso de 2021-12 (run
+[36344381547](https://github.com/byroncz/intrinsica/actions/runs/36344381547)),
+y la dejó en el PR 54 (comentario del 2026-09-28). El log de GitHub Actions
+del reproceso trae la línea (`wall_s=113.8`); el del backfill no, porque
+Actions solo muestra el `gcloud run jobs execute --wait`, no los logs de las
+tareas.
 
-| Concepto | Estimación con mediana (108 × 80 s) | Cota inferior válida (53 × 80 s + 537 s) | Cota con máxima (108 × 537 s) | §10.3 |
-| --- | --- | --- | --- | --- |
-| Backfill, GiB-s | 138.240 (0,38× cupo) | 76.432 (0,21× cupo) | 927.936 (2,58× cupo) | ~1,30 USD bruto, algo por encima; neto $0 por crédito de prueba (ver Billing) |
-| Backfill, vCPU-s | 34.560 (0,19× cupo) | 19.108 (0,11× cupo) | 231.984 (1,29× cupo) | ~1,30 USD bruto, algo por encima; neto $0 por crédito de prueba (ver Billing) |
+| Tramo | Pared Σ | GiB-s (×16) | vCPU-s (×4) |
+| --- | --- | --- | --- |
+| 107 tareas OK (106 procesadas + 2023-03 saltada por checksum) | 11.412,4 s | 182.598,4 | 45.649,6 |
+| 2 intentos fallidos de 2021-12 (`max_retries = 1`) | 89,2 s | 1.427,2 | 356,8 |
+| Ejecución `l1-backfill-zzpft`, total | 11.501,6 s | 184.025,6 | 46.006,4 |
+| Reproceso de 2021-12 | 113,8 s | 1.820,8 | 455,2 |
+| **Backfill completo** | **11.615,4 s (3,23 h)** | **185.846,4 (0,52× cupo)** | **46.461,6 (0,26× cupo)** |
 
-La columna "Estimación con mediana" no es una cota: es solo 108 × la
-mediana, y con cola derecha (2026-02 con 537 s empuja la media por encima de
-la mediana) no hay garantía de que el real quede cerca. La única cota
-inferior que sí se sostiene con los dos únicos datos medidos (mediana 80 s,
-máxima 537 s) sale de que al menos 54 de las 108 tareas —la mitad
-superior— duran ≥ 80 s, y de esas 54 ya conocemos la mayor (537 s, 2026-02):
-Σ ≥ 53×80 s + 537 s = 4.777 s. Las 54 tareas restantes no tienen piso
-conocido, así que no se puede subir esta cota inferior sin medir cada tarea.
-La cota superior sí existe: la columna "Cota con máxima" (108 × 537 s).
-
-Cupo gratis mensual: 360.000 GiB-s y 180.000 vCPU-s. El reintento de 2021-12
-agrega 1.821 GiB-s y 455 vCPU-s, insignificante frente a las tres columnas.
-La cota con máxima tampoco suma los reintentos automáticos del backfill
-original (`max_retries = 1`): 2021-12 falló y corrió dos veces antes de
-marcarse fallido, así que en el peor caso hay que sumarle hasta 537 s más
-(16×537 = 8.592 GiB-s, 4×537 = 2.148 vCPU-s), insignificante frente al
-total. La sonda ([`docs/runbooks/sonda-l1.md`](sonda-l1.md), extrapolación
-×96 meses) estimó 886.272 GiB-s asumiendo el mes más pesado (2023-03, 577 s)
-repetido en los 96 meses del backfill original:
-la cota con máxima de esta ejecución (927.936 GiB-s, con 2026-02 en vez de
-2023-03) confirma ese orden de magnitud.
-
-**Σ real de las paredes:** ninguna de las tres columnas es el dato que pide
-[§10.3](../TRD/l1.md). Falta que el humano sume las 108 paredes reales, por
-ejemplo con
+Cupo gratis mensual: 360.000 GiB-s y 180.000 vCPU-s. Los intentos fallidos
+entran en la suma porque también facturaron. Para repetir la medición sin
+pasar por la consola:
 
 ```sh
 gcloud logging read 'resource.type="cloud_run_job"
   AND resource.labels.job_name="l1-backfill"
-  AND textPayload:"sonda: unit="
-  AND timestamp>="2026-09-27T00:38:00Z" AND timestamp<="2026-09-27T02:35:00Z"' \
-  --project <proyecto> --format='value(textPayload)'
+  AND labels."run.googleapis.com/execution_name"="l1-backfill-zzpft"
+  AND textPayload:"sonda: unit="' \
+  --project intrinsica-dc --format='value(textPayload)'
 ```
 
-y sumando cada `wall_s`. La ventana es la del run
-[36283117940](https://github.com/byroncz/intrinsica/actions/runs/36283117940)
-(2026-09-26 19:38 → 21:35, UTC-5) pasada a UTC. Sin ella, la suma mezclaría
-el reintento manual de 2021-12 y la sonda de ITSC-218, que usan el mismo job
-y el mismo formato de log. Si se conoce el nombre de la ejecución, filtrar
-por `labels."run.googleapis.com/execution_name"="<ejecución>"` es más
-preciso que la ventana. Dentro de la ventana sí entra el reintento
-automático de 2021-12 (`max_retries = 1`), y está bien que entre: también
-facturó. La otra vía es leer la duración de cada tarea en *Cloud Run → Jobs
-→ l1-backfill → ejecución → Tareas*. El veredicto de la columna §10.3 no
-depende de esa Σ: sale directo de lo facturado (abajo), que ya es el dato
-real y no una estimación a partir de las paredes.
+y sumar cada `wall_s`. Filtrar por `execution_name` deja afuera el
+reproceso manual de 2021-12 y la sonda de ITSC-218, que usan el mismo job y
+el mismo formato de log.
 
-**Backfill, facturado (Billing):** rango 2026-09-26 a 2026-09-27, proyecto
+**Cotas previas a la Σ.** Antes de tener la Σ, el runbook la acotaba con los
+dos únicos datos reportados, la mediana (80 s) y la máxima (537 s, 2026-02).
+Al menos 54 de las 108 tareas duran ≥ 80 s y de ellas la mayor dura 537 s,
+así que Σ ≥ 53 × 80 s + 537 s = 4.777 s. Por arriba, Σ ≤ 108 × 537 s =
+57.996 s. La Σ real de la ejecución, 11.501,6 s, cae dentro de ese rango y
+queda un 33 % por encima de 108 × la mediana (8.640 s): la cola derecha
+existe, pero es corta. Se dejan como registro de cómo se razonó sin el dato:
+
+| Concepto | 108 × mediana (no es cota) | Cota inferior (53 × 80 s + 537 s) | Cota superior (108 × 537 s) | Σ real (ejecución) |
+| --- | --- | --- | --- | --- |
+| Backfill, GiB-s | 138.240 (0,38× cupo) | 76.432 (0,21× cupo) | 927.936 (2,58× cupo) | 184.025,6 (0,51× cupo) |
+| Backfill, vCPU-s | 34.560 (0,19× cupo) | 19.108 (0,11× cupo) | 231.984 (1,29× cupo) | 46.006,4 (0,26× cupo) |
+
+La sonda ([`docs/runbooks/sonda-l1.md`](sonda-l1.md), extrapolación ×96
+meses) estimó 886.272 GiB-s asumiendo que el mes más pesado (2023-03, 577 s)
+se repetía en los 96 meses. El real, 185.846,4 GiB-s, es 0,21× esa
+extrapolación, 4,8 veces menos: la mayoría de los meses son mucho más
+livianos que el más pesado. Por volumen, el backfill completo cabe en el cupo
+gratis mensual.
+
+**Contraste con Billing:** rango 2026-09-26 a 2026-09-27, proyecto
 `intrinsica-dc`, cuenta en COP (≈4.000 COP/USD). Cubre el backfill (09-26)
 junto con el seam-check, el daily y el monthly-close (09-27), así que el
 monto es del rango completo, no solo del backfill: Cloud Run bruto 5.197 COP
-(~1,30 USD), crédito de prueba -5.197 COP, neto 0. Veredicto frente a §10.3:
-~1,30 USD bruto, algo por encima del ≈0–1 USD que prevé para el backfill, y
-eso aun cargándole al backfill el monto de los otros tres runs. El neto 0 no
-es mérito del diseño: lo absorbió un crédito de prueba temporal, que no
-estará en una cuenta de producción.
+(~1,30 USD), crédito de prueba -5.197 COP, neto 0. La Σ, a precio de lista
+con 4 vCPU / 16 GiB, da ≈1,58 USD brutos solo para el backfill (cálculo del
+humano). Los dos coinciden en el orden de magnitud. Billing da menos aunque
+incluye tres runs más, así que la tarifa efectiva que aplicó es menor que la
+de lista usada para estimar; eso no cambia el veredicto. Billing tampoco
+muestra descontado el cupo gratis, aunque por volumen la Σ cabe en él: el
+bruto completo lo absorbió el crédito de prueba.
+
+**Veredicto frente a §10.3:** el backfill costó entre ~1,30 USD (Billing) y
+≈1,58 USD (Σ a precio de lista) brutos, algo por encima del ≈0–1 USD que
+prevé §10.3. El neto 0 no es mérito del diseño: lo absorbió un crédito de
+prueba temporal, que no estará en una cuenta de producción.
 
 **Cloud Storage:** sin cargo consolidado aún en el reporte de esos días
 (Cloud Storage factura por día con retraso, más que Cloud Run). 38,4 GiB
