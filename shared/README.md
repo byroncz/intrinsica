@@ -12,12 +12,12 @@ Un paquete por subcarpeta, cada uno con su `pyproject.toml` (o `Cargo.toml`).
 | Paquete | Qué es |
 |---|---|
 | [`dq`](dq/) | Contrato del hallazgo de DQ (esquema Arrow) |
+| [`dc_core`](dc_core/) | Crate Rust del núcleo de Directional Change (mínimo, ITSC-238) |
 
 ## Nombres reservados (aún no existen)
 
 | Nombre | Qué será | Épica |
 |---|---|---|
-| `dc_core` | Crate Rust del núcleo de Directional Change | E4 |
 | `dc_pyo3` | Bindings PyO3 sobre `dc_core` | E4 |
 | `pyutils` | Utilidades Python comunes | E1 |
 
@@ -25,4 +25,6 @@ Un paquete por subcarpeta, cada uno con su `pyproject.toml` (o `Cargo.toml`).
 
 - Lógica propia de una capa: va en `layers/`.
 - Directorios sin `pyproject.toml`: rompen el workspace de uv. Cada
-  directorio se crea junto con su manifiesto, no antes.
+  directorio se crea junto con su manifiesto, no antes; un paquete solo
+  Rust (como `dc_core`) se excluye en `[tool.uv.workspace] exclude` del
+  `pyproject.toml` raíz.

@@ -19,6 +19,15 @@ jobs:
       - run: uvx yamllint .
       - run: .github/scripts/check-workflow-yaml.sh
 
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show # ubuntu-latest ya trae rustup; lee rust-toolchain.toml sola
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+
   # Decide qué capas construir. Una capa se construye si cambió layers/<capa>/**;
   # todas se construyen si cambió shared/**, uv.lock, pyproject.toml o .github/workflows/**
   # (o en un run manual): el Dockerfile copia el lock y pyproject a la imagen.
