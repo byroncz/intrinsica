@@ -28,6 +28,8 @@ y un lint puede pasar en el contenedor y fallar en CI (o al revés). El costo
 
 `rustup` trae el compilador pero no un linker: `cargo test` invoca `cc` para
 enlazar el binario de pruebas, y Debian trixie no lo trae por defecto. `apt`
-suma `gcc` (no `build-essential`) porque es lo mínimo que provee `cc`; no
-hace falta `g++` ni `make` para un crate que aún no tiene dependencias con
-build scripts en C/C++.
+suma `gcc` (no `build-essential`) porque es lo mínimo que provee `cc`, y
+`libc6-dev` porque la imagen instala sin paquetes recomendados y `gcc` solo
+lo *recomienda*: sin él `cc` existe pero el enlace falla con `cannot find
+Scrt1.o` / `crti.o`. No hace falta `g++` ni `make` para un crate que aún no
+tiene dependencias con build scripts en C/C++.
