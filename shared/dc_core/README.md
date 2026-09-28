@@ -25,3 +25,9 @@ ruta de paquetes Debian, `clippy`/`rustfmt` locales divergen de esa versión
 y un lint puede pasar en el contenedor y fallar en CI (o al revés). El costo
 —volver a bajar el toolchain tras cada `recreate`— es aceptable porque
 `recreate` es poco frecuente frente a `rebuild`.
+
+`rustup` trae el compilador pero no un linker: `cargo test` invoca `cc` para
+enlazar el binario de pruebas, y Debian trixie no lo trae por defecto. `apt`
+suma `gcc` (no `build-essential`) porque es lo mínimo que provee `cc`; no
+hace falta `g++` ni `make` para un crate que aún no tiene dependencias con
+build scripts en C/C++.
