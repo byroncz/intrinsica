@@ -174,3 +174,13 @@ def test_error_de_borrado_no_oculta_la_excepcion_original(tmp_path):
     ):
         writer._fs = _FsWithoutTmpDelete(writer._fs)
         raise RuntimeError("original")
+
+
+def test_abort_local_deja_el_destino_intacto_y_sin_temporal(tmp_path):
+    path = str(tmp_path / "c.parquet")
+    write_partition(_table(3), path)
+    with pytest.raises(RuntimeError, match="boom"), PartitionWriter(path) as writer:
+        writer.write_table(_table(5))
+        raise RuntimeError("boom")
+    assert pq.read_table(path).num_rows == 3
+    assert [p.name for p in tmp_path.iterdir()] == ["c.parquet"]

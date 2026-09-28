@@ -75,6 +75,15 @@ class PartitionWriter:
     prefijo en GCS) y `commit` lo renombra sobre el destino: nunca queda un
     archivo a medias ni se toca el anterior si algo falla. Sin `commit`, salir
     del bloque `with` borra el temporal. El llamador garantiza el orden.
+
+    En GCS, `commit` mueve el temporal con `fs.move` (copia más borrado): con
+    el bucket versionado, el `.tmp` borrado queda como versión no vigente
+    hasta que la regla de lifecycle de `landing` lo elimina
+    (`docs/data-contracts.md`, "Sobrescritura atómica"). Escribir directo
+    sobre `target` sin temporal no es seguro: `ParquetWriter.__del__` y los
+    destructores de `GcsOutputStream`/`ObjectWriteStream` finalizan la subida
+    aunque `close()` nunca se llame, así que abortar podía dejar el destino
+    sustituido por un Parquet con solo las filas ya escritas (ITSC-234, H1).
     """
 
     def __init__(self, path: str) -> None:

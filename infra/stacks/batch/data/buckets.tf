@@ -45,6 +45,25 @@ resource "google_storage_bucket" "landing" {
     }
   }
 
+  # ITSC-234: PartitionWriter escribe a un temporal `.tmp` y lo mueve sobre
+  # el destino con fs.move (copia más borrado); con el bucket versionado,
+  # cada `.tmp` borrado queda como versión no vigente del mismo tamaño que
+  # la partición. Esta regla lo borra al día siguiente sin esperar
+  # num_newer_versions (un .tmp borrado no tiene versiones más nuevas y
+  # nunca alcanza esa condición), evitando que la duplicación se acumule.
+  # Es la mitigación definitiva: se acepta un .tmp no vigente de hasta un
+  # día por escritura (docs/data-contracts.md, "Sobrescritura atómica").
+  lifecycle_rule {
+    action {
+      type = "Delete"
+    }
+    condition {
+      with_state                 = "ARCHIVED"
+      matches_suffix             = [".tmp"]
+      days_since_noncurrent_time = 1
+    }
+  }
+
   # Nearline y no Coldline: L2 relee el histórico completo, y Nearline cobra
   # menos por recuperación. Los 30 días respetan su mínimo de permanencia.
   lifecycle_rule {

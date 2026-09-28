@@ -42,12 +42,30 @@ tabla se desvía del código.
   (`transact_time`, `agg_trade_id`) en los metadatos. `write_partition`
   rechaza una tabla que no llegue ordenada por esas claves.
 - **Sobrescritura atómica**: `PartitionWriter` escribe a un temporal
-  `.<nombre>.<uuid>.tmp` en el mismo directorio (o prefijo de GCS) y lo
-  mueve sobre el destino: `os.replace` en local; en GCS, `move` (copia más
-  borrado). Nunca queda un archivo a medias. Si el proceso muere sin pasar
-  por `__exit__` (SIGKILL por OOM), el temporal queda huérfano: los lectores
-  lo ignoran porque su nombre empieza por `.` y no es un `.parquet`
-  de la partición, y se limpia a mano borrando los `.*.tmp` del prefijo.
+  `.<nombre>.<uuid>.tmp` del mismo directorio (o del mismo prefijo en GCS) y
+  `commit` lo renombra sobre el destino: nunca queda un archivo a medias ni
+  se toca el anterior si algo falla. En local es `os.replace`; en GCS,
+  `fs.move` (copia más borrado). Con el bucket versionado, cada `.tmp`
+  borrado por `fs.move` queda como versión no vigente hasta que la regla de
+  lifecycle de `landing` lo elimina (`matches_suffix = [".tmp"]`,
+  `days_since_noncurrent_time = 1`), en vez de esperar a
+  `num_newer_versions`. Esa regla es la mitigación definitiva, no una
+  provisional (decisión del arquitecto en ITSC-234): en GCS se acepta que
+  cada `commit` deje un `.tmp` no vigente durante un día, más el retraso con
+  que GCS ejecuta las acciones de lifecycle, porque la copia dentro del
+  mismo bucket no cobra red y el duplicado de un día cuesta centavos.
+  Escribir directo sobre el destino en GCS no es alternativa: abortar sin
+  llamar a `close()` no basta, porque `ParquetWriter.__del__` y los
+  destructores de `GcsOutputStream`/`ObjectWriteStream` finalizan la subida
+  igual, y un aborto podía sustituir la partición vigente por un Parquet con
+  solo las filas ya escritas. Por eso se mantiene el temporal en ambos
+  filesystems. Si
+  el proceso muere sin pasar por `__exit__` (SIGKILL por OOM), el temporal
+  queda huérfano: los lectores lo ignoran porque su nombre empieza por `.` y
+  no es un `.parquet` de la partición, pero sigue vigente (LIVE) y la regla
+  de lifecycle nueva solo actúa sobre versiones no vigentes
+  (`with_state = "ARCHIVED"`): nunca lo alcanza. Solo una limpieza a mano con
+  `gsutil rm` lo retira.
 - **Idempotencia**: es contenido idéntico, no bytes idénticos. Se mide con
   `content_hash(table)` (o `ContentHasher`, que lo calcula lote a lote): el
   SHA-256 del esquema más un SHA-256 por columna sobre los bytes de sus
