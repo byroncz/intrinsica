@@ -220,7 +220,8 @@ segundos:
 
 ## Resultados
 
-Ejecutados por el humano el 2026-09-27. Imagen `l1_ingest`, stack `l1` con
+Ejecutados por el humano el 2026-09-26 (backfill) y el 2026-09-27 (el
+resto), hora UTC-5. Imagen `l1_ingest`, stack `l1` con
 4 vCPU / 16 GiB, timeout 3600/900 s y `max_retries = 1` (ITSC-219). El
 backfill inicial corrió con `l1_ingest:0.5.0`, ya con ITSC-230 (workflow) en
 `main`. Antes del reintento de 2021-12 se mergeó ITSC-231 (ZIP con CSV
