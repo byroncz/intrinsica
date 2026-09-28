@@ -207,6 +207,41 @@ data "terraform_remote_state" "data" {
 - Un stack de capa nunca crea buckets: son datos y `data` es su único dueño.
 - Los módulos hijo no declaran `provider` (TRD maestro §8.2).
 
+## Limpieza única de los `.tmp` huérfanos en `landing` (ITSC-234)
+
+Antes de ITSC-234, `PartitionWriter` escribía a un temporal y lo movía sobre
+el destino con `fs.move`: en GCS eso es copia más borrado, y con el bucket
+versionado cada `.tmp` borrado quedaba como versión no vigente del mismo
+tamaño que la partición, duplicando el almacenamiento (detalle completo en
+docs/data-contracts.md, "Sobrescritura atómica"). Tras aplicar la regla de
+ciclo de vida nueva del bucket `landing` (`matches_suffix = [".tmp"]`), esos
+restos siguen ahí hasta que la regla los alcanza. Para no esperar, bórralos a
+mano una sola vez desde Cloud Shell. Solo lo ejecuta el humano; el agente no
+tiene credenciales de GCP.
+
+Primero verifica qué hay, filtrando solo las versiones no vigentes (`gsutil
+ls -a` lista todas; la vigente no lleva `#<generación>` al final del nombre
+sin más contexto, así que compara contra `gsutil ls` sin `-a`):
+
+```bash
+gsutil ls -a 'gs://<bucket landing>/l1/**/.*.tmp'
+```
+
+Confirmado que son restos (no hay `.tmp` vigente: ningún `PartitionWriter`
+en curso los necesita), bórralos:
+
+```bash
+gsutil rm -a 'gs://<bucket landing>/l1/**/.*.tmp'
+```
+
+Verifica el resultado comparando el tamaño vigente contra el total con
+versiones; deberían quedar aproximadamente iguales:
+
+```bash
+gsutil du -sh 'gs://<bucket landing>/l1'
+gsutil du -sha 'gs://<bucket landing>/l1'
+```
+
 ## Timeouts y reintentos de los jobs de l1
 
 Cada job fija `timeout` y `max_retries` de forma explícita (módulo `layer`,

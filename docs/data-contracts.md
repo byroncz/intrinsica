@@ -41,13 +41,21 @@ tabla se desvía del código.
   columna, un row group por bloque de CSV de 64 MiB (~800k filas) y `sorting_columns`
   (`transact_time`, `agg_trade_id`) en los metadatos. `write_partition`
   rechaza una tabla que no llegue ordenada por esas claves.
-- **Sobrescritura atómica**: `PartitionWriter` escribe a un temporal
-  `.<nombre>.<uuid>.tmp` en el mismo directorio (o prefijo de GCS) y lo
-  mueve sobre el destino: `os.replace` en local; en GCS, `move` (copia más
-  borrado). Nunca queda un archivo a medias. Si el proceso muere sin pasar
-  por `__exit__` (SIGKILL por OOM), el temporal queda huérfano: los lectores
-  lo ignoran porque su nombre empieza por `.` y no es un `.parquet`
-  de la partición, y se limpia a mano borrando los `.*.tmp` del prefijo.
+- **Sobrescritura atómica**: en GCS, `PartitionWriter` escribe directo sobre
+  el destino, sin temporal (ITSC-234). Un objeto de GCS solo existe cuando su
+  subida termina completa: si el `with` no llega a `commit`, el stream se
+  suelta sin cerrarse con éxito y GCS no crea ni toca nada, así que la
+  atomicidad que antes daba el temporal ya la da GCS sola. Antes de ITSC-234
+  `PartitionWriter` escribía a un temporal `.<nombre>.<uuid>.tmp` y lo movía
+  con `fs.move` (copia más borrado): con el bucket versionado, cada `.tmp`
+  borrado quedaba como versión no vigente del mismo tamaño que la partición,
+  duplicando el almacenamiento para siempre. En local el filesystem no da
+  esa atomicidad solo, así que sí escribe a un temporal
+  `.<nombre>.<uuid>.tmp` en el mismo directorio y `commit` hace
+  `os.replace` sobre el destino; si el proceso muere sin pasar por
+  `__exit__` (SIGKILL por OOM), el temporal queda huérfano: los lectores lo
+  ignoran porque su nombre empieza por `.` y no es un `.parquet` de la
+  partición, y se limpia a mano borrando los `.*.tmp` del prefijo.
 - **Idempotencia**: es contenido idéntico, no bytes idénticos. Se mide con
   `content_hash(table)` (o `ContentHasher`, que lo calcula lote a lote): el
   SHA-256 del esquema más un SHA-256 por columna sobre los bytes de sus

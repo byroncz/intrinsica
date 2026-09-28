@@ -45,6 +45,21 @@ resource "google_storage_bucket" "landing" {
     }
   }
 
+  # Red de seguridad (ITSC-234): PartitionWriter ya no escribe temporales en
+  # GCS, pero si alguna vez queda un `.tmp` como versión no vigente, esta
+  # regla lo borra al día siguiente sin esperar num_newer_versions (un .tmp
+  # borrado no tiene versiones más nuevas y nunca alcanza esa condición).
+  lifecycle_rule {
+    action {
+      type = "Delete"
+    }
+    condition {
+      with_state                 = "ARCHIVED"
+      matches_suffix             = [".tmp"]
+      days_since_noncurrent_time = 1
+    }
+  }
+
   # Nearline y no Coldline: L2 relee el histórico completo, y Nearline cobra
   # menos por recuperación. Los 30 días respetan su mínimo de permanencia.
   lifecycle_rule {
