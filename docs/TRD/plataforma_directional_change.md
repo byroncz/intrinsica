@@ -6,9 +6,9 @@
 | Campo | Valor |
 |---|---|
 | Documento | TRD maestro — Plataforma DC |
-| Versión | **2.1** |
+| Versión | **2.2** |
 | Estado | Línea base ampliada (operaciones + stack + decisiones de L1) |
-| Fecha | Junio de 2026 |
+| Fecha | Septiembre de 2026 |
 | Alcance | Capa Batch (Arquitectura Lambda) |
 | Clasificación | Académico / Uso personal |
 | Contexto | Trabajo de grado — Maestría en Finanzas · Universidad EAFIT (Medellín, Colombia) |
@@ -47,7 +47,7 @@ Este TRD maestro fija las **invariantes** (contratos entre capas, formatos, part
 |---|---|---|
 | TRD-L1 | Ingesta, ordenamiento y materialización a Parquet de aggTrades crudos | A redactar al iniciar Capa 1 |
 | TRD-L2 | Detección de eventos DC (extremos, confirmaciones, overshoots) por θ | A redactar al iniciar Capa 2 |
-| TRD-L3 | Tramas de series de tiempo cortadas por evento DC | A redactar al iniciar Capa 3 |
+| TRD-L3 | Resúmenes por evento y θ con estadísticos por fase (confirmación, overshoot) | A redactar al iniciar Capa 3 |
 | TRD-L4 | Indicadores inter e intra-evento por θ | A redactar al iniciar Capa 4 |
 | TRD-ML | Backtesting walk-forward, ML y evaluación de estrategias | A redactar tras completar L1–L4 |
  
@@ -58,6 +58,7 @@ Este TRD maestro fija las **invariantes** (contratos entre capas, formatos, part
 | 1.0 | Jun 2026 | Línea base inicial. Consolida los análisis de créditos GCP, free tier, dimensionamiento de cómputo, ventana de procesamiento, arquitectura de Capa 2 y selección de lenguaje. |
 | 2.0 | Jun 2026 | Ampliación de operaciones y stack. Añade estrategia de repositorios, IaC modular, registro de imágenes, CI/CD, observabilidad a costo cero, secretos y orquestación; valida el stack Polars + DuckDB + Arrow con catálogo DuckLake. Incorpora ADR 05–08, nuevos requerimientos y supuestos. |
 | 2.1 | Jun 2026 | Incorpora la discusión de diseño de la **Capa 1 (L1)** y sus implicaciones transversales: corrige la terminología *environment*→*stack*; fija la estrategia de un único GCP project; reasigna el cómputo de L1 a **Cloud Run Jobs** (difiriendo Cloud Batch a TRD-L2); precisa el contrato de datos de L1 (orden por tiempo, timestamp µs por magnitud, DECIMAL exacto, ZSTD-3, partición mensual inmutable); añade el **lago de hallazgos de Data Quality** y la emisión por librería compartida; acota Secret Manager a etapas posteriores. Marca como **abiertos** la política de fallo de DQ y el dimensionamiento del backfill (a validar con sonda). |
+| 2.2 | 30 sep 2026 | Corrige la definición de la **Capa 3** (§3.1, RF-07, RF-08): pasa de "series cortadas por evento" (que equivalía a copiar L1 una vez por θ) a **resúmenes por evento y θ**; la trama de un evento es un recorte de L1 por rango de tiempo, no un objeto guardado. Los indicadores de ticks releen L1 con fan-out y se persisten una vez como columna con clave (θ, evento). Recalcula el volumen del medallion en §7.1 con L2 medido (ITSC-244) y agrega la entrada "Trama" al glosario. Decisión y porqué: [Decisión: L3 guarda resúmenes por evento, no copias de ticks](https://app.notion.com/p/3eb27957d23d81d69ccac074bef2f8b3). |
  
 ---
  
@@ -88,7 +89,7 @@ Autor del trabajo de grado (desarrollador e investigador), asesor académico y r
 - Ingesta histórica y conformación de aggTrades SPOT BTC/USDT desde `data.binance.vision`.
 - Arquitectura medallion de 4 capas en Parquet sobre Cloud Storage (us-east1).
 - Detección de eventos DC para 50 valores de θ.
-- Cálculo de tramas (Capa 3) e indicadores (Capa 4) por evento.
+- Cálculo de resúmenes por evento (Capa 3) e indicadores (Capa 4) por evento y θ.
 - Procesamiento por ventanas mensuales con carry-over de puntos huérfanos.
 - Backtesting walk-forward (Walk-Through) y análisis ML sobre los indicadores.
 - Despliegue con Terraform (local) y, posteriormente, GitHub Actions.
@@ -103,7 +104,7 @@ Autor del trabajo de grado (desarrollador e investigador), asesor académico y r
  
 ## 3. Arquitectura general del sistema
  
-Patrón medallion de 4 capas, todas materializadas en **Parquet** sobre Cloud Storage en **us-east1**. El cómputo se asigna **por capa según su perfil** (ver §3.2), no por reflejo a un único servicio. Flujo: `data.binance.vision` → Capa 1 (raw) → Capa 2 (eventos DC) → Capa 3 (tramas) → Capa 4 (indicadores) → backtesting/ML.
+Patrón medallion de 4 capas, todas materializadas en **Parquet** sobre Cloud Storage en **us-east1**. El cómputo se asigna **por capa según su perfil** (ver §3.2), no por reflejo a un único servicio. Flujo: `data.binance.vision` → Capa 1 (raw) → Capa 2 (eventos DC) → Capa 3 (resúmenes por evento) → Capa 4 (indicadores) → backtesting/ML.
  
 ### 3.1 Vista de capas (flujo de datos)
  
@@ -111,7 +112,7 @@ Patrón medallion de 4 capas, todas materializadas en **Parquet** sobre Cloud St
 |---|---|---|---|
 | 1 | Raw / Landing | Parquet con aggTrades crudos (8 columnas), ordenados temporalmente | Exigente en memoria (carga + sort). **Meses independientes** (sin carry-over en L1). Paralelizable por ventana histórica |
 | 2 | DC Events | Por θ: intervalos extremo→confirmación y confirmación→fin de overshoot. Una fila por evento | **Estrictamente secuencial** dentro de θ (O(n), una pasada). Paralelizable entre θ. **El carry-over de huérfanos aparece aquí**, no en L1 |
-| 3 | Tramas | Series (precio, volumen, etc.) cortadas por evento DC. Una fila por evento; pares de columnas (confirmación, overshoot) por serie | Altamente paralelizable por θ y dentro de θ |
+| 3 | Resúmenes por evento | Una fila por evento y θ con estadísticos por fase (confirmación, overshoot): conteo de ticks, volumen, extremos, rachas y los que cada indicador exija. La trama completa se recorta de L1 por rango de tiempo bajo demanda; no se materializa | Una pasada por θ y mes sobre L1 alineada con L2 (mezcla ordenada por tiempo), con fan-out de los 50 θ sobre una sola lectura de L1 |
 | 4 | Indicadores | Métricas por evento DC. Tantas como se definan | Inter-evento altamente paralelizable; intra-evento por θ |
  
 > **Nota.** En L1 los meses son **independientes**: el sort y la materialización de un mes no dependen de otro. La dependencia secuencial por θ y el carry-over de puntos huérfanos son propiedad de la Capa 2, no de la Capa 1. Esto es lo que habilita ejecutar L1 como un *task array* de tareas independientes (ver §3.2 y ADR-04).
@@ -190,8 +191,8 @@ Se introduce un **lago de hallazgos de calidad de datos (Data Quality findings)*
 | RF-04 | Materialización Parquet | Convertir los datos crudos a Parquet en la Capa 1 con: **tipos DECIMAL exactos** (precisión ≤ 18) para precio y cantidad; **timestamp normalizado a microsegundos por detección de magnitud**; **detección de header por archivo**; **compresión ZSTD nivel 3**. | M |
 | RF-05 | Detección DC multi-θ | Detectar eventos DC (extremo, confirmación, overshoot) para los 50 valores de θ. | M |
 | RF-06 | Carry-over de huérfanos | El análisis de un mes M consume los huérfanos de M-1 y persiste los huérfanos resultantes para M+1, por cada θ. | M |
-| RF-07 | Tramas por evento | Materializar, por evento DC, las series de tiempo disponibles cortadas en (confirmación, overshoot). | M |
-| RF-08 | Indicadores por evento | Calcular indicadores inter e intra-evento por θ. | M |
+| RF-07 | Resúmenes por evento | Materializar, por evento DC y θ, una fila con estadísticos por fase (confirmación, overshoot): conteo de ticks, volumen, extremos, rachas y los que cada indicador exija. Se calculan en una pasada por θ y mes sobre L1 alineada con L2 (mezcla ordenada por tiempo), con fan-out de los 50 θ sobre una sola lectura. La trama completa (los ticks del evento) se recorta de L1 por rango de tiempo bajo demanda y no se materializa. | M |
+| RF-08 | Indicadores por evento | Calcular indicadores inter e intra-evento por θ. Cada indicador se persiste una sola vez como columna con clave (θ, evento). Un indicador nuevo es una pasada que escribe solo su columna, sin recalcular las existentes; varios indicadores nuevos se agrupan en una pasada, porque el costo es leer L1, no calcular. | M |
 | RF-09 | Metacatálogo | Catalogar las particiones (activo × θ × fecha) para descubrimiento y consulta. | S |
 | RF-10 | Backtesting walk-forward | Soportar backtesting walk-forward (Walk-Through) sobre los indicadores. | M |
 | RF-11 | Reusabilidad streaming | El núcleo del detector DC debe ser reusable sin reescritura para consumo por-tick en tiempo real (Capa Kappa). | S |
@@ -323,10 +324,15 @@ Se introduce un **lago de hallazgos de calidad de datos (Data Quality findings)*
 | Inicio de la serie | 2017-08-17 | ~8 años, no 10 |
 | aggTrades totales (8 años) | ~2,5–3,5 mil millones | Estimado |
 | CSV crudo histórico | ~185 GB | Descomprimido |
-| Parquet comprimido histórico | ~30 GB | Snappy/ZSTD |
-| Medallion completo (4 capas) | ~45–75 GB | Capas 2–4 muy livianas |
+| Parquet comprimido histórico (L1) | ~30 GB | Snappy/ZSTD. Medido: 38,4 GiB en la landing (ITSC-228) |
+| L2 (eventos, 50 θ) | ~73–103 GiB | Medido: 12,15 M de eventos y 421 MiB por mes en 2020-01 (14,05 M de ticks; ITSC-244), unos 30 MiB por millón de ticks. Extrapolado a 2,5–3,5 mil millones de ticks; la sonda de E4a lo afina |
+| L3 (resúmenes por evento y θ) | ~del orden de L2 | Una fila por evento y θ, con más columnas que L2 pero sin ticks. Supuesto: se mide con la sonda de L3 |
+| L4 (indicadores) | ~pequeño frente a L2 | Una columna con clave (θ, evento) por indicador. Supuesto: crece con el catálogo de indicadores |
+| Medallion completo (4 capas) | ~0,2–0,25 TB | L1 38,4 GiB + L2 ~73–103 GiB + L3 del orden de L2 + L4. Reemplaza los 45–75 GB de v2.1, que suponían las capas 2–4 "muy livianas" |
 | Ventana mensual reciente | ~30–40 M filas / ~2,5–5 GB CSV | ~0,5–0,6 GB precio+ts en memoria |
  
+> **Nota — tramas con ticks por θ.** Materializar los ticks de cada evento (la definición de L3 hasta v2.1) equivale a copiar L1 una vez por θ, porque los eventos de un θ cubren el mes sin huecos ni solapes: 50 copias de 38,4 GiB, más de 1 TB, y diez veces más lectura en cada indicador nuevo. Queda **fuera del diseño**, salvo para un puñado de θ de investigación interactiva, nunca los 50. Una pasada histórica con fan-out cuesta minutos de cómputo (2,8 M ticks/s por core con 50 θ, ITSC-241) y una lectura de 38 GiB. Porqué completo: [Decisión: L3 guarda resúmenes por evento](https://app.notion.com/p/3eb27957d23d81d69ccac074bef2f8b3).
+
 ### 7.2 Tarifas de cómputo (us-east1, 2026)
  
 Se mantienen las tarifas de Cloud Batch + Spot como referencia para Capas 2–4 (a confirmar en TRD-L2). Para **L1 se usa Cloud Run Jobs**, cuyo costo se modela por **vCPU-segundo y GiB-segundo de ejecución de tarea**, con un **cupo perpetuo gratuito propio**. El costo efectivo de L1 **queda a validar con la sonda** (§7.4); la expectativa es que el backfill caiga en o cerca del free tier.
@@ -352,6 +358,8 @@ La estructura de costos se mantiene, con un matiz: el cómputo de **L1 migra de 
 | **TOTAL ESTIMADO** | **≈ 2–4 USD/mes** | **≈ 18–22 USD/mes** |
  
 > **Holgura presupuestal.** Incluso el escenario intensivo (~18–22 USD/mes) deja > 75 % de margen frente a los 100 USD/mes. El backfill inicial (pico único, ~5–15 USD) lo absorbe el crédito de prueba de 300 USD válido por 90 días.
+
+> **Nota — almacenamiento con el volumen de v2.2.** La fila de almacenamiento se dimensionó sobre 45–75 GB. Con el medallion recalculado en §7.1 (~0,2–0,25 TB) sube a ≈ 4–5 USD/mes en Standard (≈ 0,02 USD/GB-mes); el escenario intensivo pasa a ≈ 21–26 USD/mes y sigue dejando más de 70 % de margen.
  
 > **Nota — modelo de free tier.** No existe una única bolsa *always-free* compartida entre servicios: **cada servicio tiene su propio cupo perpetuo** (Cloud Run, Compute Engine, GCS, BigQuery, …), contabilizado **por billing account** (compartido entre projects del mismo billing account, **no** multiplicado por project). La **única bolsa compartida** entre servicios es el **crédito de prueba de 300 USD** (90 días). **Cloud Batch no cobra por el servicio de orquestación**: solo se pagan los recursos de Compute Engine que provisiona.
  
@@ -475,7 +483,7 @@ dc-platform/                      # raíz del monorepo
   | Billing Account | (parte de facturación de la Account) | Frontera de facturación; agrega varios projects |
   En GCP el **project** es la frontera de aislamiento e IAM (equivalente a una *Account* de AWS), mientras que el **billing account** es la frontera de facturación que puede agregar varios projects.
 - **Cuota de vCPU por defecto:** 8 vCPU/región en proyectos nuevos. Relevante para Cloud Batch en L2–L4 (no para Cloud Run Jobs de L1); requiere solicitar aumento (autoaprobado en incrementos modestos).
-- **Always Free de Cloud Storage:** solo 5 GB-mes Standard en us-east1/us-west1/us-central1. El medallion (~45–75 GB) lo excede; el costo aun así es de ~1–2 USD/mes.
+- **Always Free de Cloud Storage:** solo 5 GB-mes Standard en us-east1/us-west1/us-central1. El medallion (~0,2–0,25 TB, §7.1) lo excede; el costo aun así es de ~4–5 USD/mes en Standard.
 - **Free trial:** 300 USD por 90 días; prohíbe minería de cripto (el análisis ML/DC sobre datos de cripto SÍ está permitido), GPUs y VMs Windows durante el trial.
 - **Región única:** us-east1 para todo (cómputo, buckets, Artifact Registry) → egress intra-región nulo.
 - **Límite de paralelismo de Batch (referencia L2–L4):** máx. 1.000 tareas en paralelo por job; hasta ~100.000 tareas por task group.
@@ -533,7 +541,7 @@ dc-platform/                      # raíz del monorepo
 | F0 | Fundaciones de operaciones | Monorepo, módulo Terraform `layer` + estado GCS, Artifact Registry + cleanup, CI con build selectivo, WIF, un único GCP project. | (este TRD) |
 | F1 | Capa 1 — Raw | Ingesta histórica + incremental sobre **Cloud Run Jobs** (task array por mes, una imagen por modo); sort por tiempo (DuckDB); Parquet DECIMAL/ZSTD-3; timestamp µs por magnitud; lifecycle e inmutabilidad mensual; **sonda de dimensionamiento**; **lago de hallazgos de DQ** + `emit_findings()`. **Abiertos:** política de fallo de DQ y set exacto de columnas/costura inter-mensual. | TRD-L1 |
 | F2 | Capa 2 — DC Events | Núcleo DC (Rust/Numba), fan-out por tick, carry-over por θ, particionado. **Aquí se decide y justifica el uso de Cloud Batch + Spot** (el fan-out de 50 θ puede requerir VMs multinúcleo). | TRD-L2 |
-| F3 | Capa 3 — Tramas | Cortes de series por evento (DuckDB/Polars); paralelización por θ y dentro de θ. | TRD-L3 |
+| F3 | Capa 3 — Resúmenes por evento | Estadísticos por fase y evento, con fan-out de los 50 θ sobre una lectura de L1 alineada con L2 (DuckDB/Polars); paralelización por θ y dentro de θ. | TRD-L3 |
 | F4 | Capa 4 — Indicadores | Indicadores inter/intra-evento (DuckDB/Polars); catálogo de métricas. | TRD-L4 |
 | F5 | Observabilidad | Meta-métricas y hallazgos de DQ a BigQuery, dashboards Looker Studio, budget y log-based alerts. | (este TRD) |
 | F6 | Backtesting/ML | Walk-forward (Walk-Through), features, evaluación de estrategias. | TRD-ML |
@@ -554,6 +562,7 @@ dc-platform/                      # raíz del monorepo
  
 | Término | Definición |
 |---|---|
+| Trama | Los ticks de un evento DC (o de una de sus fases). **No es un objeto guardado**: se obtiene recortando L1 por rango de tiempo con las fronteras de L2, apoyándose en las estadísticas min/max de los row groups de Parquet. L3 guarda resúmenes por evento y θ, no tramas. |
 | Directional Change (DC) | Evento que se registra cuando el precio revierte un umbral θ desde un extremo local; base del muestreo por tiempo intrínseco. |
 | θ (theta) | Umbral porcentual de reversión que define un evento DC. El proyecto usa 50 valores distintos. |
 | Overshoot | Tramo del precio que sigue a la confirmación de un evento DC hasta el siguiente DC opuesto. |
@@ -589,5 +598,5 @@ dc-platform/                      # raíz del monorepo
 - HashiCorp Terraform (módulos, estado remoto en GCS), GitHub Actions y Container Registry (docs.github.com), OpenTelemetry (opentelemetry.io), Grafana Cloud (grafana.com).
 ---
  
-> **Nota de cierre.** Este es el TRD maestro v2.1, que fusiona la v2.0 con la discusión de diseño de la Capa 1 (cómputo en Cloud Run Jobs, contrato de datos de L1, lago de hallazgos de Data Quality, terminología de stacks y estrategia de projects). Las cifras de volumen y precios son estimaciones de referencia a 2026 y deben verificarse contra los datos y tarifas vigentes antes de la implementación de cada fase. Los ítems marcados como **abiertos** (política de fallo de DQ, dimensionamiento del backfill por sonda, set de columnas y costura inter-mensual) se resuelven en el TRD-L1. Cada capa profundizará sus requerimientos en su propio TRD derivado, revalidando el stack y el motor óptimos para su perfil.
+> **Nota de cierre.** Este es el TRD maestro v2.2 (v2.1 más la corrección de la Capa 3 y del volumen del medallion), que fusiona la v2.0 con la discusión de diseño de la Capa 1 (cómputo en Cloud Run Jobs, contrato de datos de L1, lago de hallazgos de Data Quality, terminología de stacks y estrategia de projects). Las cifras de volumen y precios son estimaciones de referencia a 2026 y deben verificarse contra los datos y tarifas vigentes antes de la implementación de cada fase. Los ítems marcados como **abiertos** (política de fallo de DQ, dimensionamiento del backfill por sonda, set de columnas y costura inter-mensual) se resuelven en el TRD-L1. Cada capa profundizará sus requerimientos en su propio TRD derivado, revalidando el stack y el motor óptimos para su perfil.
  
