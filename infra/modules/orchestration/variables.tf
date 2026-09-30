@@ -24,12 +24,13 @@ variable "scheduler_invoker_email" {
 }
 
 variable "schedules" {
-  description = "Un scheduler por modo orquestado: mapa modo → {schedule, time_zone, paused, description}. Cada modo debe existir en job_names. paused = false enciende el scheduler."
+  description = "Un scheduler por modo orquestado: mapa modo → {schedule, time_zone, paused, description, next_job}. Cada modo debe existir en job_names. paused = false enciende el scheduler. next_job (opcional) es el nombre de un Cloud Run Job, de esta capa u otra, que el workflow ejecuta sin overrides cuando el job del modo termina con éxito."
   type = map(object({
     schedule    = string
     time_zone   = optional(string, "Etc/UTC")
     paused      = optional(bool, true)
     description = string
+    next_job    = optional(string)
   }))
 
   validation {

@@ -100,6 +100,14 @@ module "orchestration" {
       schedule    = "0 6 8 * *"
       paused      = true
       description = "Cierre mensual de L1, tras el primer lunes de M+1."
+      # L2 procesa el mes que L1 acaba de cerrar: el workflow espera el fin de
+      # monthly-close y, solo si fue exitoso, ejecuta l2-monthly sin overrides
+      # (la CLI toma el mes por defecto). El nombre sigue la convención
+      # <capa>-<modo> del módulo layer y no sale del output job_names del stack
+      # l2: leerlo exigiría un remote_state más y un outputs.tf en l2 que este
+      # stack no necesita, porque el nombre no cambia sin cambiar la convención.
+      # El stack l2 debe estar aplicado antes: el IAM se da sobre ese job.
+      next_job = "l2-monthly"
     }
   }
 }
