@@ -5,6 +5,7 @@ description = "Capa L1 de intrinsica: ingesta de aggTrades de Binance a Parquet.
 requires-python = ">=3.14"
 dependencies = [
     "dq",
+    "pyutils",
     "fsspec>=2026.9.0",
     "pyarrow>=25.0.1",
 ]
@@ -15,3 +16,4 @@ build-backend = "uv_build"
 
 [tool.uv.sources]
 dq = { workspace = true }
+pyutils = { workspace = true }

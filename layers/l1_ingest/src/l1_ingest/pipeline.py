@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pyarrow.fs as pafs
 from dq import Finding, Severity, Stage, Status, emit_findings
+from pyutils import content_hash, resolve_fs
 
 from l1_ingest.checks import CheckResult
 from l1_ingest.conform import TimestampUnitError, conform
@@ -17,12 +18,11 @@ from l1_ingest.download import (
     source_url,
 )
 from l1_ingest.integrity import check_agg_trade_id, ensure_order
-from l1_ingest.manifest import ManifestEntry, last_sha256, resolve_fs, write_manifest
+from l1_ingest.manifest import ManifestEntry, last_sha256, write_manifest
 from l1_ingest.parse import open_zip_batches, read_zip
 from l1_ingest.stream import NotStreamable, stream_partition
 from l1_ingest.write import (
     CONSOLIDATED,
-    content_hash,
     day_filename,
     partition_path,
     write_partition,

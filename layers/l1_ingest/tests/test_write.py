@@ -6,12 +6,12 @@ import pytest
 from l1_ingest.schema import OUTPUT_SCHEMA
 from l1_ingest.write import (
     CONSOLIDATED,
-    PartitionWriter,
-    content_hash,
     day_filename,
+    output_writer,
     partition_path,
     write_partition,
 )
+from pyutils import content_hash
 
 
 def _table(n: int = 5) -> pa.Table:
@@ -141,45 +141,23 @@ def test_content_hash_ignores_schema_metadata():
     )
 
 
-class _FsWithoutTmpDelete:
-    """Como GCS tras `move`: borrar lo que no existe lanza un OSError genérico."""
-
-    def __init__(self, fs):
-        self._fs = fs
-        self.deleted = []
-
-    def __getattr__(self, name):
-        return getattr(self._fs, name)
-
-    def delete_file(self, path):
-        self.deleted.append(path)
-        raise OSError("object does not exist")
-
-
-def test_commit_exitoso_no_intenta_borrar_el_temporal(tmp_path):
-    path = str(tmp_path / "c.parquet")
-    with PartitionWriter(path) as writer:
-        writer._fs = fake = _FsWithoutTmpDelete(writer._fs)
-        writer.write_table(_table(3))
-        writer.commit()
-    assert fake.deleted == []
-    assert pq.read_table(path).num_rows == 3
-
-
-def test_error_de_borrado_no_oculta_la_excepcion_original(tmp_path):
-    path = str(tmp_path / "c.parquet")
-    with (
-        pytest.raises(RuntimeError, match="original"),
-        PartitionWriter(path) as writer,
-    ):
-        writer._fs = _FsWithoutTmpDelete(writer._fs)
-        raise RuntimeError("original")
+def test_content_hash_is_the_one_l1_has_always_published():
+    # Fijado en ITSC-245, al extraer `ContentHasher` a `shared/pyutils`: el
+    # hash de una misma tabla no puede cambiar con la extracción.
+    times = pa.array([10**15 + i for i in range(7)], pa.int64())
+    table = _table(7).set_column(5, OUTPUT_SCHEMA.field(5), times)
+    assert content_hash(table) == (
+        "4819b978630226832798a19ea54c755e2e7eaa75a56562dec7c6d4564673db1a"
+    )
+    assert content_hash(table.slice(2, 3)) == (
+        "c59b0831b4d6ff2645e9dc29ac1b1db74572307b66ac74b7f52bca301ec81493"
+    )
 
 
 def test_abort_local_deja_el_destino_intacto_y_sin_temporal(tmp_path):
     path = str(tmp_path / "c.parquet")
     write_partition(_table(3), path)
-    with pytest.raises(RuntimeError, match="boom"), PartitionWriter(path) as writer:
+    with pytest.raises(RuntimeError, match="boom"), output_writer(path) as writer:
         writer.write_table(_table(5))
         raise RuntimeError("boom")
     assert pq.read_table(path).num_rows == 3

@@ -17,11 +17,10 @@ from l2_dc_events.thetas import load_thetas
 from l2_dc_events.write import (
     CARRY_OVER,
     EVENTS,
-    ContentHasher,
-    PartitionWriter,
     format_theta,
     partition_path,
 )
+from pyutils import ContentHasher, PartitionWriter
 
 THETAS = load_thetas()
 # Un θ del config con eventos en el fixture de un día (≈ 1,6 %).
@@ -502,3 +501,32 @@ def test_the_first_month_of_the_series_needs_no_carry_over(
     process_unit(AUG, ctx)
     # Re-ejecutarlo sigue siendo el primero: arranca en frío otra vez.
     process_unit(AUG, ctx)
+
+
+def test_content_hash_is_the_one_l2_has_always_published():
+    # Fijado en ITSC-245, al extraer `ContentHasher` a `shared/pyutils`: el
+    # hash de un mismo contenido no puede cambiar con la extracción.
+    def batch(schema, row):
+        return pa.RecordBatch.from_pylist(row, schema=schema)
+
+    def value(field):
+        kind = field.type
+        if pa.types.is_decimal(kind):
+            return Decimal(1)
+        if pa.types.is_string(kind):
+            return "x"
+        return True if pa.types.is_boolean(kind) else 1
+
+    event = {field.name: value(field) for field in EVENTS_SCHEMA}
+    carry = {field.name: value(field) for field in CARRY_OVER_SCHEMA}
+    carry["pending_reference_time"] = None
+    expected = {
+        "events": "b5de26248f5c6e5d20c71e9f5abaee016c05b8536d928229e8334772ed25e13a",
+        "carry": "cc105c416b95de4d2cf40ab3771dc6dcbc0eb61f5c58f6e223431e8d192bd90f",
+    }
+    events = ContentHasher(EVENTS_SCHEMA)
+    events.update(batch(EVENTS_SCHEMA, [event, event]))
+    carry_over = ContentHasher(CARRY_OVER_SCHEMA)
+    carry_over.update(batch(CARRY_OVER_SCHEMA, [carry]))
+    assert events.hexdigest() == expected["events"]
+    assert carry_over.hexdigest() == expected["carry"]

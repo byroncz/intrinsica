@@ -13,8 +13,8 @@ COPY pyproject.toml uv.lock ./
 COPY shared ./shared
 COPY layers ./layers
 
-# --no-editable copia el código de l1_ingest y dq dentro del entorno, así la
-# etapa final no necesita el árbol fuente.
+# --no-editable copia el código de l1_ingest, dq y pyutils dentro del entorno,
+# así la etapa final no necesita el árbol fuente.
 RUN uv sync --locked --package l1_ingest --no-dev --no-editable
 
 FROM python:3.14-slim

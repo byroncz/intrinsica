@@ -8,9 +8,9 @@ import calendar
 import logging
 
 from dq import Finding, Severity, Status, emit_findings
+from pyutils import resolve_fs
 
 from l1_ingest.checks import CheckResult
-from l1_ingest.manifest import resolve_fs
 from l1_ingest.pipeline import RunContext, Unit, _exists, _finding, process_unit
 from l1_ingest.seam import check_seam, find_partition, footer_stats, list_provisionals
 from l1_ingest.write import CONSOLIDATED, partition_path

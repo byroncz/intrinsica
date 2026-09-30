@@ -12,11 +12,13 @@ from collections.abc import Iterable
 import pyarrow as pa
 import pyarrow.compute as pc
 from dq import Severity, Status
+from pyutils import ContentHasher
 
 from l1_ingest.checks import CheckResult
 from l1_ingest.conform import classify_unit, conform_batch, unit_check, unit_error
 from l1_ingest.integrity import DETAILS_MAX, aggid_results
-from l1_ingest.write import ContentHasher, PartitionWriter
+from l1_ingest.schema import OUTPUT_SCHEMA
+from l1_ingest.write import output_writer
 
 
 class NotStreamable(Exception):
@@ -100,12 +102,12 @@ def stream_partition(
     huecos y duplicados. Si la unidad temporal no es válida lanza
     `TimestampUnitError` con el mín y máx de toda la unidad, sin dejar archivo.
     """
-    hasher = ContentHasher()
+    hasher = ContentHasher(OUTPUT_SCHEMA)
     sequence = _SequenceCheck()
     lo = hi = unit = None
     invalid = False
 
-    with PartitionWriter(path) as writer:
+    with output_writer(path) as writer:
         for batch in batches:
             if batch.num_rows == 0:
                 continue
