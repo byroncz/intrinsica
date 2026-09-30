@@ -7,18 +7,33 @@ from conftest import FIXTURES, price_int
 from l2_dc_events.landing import LandingError, open_consolidated, read_batches, ticks_of
 from l2_dc_events.pipeline import FEED_TICKS, RunContext, Unit, process_unit
 
-# Los θ del fixture (`theta` = θ × 10⁸) y, por θ, el `agg_trade_id` de la
-# confirmación donde abre la primera ventana de discrepancia con la v0. Salen de
-# `VENTANAS` en shared/dc_core/tests/equivalence_v0.rs: son las divergencias
-# declaradas de ADR-L2-04 (instante de confirmación atómico). Con 2 % no hay.
-FIRST_WINDOW = {
-    100_000: 3259,
-    250_000: 3472,
-    500_000: 4302,
-    1_000_000: 3259,
-    2_000_000: None,
+# Por θ (`theta` = θ × 10⁸), el `agg_trade_id` de la confirmación con que abre
+# cada ventana de discrepancia contra la v0. Es `VENTANAS` de
+# shared/dc_core/tests/equivalence_v0.rs: las divergencias declaradas de
+# ADR-L2-04 (instante de confirmación atómico). Con 2 % no hay ninguna.
+VENTANAS = {
+    100_000: [
+        3259,
+        3400,
+        4302,
+        4858,
+        5299,
+        5634,
+        5922,
+        5973,
+        6415,
+        6564,
+        6726,
+        7100,
+        7160,
+        7582,
+    ],
+    250_000: [3472, 4302, 5299, 5634, 5922, 5973, 6415, 6564, 7100, 7582],
+    500_000: [4302, 7100, 7149],
+    1_000_000: [3259, 3334, 3397, 4626, 7100, 7149, 7445],
+    2_000_000: [],
 }
-THETAS = list(FIRST_WINDOW)
+THETAS = list(VENTANAS)
 UNIT = Unit(2017, 8)
 
 
@@ -81,12 +96,63 @@ def as_tuple(event):
     return (event.direction, event.reference, event.confirm, event.extreme)
 
 
+def rust_events(closed, carry):
+    """Los eventos cerrados de un θ más el pendiente, sin extremo (como la v0)."""
+    reference, confirm = carry.pending
+    return [as_tuple(e) for e in closed] + [(carry.direction, reference, confirm, None)]
+
+
+def align(mine, v0):
+    """Alinea los eventos de las dos implementaciones (`align` de equivalence_v0.rs).
+
+    Devuelve `(tipo, evento)`: `same`, `fields` (mismo evento con campos
+    distintos), `mine_only` o `v0_only`.
+    """
+    a = b = 0
+    out = []
+    while a < len(mine) or b < len(v0):
+        r = mine[a] if a < len(mine) else None
+        v = v0[b] if b < len(v0) else None
+        if r and v and r[0] == v[0] and r[2][2] == v[2][2]:
+            out.append(("same" if r == v else "fields", r))
+            a += 1
+            b += 1
+        elif r and (v is None or r[2][2] < v[2][2]):
+            out.append(("mine_only", r))
+            a += 1
+        else:
+            out.append(("v0_only", v))
+            b += 1
+    return out
+
+
+def windows(items):
+    """`agg_trade_id` de la confirmación con que abre cada racha de no `same`."""
+    ids, is_open = [], False
+    for kind, event in items:
+        if kind == "same":
+            is_open = False
+        elif not is_open:
+            ids.append(event[2][2])
+            is_open = True
+    return ids
+
+
+def longest_run(items):
+    run = longest = 0
+    for kind, _ in items:
+        run = 0 if kind == "same" else run + 1
+        longest = max(longest, run)
+    return longest
+
+
 def test_events_through_the_reader_equal_the_v0_fixture(fixture_ticks, write_month):
     """Landing → lector por row group → fan-out da los eventos del crate.
 
-    El crate (`equivalence_v0.rs`) coincide con la v0 evento a evento con
-    θ = 2 % y hasta la primera ventana de ADR-L2-04 con los demás θ; aquí se
-    exige lo mismo de punta a punta a través del binding y del lector.
+    Igual que `eventos_iguales_salvo_las_divergencias_declaradas` de
+    `equivalence_v0.rs`: para cada θ, la serie completa coincide con la v0 salvo
+    en las ventanas declaradas de ADR-L2-04, que abren en los mismos eventos y
+    no pasan de 3. Con θ = 2 % no hay ventanas: es idéntica evento a evento.
     """
     path = write_month(fixture_ticks, row_group_size=1_000)  # 5 row groups
     assert open_consolidated(str(path)).num_row_groups == 5
@@ -94,17 +160,11 @@ def test_events_through_the_reader_equal_the_v0_fixture(fixture_ticks, write_mon
     events = fan_out_month(path, fanout)
     expected = v0_events()
 
-    for theta, mine in zip(THETAS, events, strict=True):
-        mine = [as_tuple(e) for e in mine]
-        v0_closed = [e for e in expected[theta] if e[3] is not None]
-        limit = FIRST_WINDOW[theta]
-        if limit is None:
-            assert mine == v0_closed, f"θ={theta}"
-            continue
-        agree = [e for e in v0_closed if e[2][2] < limit]
-        # Puede ser vacío (con 1 % la ventana abre en la primera confirmación).
-        assert mine[: len(agree)] == agree, f"θ={theta}"
-        assert len(mine) > len(agree)
+    carries = fanout.carry_overs()
+    for theta, closed, carry in zip(THETAS, events, carries, strict=True):
+        items = align(rust_events(closed, carry), expected[theta])
+        assert windows(items) == VENTANAS[theta], f"θ={theta}: ventanas"
+        assert longest_run(items) <= 3, f"θ={theta}: ventana de más de 3 eventos"
 
     assert fanout.discarded() == [0] * len(THETAS)
 
