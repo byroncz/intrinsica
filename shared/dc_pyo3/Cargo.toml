@@ -1,0 +1,25 @@
+[package]
+name = "dc_pyo3"
+version = "0.1.0"
+edition = "2021"
+description = "Bindings PyO3 sobre dc_core: fan-out de N theta y carry-over para Python."
+publish = false
+
+[lib]
+name = "dc_pyo3"
+crate-type = ["cdylib"]
+# Sin pruebas Rust propias: el binario de pruebas enlazaría libpython y `cargo
+# test` exigiría un Python instalado en cada máquina. Los bindings se prueban
+# con pytest (tests/), que es como los usa la capa.
+test = false
+doctest = false
+
+[dependencies]
+dc_core = { path = "../dc_core" }
+pyo3 = "0.27"
+
+[features]
+# Solo lo activa maturin ([tool.maturin] features). Con `extension-module` el
+# enlazador deja los símbolos de libpython sin resolver, y `cargo test` no
+# puede construir el binario de pruebas.
+extension-module = ["pyo3/extension-module"]

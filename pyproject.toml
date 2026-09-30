@@ -4,7 +4,7 @@ version = "0.0.0"
 description = "Motor de análisis Directional Change (DC) para mercados financieros."
 readme = "README.md"
 requires-python = ">=3.14"
-dependencies = ["dq[reader]", "l1_ingest"]
+dependencies = ["dc_pyo3", "dq[reader]", "l1_ingest", "l2_dc_events"]
 
 [dependency-groups]
 dev = [
@@ -18,11 +18,14 @@ package = false
 [tool.uv.sources]
 dq = { workspace = true }
 l1_ingest = { workspace = true }
+l2_dc_events = { workspace = true }
+dc_pyo3 = { workspace = true }
 
 [tool.uv.workspace]
 members = ["shared/*", "layers/*"]
 # dc_core es un crate Rust, sin pyproject.toml: un directorio sin manifiesto
-# bajo shared/ rompe el workspace de uv (shared/README.md).
+# bajo shared/ rompe el workspace de uv (shared/README.md). dc_pyo3 sí lo
+# tiene: maturin lo construye.
 exclude = ["shared/dc_core"]
 
 [tool.ruff]
@@ -33,4 +36,10 @@ extend-exclude = ["scaffold"]
 extend-select = ["I"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests", "shared/dq/tests", "layers/l1_ingest/tests"]
+testpaths = [
+    "tests",
+    "shared/dq/tests",
+    "shared/dc_pyo3/tests",
+    "layers/l1_ingest/tests",
+    "layers/l2_dc_events/tests",
+]

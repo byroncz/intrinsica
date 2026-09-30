@@ -1,0 +1,26 @@
+[project]
+name = "dc_pyo3"
+version = "0.1.0"
+description = "Bindings PyO3 sobre dc_core: fan-out de N theta y carry-over."
+requires-python = ">=3.14"
+
+[build-system]
+requires = ["maturin>=1.9,<2"]
+build-backend = "maturin"
+
+[tool.maturin]
+# `extension-module` solo lo activa maturin: por defecto el crate enlaza
+# libpython y sus herramientas (clippy, cargo test) funcionan sin él.
+features = ["extension-module"]
+module-name = "dc_pyo3"
+
+[tool.uv]
+# uv solo reconstruye un paquete local cuando cambia su pyproject.toml; sin
+# esto, editar el Rust (o dc_core) dejaría el wheel viejo en el entorno.
+cache-keys = [
+    { file = "pyproject.toml" },
+    { file = "Cargo.toml" },
+    { file = "src/**/*.rs" },
+    { file = "../dc_core/Cargo.toml" },
+    { file = "../dc_core/src/**/*.rs" },
+]
