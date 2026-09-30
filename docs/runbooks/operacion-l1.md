@@ -54,8 +54,9 @@ y las pasa como `--tasks`. Cada tarea toma `from` + `CLOUD_RUN_TASK_INDEX`:
 la tarea 0 es el primer mes (o día), la 1 el siguiente, etc. Por eso
 **`--tasks` = número de meses** en `backfill` y `monthly-close`, y número de
 días en `daily`. `seam-check` siempre es una sola tarea que recorre todo el
-rango. Regla: no lances a mano el mismo mes y modo que Scheduler esté
-ejecutando.
+rango. Los jobs `l2-*` no usan task array (sus meses son secuenciales): el
+script devuelve una sola unidad y el workflow lanza `--tasks 1`. Regla: no
+lances a mano el mismo mes y modo que Scheduler esté ejecutando.
 
 Al final, el run vuelca los logs de la ejecución y un resumen (estado,
 tareas completadas y fallidas, inicio y fin) en el *Summary* del run.

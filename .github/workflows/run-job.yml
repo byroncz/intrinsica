@@ -1,7 +1,16 @@
 # Ejecución manual de un Cloud Run Job, genérica para todas las capas. Hay un
-# job por modo (<capa>-<modo>); el modo se deriva del nombre del job. Lanza
-# una tarea por unidad del rango (mes o día, según el modo); cada tarea toma
-# from + CLOUD_RUN_TASK_INDEX. Corre el workflow de la rama elegida en el botón.
+# job por modo (<capa>-<modo>); el modo se deriva del nombre del job. Corre el
+# workflow de la rama elegida en el botón.
+#
+# L1 lanza una tarea por unidad del rango (mes o día, según el modo); cada
+# tarea toma from + CLOUD_RUN_TASK_INDEX, porque sus meses son independientes.
+#
+# L2 no usa task array: sus meses son secuenciales (cada mes lee el carry-over
+# que escribió el anterior), y paralelizarlos rompería esa cadena. l2-backfill
+# va en una sola tarea que recorre el rango completo en orden y reanuda donde
+# quedó; l2-monthly procesa un mes. Por eso run-job-tasks.sh devuelve una sola
+# unidad para los jobs l2 y el workflow lanza --tasks 1.
+#
 # Regla: no lanzar a mano el mismo mes y modo que Scheduler esté ejecutando.
 name: Run job
 
@@ -16,19 +25,25 @@ on:
           - l1-daily
           - l1-monthly-close
           - l1-seam-check
+          - l2-backfill
+          - l2-monthly
         required: true
       from:
-        description: "Inicio: YYYY-MM (backfill, monthly-close) o YYYY-MM-DD (daily)"
+        description: "Inicio: YYYY-MM (backfill, monthly, monthly-close) o YYYY-MM-DD (l1-daily)"
         type: string
         required: true
       to:
-        description: Fin inclusivo, mismo formato que from (por defecto, igual a from)
+        description: Fin inclusivo, mismo formato que from (por defecto, igual a from; l2-monthly no admite otro valor)
         type: string
         required: false
       force:
-        description: Reprocesar aunque el .CHECKSUM coincida con el manifiesto (úsalo si cambió el código de L1)
+        description: "Reprocesar aunque ya esté hecho. L1: el .CHECKSUM coincide con el manifiesto (úsalo si cambió el código). L2 (backfill): arrancar en from aunque los meses ya tengan carry-over"
         type: boolean
         default: false
+      series_start:
+        description: "Solo L2: primer mes de la serie, YYYY-MM (vacío: la CLI usa L2_SERIES_START del stack)"
+        type: string
+        required: false
 
 jobs:
   run:
@@ -42,6 +57,7 @@ jobs:
       FROM: ${{ inputs.from }}
       TO: ${{ inputs.to }}
       FORCE: ${{ inputs.force }}
+      SERIES_START: ${{ inputs.series_start }}
       GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
       GCP_REGION: ${{ vars.GCP_REGION }}
     steps:
@@ -53,7 +69,7 @@ jobs:
       - name: Contar las tareas del rango
         id: tasks
         run: |
-          units="$(.github/scripts/run-job-tasks.sh "$MODE" "$FROM" ${TO:+"$TO"})" || {
+          units="$(.github/scripts/run-job-tasks.sh "$JOB" "$FROM" ${TO:+"$TO"})" || {
             echo "::error::Rango inválido, ver el mensaje anterior"
             exit 1
           }
@@ -84,6 +100,9 @@ jobs:
           fi
           if [[ "$FORCE" == "true" ]]; then
             args="${args},--force"
+          fi
+          if [[ -n "$SERIES_START" ]]; then
+            args="${args},--series-start,${SERIES_START}"
           fi
           # --args reemplaza los argumentos del contenedor, no el ENTRYPOINT.
           # Con --format, gcloud imprime el nombre de la ejecución al terminar.
