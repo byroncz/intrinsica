@@ -309,4 +309,5 @@ Orden de apply, todo por el humano:
 
 Los recursos del job son provisionales: 4 vCPU, 16 GiB, timeout 3600 s y
 `max_retries = 1`, los mismos valores de L1 y no una medición de L2. La sonda
-de L2 (ITSC-281) los mide y la decisión ADR-04 (ITSC-282) los fija.
+de L2 ([runbook](../docs/runbooks/sonda-l2.md), ITSC-281) los mide y la
+decisión ADR-04 (ITSC-282) los fija.
