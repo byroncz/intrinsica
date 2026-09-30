@@ -69,6 +69,12 @@ jobs:
       - name: Contar las tareas del rango
         id: tasks
         run: |
+          # La CLI de L1 no define --series-start: argparse saldría con 2 dentro
+          # de Cloud Run y gastaría una ejecución.
+          if [[ -n "$SERIES_START" && "$JOB" != l2-* ]]; then
+            echo "::error::series_start solo aplica a los jobs l2-*, no a $JOB"
+            exit 1
+          fi
           units="$(.github/scripts/run-job-tasks.sh "$JOB" "$FROM" ${TO:+"$TO"})" || {
             echo "::error::Rango inválido, ver el mensaje anterior"
             exit 1
