@@ -167,6 +167,11 @@ Lo hace el humano, en este orden. Ningún agente ejecuta el apply.
    aplica las reglas de ciclo de vida del bucket landing. Sin este apply, el
    de `l1` falla con 403 o con la API deshabilitada.
 
+   Aplica `data` también antes del primer apply de `l2`: `deploy-github`
+   necesita `bucketIamAdmin` sobre el bucket `dc-events` para fijar el IAM por
+   prefijo. Sin este apply, el de `l2` falla con 403 al crear los
+   `google_storage_bucket_iam_member` de `dc-events`.
+
 2. Crea el environment `gcp` del repositorio (*Settings → Environments →
    New environment*) con tu usuario como revisor requerido. Debe existir
    antes del paso 3: un `workflow_dispatch` que referencia un environment
@@ -284,3 +289,24 @@ el humano espera a que el run de CI en `main` termine de publicar
 *Terraform → `<capa>` → apply* para que el job pase al tag nuevo. Un apply
 anterior falla porque el tag aún no existe. El plan debe mostrar
 `image: ...:<versión anterior> -> ...:<versión nueva>`.
+
+## Stack l2 (DC Events)
+
+Instancia del módulo `layer` con dos modos: `l2-backfill` y `l2-monthly`, cada
+uno con su service account. Lee la landing de L1 (`roles/storage.objectViewer`
+bajo `l1/`) y escribe en `dc-events` y `dq-findings` (`roles/storage.objectUser`
+bajo `l2/`). No toca `manifest`: L2 no escribe manifiesto (TRD-L2 §7). No
+tiene scheduler propio: la encadena el workflow de L1 (ITSC-283).
+
+Orden de apply, todo por el humano:
+
+1. `data` desde Cloud Shell (ver "Habilitar el despliegue desde GitHub
+   Actions"), para que `deploy-github` tenga `bucketIamAdmin` sobre `dc-events`.
+2. Esperar a que el run de CI en `main` publique `l2_dc_events:<versión>`, con
+   la versión de `layers/l2_dc_events/VERSION`. Un apply anterior falla
+   porque el tag aún no existe.
+3. Actions → *Terraform* → `l2` → `apply`.
+
+Los recursos del job son provisionales: 4 vCPU, 16 GiB, timeout 3600 s y
+`max_retries = 1`, los mismos valores de L1 y no una medición de L2. La sonda
+de L2 (ITSC-281) los mide y la decisión ADR-04 (ITSC-282) los fija.

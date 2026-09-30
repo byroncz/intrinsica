@@ -163,6 +163,7 @@ resource "google_project_iam_custom_role" "bucket_iam_admin" {
 resource "google_storage_bucket_iam_member" "deploy_bucket_iam" {
   for_each = {
     landing     = google_storage_bucket.landing.name
+    dc-events   = google_storage_bucket.dc_events.name
     dq-findings = google_storage_bucket.dq_findings.name
     manifest    = google_storage_bucket.manifest.name
   }
