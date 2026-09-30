@@ -439,6 +439,46 @@ def test_an_incompatible_state_version_aborts_the_unit(fixture_ticks, write_mont
     assert sorted(str(p) for p in Path(ctx.events_root).rglob("*.parquet")) == before
 
 
+def _carry_table(tmp_path, rows: int) -> pa.Table:
+    point = (100_000_000, 1_000, 1)
+    carry = dc_pyo3.CarryOver(THETA, dc_pyo3.STATE_VERSION, 0, point, point)
+    batch = to_batch(carry, Coordinates("binance", "spot", "BTCUSDT", 2017, 8))
+    return pa.Table.from_batches([batch] * rows, schema=CARRY_OVER_SCHEMA)
+
+
+@pytest.mark.parametrize("kind", ["empty_file", "truncated", "no_rows", "two_rows"])
+def test_an_unreadable_carry_over_is_a_carry_over_error(tmp_path, kind):
+    path = tmp_path / "carry_over.parquet"
+    if kind == "empty_file":
+        path.write_bytes(b"")
+    elif kind == "truncated":
+        pq.write_table(_carry_table(tmp_path, 1), path)
+        path.write_bytes(path.read_bytes()[:-20])
+    else:
+        pq.write_table(_carry_table(tmp_path, 0 if kind == "no_rows" else 2), path)
+    with pytest.raises(CarryOverError) as error:
+        read_carry_over(str(path), THETA)
+    assert error.value.check_type == "carry_over_version_mismatch"
+    assert error.value.details["path"] == str(path)
+    assert error.value.details["reason"]
+
+
+def test_a_corrupt_carry_over_emits_a_finding_and_aborts_the_unit(
+    fixture_ticks, write_month, ctx
+):
+    write_month(fixture_ticks[:2_000], row_group_size=1_000, month=8)
+    write_month(fixture_ticks[2_000:], row_group_size=1_000, month=9)
+    process_unit(AUG, ctx)
+    Path(path_of(ctx, AUG, THETAS[7], CARRY_OVER)).write_bytes(b"")
+
+    with pytest.raises(CarryOverError):
+        process_unit(SEP, ctx)
+    (row,) = [
+        r for r in findings_of(ctx) if r["check_type"] == "carry_over_version_mismatch"
+    ]
+    assert json_details(row)["theta"] == THETAS[7]
+
+
 def test_a_carry_over_of_another_theta_is_config_drift(fixture_ticks, write_month, ctx):
     write_month(fixture_ticks[:2_000], row_group_size=1_000, month=8)
     process_unit(AUG, ctx)

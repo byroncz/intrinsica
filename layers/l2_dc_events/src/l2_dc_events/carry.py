@@ -129,6 +129,37 @@ def read_carry_over(path: str, theta: int) -> dc_pyo3.CarryOver:
             f"{path} no existe: el mes anterior no dejó su carry-over",
             {"theta": theta, "expected_path": path},
         )
+    try:
+        row = _read_row(path, resolved, fs, theta)
+    except (pa.ArrowException, IndexError, ValueError) as exc:
+        raise CarryOverError(
+            "carry_over_version_mismatch",
+            f"{path}: no se pudo leer el carry-over ({type(exc).__name__}: {exc})",
+            {"theta": theta, "path": path, "reason": f"{type(exc).__name__}: {exc}"},
+        ) from exc
+    if int(row["theta"].scaleb(8)) != theta:
+        raise CarryOverError(
+            "theta_config_drift",
+            f"{path}: theta={row['theta']} no es el de la partición ({theta})",
+            {"theta": theta, "found": str(row["theta"]), "path": path},
+        )
+    pending = None
+    if row["has_pending_event"]:
+        pending = (_point(row, "pending_reference"), _point(row, "pending_confirm"))
+    return dc_pyo3.CarryOver(
+        theta,
+        row["state_version"],
+        row["direction"],
+        _point(row, "ext_high"),
+        _point(row, "ext_low"),
+        pending,
+    )
+
+
+def _read_row(path: str, resolved: str, fs, theta: int) -> dict:
+    """La única fila del archivo. Los errores de `CarryOverError` salen tal cual;
+    un archivo corrupto, vacío o con más de una fila levanta el error de Arrow
+    o `ValueError`, que `read_carry_over` convierte."""
     with pq.ParquetFile(resolved, filesystem=fs) as parquet:
         schema = parquet.schema_arrow
         found = None
@@ -153,20 +184,4 @@ def read_carry_over(path: str, theta: int) -> dc_pyo3.CarryOver:
                 {"theta": theta, "found": str(schema), "path": path},
             )
         (row,) = parquet.read().to_pylist()
-    if int(row["theta"].scaleb(8)) != theta:
-        raise CarryOverError(
-            "theta_config_drift",
-            f"{path}: theta={row['theta']} no es el de la partición ({theta})",
-            {"theta": theta, "found": str(row["theta"]), "path": path},
-        )
-    pending = None
-    if row["has_pending_event"]:
-        pending = (_point(row, "pending_reference"), _point(row, "pending_confirm"))
-    return dc_pyo3.CarryOver(
-        theta,
-        row["state_version"],
-        row["direction"],
-        _point(row, "ext_high"),
-        _point(row, "ext_low"),
-        pending,
-    )
+    return row
