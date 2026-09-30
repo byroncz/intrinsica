@@ -331,7 +331,7 @@ Se introduce un **lago de hallazgos de calidad de datos (Data Quality findings)*
 | Medallion completo (4 capas) | ~0,2–0,25 TB | L1 38,4 GiB + L2 ~73–103 GiB + L3 del orden de L2 + L4. Reemplaza los 45–75 GB de v2.1, que suponían las capas 2–4 "muy livianas" |
 | Ventana mensual reciente | ~30–40 M filas / ~2,5–5 GB CSV | ~0,5–0,6 GB precio+ts en memoria |
  
-> **Nota — tramas con ticks por θ.** Materializar los ticks de cada evento (la definición de L3 hasta v2.1) equivale a copiar L1 una vez por θ, porque los eventos de un θ cubren el mes sin huecos ni solapes: 50 copias de 38,4 GiB, más de 1 TB, y diez veces más lectura en cada indicador nuevo. Queda **fuera del diseño**, salvo para un puñado de θ de investigación interactiva, nunca los 50. Una pasada histórica con fan-out cuesta minutos de cómputo (2,8 M ticks/s por core con 50 θ, ITSC-241) y una lectura de 38 GiB. Porqué completo: [Decisión: L3 guarda resúmenes por evento](https://app.notion.com/p/3eb27957d23d81d69ccac074bef2f8b3).
+> **Nota — tramas con ticks por θ.** Materializar los ticks de cada evento (la definición de L3 hasta v2.1) equivale a copiar L1 una vez por θ, porque los eventos de un θ cubren el mes sin huecos ni solapes: 50 copias de 38,4 GiB (50 × 38,4 GiB ≈ 1,9 TiB) y hasta 50 veces más lectura en cada indicador que mire todos los θ, frente a una lectura de L1 con fan-out. Queda **fuera del diseño**, salvo para un puñado de θ de investigación interactiva, nunca los 50. Una pasada histórica con fan-out cuesta minutos de cómputo (2,8 M ticks/s por core con 50 θ, ITSC-241) y una lectura de 38 GiB. Porqué completo: [Decisión: L3 guarda resúmenes por evento](https://app.notion.com/p/3eb27957d23d81d69ccac074bef2f8b3).
 
 ### 7.2 Tarifas de cómputo (us-east1, 2026)
  
