@@ -90,19 +90,20 @@ jobs:
         env:
           TASKS: ${{ steps.tasks.outputs.tasks }}
         run: |
-          args="--mode,${MODE},--from,${FROM}"
-          # gcloud rechaza un --args con un valor repetido en la lista: si
-          # to == from, agregar --to duplicaría ese valor y la ejecución
-          # nunca se crea. Se omite en ese caso; el CLI de la capa asume
-          # to = from cuando --to falta.
+          # gcloud rechaza un --args con un valor repetido en la lista (ITSC-232:
+          # to == from; ITSC-280: series_start == from). Cada opción va como una
+          # sola pieza --opción=valor, así dos meses iguales no chocan. Aun así,
+          # --to se omite si es igual a from: el CLI de la capa asume to = from
+          # cuando falta, y el de l2-monthly rechaza --to.
+          args="--mode,${MODE},--from=${FROM}"
           if [[ -n "$TO" && "$TO" != "$FROM" ]]; then
-            args="${args},--to,${TO}"
+            args="${args},--to=${TO}"
           fi
           if [[ "$FORCE" == "true" ]]; then
             args="${args},--force"
           fi
           if [[ -n "$SERIES_START" ]]; then
-            args="${args},--series-start,${SERIES_START}"
+            args="${args},--series-start=${SERIES_START}"
           fi
           # --args reemplaza los argumentos del contenedor, no el ENTRYPOINT.
           # Con --format, gcloud imprime el nombre de la ejecución al terminar.
