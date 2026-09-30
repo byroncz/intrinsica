@@ -349,6 +349,16 @@ los tres últimos los sumó ITSC-244, cada uno con su porqué:
   `events`, `has_pending_event` y los `content_hash` de `events.parquet` y
   `carry_over.parquet`. Es la huella de la corrida: dos ejecuciones del mismo
   mes deben dar los mismos hashes.
+- **`unit_timing`** (`info`, `pass`): uno por unidad (mes) al terminar, no por
+  θ. `metric_value` es la pared en segundos (`wall_s`); `details` lleva los
+  segundos por fase (`read_s`, `decode_s`, `detect_s`, `write_s`, `carry_s`,
+  `wait_s`, `other_s`), `row_groups`, `bytes_in`, el límite efectivo de CPU
+  (`cores`, `cores_visible`, `cores_source`), `write_workers` y
+  `cpu_throttled_s` (`null` si el cgroup no lo expone). `read_s`, `decode_s`,
+  `detect_s`, `carry_s` y `wait_s` son pared del hilo principal y, con
+  `other_s`, suman `wall_s`; `write_s` se acumula entre hilos y puede
+  pasarla. Va aparte de `events_summary` porque sus tiempos cambian en cada
+  corrida y el de `events_summary` no puede.
 
 ### Estado actual de un hallazgo
 

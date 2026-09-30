@@ -2,8 +2,9 @@ import logging
 from datetime import date
 
 import pytest
-from l2_dc_events import cli
+from l2_dc_events import cli, cpu
 from l2_dc_events.cli import UsageError, main, previous_month, resolve_range
+from l2_dc_events.cpu import CpuLimit
 
 SERIES = ["--series-start", "2017-08"]
 BACKFILL = [*SERIES, "--mode", "backfill"]
@@ -195,6 +196,28 @@ def test_main_fails_closed_without_the_previous_carry_over(
     assert main(argv, _env(tmp_path)) == 1
     assert "carry-over" in capsys.readouterr().err
     assert not list((tmp_path / "events").rglob("*.parquet"))
+
+
+def test_the_probe_line_reports_the_effective_cpu_limit_and_the_phases(
+    tmp_path, fixture_ticks, write_month, monkeypatch, caplog
+):
+    write_month(fixture_ticks, row_group_size=1_000, year=2017, month=8)
+    monkeypatch.setattr(cpu, "cpu_limit", lambda: CpuLimit(2.0, 6, "cgroup-v2"))
+    argv = [*BACKFILL, "--from", "2017-08"]
+    with caplog.at_level(logging.INFO):
+        assert main(argv, _env(tmp_path)) == 0
+    (line,) = [m for m in caplog.messages if m.startswith("sonda:")]
+    fields = dict(part.split("=") for part in line.split()[2:])
+    assert (fields["cores"], fields["cores_visible"]) == ("2", "6")
+    assert fields["cores_source"] == "cgroup-v2"
+    # ticks_s_core se calcula con el límite efectivo, no con los cores visibles.
+    wall, ticks = float(fields["wall_s"]), int(fields["ticks"])
+    assert int(fields["ticks_s_core"]) == round(ticks / wall / 2)
+    assert (fields["row_groups"], int(fields["bytes_in"]) > 0) == ("5", True)
+    phases = ("read_s", "decode_s", "detect_s", "carry_s", "wait_s", "other_s")
+    # Las fases del hilo principal más lo no explicado suman la pared (a 0,1 s por redondeo).
+    assert abs(sum(float(fields[p]) for p in phases) - wall) <= 0.6
+    assert float(fields["write_s"]) > 0
 
 
 def test_monthly_defaults_to_the_previous_month(

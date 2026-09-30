@@ -135,19 +135,36 @@ def _log_probe(
 
     La pared se redondea hacia arriba a 0.1 s para que nunca salga 0.0. Con
     `result`, agrega los ticks y los ticks/s por core (los de la unidad entera:
-    lectura, 50 θ y escritura, sobre los núcleos disponibles), y θ·ticks/s por
+    lectura, 50 θ y escritura, sobre el límite efectivo de CPU), y θ·ticks/s por
     core, la unidad con que `dc_core` reporta su benchmark.
+
+    `cores` es el límite efectivo (cuota del cgroup o, sin ella, los cores
+    visibles) y `cores_visible` lo que ve la máquina. Las fases son las de
+    `timing.py`: `read_s`, `decode_s`, `detect_s`, `carry_s` y `wait_s` son
+    pared del hilo principal; `write_s` es la suma de los hilos de escritura
+    y `other_s` lo que queda de `wall_s` sin explicar (incluye emitir los
+    hallazgos, que el hallazgo `unit_timing` no cuenta).
     """
     rss_mib = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss // 1024
     wall_s = math.ceil((time.monotonic() - started) * 10) / 10
     line = f"sonda: unit={unit} mode={mode} rss_peak_mib={rss_mib} wall_s={wall_s:.1f}"
     if result is not None:
-        cores = len(os.sched_getaffinity(0))
-        per_core = result.n_ticks / wall_s / cores
-        line += (
-            f" ticks={result.n_ticks} cores={cores} ticks_s_core={per_core:.0f}"
-            f" theta_ticks_s_core={per_core * len(result.events_per_theta):.0f}"
+        t = result.timing
+        per_core = result.n_ticks / wall_s / t.cores
+        other_s = max(
+            0.0, wall_s - (t.carry_s + t.read_s + t.decode_s + t.detect_s + t.wait_s)
         )
+        line += (
+            f" ticks={result.n_ticks} cores={t.cores:g} cores_visible={t.cores_visible}"
+            f" cores_source={t.cores_source} ticks_s_core={per_core:.0f}"
+            f" theta_ticks_s_core={per_core * len(result.events_per_theta):.0f}"
+            f" read_s={t.read_s:.1f} decode_s={t.decode_s:.1f}"
+            f" detect_s={t.detect_s:.1f} write_s={t.write_s:.1f}"
+            f" carry_s={t.carry_s:.1f} wait_s={t.wait_s:.1f} other_s={other_s:.1f}"
+            f" row_groups={t.row_groups} bytes_in={t.bytes_in}"
+        )
+        if t.cpu_throttled_s is not None:
+            line += f" cpu_throttled_s={t.cpu_throttled_s:.1f}"
     logger.info(line)
 
 

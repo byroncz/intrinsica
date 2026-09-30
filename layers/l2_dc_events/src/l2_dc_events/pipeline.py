@@ -8,6 +8,7 @@ cada θ a medida que cierran y, al final, publica `events.parquet` y
 
 import logging
 import os
+import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
 from dataclasses import dataclass
@@ -15,7 +16,7 @@ from dataclasses import dataclass
 import dc_pyo3
 import pyarrow as pa
 
-from l2_dc_events import findings
+from l2_dc_events import cpu, findings
 from l2_dc_events.carry import (
     CarryOverError,
     Coordinates,
@@ -33,6 +34,7 @@ from l2_dc_events.landing import (
 )
 from l2_dc_events.parallel import ParallelWriters
 from l2_dc_events.thetas import load_thetas
+from l2_dc_events.timing import Phases, Timing
 from l2_dc_events.write import CARRY_OVER, EVENTS, partition_path
 
 __all__ = [
@@ -63,12 +65,14 @@ class Result:
     events_per_theta: list[int]
     events_hashes: list[str]
     carry_over_hashes: list[str]
+    timing: Timing
 
 
 def _feed(
     fanout: dc_pyo3.FanOut,
     batch: pa.RecordBatch,
     writes: ParallelWriters,
+    phases: Phases,
 ) -> int:
     """Alimenta el lote al fan-out por tramos y pasa sus eventos a los escritores.
 
@@ -78,10 +82,15 @@ def _feed(
     """
     ticks = ticks_of(batch)
     for chunk in ticks.chunks(FEED_TICKS):
+        started = time.perf_counter()
         closed = fanout.feed_batch_columns(
             chunk.prices, chunk.times, chunk.agg_trade_ids
         )
+        detected = time.perf_counter()
+        # `submit` se bloquea si los escritores van atrasados: esa es la espera.
         writes.submit(closed)
+        phases.detect_s += detected - started
+        phases.wait_s += time.perf_counter() - detected
     return len(ticks)
 
 
@@ -172,6 +181,9 @@ def process_unit(
     `fanout` permite que el llamador aporte uno ya construido, y entonces no
     se consulta el carry-over: es quien lo llama el que responde por el estado.
     """
+    started = time.perf_counter()
+    throttled_before = cpu.throttled_s()
+    phases = Phases()
     path = consolidated_path(
         str(ctx.landing_root),
         unit.provider,
@@ -182,6 +194,8 @@ def process_unit(
     )
     try:
         parquet = open_consolidated(path)
+        # Existencia y footer del archivo: también es espera de I/O.
+        phases.read_s += time.perf_counter() - started
     except LandingError as exc:
         if exc.check_type:
             findings.emit(
@@ -193,7 +207,9 @@ def process_unit(
     # `with`: el archivo se cierra al terminar la unidad, también si falla.
     with parquet, ExitStack() as stack:
         if fanout is None:
+            carry_started = time.perf_counter()
             fanout = _start(unit, ctx)
+            phases.carry_s = time.perf_counter() - carry_started
         thetas = fanout.thetas
         writers = [
             stack.enter_context(EventWriter(_path(ctx, unit, theta, EVENTS), theta))
@@ -201,17 +217,23 @@ def process_unit(
         ]
         # Después de los escritores: al salir, primero se cancela y se espera
         # al pool y solo entonces se cierran (o se borran) los temporales.
-        pool = ThreadPoolExecutor(max_workers=len(os.sched_getaffinity(0)))
+        write_workers = len(os.sched_getaffinity(0))
+        pool = ThreadPoolExecutor(max_workers=write_workers)
         stack.callback(pool.shutdown, wait=True, cancel_futures=True)
         writes = ParallelWriters(pool, writers)
         n_ticks = 0
         n_row_groups = parquet.num_row_groups
-        for batch in read_batches(parquet):
-            n_ticks += _feed(fanout, batch, writes)
+        for batch in read_batches(parquet, phases):
+            n_ticks += _feed(fanout, batch, writes, phases)
             # Soltar el lote antes de pedir el siguiente row group.
             del batch
-        writes.submit(fanout.finish_columns())
+        started_tail = time.perf_counter()
+        closing = fanout.finish_columns()
+        closed = time.perf_counter()
+        writes.submit(closing)
         writes.wait()
+        phases.detect_s += closed - started_tail
+        phases.wait_s += time.perf_counter() - closed
 
         discarded = fanout.discarded()
         carries = fanout.carry_overs()
@@ -219,19 +241,57 @@ def process_unit(
         def publish(theta: int, writer: EventWriter, carry: dc_pyo3.CarryOver):
             # Por θ, primero los eventos y luego su carry-over.
             events_hash = writer.commit()
+            carry_started = time.perf_counter()
             _, carry_hash = write_carry_over(
                 carry, where, _path(ctx, unit, theta, CARRY_OVER)
             )
-            return events_hash, carry_hash
+            return events_hash, carry_hash, time.perf_counter() - carry_started
 
+        published = time.perf_counter()
         hashes = list(pool.map(publish, thetas, writers, carries))
-        events_hashes = [events_hash for events_hash, _ in hashes]
-        carry_hashes = [carry_hash for _, carry_hash in hashes]
+        phases.wait_s += time.perf_counter() - published
+        events_hashes = [events_hash for events_hash, _, _ in hashes]
+        carry_hashes = [carry_hash for _, carry_hash, _ in hashes]
+        phases.write_s = sum(writer.write_s for writer in writers) + sum(
+            carry_write_s for _, _, carry_write_s in hashes
+        )
 
     events = [writer.n_events for writer in writers]
-    _report(ctx, unit, thetas, events, carries, events_hashes, carry_hashes, discarded)
+    limit = cpu.cpu_limit()
+    throttled_after = cpu.throttled_s()
+    timing = Timing(
+        wall_s=time.perf_counter() - started,
+        read_s=phases.read_s,
+        decode_s=phases.decode_s,
+        detect_s=phases.detect_s,
+        write_s=phases.write_s,
+        carry_s=phases.carry_s,
+        wait_s=phases.wait_s,
+        row_groups=phases.row_groups,
+        bytes_in=phases.bytes_in,
+        cores=limit.cores,
+        cores_visible=limit.visible,
+        cores_source=limit.source,
+        write_workers=write_workers,
+        cpu_throttled_s=(
+            None
+            if throttled_before is None or throttled_after is None
+            else throttled_after - throttled_before
+        ),
+    )
+    _report(
+        ctx,
+        unit,
+        thetas,
+        events,
+        carries,
+        events_hashes,
+        carry_hashes,
+        discarded,
+        timing,
+    )
     logger.info("unidad %s: %d ticks, %d row groups", unit, n_ticks, n_row_groups)
-    return Result(n_ticks, n_row_groups, events, events_hashes, carry_hashes)
+    return Result(n_ticks, n_row_groups, events, events_hashes, carry_hashes, timing)
 
 
 def _report(
@@ -243,9 +303,11 @@ def _report(
     events_hashes: list[str],
     carry_hashes: list[str],
     discarded: list[int],
+    timing: Timing,
 ) -> None:
-    """Emite el resumen por θ y, si la guarda de §9.1 descartó algo, su hallazgo."""
-    out = []
+    """Emite el resumen por θ, el tiempo por fase de la unidad y, si la guarda
+    de §9.1 descartó algo, su hallazgo."""
+    out = [findings.unit_timing(ctx, unit, timing)]
     rows = zip(thetas, events, carries, events_hashes, carry_hashes, discarded)
     for theta, n, carry, events_hash, carry_hash, dropped in rows:
         out.append(

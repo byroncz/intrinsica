@@ -530,3 +530,45 @@ def test_content_hash_is_the_one_l2_has_always_published():
     carry_over.update(batch(CARRY_OVER_SCHEMA, [carry]))
     assert events.hexdigest() == expected["events"]
     assert carry_over.hexdigest() == expected["carry"]
+
+
+def test_one_unit_timing_finding_per_unit(fixture_ticks, write_month, ctx):
+    write_month(fixture_ticks, row_group_size=1_000)
+    result = process_unit(AUG, ctx)
+    (row,) = [r for r in findings_of(ctx) if r["check_type"] == "unit_timing"]
+    assert (row["layer"], row["mode"], row["stage"]) == ("l2", "backfill", "canonical")
+    assert (row["severity"], row["status"]) == ("info", "pass")
+    assert (row["year"], row["month"]) == (2017, 8)
+    details = json_details(row)
+    assert details == result.timing.details()
+    assert row["metric_value"] == details["wall_s"]
+    assert (details["row_groups"], details["bytes_in"] > 0) == (5, True)
+    # Las fases del hilo principal no se solapan: no pueden pasar de la pared.
+    serial = sum(details[k] for k in ("carry_s", "read_s", "decode_s", "detect_s"))
+    assert serial + details["wait_s"] <= details["wall_s"] + 0.002
+    assert details["write_s"] > 0
+    assert details["cores"] <= details["cores_visible"]
+
+
+def test_timing_stays_out_of_events_summary(fixture_ticks, write_month, ctx):
+    """`events_summary` es la huella de la corrida: no puede llevar tiempos."""
+    write_month(fixture_ticks, row_group_size=1_000)
+    process_unit(AUG, ctx)
+    rows = [r for r in findings_of(ctx) if r["check_type"] == "events_summary"]
+    assert {frozenset(json_details(r)) for r in rows} == {
+        frozenset(
+            {
+                "theta",
+                "events",
+                "has_pending_event",
+                "events_content_hash",
+                "carry_over_content_hash",
+            }
+        )
+    }
+
+
+def test_a_month_that_cannot_start_emits_no_unit_timing(write_month, ctx):
+    with pytest.raises(LandingError):
+        process_unit(AUG, ctx)
+    assert not [r for r in findings_of(ctx) if r["check_type"] == "unit_timing"]

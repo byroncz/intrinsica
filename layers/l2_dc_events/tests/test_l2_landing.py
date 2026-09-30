@@ -1,3 +1,4 @@
+import time
 from pathlib import Path
 
 import pyarrow as pa
@@ -5,12 +6,14 @@ import pyarrow.parquet as pq
 import pytest
 from conftest import table_of
 from l2_dc_events.landing import (
+    COLUMNS,
     LandingError,
     consolidated_path,
     open_consolidated,
     read_batches,
     ticks_of,
 )
+from l2_dc_events.timing import Phases
 
 
 def ticks(n, start=1):
@@ -156,3 +159,48 @@ def test_a_file_that_breaks_the_contract_is_not_left_open(tmp_path):
     with pytest.raises(LandingError, match="falta la columna"):
         open_consolidated(str(path))
     assert _open_fds_of(path) == []
+
+
+def test_read_batches_counts_row_groups_and_the_bytes_of_the_three_columns(write_month):
+    path = write_month(ticks(25), row_group_size=10)
+    parquet = open_consolidated(str(path))
+    phases = Phases()
+    assert sum(b.num_rows for b in read_batches(parquet, phases)) == 25
+    assert phases.row_groups == 3
+    columns = [
+        column
+        for index in range(parquet.metadata.num_row_groups)
+        for column in map(
+            parquet.metadata.row_group(index).column,
+            range(parquet.metadata.num_columns),
+        )
+    ]
+    three = sum(c.total_compressed_size for c in columns if c.path_in_schema in COLUMNS)
+    everything = sum(c.total_compressed_size for c in columns)
+    assert phases.bytes_in == three < everything
+
+
+def test_waiting_is_read_time_and_the_cpu_of_the_thread_is_decode_time(
+    write_month, monkeypatch
+):
+    parquet = open_consolidated(str(write_month(ticks(25), row_group_size=10)))
+    real = parquet.read_row_group
+
+    def slow(*args, **kwargs):  # espera de I/O: pared sin CPU
+        time.sleep(0.05)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(parquet, "read_row_group", slow)
+    phases = Phases()
+    list(read_batches(parquet, phases))
+    assert phases.read_s >= 0.14
+    assert phases.decode_s < phases.read_s / 3
+
+
+def test_read_batches_without_phases_reads_the_same(write_month):
+    path = write_month(ticks(25), row_group_size=10)
+    plain = [b.to_pylist() for b in read_batches(open_consolidated(str(path)))]
+    timed = [
+        b.to_pylist() for b in read_batches(open_consolidated(str(path)), Phases())
+    ]
+    assert plain == timed

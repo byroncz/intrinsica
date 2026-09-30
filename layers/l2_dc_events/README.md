@@ -89,7 +89,7 @@ uv run python -m l2_dc_events --mode backfill --from 2020-01 --series-start 2020
    `carry_over.parquet`, cada uno con escritura atómica (temporal más
    `commit`). Un carry-over presente significa que el mes de ese θ quedó
    completo.
-6. Emite los hallazgos de resumen y deja la línea `sonda:`.
+6. Emite los hallazgos de resumen y de tiempo por fase, y deja la línea `sonda:`.
 
 **Re-ejecutar un mes** da los mismos archivos: la entrada es la misma y nada
 de la salida depende de la ejecución (ni el `run_id` ni la hora). Si el
@@ -114,6 +114,7 @@ hallazgos"):
 | `carry_over_missing`, `carry_over_version_mismatch`, `theta_config_drift` | La compuerta aborta la unidad; uno por θ afectado |
 | `dc_zero_tick_discarded` | La guarda de §9.1 descartó eventos (esperado: cero, nunca se emite) |
 | `events_summary` | Uno por θ al terminar: eventos escritos y `content_hash` de ambos archivos |
+| `unit_timing` | Uno por mes al terminar: pared y tiempo por fase, límite efectivo de CPU y bytes leídos (ITSC-289) |
 
 ## Los 50 θ
 
@@ -235,6 +236,69 @@ pero no queda por debajo de la base como enero.
   job, así que con 2 vCPU hubo 6 hilos de escritura sobre 2 vCPU; no invalida
   el veredicto, porque con 8 vCPU (9 hilos) tampoco aceleró.
 
+
+## Tiempo por fase y límite de CPU (ITSC-289)
+
+La sonda de ITSC-281 dio la pared del mes más pesado (2023-03) con 2, 4 y 8
+vCPU (292, 262 y 301 s) pero no dónde se va. Desde la versión 0.5.1 la línea
+`sonda:` y el hallazgo `unit_timing` (uno por mes, en `dq-findings`; contrato en
+[`docs/data-contracts.md`](../../docs/data-contracts.md)) separan el tiempo por
+fase. Solo instrumenta: no cambia cómo se lee, se detecta ni se escribe.
+
+```
+sonda: unit=binance/spot/BTCUSDT/2020-01 mode=backfill rss_peak_mib=254 wall_s=8.3 ticks=14051798 cores=10 cores_visible=10 cores_source=affinity ticks_s_core=169299 theta_ticks_s_core=8464939 read_s=0.0 decode_s=0.7 detect_s=1.8 write_s=38.2 carry_s=0.0 wait_s=5.7 other_s=0.1 row_groups=15 bytes_in=81066590 cpu_throttled_s=0.0
+```
+
+- **`cores` es el límite efectivo.** Cuota del cgroup (`cpu.max`, v2, o
+  `cpu.cfs_quota_us`, v1; el menor de la jerarquía) o, sin cuota, los cores
+  visibles (`sched_getaffinity`). `cores_visible` conserva el dato que la sonda
+  reportaba antes, y `cores_source` dice quién fijó `cores`. `ticks_s_core` se
+  calcula con el límite efectivo. Lo hace `cpu.py`.
+- **Las fases del hilo principal son disjuntas y suman `wall_s`:** `carry_s`
+  (cargar el carry-over), `read_s` + `decode_s` (leer la landing), `detect_s`
+  (el fan-out) y `wait_s` (esperar a los escritores, publicación final
+  incluida); lo que falta es `other_s`. **`write_s` no entra en esa suma:** es
+  el tiempo que los θ pasan codificando y subiendo Parquet, sumado entre los
+  hilos de escritura, y puede pasar de la pared (en el ejemplo, 38 s de
+  escritura en 8 s de pared, sobre 10 hilos). Para saber si la escritura
+  frena la unidad se mira `wait_s`. Lo define `timing.py`.
+- **Cómo se separa `read_s` de `decode_s`.** No se envuelve el archivo:
+  `ParquetFile` lee con `pre_buffer=True` (lecturas en paralelo en hilos de
+  Arrow), y un archivo Python las serializaría y cambiaría lo que se mide. Con
+  `use_threads=False` el hilo que lee decodifica, así que su CPU
+  (`time.thread_time`) es `decode_s` y el resto de la pared de cada row group
+  es `read_s`. Límite: si la cuota estrangula al proceso, esa espera también
+  cae en `read_s`; `cpu_throttled_s` (`throttled_usec` de `cpu.stat`) permite
+  descontarla.
+- **`unit_timing` y no `events_summary`.** El resumen es por θ (50 filas por
+  mes) y su `details` debe ser idéntico entre dos corridas del mes; agregarle
+  tiempos lo rompería y repetiría 50 veces un dato de la unidad.
+
+### Costo de la instrumentación
+
+Medido en local sobre 2020-01 (10 cores, 14 051 798 ticks), 8 corridas
+intercaladas de la versión anterior (A) y la nueva (B) para cancelar la deriva
+de la máquina, que entre tandas seguidas llegó a 0,8 s:
+
+| 2020-01 | Antes (0.5.0) | Después (0.5.1) |
+|---|---|---|
+| Pared, media de 8 | 8,20 s | 8,16 s |
+| Pared, mínima | 8,0 s | 7,8 s |
+| RSS pico, media | 247,4 MiB | 248,2 MiB |
+| `content_hash` de `events.parquet` y `carry_over.parquet` (50 θ) | los de la línea base | idénticos |
+
+La sobrecarga de pared queda por debajo del ruido entre corridas (la diferencia
+es −0,5 %, con corridas de 7,8 a 8,6 s), así que cumple el tope de 1 %. El RSS
+no crece más de lo que varía entre corridas (244 a 254 MiB).
+
+### Corrida en la nube sobre 2023-03
+
+Pendiente (la corre el humano, runbook
+[`sonda-l2.md`](../../docs/runbooks/sonda-l2.md#corrida-por-fases-itsc-289)):
+una corrida con `force=true` en la config vigente del stack `l2`. Su línea
+`sonda:` y el párrafo con la fase dominante y la optimización que propone la
+card siguiente van aquí.
+
 ## Imagen
 
 `Dockerfile` (contexto: la raíz del workspace) tiene dos etapas. La de
@@ -278,6 +342,8 @@ de DQ y la línea con `content_hash`.
 - `test_l2_cli.py`: el CLI: el rango encadenado en un proceso, la reanudación
   y `--force`, que un fallo detenga el rango, el índice de tarea distinto de 0,
   `monthly` por defecto, `L2_SERIES_START` y el fail-closed.
+- `test_l2_cpu.py` y `test_l2_timing.py`: el límite efectivo de CPU (cuota del
+  cgroup v1 y v2, jerarquía, sin cuota) y la aritmética de `other_s`.
 
 ## Acoplamiento con L1
 
