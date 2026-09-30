@@ -165,14 +165,22 @@ let mut d = Detector::from_carry_over(theta, &carry)?;
   extremo (`pending`, que es `has_pending_event` más `pending_reference_*` y
   `pending_confirm_*`). `provider`, `market`, `asset`, `year` y `month` son
   coordenadas de la partición: las agrega quien escribe el archivo.
-- **Bytes, no Parquet.** El TRD fija Parquet de una fila, que escribe la capa
-  L2 en Python (hija 8); el crate solo convierte estado ↔ bytes, sin
-  dependencias. Formato de `to_bytes`: largo de `state_version` (1 byte),
+- **Mapeo a las columnas de §7.4.** El TRD fija un Parquet de una fila, que
+  escribe la capa L2 en Python (hija 8) a partir de los campos de
+  `CarryOver`, uno a uno: `theta` y cada precio son el entero sin escalar de
+  su `DECIMAL` (`theta` a `DECIMAL(9,8)`, precios a `DECIMAL(18,8)`), `time` y
+  `agg_trade_id` van a `INT64`, `direction` a `INT8`, y `ext_high`/`ext_low`
+  a `ext_high_*`/`ext_low_*`. `pending = Some(..)` es `has_pending_event =
+  true` con `pending_reference_*` y `pending_confirm_*`; `pending = None` es
+  `has_pending_event = false` con las seis columnas `pending_*` en nulo.
+- **Bytes, no Parquet.** `to_bytes`/`from_bytes` son un transporte interno,
+  sin dependencias, y **no** son el formato del TRD. Tampoco son la base del
+  `content_hash`: el TRD lo calcula sobre el `carry_over.parquet` comprimido
+  con ZSTD-3 (§6.7, §8.1 paso 8). Formato: largo de `state_version` (1 byte),
   `state_version` en UTF-8, y `theta`, `direction` (1 byte), `ext_high`,
   `ext_low`, `has_pending_event` (1 byte) y los dos puntos pendientes (en
   cero si no hay), todo entero little-endian de 8 bytes. Son 112 bytes con
-  `1.0.0`, vea la serie que vea: mismo estado, mismos bytes (sirve para el
-  `content_hash`).
+  `1.0.0`, vea la serie que vea: mismo estado, mismos bytes.
 - **Estado acotado.** Solo escalares: sin ticks huérfanos y sin grupo de
   empate. Un grupo abierto no se guarda: `carry_over()` devuelve `OpenGroup`
   hasta que se llama `finish()`, igual que en el fin de la entrada de un mes

@@ -33,6 +33,17 @@ pub struct CarryPending {
 /// `market`, `asset`, `year`, `month`) las agrega quien escribe el Parquet.
 ///
 /// Los precios van enteros en escala [`SCALE`], igual que en el detector.
+///
+/// Mapeo 1:1 a las columnas de §7.4, que escribe la capa:
+///
+/// - `theta` y cada `price` son el entero sin escalar de su `DECIMAL`
+///   (`theta` a `DECIMAL(9,8)`, los precios a `DECIMAL(18,8)`);
+/// - `time` y `agg_trade_id` van a `INT64` y `direction` a `INT8`;
+/// - `ext_high` y `ext_low` son las columnas `ext_high_*` y `ext_low_*`;
+/// - `pending = Some(p)` es `has_pending_event = true` con `p.reference` en
+///   `pending_reference_*` y `p.confirm` en `pending_confirm_*`;
+///   `pending = None` es `has_pending_event = false` con las seis columnas
+///   `pending_*` en nulo.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CarryOver {
     /// `round(θ × 10⁸)`, el θ de esta cadena.
@@ -104,7 +115,13 @@ impl CarryOver {
     /// Bytes canónicos: `state_version` (largo en un byte + UTF-8) y luego los
     /// campos en el orden de la struct, enteros de 8 bytes little-endian,
     /// `has_pending_event` en un byte y los puntos pendientes en cero si no
-    /// hay evento. Mismo estado, mismos bytes (base del `content_hash`).
+    /// hay evento. Mismo estado, mismos bytes.
+    ///
+    /// Es un transporte interno entre el detector y quien lo llama, no el
+    /// formato del TRD: el carry-over de TRD-L2 §7.4 es un Parquet de una fila
+    /// que escribe la capa a partir de los campos de [`CarryOver`]. Estos
+    /// bytes tampoco son la base del `content_hash`, que el TRD calcula sobre
+    /// el `carry_over.parquet` comprimido (§6.7, §8.1 paso 8).
     ///
     /// Falla solo si `state_version` no cabe en el prefijo de un byte. No
     /// valida el estado: eso lo hace [`Detector::from_carry_over`].
