@@ -314,8 +314,12 @@ ITSC-281) y de la decisión ADR-04 (ITSC-282, [TRD-L2 §14](../docs/TRD/l2.md)):
 **Aplicar este cambio cierra la deriva de la sonda.** Las corridas de la sonda
 cambiaron el job `l2-backfill` a mano con `gcloud run jobs update` (CPU variable,
 4 GiB, timeout de 24 h, sin reintentos). El `apply` de `l2` lo devuelve al
-código. El plan debe mostrar solo cambios de `cpu`, `memory`, `timeout` y
-`max_retries` en los dos jobs, y nada más.
+código. El plan debe mostrar cambios de `cpu`, `memory` y `timeout` en los dos
+jobs, y de `max_retries` (0 a 1) solo en `l2-backfill`: `l2-monthly` ya tenía 1
+reintento. En `l2-backfill` también puede quitar `client` y `client_version`,
+que `gcloud run jobs update` deja puestos y el módulo no fija; eso es parte de
+cerrar la deriva. Cualquier otro cambio es una sorpresa y se revisa antes de
+aprobar el `apply`.
 
 ## Timeouts y reintentos de los jobs de l2
 
