@@ -217,7 +217,10 @@ docs/data-contracts.md, "Sobrescritura atómica"). Antes de ITSC-234, la
 primera regla de lifecycle (`num_newer_versions`/`days_since_noncurrent_time`)
 nunca alcanzaba a estos `.tmp`: un `.tmp` borrado no vuelve a tener versiones
 más nuevas, así que la condición de `num_newer_versions` nunca se cumplía y
-se acumulaban para siempre. La regla nueva (`matches_suffix = [".tmp"]`,
+se acumulaban para siempre. Desde ITSC-235 esa primera regla ya no usa
+`num_newer_versions`: toda versión no vigente de `landing` se borra a los 30
+días (`days_since_noncurrent_time = 30`), lo que también alcanza a los
+`provisional-day=NN.parquet` que `monthly-close` borra. La regla nueva (`matches_suffix = [".tmp"]`,
 `days_since_noncurrent_time = 1`) baja esa espera a un día para lo que se
 escriba de ahora en más, pero los `.tmp` acumulados antes de aplicarla siguen
 ahí hasta que la regla los alcanza. Para no esperar, bórralos a mano una sola

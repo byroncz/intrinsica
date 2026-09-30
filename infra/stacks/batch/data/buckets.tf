@@ -32,15 +32,17 @@ resource "google_storage_bucket" "landing" {
     enabled = true
   }
 
-  # Conserva la versión vigente y las 2 no vigentes más recientes. En GCS,
-  # num_newer_versions cuenta también la vigente, por eso el valor es 3.
+  # ITSC-235: toda versión no vigente se borra a los 30 días, que son la
+  # ventana de recuperación ante una reescritura o un borrado equivocado.
+  # Sin num_newer_versions: un objeto borrado (p. ej. los provisional-day de
+  # monthly-close) no tiene versiones más nuevas y esa condición nunca se
+  # cumplía, así que quedaba huérfano para siempre.
   lifecycle_rule {
     action {
       type = "Delete"
     }
     condition {
       with_state                 = "ARCHIVED"
-      num_newer_versions         = 3
       days_since_noncurrent_time = 30
     }
   }
