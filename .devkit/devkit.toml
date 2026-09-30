@@ -1,5 +1,5 @@
 [devkit]
-template = "1.1.0"
+template = "1.2.0"
 project  = "ITSC"
 python   = "3.14"
 apt      = ["rustup", "gcc", "libc6-dev"]

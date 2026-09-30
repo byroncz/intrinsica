@@ -37,8 +37,12 @@ vigente.
   `.devkit/devkit.toml` (`apt`) y se reconstruye la imagen con
   `devkit rebuild`.
 - Si una conexión falla con "connection refused", el dominio no está en la
-  lista blanca del proxy. Ejecuta `devkit-net-denied`, añádelo a `domains`
-  en `.devkit/devkit.toml` y aplica con `devkit recreate`.
+  lista blanca del proxy. Ejecuta `devkit-net-denied` para confirmarlo,
+  añádelo a `domains` en `.devkit/devkit.toml`, comitea y pushea: `devkit
+  recreate` no lo aplica antes del merge, porque lee `domains` de `origin/main`,
+  donde la card aún no llegó (DEVKIT-182). Bloquea la card pidiendo
+  `devkit proxy <proyecto> --ref <rama>` al humano; el detalle está en "Un
+  dominio bloqueado" de `task-start` y `task-fix`.
 
 ## Notion y skills
 
