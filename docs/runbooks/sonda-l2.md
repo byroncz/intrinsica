@@ -74,7 +74,7 @@ ese mes en `from`, `to` y `series_start` de todas las corridas y en las
 rutas de este runbook. La diferencia entre el puesto 1 y el 2 es de 1,3 %: si
 queda así, 2023-03 sigue siendo el mes a medir.
 
-Anota aquí la fecha de la verificación: `<AAAA-MM-DD>`.
+Última verificación: 2026-09-30 (sin meses nuevos).
 
 ## Inputs de Run job
 
@@ -150,10 +150,12 @@ En el log que vuelca el paso "Logs de la ejecución" del run:
   - `wall_s`: pared de la unidad completa (lectura, 50 θ y escritura), no del
     arranque del contenedor.
   - `ticks`: ticks del mes; debe ser el mismo en las tres corridas.
-  - `cores`: núcleos que vio el proceso. Debe ser igual a la CPU configurada
-    (2, 4 u 8); si no, la corrida no midió lo que crees.
-  - `ticks_s_core` = `ticks / wall_s / cores`, y `theta_ticks_s_core` es lo
-    mismo por los 50 θ (la unidad del benchmark de `dc_core`).
+  - `cores`: núcleos visibles de la máquina, **no** el límite de vCPU del job
+    (la sonda del 2026-09-30 leyó 6, 6 y 9 con 2, 4 y 8 vCPU configurados).
+    No lo uses para validar la config: usa `gcloud run jobs describe`.
+  - `ticks_s_core` = `ticks / wall_s / cores` y `theta_ticks_s_core` es lo
+    mismo por los 50 θ (la unidad del benchmark de `dc_core`). Por lo dicho
+    en `cores`, recalcúlalos dividiendo por el vCPU configurado.
 - Las líneas `θ=<θ> eventos=<n> events_content_hash=... carry_over_content_hash=...`,
   una por θ (50), y `eventos cerrados por θ: min=<n> max=<n>`. Con las tres
   corridas sobre los mismos datos, eventos y hashes deben coincidir entre ellas:
@@ -213,32 +215,67 @@ Con `s` = `wall_s` y la config de la corrida (`c` vCPU, `m` GiB):
 
 ## Resultados
 
-Los llena la card ITSC-281 con los números del humano; hoy están pendientes.
+Medido por el humano el 2026-09-30, con `run-job.yml` desde `main` sobre
+`l2-backfill`, `from` = `to` = `series_start` = `2023-03` y `force` = `true`.
 
-Tarifas usadas: vCPU-s `<USD>`, GiB-s `<USD>`, región `<región>`, consultadas el
-`<AAAA-MM-DD>`.
+Tarifas de lista de Cloud Run Jobs (Default, sin CUD), consultadas el
+2026-09-30 en <https://cloud.google.com/run/pricing>: vCPU-s 0,000018 USD,
+GiB-s 0,000002 USD, región `us-east1`.
 
-**Sonda (mes 2023-03)**, imagen `<versión>`, 4 GiB, `force` = `true`, sin
-reintentos, timeout de 24 h.
+**Sonda (mes 2023-03)**, imagen `l2_dc_events:0.5.0`, 4 GiB, `force` = `true`,
+sin reintentos, timeout de 24 h. `ticks` = 190.227.841 en las tres corridas.
+Ticks/s por core se calculó con el **vCPU configurado**, no con el `cores` del
+log (ver hallazgo abajo).
 
 | Corrida | Fecha | URL del run | Config | RSS pico (MiB) | Pared (s) | Ticks/s por core | GiB-s | vCPU-s | Costo de la corrida (USD) |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 1 | pendiente | pendiente | 2 vCPU, 4 GiB | pendiente | pendiente | pendiente | pendiente | pendiente | pendiente |
-| 2 | pendiente | pendiente | 4 vCPU, 4 GiB | pendiente | pendiente | pendiente | pendiente | pendiente | pendiente |
-| 3 | pendiente | pendiente | 8 vCPU, 4 GiB | pendiente | pendiente | pendiente | pendiente | pendiente | pendiente |
+| 1 | 2026-09-30 | [36744329462](https://github.com/byroncz/intrinsica/actions/runs/36744329462) | 2 vCPU, 4 GiB | 446 | 292,2 | 325.510 | 1.168,8 | 584,4 | 0,0129 |
+| 2 | 2026-09-30 | [36747509163](https://github.com/byroncz/intrinsica/actions/runs/36747509163) | 4 vCPU, 4 GiB | 446 | 261,5 | 181.862 | 1.046,0 | 1.046,0 | 0,0209 |
+| 3 | 2026-09-30 | [36749897862](https://github.com/byroncz/intrinsica/actions/runs/36749897862) | 8 vCPU, 4 GiB | 445 | 301,1 | 78.972 | 1.204,4 | 2.408,8 | 0,0458 |
+
+Ticks/s por core (θ × 50, la unidad del benchmark de `dc_core`): 16.275.483,
+9.093.109 y 3.948.602. La línea `sonda:` reportó 108.503, 121.241 y 70.197
+(5.425.161, 6.062.073 y 3.509.868 por θ) porque divide por `cores` (6, 6 y 9).
 
 **Extrapolación a los 109 meses** (backfill secuencial en una tarea, techo con
 el mes más pesado)
 
 | Corrida | Pared total (h) | Contra 24 h | GiB-s ×109 | vs cupo (360.000) | vCPU-s ×109 | vs cupo (180.000) | Costo del backfill, con cupo (USD) |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| 2 vCPU | pendiente | pendiente | pendiente | pendiente | pendiente | pendiente | pendiente |
-| 4 vCPU | pendiente | pendiente | pendiente | pendiente | pendiente | pendiente | pendiente |
-| 8 vCPU | pendiente | pendiente | pendiente | pendiente | pendiente | pendiente | pendiente |
+| 2 vCPU | 8,85 | 36,9 % | 127.399 | 35,4 % | 63.700 | 35,4 % | 0,00 |
+| 4 vCPU | 7,92 | 33,0 % | 114.014 | 31,7 % | 114.014 | 63,3 % | 0,00 |
+| 8 vCPU | 9,12 | 38,0 % | 131.280 | 36,5 % | 262.559 | 145,9 % | 1,49 |
 
-**Veredicto según la regla de decisión** (sobre la corrida de 8 vCPU): pendiente.
+El costo con cupo del 8 vCPU es el excedente de vCPU-s (82.559) × tarifa. A
+precio de lista y sin cupo, el backfill costaría 1,40, 2,28 y 4,99 USD. Si L1
+consumió cupo ese mes, el excedente sube.
 
-- Verificación del mes más pesado: pendiente.
-- Estado de cada ejecución (Exitosa o Fallida, OOM o timeout): pendiente.
-- Consistencia entre corridas (`ticks`, eventos por θ y hashes iguales):
-  pendiente.
+**Veredicto según la regla de decisión** (sobre la corrida de 8 vCPU):
+**Cloud Run Jobs**.
+
+1. RSS pico 445 MiB de 24.576 MiB (1,8 %), sin OOM.
+2. 109 × 301,1 s = 32.820 s (9,12 h) < 86.400 s: 38 % del tope de 24 h.
+
+Cloud Batch con Spot no hace falta.
+
+- Verificación del mes más pesado: 2026-09-30. El ranking del 2026-09-25
+  cubre los 109 meses hasta 2026-08 y no hay meses nuevos; 2023-03 sigue
+  siendo el mayor.
+- Estado de cada ejecución: Exitosa en las tres, sin OOM ni timeout.
+- Consistencia entre corridas: `ticks` igual y `events_summary` con
+  `status=pass` en los 50 θ en las tres. No se anotaron los hashes por θ.
+- Memoria: 4 GiB funcionó con 2, 4 y 8 vCPU (verificado con `gcloud run jobs
+  describe`). El RSS no cambia con la CPU: ~445 MiB.
+
+**Hallazgos para ITSC-282**
+
+- **La pared no baja con más vCPU**: 292,2 s con 2, 261,5 con 4 y 301,1 con 8.
+  Pasar de 2 a 8 vCPU cuadruplica vCPU-s y costo sin ganar tiempo. Con una
+  sola corrida por config, la diferencia entre 261 y 301 s puede ser ruido;
+  lo sólido es que más CPU no acelera. Es lo que ITSC-282 debe pesar al elegir
+  los vCPU; esta sonda no explica la causa.
+- **`cores` no es el límite del job.** La línea `sonda:` reportó 6, 6 y 9
+  cores (los visibles de la máquina) contra 2, 4 y 8 configurados. Por eso
+  `ticks_s_core` y `theta_ticks_s_core` de la línea `sonda:` no sirven: usa
+  los de la tabla. Falta que la sonda lea la cuota de CPU del cgroup; queda
+  como card aparte.
