@@ -61,13 +61,18 @@ uv run python -m l2_dc_events --mode backfill --from 2020-01 --series-start 2020
    `agg_trade_id` (`landing.py`). Cada lote va a los 50 θ como buffers de Arrow
    sin copia, en tramos de 65 536 ticks (`FEED_TICKS`), y se suelta antes de
    pedir el siguiente.
-4. Los eventos que cada tramo cierra van a 50 escritores abiertos
-   (`events.py`), que los vuelcan a columnas y los escriben en row groups de
-   hasta 32 768 filas. Nunca se acumula el mes de un θ: la RAM es O(lote).
-5. Al final cierra el grupo de empate abierto (`finish`, RF-L2-12) y publica:
-   por cada θ, primero `events.parquet` y luego `carry_over.parquet`, cada uno
-   con escritura atómica (temporal más `commit`). Un carry-over presente
-   significa que el mes de ese θ quedó completo.
+4. Los eventos que cada tramo cierra salen de `dc_pyo3` **ya en columnas**
+   (`feed_batch_columns`, sin un objeto `Event` por evento) y van a 50
+   escritores abiertos (`events.py`), que los envuelven sin copia y los
+   escriben en row groups de hasta 32 768 filas. Los 50 escritores codifican
+   **en paralelo** (`parallel.py`): un pool de hilos, un θ a la vez y en orden
+   cada uno, y a lo más 2 tramos sin escribir (`MAX_CHUNKS_IN_FLIGHT`), así que
+   nunca se acumula el mes de un θ ni la cola de escritura: la RAM es O(lote).
+5. Al final cierra el grupo de empate abierto (`finish_columns`, RF-L2-12) y
+   publica, en paralelo por θ: primero `events.parquet` y luego
+   `carry_over.parquet`, cada uno con escritura atómica (temporal más
+   `commit`). Un carry-over presente significa que el mes de ese θ quedó
+   completo.
 6. Emite los hallazgos de resumen y deja la línea `sonda:`.
 
 **Re-ejecutar un mes** da los mismos archivos: la entrada es la misma y nada
@@ -145,8 +150,9 @@ sonda: unit=binance/spot/BTCUSDT/2020-01 mode=backfill rss_peak_mib=263 wall_s=2
 
 ### Dónde se va el tiempo (para E4a)
 
-El detector no es el cuello. Perfilado con `cProfile` sobre 2020-01 (los
-tiempos absolutos se inflan por el perfilador; la proporción es la que sirve):
+El detector no es el cuello. Perfilado con `cProfile` sobre 2020-01 en la
+versión de ITSC-244 (los tiempos absolutos se inflan por el perfilador; la
+proporción es la que sirve; se repitió en ITSC-275 con el mismo resultado):
 
 | Paso | Tiempo aproximado |
 |---|---|
@@ -156,15 +162,59 @@ tiempos absolutos se inflan por el perfilador; la proporción es la que sirve):
 | Leer los row groups | ~0,6 s |
 | Hash de contenido | ~0,6 s |
 
-Los 50 θ sobre 14 M ticks cuestan ~1,6 s de cómputo, unos 0,9 M ticks/s por
-core incluyendo la creación de los objetos `Event`. El resto es trabajo serial
-de Python: materializar 12 M de eventos como objetos y codificarlos a Parquet,
-con casi todos los demás cores ociosos. La ganancia está ahí, no en el detector: que
-`dc_pyo3` devuelva los eventos ya en columnas y que los θ se escriban en
-paralelo (pyarrow libera el GIL al codificar). Es una decisión de E4a, y por
-eso los ticks/s por core de arriba son los de la unidad entera y no los 2,8 M
-del benchmark de [`dc_core`](../../shared/dc_core/README.md), que mide solo el
-detector.
+Los 50 θ sobre 14 M ticks cuestan ~1,6 s de cómputo. El resto era trabajo
+serial de Python: materializar 12 M de eventos como objetos y codificarlos a
+Parquet, con casi todos los demás cores ociosos. Por eso los ticks/s por core de
+arriba son los de la unidad entera y no los 2,8 M del benchmark de
+[`dc_core`](../../shared/dc_core/README.md), que mide solo el detector.
+
+## Antes y después de sacar el trabajo serial de Python (ITSC-275)
+
+Dos cambios: `dc_pyo3` entrega los eventos en columnas
+([`dc_pyo3`](../../shared/dc_pyo3/README.md#eventos-en-columnas-feed_batch_columns-finish_columns))
+y los 50 escritores codifican en paralelo. Misma máquina (10 cores, 7 GiB) y
+misma landing de 2020-01, con la línea sonda de la corrida:
+
+| 2020-01 | Antes (ITSC-244) | Después (ITSC-275) |
+|---|---|---|
+| Tiempo de pared | 24,9 s (ITSC-244: 24,4 s) | 7,7 s (5 corridas: 7,7 a 8,6 s) |
+| Ticks/s por core | 56 433 (57 589) | 182 491 |
+| θ·ticks/s por core | 2,82 M | 9,12 M |
+| RSS pico | 261 MiB (263) | 247-250 MiB |
+
+```
+antes:   sonda: ... rss_peak_mib=261 wall_s=24.9 ticks=14051798 cores=10 ticks_s_core=56433 theta_ticks_s_core=2821646
+después: sonda: ... rss_peak_mib=249 wall_s=7.7 ticks=14051798 cores=10 ticks_s_core=182491 theta_ticks_s_core=9124544
+```
+
+2020-02 (`monthly`, con el carry-over de enero): 9,2 s y 285 MiB, frente a
+24,6 s y 272 MiB de ITSC-244. Es el único punto donde el pico sube (+13 MiB, un
+mes 20 % más grande): sigue sin crecer con los ticks, que es lo que pide O(lote),
+pero no queda por debajo de la base como enero.
+
+- **Nada de la salida cambió.** Los 50 θ dan el mismo `content_hash` de
+  `events.parquet` y de `carry_over.parquet` que la línea base de ITSC-244, en
+  enero y en febrero, y los archivos de enero son idénticos byte a byte a los de
+  la versión anterior: mismos row groups, mismas filas.
+- **Dónde quedó el tiempo:** el hilo principal ya solo lee, calcula el fan-out
+  (~1,5 s) y espera a los escritores. El Parquet se codifica en los 10 cores en
+  vez de en uno.
+- **El tope de tramos es un intercambio entre pared y RAM**, medido en enero
+  (`MAX_CHUNKS_IN_FLIGHT`, ver `parallel.py`): 1 tramo, ~10 s y ~238 MiB; 2,
+  ~8 s y ~250 MiB; 3, ~7,1 s y ~265 MiB; 4, ~6,7 s y ~273 MiB. Se dejó en 2, el
+  mayor que no sube el pico de la base (261 MiB).
+- **El allocator importa tanto como el paralelismo.** Con los hilos, el pico se
+  fue a ~580 MiB con solo ~70 MiB vivos en Arrow: el pool `mimalloc` de Arrow y
+  el umbral dinámico de `mmap` de glibc retenían lo liberado. `memory.py` y
+  `ARROW_DEFAULT_MEMORY_POOL=system` (fijada en `l2_dc_events/__init__.py`)
+  lo resuelven, y la imagen de E4a debería fijar las dos variables como `ENV`
+  (`ARROW_DEFAULT_MEMORY_POOL=system`, `MALLOC_MMAP_THRESHOLD_=16384`). El
+  detalle y las medidas están en el docstring de `memory.py`.
+- **Lo que queda para E4a:** el paralelismo de escritura es el número de
+  cores. Con un solo hilo de escritura (10 cores para el fan-out) la unidad
+  tardó 12,2 s: el volcado a columnas ya no pasa por Python, y eso solo bajó
+  la unidad a la mitad. Con 1 vCPU no está medido; conviene que la sonda de
+  E4a lo mida.
 
 ## Pruebas
 
@@ -181,6 +231,10 @@ detector.
   tamaños de row group, que dos meses encadenados por Parquet den lo mismo que
   un mes entero, el carry-over con y sin evento pendiente, que una falla no
   deje archivos, y cada hallazgo de DQ.
+- `test_l2_parallel.py`: que cada θ reciba sus bloques en orden aunque los
+  demás corran en paralelo, que un error del escritor llegue al hilo principal y
+  detenga las escrituras, el tope de tramos en vuelo y que `to_batch` envuelva
+  los buffers del binding sin cambiar los valores.
 - `test_l2_output_contract_doc.py`: que las tablas de `docs/data-contracts.md`
   coincidan con `EVENTS_SCHEMA` y `CARRY_OVER_SCHEMA`.
 - `test_l2_cli.py`: el CLI, incluida la cadena de dos meses y el fail-closed.

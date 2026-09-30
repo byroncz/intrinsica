@@ -20,6 +20,18 @@ class Event:
     @property
     def extreme(self) -> Point: ...
 
+class EventColumns:
+    """Los eventos de un θ como columnas, sin un `Event` por evento.
+
+    `buffers()` son 10 `bytes` en el orden de `events.parquet` (`reference_*`,
+    `confirm_*`, `extreme_*`: precio, tiempo, `agg_trade_id`; luego
+    `direction`), en el layout de Arrow: precio `decimal128` (16 B
+    little-endian), tiempo e id `int64`, `direction` `int8`. `theta` no va.
+    """
+
+    def buffers(self) -> list[bytes]: ...
+    def __len__(self) -> int: ...
+
 class CarryOver:
     def __new__(
         cls,
@@ -62,7 +74,14 @@ class FanOut:
         times: memoryview,
         ids: memoryview,
     ) -> list[list[Event]]: ...
+    def feed_batch_columns(
+        self,
+        prices: memoryview,
+        times: memoryview,
+        ids: memoryview,
+    ) -> list[EventColumns]: ...
     def finish(self) -> list[Event | None]: ...
+    def finish_columns(self) -> list[EventColumns]: ...
     def discarded(self) -> list[int]: ...
     def carry_overs(self) -> list[CarryOver]: ...
     def __len__(self) -> int: ...

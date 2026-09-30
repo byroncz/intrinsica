@@ -277,7 +277,7 @@ def test_a_failure_mid_unit_leaves_nothing_behind(fixture_ticks, write_month, ct
     class Exploding:
         thetas = THETAS[:3]
 
-        def feed_batch(self, prices, times, ids):
+        def feed_batch_columns(self, prices, times, ids):
             raise RuntimeError("boom")
 
     with pytest.raises(RuntimeError, match="boom"):

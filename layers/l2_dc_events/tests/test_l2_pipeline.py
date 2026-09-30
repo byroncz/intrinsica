@@ -210,6 +210,11 @@ def test_process_unit_counts_the_closed_events_of_a_given_fanout(
     assert result.events_per_theta == expected
 
 
+# Un `EventColumns` vacío: el binding no tiene constructor, pero un fan-out sin
+# ticks cierra 0 eventos.
+NO_EVENTS = dc_pyo3.FanOut([100_000]).finish_columns()[0]
+
+
 class SpyFanOut:
     """Un fan-out que anota qué recibe y cuánta memoria de Arrow hay en cada lote."""
 
@@ -220,12 +225,12 @@ class SpyFanOut:
     def __len__(self):
         return len(self.thetas)
 
-    def feed_batch(self, prices, times, ids):
+    def feed_batch_columns(self, prices, times, ids):
         self.calls.append((len(times), pa.total_allocated_bytes()))
-        return [[] for _ in self.thetas]
+        return [NO_EVENTS] * len(self.thetas)
 
-    def finish(self):
-        return [None] * len(self.thetas)
+    def finish_columns(self):
+        return [NO_EVENTS] * len(self.thetas)
 
     def discarded(self):
         return [0] * len(self.thetas)

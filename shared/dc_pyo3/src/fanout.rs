@@ -1,9 +1,10 @@
 //! El fan-out de N θ de `dc_core` como clase Python.
 
 use crate::carry::CarryOver;
+use crate::columns::EventColumns;
 use crate::convert::value_error;
 use crate::event::Event;
-use dc_core::{FanOut as CoreFanOut, PRICE_LIMIT};
+use dc_core::{Event as CoreEvent, FanOut as CoreFanOut, PRICE_LIMIT};
 use pyo3::buffer::{Element, PyBuffer};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -77,6 +78,9 @@ impl FanOut {
     /// Se valida todo el lote antes de alimentar: si falla con `ValueError`, el
     /// fan-out no se tocó. El GIL se mantiene durante el lote, porque los
     /// buffers son de Python.
+    ///
+    /// Un objeto `Event` por evento: para pruebas y usos pequeños. La capa usa
+    /// `feed_batch_columns`.
     fn feed_batch(
         &mut self,
         py: Python<'_>,
@@ -84,7 +88,85 @@ impl FanOut {
         times: PyBuffer<i64>,
         ids: PyBuffer<i64>,
     ) -> PyResult<Vec<Vec<Event>>> {
-        let (prices, times, ids) = (view(py, &prices)?, view(py, &times)?, view(py, &ids)?);
+        let closed = self.feed_core(py, &prices, &times, &ids)?;
+        Ok(closed
+            .into_iter()
+            .map(|events| events.into_iter().map(Event).collect())
+            .collect())
+    }
+
+    /// Igual que `feed_batch`, pero los eventos de cada θ salen como un
+    /// `EventColumns` (buffers por columna, ya en el layout de Arrow) y no
+    /// como objetos `Event`: no se crea un objeto de Python por evento.
+    fn feed_batch_columns(
+        &mut self,
+        py: Python<'_>,
+        prices: PyBuffer<u8>,
+        times: PyBuffer<i64>,
+        ids: PyBuffer<i64>,
+    ) -> PyResult<Vec<EventColumns>> {
+        let closed = self.feed_core(py, &prices, &times, &ids)?;
+        // Un θ a la vez: los eventos de `dc_core` de un θ se sueltan al
+        // terminar sus columnas, no todos juntos al final.
+        closed
+            .into_iter()
+            .map(|events| EventColumns::new(py, &events))
+            .collect()
+    }
+
+    /// Fin de entrada (RF-L2-12): cierra el grupo de empate abierto de cada θ.
+    /// Devuelve, por θ, el evento que cierra (o `None`).
+    fn finish(&mut self) -> Vec<Option<Event>> {
+        self.inner
+            .finish()
+            .into_iter()
+            .map(|e| e.map(Event))
+            .collect()
+    }
+
+    /// `finish` con los eventos como columnas: un `EventColumns` por θ, de 0
+    /// o 1 evento.
+    fn finish_columns(&mut self, py: Python<'_>) -> PyResult<Vec<EventColumns>> {
+        self.inner
+            .finish()
+            .into_iter()
+            .map(|e| EventColumns::new(py, e.as_slice()))
+            .collect()
+    }
+
+    /// Eventos descartados por la validación "un DC tiene al menos un tick"
+    /// (§9.1), por θ. Distinto de cero señala un defecto del detector.
+    fn discarded(&self) -> Vec<u64> {
+        self.inner
+            .detectors()
+            .iter()
+            .map(dc_core::Detector::discarded)
+            .collect()
+    }
+
+    /// El carry-over de cada θ, en orden, para entregarlo al cerrar la unidad.
+    /// Exige haber llamado a `finish()` y haber visto al menos un tick.
+    fn carry_overs(&self) -> PyResult<Vec<CarryOver>> {
+        let carry = self.inner.carry_overs().map_err(value_error)?;
+        Ok(carry.into_iter().map(CarryOver).collect())
+    }
+
+    fn __len__(&self) -> usize {
+        self.thetas.len()
+    }
+}
+
+impl FanOut {
+    /// Valida el lote y lo alimenta por tramos; devuelve los eventos cerrados
+    /// por θ, en el tipo de `dc_core`.
+    fn feed_core(
+        &mut self,
+        py: Python<'_>,
+        prices: &PyBuffer<u8>,
+        times: &PyBuffer<i64>,
+        ids: &PyBuffer<i64>,
+    ) -> PyResult<Vec<Vec<CoreEvent>>> {
+        let (prices, times, ids) = (view(py, prices)?, view(py, times)?, view(py, ids)?);
         let n = times.len();
         if ids.len() != n || prices.len() != n * DECIMAL_LEN {
             return Err(PyValueError::new_err(format!(
@@ -116,41 +198,10 @@ impl FanOut {
                 .inner
                 .feed_batch(&scratch, &times[start..end], &ids[start..end]);
             for (acc, events) in out.iter_mut().zip(closed) {
-                acc.extend(events.into_iter().map(Event));
+                acc.extend(events);
             }
         }
         Ok(out)
-    }
-
-    /// Fin de entrada (RF-L2-12): cierra el grupo de empate abierto de cada θ.
-    /// Devuelve, por θ, el evento que cierra (o `None`).
-    fn finish(&mut self) -> Vec<Option<Event>> {
-        self.inner
-            .finish()
-            .into_iter()
-            .map(|e| e.map(Event))
-            .collect()
-    }
-
-    /// Eventos descartados por la validación "un DC tiene al menos un tick"
-    /// (§9.1), por θ. Distinto de cero señala un defecto del detector.
-    fn discarded(&self) -> Vec<u64> {
-        self.inner
-            .detectors()
-            .iter()
-            .map(dc_core::Detector::discarded)
-            .collect()
-    }
-
-    /// El carry-over de cada θ, en orden, para entregarlo al cerrar la unidad.
-    /// Exige haber llamado a `finish()` y haber visto al menos un tick.
-    fn carry_overs(&self) -> PyResult<Vec<CarryOver>> {
-        let carry = self.inner.carry_overs().map_err(value_error)?;
-        Ok(carry.into_iter().map(CarryOver).collect())
-    }
-
-    fn __len__(&self) -> usize {
-        self.thetas.len()
     }
 }
 

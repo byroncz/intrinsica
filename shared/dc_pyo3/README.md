@@ -17,8 +17,11 @@ también lo reconstruye cuando cambia el Rust suyo o el de `dc_core`
 import dc_pyo3
 
 fan = dc_pyo3.FanOut([10_000, 11_352, ...])  # round(θ × 10⁸), en este orden
+closed = fan.feed_batch_columns(prices, times, ids)  # list[EventColumns], uno por θ
+last = fan.finish_columns()  # list[EventColumns] de 0 o 1 evento: fin de entrada
+# Por objetos, para pruebas y usos pequeños:
 closed = fan.feed_batch(prices, times, ids)  # list[list[Event]], uno por θ
-last = fan.finish()  # list[Event | None]: fin de entrada
+last = fan.finish()  # list[Event | None]
 carry = fan.carry_overs()  # list[CarryOver], uno por θ
 fan = dc_pyo3.FanOut.from_carry_over(thetas, carry)  # el mes siguiente
 ```
@@ -54,10 +57,30 @@ Las tres entradas son objetos con protocolo de buffer, que en la capa son los
 - **El orden es del llamador**: los ticks van en orden estricto de
   `(time, agg_trade_id)`, como los entrega L1. El resultado no depende de cómo
   se parta la serie en lotes (lo verifican las pruebas).
-- Los eventos que devuelve una llamada son objetos de Python (~100 B cada
-  uno). Con θ chico pueden ser un evento cada pocos ticks: pasa lotes de
-  decenas de miles de ticks (la capa usa 65 536), no un row group entero de
-  1 M, o el pico de RAM sale de los eventos y no de los precios.
+- Con θ chico puede haber un evento cada pocos ticks: pasa lotes de decenas
+  de miles de ticks (la capa usa 65 536), no un row group entero de 1 M, o el
+  pico de RAM sale de los eventos y no de los precios.
+
+## Eventos en columnas (`feed_batch_columns`, `finish_columns`)
+
+`feed_batch` crea un objeto `Event` por evento (~100 B y varias tuplas). Con
+12 M de eventos por mes, volcarlos a columnas desde Python era el 50 % del
+tiempo de una unidad de L2 (ITSC-275). Las variantes `*_columns` reciben lo
+mismo y calculan lo mismo, pero devuelven por θ un `EventColumns`:
+
+| | |
+|---|---|
+| `len(block)` | número de eventos |
+| `block.buffers()` | 10 `bytes`, en el orden de `events.parquet`: `reference_*`, `confirm_*`, `extreme_*` (precio, tiempo, `agg_trade_id`) y `direction` |
+
+Cada buffer ya está en el layout de Arrow: precio `decimal128` (16 B
+little-endian, el entero sin escalar), tiempo e id `int64`, `direction`
+`int8`. `pyarrow.py_buffer(b)` los envuelve sin copia, y `theta`, que es
+constante, lo agrega quien escribe. Se construyen directo en la memoria del
+`bytes`, así que nunca conviven los eventos y una segunda copia: los
+eventos de `dc_core` de un θ se sueltan en cuanto están sus columnas. Las
+pruebas (`test_columns_carry_the_same_events_as_the_objects`) comprueban que
+`EventColumns` y `Event` llevan exactamente lo mismo.
 
 ## Por qué `extension-module` no es una feature por defecto
 

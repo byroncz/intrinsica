@@ -7,6 +7,8 @@ cada θ a medida que cierran y, al final, publica `events.parquet` y
 """
 
 import logging
+import os
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
 from dataclasses import dataclass
 
@@ -29,6 +31,7 @@ from l2_dc_events.landing import (
     read_batches,
     ticks_of,
 )
+from l2_dc_events.parallel import ParallelWriters
 from l2_dc_events.thetas import load_thetas
 from l2_dc_events.write import CARRY_OVER, EVENTS, partition_path
 
@@ -37,10 +40,10 @@ __all__ = ["FEED_TICKS", "Result", "RunContext", "Unit", "process_unit"]
 logger = logging.getLogger(__name__)
 
 # Ticks por llamada al fan-out. Los eventos que cada llamada devuelve son
-# objetos de Python (~100 B cada uno; con θ = 0,01 % puede ser un evento cada
-# pocos ticks), así que un row group entero de 1 M de ticks multiplicaría por 50
-# θ un pico de cientos de MiB. Con tramos de 65 536 el pico de eventos es
-# O(tramo), y el tiempo de crear los hilos sigue siendo una fracción pequeña.
+# buffers (~113 B por evento; con θ = 0,01 % puede ser un evento cada pocos
+# ticks), así que un row group entero de 1 M de ticks multiplicaría por 50 θ un
+# pico de cientos de MiB. Con tramos de 65 536 el pico de eventos es O(tramo), y
+# el tiempo de crear los hilos sigue siendo una fracción pequeña.
 FEED_TICKS = 65_536
 
 
@@ -56,7 +59,9 @@ class Result:
 
 
 def _feed(
-    fanout: dc_pyo3.FanOut, batch: pa.RecordBatch, writers: list[EventWriter]
+    fanout: dc_pyo3.FanOut,
+    batch: pa.RecordBatch,
+    writes: ParallelWriters,
 ) -> int:
     """Alimenta el lote al fan-out por tramos y pasa sus eventos a los escritores.
 
@@ -66,9 +71,10 @@ def _feed(
     """
     ticks = ticks_of(batch)
     for chunk in ticks.chunks(FEED_TICKS):
-        closed = fanout.feed_batch(chunk.prices, chunk.times, chunk.agg_trade_ids)
-        for writer, new in zip(writers, closed, strict=True):
-            writer.add(new)
+        closed = fanout.feed_batch_columns(
+            chunk.prices, chunk.times, chunk.agg_trade_ids
+        )
+        writes.submit(closed)
     return len(ticks)
 
 
@@ -130,8 +136,9 @@ def process_unit(
     """Procesa el mes: eventos y carry-over de los 50 θ a partir del consolidado.
 
     Cada lote se conforma como buffers sin copia, se alimenta a los 50 θ y se
-    suelta antes de pedir el siguiente; los eventos van a `events.parquet` a
-    medida que cierran. La RAM de la unidad es O(row group). Al final se cierra
+    suelta antes de pedir el siguiente; los eventos salen del binding ya en
+    columnas y los 50 escritores los codifican a `events.parquet` en paralelo
+    (`parallel.py`), a medida que cierran. La RAM de la unidad es O(row group). Al final se cierra
     el grupo de empate abierto (RF-L2-12) y se publica todo: primero los
     eventos de cada θ y luego su carry-over, así un carry-over presente
     significa que el mes de ese θ quedó completo. Re-ejecutar el mes da los
@@ -168,25 +175,34 @@ def process_unit(
             stack.enter_context(EventWriter(_path(ctx, unit, theta, EVENTS), theta))
             for theta in thetas
         ]
+        # Después de los escritores: al salir, primero se cancela y se espera
+        # al pool y solo entonces se cierran (o se borran) los temporales.
+        pool = ThreadPoolExecutor(max_workers=len(os.sched_getaffinity(0)))
+        stack.callback(pool.shutdown, wait=True, cancel_futures=True)
+        writes = ParallelWriters(pool, writers)
         n_ticks = 0
         n_row_groups = parquet.num_row_groups
         for batch in read_batches(parquet):
-            n_ticks += _feed(fanout, batch, writers)
+            n_ticks += _feed(fanout, batch, writes)
             # Soltar el lote antes de pedir el siguiente row group.
             del batch
-        for writer, last in zip(writers, fanout.finish(), strict=True):
-            if last is not None:
-                writer.add([last])
+        writes.submit(fanout.finish_columns())
+        writes.wait()
 
         discarded = fanout.discarded()
         carries = fanout.carry_overs()
-        events_hashes, carry_hashes = [], []
-        for theta, writer, carry in zip(thetas, writers, carries, strict=True):
-            events_hashes.append(writer.commit())
+
+        def publish(theta: int, writer: EventWriter, carry: dc_pyo3.CarryOver):
+            # Por θ, primero los eventos y luego su carry-over.
+            events_hash = writer.commit()
             _, carry_hash = write_carry_over(
                 carry, where, _path(ctx, unit, theta, CARRY_OVER)
             )
-            carry_hashes.append(carry_hash)
+            return events_hash, carry_hash
+
+        hashes = list(pool.map(publish, thetas, writers, carries))
+        events_hashes = [events_hash for events_hash, _ in hashes]
+        carry_hashes = [carry_hash for _, carry_hash in hashes]
 
     events = [writer.n_events for writer in writers]
     _report(ctx, unit, thetas, events, carries, events_hashes, carry_hashes, discarded)
