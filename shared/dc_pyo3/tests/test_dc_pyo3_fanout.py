@@ -210,3 +210,79 @@ def test_buffers_must_be_contiguous_and_int64():
         fanout.feed_batch(prices, memoryview(array("d", [1.0, 2.0])), ids)
     with pytest.raises(TypeError):
         fanout.feed_batch([1, 2], times, ids)
+
+
+def decode_columns(block):
+    """Un `EventColumns` a `(direction, reference, confirm, extreme)` por evento."""
+    raw = block.buffers()
+    assert len(raw) == 10
+    n = len(block)
+
+    def ints(buffer, width):
+        assert len(buffer) == n * width
+        return [
+            int.from_bytes(buffer[i * width : (i + 1) * width], "little", signed=True)
+            for i in range(n)
+        ]
+
+    points = [
+        list(zip(ints(raw[k], 16), ints(raw[k + 1], 8), ints(raw[k + 2], 8)))
+        for k in (0, 3, 6)
+    ]
+    directions = ints(raw[9], 1)
+    return list(zip(directions, *points, strict=True))
+
+
+def as_tuples(events):
+    return [(e.direction, e.reference, e.confirm, e.extreme) for e in events]
+
+
+def test_columns_carry_the_same_events_as_the_objects():
+    ticks = series(6_000, seed=13)
+    thetas = [20_000, 100_000, 5_000_000]
+    by_objects, by_columns = dc_pyo3.FanOut(thetas), dc_pyo3.FanOut(thetas)
+    for start in range(0, len(ticks), 1_500):
+        batch = columns(ticks[start : start + 1_500])
+        objects = by_objects.feed_batch(*batch)
+        blocks = by_columns.feed_batch_columns(*batch)
+        assert [len(b) for b in blocks] == [len(e) for e in objects]
+        for block, events in zip(blocks, objects, strict=True):
+            assert decode_columns(block) == as_tuples(events)
+    # Con el θ de 20 % (el último) no hay eventos: bloque vacío, 10 buffers vacíos.
+    assert len(blocks[-1]) == 0
+    assert all(len(b) == 0 for b in blocks[-1].buffers())
+    assert sum(len(b) for b in blocks) > 0
+
+
+def test_finish_columns_matches_finish():
+    # θ = 10 %: el grupo de t=4 confirma la baja y sigue abierto (107 y 106 en
+    # t=4); `finish` lo cierra y con él el evento de subida, con extremo 120.
+    ticks = [
+        (100 * SCALE, 1, 1),
+        (111 * SCALE, 2, 2),
+        (120 * SCALE, 3, 3),
+        (107 * SCALE, 4, 4),
+        (106 * SCALE, 4, 5),
+    ]
+    thetas = [THETA_10_PCT, 50_000_000]
+    a, b = dc_pyo3.FanOut(thetas), dc_pyo3.FanOut(thetas)
+    feed_all(a, ticks, 5)
+    feed_all(b, ticks, 5)
+    last = a.finish()
+    blocks = b.finish_columns()
+    assert last[0] is not None and last[1] is None
+    for block, event in zip(blocks, last, strict=True):
+        assert decode_columns(block) == ([] if event is None else as_tuples([event]))
+    assert a.carry_overs() == b.carry_overs()
+
+
+def test_feed_batch_columns_validates_like_feed_batch():
+    fanout = dc_pyo3.FanOut([THETA_10_PCT])
+    prices, times, ids = columns([(100 * SCALE, 1, 1), (0, 2, 2)])
+    with pytest.raises(ValueError, match="prices"):
+        fanout.feed_batch_columns(prices, times, ids)
+    with pytest.raises(ValueError, match="distinto largo"):
+        fanout.feed_batch_columns(prices, times, memoryview(array("q", [1])))
+    # No se tocó: sigue aceptando una serie válida desde cero.
+    ok = [(100 * SCALE, 1, 1), (111 * SCALE, 2, 2)]
+    assert [len(b) for b in fanout.feed_batch_columns(*columns(ok))] == [0]

@@ -15,6 +15,7 @@ from pathlib import Path
 
 from l2_dc_events.carry import CarryOverError
 from l2_dc_events.landing import LandingError
+from l2_dc_events.memory import tune_allocators
 from l2_dc_events.pipeline import Result, RunContext, Unit, process_unit
 
 MODES = ("backfill", "monthly")
@@ -152,6 +153,7 @@ def main(
         print(f"l2_dc_events: {exc}", file=sys.stderr)
         return EXIT_USAGE
 
+    tune_allocators()
     unit = Unit(year, month, asset=args.asset)
     result = None
     try:

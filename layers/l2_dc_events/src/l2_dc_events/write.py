@@ -107,6 +107,12 @@ class PartitionWriter:
             raise ValueError(f"el esquema no es el del archivo:\n{batch.schema}")
         self._writer.write_batch(batch, row_group_size=max(batch.num_rows, 1))
 
+    def write_table(self, table: pa.Table) -> None:
+        """Escribe la tabla (de uno o más trozos) como un solo row group."""
+        if not table.schema.equals(self.schema):
+            raise ValueError(f"el esquema no es el del archivo:\n{table.schema}")
+        self._writer.write_table(table, row_group_size=max(table.num_rows, 1))
+
     def commit(self) -> str:
         """Cierra el archivo y lo deja en el destino. Devuelve `path`."""
         self._close()
