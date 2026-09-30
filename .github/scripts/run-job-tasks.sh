@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
 # Imprime una línea por unidad de trabajo del rango; run-job.yml cuenta las
-# líneas para fijar --tasks. Cada tarea del job toma from + CLOUD_RUN_TASK_INDEX.
+# líneas para fijar --tasks. En L1 cada tarea del job toma from +
+# CLOUD_RUN_TASK_INDEX. L2 no usa task array: sus meses son secuenciales (cada
+# uno lee el carry-over del anterior), así que su CLI exige una sola tarea.
 #
-# Uso: run-job-tasks.sh <mode> <from> [to]
-#   backfill, monthly-close: meses YYYY-MM del rango inclusivo
-#   daily:                   días YYYY-MM-DD del rango inclusivo
-#   seam-check:              una sola unidad ("1")
+# Uso: run-job-tasks.sh <job> <from> [to]   (job = <capa>-<modo>)
+#   l1-backfill, l1-monthly-close: meses YYYY-MM del rango inclusivo
+#   l1-daily:                      días YYYY-MM-DD del rango inclusivo
+#   l1-seam-check:                 una sola unidad ("1")
+#   l2-backfill:                   una sola unidad ("1") para todo el rango
+#   l2-monthly:                    una sola unidad ("1"); to vacío o igual a from
 # to por defecto es from. Entrada inválida: mensaje en stderr y salida 2.
 set -euo pipefail
 
@@ -14,8 +18,8 @@ fail() {
   exit 2
 }
 
-[[ $# -ge 2 && $# -le 3 ]] || fail "uso: run-job-tasks.sh <mode> <from> [to]"
-mode=$1
+[[ $# -ge 2 && $# -le 3 ]] || fail "uso: run-job-tasks.sh <job> <from> [to]"
+job=$1
 from=$2
 to=${3:-$2}
 
@@ -28,11 +32,17 @@ valid_month() {
   [[ $1 =~ ^[0-9]{4}-(0[1-9]|1[0-2])$ ]]
 }
 
-case "$mode" in
-  backfill | monthly-close)
-    valid_month "$from" || fail "from inválido '$from': se espera YYYY-MM"
-    valid_month "$to" || fail "to inválido '$to': se espera YYYY-MM"
-    [[ "$to" < "$from" ]] && fail "to '$to' es menor que from '$from'"
+# from y to son meses válidos y to no es menor que from.
+check_month_range() {
+  valid_month "$from" || fail "from inválido '$from': se espera YYYY-MM"
+  valid_month "$to" || fail "to inválido '$to': se espera YYYY-MM"
+  [[ "$to" < "$from" ]] && fail "to '$to' es menor que from '$from'"
+  return 0
+}
+
+case "$job" in
+  l1-backfill | l1-monthly-close)
+    check_month_range
     y=$((10#${from%-*}))
     m=$((10#${from#*-}))
     while :; do
@@ -46,7 +56,7 @@ case "$mode" in
       fi
     done
     ;;
-  daily)
+  l1-daily)
     valid_day "$from" || fail "from inválido '$from': se espera YYYY-MM-DD"
     valid_day "$to" || fail "to inválido '$to': se espera YYYY-MM-DD"
     [[ "$to" < "$from" ]] && fail "to '$to' es menor que from '$from'"
@@ -57,13 +67,16 @@ case "$mode" in
       day=$(date -u -d "$day + 1 day" +%F)
     done
     ;;
-  seam-check)
+  l1-seam-check | l2-backfill)
+    check_month_range
+    echo 1
+    ;;
+  l2-monthly)
     valid_month "$from" || fail "from inválido '$from': se espera YYYY-MM"
-    valid_month "$to" || fail "to inválido '$to': se espera YYYY-MM"
-    [[ "$to" < "$from" ]] && fail "to '$to' es menor que from '$from'"
+    [[ "$to" == "$from" ]] || fail "l2-monthly procesa un solo mes: to '$to' debe estar vacío o ser igual a from '$from'"
     echo 1
     ;;
   *)
-    fail "mode inválido '$mode': backfill, daily, monthly-close o seam-check"
+    fail "job inválido '$job': l1-backfill, l1-daily, l1-monthly-close, l1-seam-check, l2-backfill o l2-monthly"
     ;;
 esac
