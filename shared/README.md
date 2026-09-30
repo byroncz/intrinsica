@@ -13,12 +13,12 @@ Un paquete por subcarpeta, cada uno con su `pyproject.toml` (o `Cargo.toml`).
 |---|---|
 | [`dq`](dq/) | Contrato del hallazgo de DQ (esquema Arrow) |
 | [`dc_core`](dc_core/) | Crate Rust del núcleo de Directional Change: detector DC de un θ (ITSC-239) |
+| [`dc_pyo3`](dc_pyo3/) | Bindings PyO3 sobre `dc_core`: fan-out de N θ y carry-over para Python (ITSC-243) |
 
 ## Nombres reservados (aún no existen)
 
 | Nombre | Qué será | Épica |
 |---|---|---|
-| `dc_pyo3` | Bindings PyO3 sobre `dc_core` | E4 |
 | `pyutils` | Utilidades Python comunes | E1 |
 
 ## Qué no contiene
@@ -27,4 +27,5 @@ Un paquete por subcarpeta, cada uno con su `pyproject.toml` (o `Cargo.toml`).
 - Directorios sin `pyproject.toml`: rompen el workspace de uv. Cada
   directorio se crea junto con su manifiesto, no antes; un paquete solo
   Rust (como `dc_core`) se excluye en `[tool.uv.workspace] exclude` del
-  `pyproject.toml` raíz.
+  `pyproject.toml` raíz. `dc_pyo3` sí tiene `pyproject.toml` (maturin), así
+  que es miembro de los dos workspaces.
