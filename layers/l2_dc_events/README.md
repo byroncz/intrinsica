@@ -6,8 +6,8 @@ mes, alimenta el fan-out de [`dc_pyo3`](../../shared/dc_pyo3/README.md) lote a
 lote y escribe, por cada θ, los eventos del mes (`events.parquet`) y el estado
 con que sigue el mes siguiente (`carry_over.parquet`). El contrato de la salida
 está en [`docs/data-contracts.md`](../../docs/data-contracts.md) ("Salida
-Parquet de L2"). Todavía no lleva Dockerfile, smoke ni entrada en `LAYERS` del
-CI (E4a). Corre con `uv run`.
+Parquet de L2"). CI construye su imagen (`Dockerfile`) y le corre el humo
+(`smoke.sh`). En local corre con `uv run`.
 
 ## Uso en local
 
@@ -101,12 +101,12 @@ hallazgos"):
 
 ## Los 50 θ
 
-[`config/thetas.yaml`](config/thetas.yaml): los enteros `round(θ × 10⁸)` de la
+[`src/l2_dc_events/config/thetas.yaml`](src/l2_dc_events/config/thetas.yaml): los enteros `round(θ × 10⁸)` de la
 regla log-espaciada de ADR-L2-10. Los valores, no la fórmula, son la fuente de
 verdad, y `tests/test_l2_thetas.py` verifica que siguen la regla (con 60
 dígitos de precisión, para que ningún redondeo de float decida un empate). El
-archivo se resuelve relativo al paquete, así que sirve con `uv run` y una
-instalación editable; hornearlo en la imagen es de E4a.
+archivo viaja dentro del paquete y se resuelve relativo al módulo, así que
+sirve igual con `uv run` que en la imagen, donde queda horneado (TRD-L2 §11).
 
 ## Resultado: un mes real de punta a punta (ITSC-244)
 
@@ -207,7 +207,7 @@ pero no queda por debajo de la base como enero.
   fue a ~580 MiB con solo ~70 MiB vivos en Arrow: el pool `mimalloc` de Arrow y
   el umbral dinámico de `mmap` de glibc retenían lo liberado. `memory.py` y
   `ARROW_DEFAULT_MEMORY_POOL=system` (fijada en `l2_dc_events/__init__.py`)
-  lo resuelven, y la imagen de E4a debería fijar las dos variables como `ENV`
+  lo resuelven, y la imagen fija las dos variables como `ENV`
   (`ARROW_DEFAULT_MEMORY_POOL=system`, `MALLOC_MMAP_THRESHOLD_=16384`). El
   detalle y las medidas están en el docstring de `memory.py`.
 - **Lo que queda para E4a:** el paralelismo de escritura es el número de
@@ -215,6 +215,25 @@ pero no queda por debajo de la base como enero.
   tardó 12,2 s: el volcado a columnas ya no pasa por Python, y eso solo bajó
   la unidad a la mitad. Con 1 vCPU no está medido; conviene que la sonda de
   E4a lo mida.
+
+## Imagen
+
+`Dockerfile` (contexto: la raíz del workspace) tiene dos etapas. La de
+compilación instala la toolchain de `rust-toolchain.toml` y corre
+`uv sync --locked --package l2_dc_events --no-dev --no-editable`, que compila
+`dc_pyo3` con maturin; la final es `python:3.14-slim` con solo `/app/.venv`,
+sin cargo ni rustc. El `thetas.yaml` va dentro del paquete instalado.
+
+```bash
+docker build -f layers/l2_dc_events/Dockerfile -t l2_dc_events:dev .
+layers/l2_dc_events/smoke.sh l2_dc_events:dev
+```
+
+`smoke.sh` convierte los 4 735 ticks de 2017-08-18
+(`shared/dc_core/tests/fixtures/ticks.csv`) en un `consolidated.parquet` con el
+esquema de L1, usando el pyarrow de la imagen, y corre el backfill de 2017-08.
+Verifica los 50 `events.parquet` y `carry_over.parquet`, un Parquet en el lago
+de DQ y la línea con `content_hash`.
 
 ## Pruebas
 
