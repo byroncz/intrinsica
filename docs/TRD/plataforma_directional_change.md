@@ -6,7 +6,7 @@
 | Campo | Valor |
 |---|---|
 | Documento | TRD maestro — Plataforma DC |
-| Versión | **2.2** |
+| Versión | **2.3** |
 | Estado | Línea base ampliada (operaciones + stack + decisiones de L1) |
 | Fecha | Septiembre de 2026 |
 | Alcance | Capa Batch (Arquitectura Lambda) |
@@ -59,6 +59,7 @@ Este TRD maestro fija las **invariantes** (contratos entre capas, formatos, part
 | 2.0 | Jun 2026 | Ampliación de operaciones y stack. Añade estrategia de repositorios, IaC modular, registro de imágenes, CI/CD, observabilidad a costo cero, secretos y orquestación; valida el stack Polars + DuckDB + Arrow con catálogo DuckLake. Incorpora ADR 05–08, nuevos requerimientos y supuestos. |
 | 2.1 | Jun 2026 | Incorpora la discusión de diseño de la **Capa 1 (L1)** y sus implicaciones transversales: corrige la terminología *environment*→*stack*; fija la estrategia de un único GCP project; reasigna el cómputo de L1 a **Cloud Run Jobs** (difiriendo Cloud Batch a TRD-L2); precisa el contrato de datos de L1 (orden por tiempo, timestamp µs por magnitud, DECIMAL exacto, ZSTD-3, partición mensual inmutable); añade el **lago de hallazgos de Data Quality** y la emisión por librería compartida; acota Secret Manager a etapas posteriores. Marca como **abiertos** la política de fallo de DQ y el dimensionamiento del backfill (a validar con sonda). |
 | 2.2 | 30 sep 2026 | Corrige la definición de la **Capa 3** (§3.1, RF-07, RF-08): pasa de "series cortadas por evento" (que equivalía a copiar L1 una vez por θ) a **resúmenes por evento y θ**; la trama de un evento es un recorte de L1 por rango de tiempo, no un objeto guardado. Los indicadores de ticks releen L1 con fan-out y se persisten una vez como columna con clave (θ, evento). Recalcula el volumen del medallion en §7.1 con L2 medido (ITSC-244) y agrega la entrada "Trama" al glosario. Decisión y porqué: [Decisión: L3 guarda resúmenes por evento, no copias de ticks](https://app.notion.com/p/3eb27957d23d81d69ccac074bef2f8b3). |
+| 2.3 | 30 sep 2026 | Cierra **ADR-04** para L2 con la sonda de ITSC-281 (TRD-L2 v1.1, §10.2 y §14.1): **L2 corre en Cloud Run Jobs** con 2 vCPU / 4 GiB, sin task array; Cloud Batch con Spot no se implementa y queda como referencia solo para L3–L4. Actualiza §3.2, ADR-04 (§6.4), §7.1 (fila de L2), §7.2 y el bloque de Batch de §8. |
  
 ---
  
@@ -123,7 +124,8 @@ Patrón medallion de 4 capas, todas materializadas en **Parquet** sobre Cloud St
 |---|---|---|
 | Ingesta incremental diaria | **Cloud Run Job** (modo `daily`) | Descarga el ZIP/CSV diario, ordena y materializa Parquet provisional del mes en curso |
 | Cómputo de Capa 1 (backfill + cierre mensual) | **Cloud Run Jobs** (task array, 1 tarea por mes) | Ejecuta la imagen de L1 en modos `backfill` / `monthly-close`; meses independientes |
-| Cómputo pesado de Capas 2–4 | **Cloud Batch + Spot VMs (c2d/c3)** — *a confirmar por capa* | Fan-out de 50 θ y joins/agregaciones multinúcleo. **La elección de Cloud Batch se decide y justifica en el TRD-L2** |
+| Cómputo de Capa 2 (backfill + cierre mensual) | **Cloud Run Jobs** (una sola tarea, 2 vCPU / 4 GiB) | Ejecuta la imagen de L2 en modos `backfill` / `monthly`. **Sin task array**: los meses se encadenan por carry-over, así que el backfill es una tarea que recorre los 109 meses. Decidido en ADR-04 con la sonda (TRD-L2 §14.1) |
+| Cómputo pesado de Capas 3–4 | **Cloud Batch + Spot VMs (c2d/c3)** — *a confirmar por capa* | Joins/agregaciones multinúcleo. Se decide y justifica en el TRD de cada capa, con el mismo criterio de medir antes de fijar |
 | Motor de datos (L1/L3/L4) | DuckDB + Polars + Apache Arrow (embebidos) | Sort out-of-core, joins, agregaciones; interoperabilidad zero-copy vía Arrow |
 | Almacenamiento medallion | Cloud Storage (Standard/Nearline/Coldline) | Buckets de las 4 capas + carry-over de huérfanos (L2) + lago de hallazgos de DQ |
 | Metacatálogo / catálogo | Parquet hive-partitioned plano + DuckLake | Descubrimiento de particiones (provider × market × asset × θ × fecha); linaje barato sin Iceberg/Delta |
@@ -134,7 +136,7 @@ Patrón medallion de 4 capas, todas materializadas en **Parquet** sobre Cloud St
 > **Nota — corrige a v2.0.** En v2.0 todo el cómputo pesado se asignaba por reflejo a Cloud Batch + Spot, y la ingesta incremental a una Cloud Run Function. Reanalizado: el backfill de L1 es **liviano y memory-bound** (estimado ~40 core-horas) y cabe en o cerca del free tier de **Cloud Run Jobs** usando *task arrays* (una tarea por mes, meses independientes). Por tanto:
 > - **L1 corre sobre Cloud Run Jobs** como cómputo único, en una **sola imagen** con modos `backfill`, `daily`, `monthly-close` (no imágenes separadas por modo).
 > - La **ingesta incremental** usa un **Cloud Run Job** (modo `daily`), no una Cloud Run Function.
-> - **Cloud Batch se difiere** y se reevalúa en el TRD-L2, donde el fan-out de 50 θ sobre la serie compartida sí puede justificar VMs Spot multinúcleo.
+> - **Cloud Batch se difirió** y se reevaluó en el TRD-L2: la sonda midió el mes más pesado (190,2 M de ticks) con RSS pico de 446 MiB y pared de 292 s con 2 vCPU, sin ganancia con 4 u 8. **L2 también corre sobre Cloud Run Jobs**, en una sola tarea (los meses se encadenan por carry-over, no hay task array). Cloud Batch queda como referencia solo para L3–L4.
 > - El dimensionamiento de L1 (GiB-segundos y tiempo de pared) queda **a validar con una sonda de un mes representativo** (ver §7.4 y §9.2).
  
 ### 3.3 Particionado y contrato de datos
@@ -263,11 +265,11 @@ Se introduce un **lago de hallazgos de calidad de datos (Data Quality findings)*
 | **Justificación** | Rust ofrece rendimiento near-C++ sin garbage collector → latencia predecible (clave para la Kappa), seguridad de memoria en compilación, ecosistema fuerte (Polars/arrow-rs, tokio/tungstenite). Máxima reusabilidad batch↔streaming. |
 | **Hardware** | Workload memory-bound, no CPU-bound; AVX2 (c2d/EPYC Milan) basta. AVX-512 (C3/C3D) solo se justificaría al escalar a miles de θ. |
  
-### 6.4 ADR-04 — Cómputo por capa: Cloud Run Jobs para L1, Cloud Batch diferido a L2
+### 6.4 ADR-04 — Cómputo por capa: Cloud Run Jobs para L1 y L2, Cloud Batch solo como referencia para L3–L4
  
 | Campo | Contenido |
 |---|---|
-| **Decisión** | Asignar el cómputo **por capa según su perfil**. **Capa 1: Cloud Run Jobs** (task array, una tarea por mes) como cómputo único, en una sola imagen con modos `backfill`/`daily`/`monthly-close`. **Cloud Batch + Spot se difiere** y se decide/justifica en el **TRD-L2**, donde el fan-out de 50 θ sobre la serie compartida puede requerir VMs multinúcleo. |
+| **Decisión** | Asignar el cómputo **por capa según su perfil**. **Capa 1: Cloud Run Jobs** (task array, una tarea por mes) como cómputo único, en una sola imagen con modos `backfill`/`daily`/`monthly-close`. **Capa 2: Cloud Run Jobs** en una sola tarea, 2 vCPU / 4 GiB, con los modos `backfill`/`monthly`: los meses se encadenan por carry-over y no admiten task array. Cierre de ADR-04 en [TRD-L2 §14.1](l2.md#141-adr-04--cómputo-de-l2-cloud-run-jobs-cerrado): la sonda del mes más pesado cumplió la regla (RSS pico 445 MiB de 24.576 MiB y 109 × 301 s = 9,1 h < 24 h con 8 vCPU), así que **Cloud Batch + Spot no se implementa** y queda como referencia para L3–L4. |
 | **Reanálisis (corrige v2.0)** | v2.0 asignaba Cloud Batch + Spot a todo el cómputo pesado por reflejo. Hallazgo: el backfill de L1 es **liviano y memory-bound** (~40 core-horas estimadas), con **meses independientes**, y cabe en o cerca del free tier de Cloud Run Jobs mediante *task arrays*. No hay justificación para provisionar VMs Spot en L1. |
 | **Justificación** | Cloud Run Jobs ofrece *task arrays* (una tarea por índice = por mes), reintentos, y un **free tier perpetuo propio** que probablemente absorbe L1; elimina la gestión de VMs y la exposición a preempción para una carga que no la necesita. Cloud Batch no tiene costo de servicio (solo paga el Compute Engine subyacente), por lo que diferirlo no cuesta nada y evita complejidad prematura. |
 | **Dimensionamiento** | **A validar con una sonda de un mes representativo** (medir GiB-segundos y tiempo de pared reales) antes de fijar memoria/CPU por tarea y confirmar el encaje en el free tier de Cloud Run. |
@@ -325,7 +327,7 @@ Se introduce un **lago de hallazgos de calidad de datos (Data Quality findings)*
 | aggTrades totales (8 años) | ~2,5–3,5 mil millones | Estimado |
 | CSV crudo histórico | ~185 GB | Descomprimido |
 | Parquet comprimido histórico (L1) | 38,4 GiB (medido) | Snappy/ZSTD. Medido en la landing (ITSC-228); la estimación original era ~30 GB |
-| L2 (eventos, 50 θ) | ~73–103 GiB | Medido: 12,15 M de eventos y 421 MiB por mes en 2020-01 (14,05 M de ticks; ITSC-244), unos 30 MiB por millón de ticks. Extrapolado a 2,5–3,5 mil millones de ticks; la sonda de E4a lo afina |
+| L2 (eventos, 50 θ) | ~73–103 GiB | Medido: 12,15 M de eventos y 421 MiB por mes en 2020-01 (14,05 M de ticks; ITSC-244), unos 30 MiB por millón de ticks. Extrapolado a 2,5–3,5 mil millones de ticks. La sonda de ITSC-281 midió el mes más pesado (2023-03, 190,2 M de ticks, 446 MiB de RSS, 292 s con 2 vCPU) pero no los bytes escritos; a 30 MiB por millón de ticks serían ~5,6 GiB, una extrapolación a confirmar con el tamaño real de `dc-events` |
 | L3 (resúmenes por evento y θ) | ~del orden de L2 | Una fila por evento y θ, con más columnas que L2 pero sin ticks. Supuesto: se mide con la sonda de L3 |
 | L4 (indicadores) | ~pequeño frente a L2 | Una columna con clave (θ, evento) por indicador. Supuesto: crece con el catálogo de indicadores |
 | Medallion completo (4 capas) | ~0,2–0,25 TB | L1 38,4 GiB + L2 ~73–103 GiB + L3 del orden de L2 + L4. Reemplaza los 45–75 GB de v2.1, que suponían las capas 2–4 "muy livianas" |
@@ -335,7 +337,7 @@ Se introduce un **lago de hallazgos de calidad de datos (Data Quality findings)*
 
 ### 7.2 Tarifas de cómputo (us-east1, 2026)
  
-Se mantienen las tarifas de Cloud Batch + Spot como referencia para Capas 2–4 (a confirmar en TRD-L2). Para **L1 se usa Cloud Run Jobs**, cuyo costo se modela por **vCPU-segundo y GiB-segundo de ejecución de tarea**, con un **cupo perpetuo gratuito propio**. El costo efectivo de L1 **queda a validar con la sonda** (§7.4); la expectativa es que el backfill caiga en o cerca del free tier.
+Se mantienen las tarifas de Cloud Batch + Spot como referencia para Capas 3–4 (a confirmar en su TRD). **L1 y L2 usan Cloud Run Jobs** (ADR-04; en L2, el backfill de 109 meses cuesta ~1,40 USD de lista y 0,00 con el cupo, TRD-L2 §10.3). Para **L1 se usa Cloud Run Jobs**, cuyo costo se modela por **vCPU-segundo y GiB-segundo de ejecución de tarea**, con un **cupo perpetuo gratuito propio**. El costo efectivo de L1 **queda a validar con la sonda** (§7.4); la expectativa es que el backfill caiga en o cerca del free tier.
  
 | Instancia (referencia L2–L4) | vCPU/RAM | On-demand $/h | Spot $/h | Descuento |
 |---|---|---|---|---|
@@ -371,7 +373,7 @@ La estructura de costos se mantiene, con un matiz: el cómputo de **L1 migra de 
 - Una sola imagen, seleccionando el modo (`backfill`/`daily`/`monthly-close`) por variable de entorno/argumento.
 - Reintentos de tarea nativos de Cloud Run Jobs; idempotencia por escritura a rutas únicas (partición mensual).
 - **Memoria/CPU por tarea: a fijar tras la sonda** de un mes representativo (medir GiB-segundos y tiempo de pared).
-**Capas 2–4 — Cloud Batch + Spot (referencia futura, se confirma en TRD-L2):**
+**Capas 3–4 — Cloud Batch + Spot (referencia futura, se confirma en su TRD; L2 quedó en Cloud Run Jobs, ADR-04):**
  
 - `provisioningModel: SPOT`; `instanceTerminationAction: STOP`.
 - `maxRetryCount: 3`; `lifecyclePolicies: RETRY_TASK` con `actionCondition exitCodes=[50001]` (reintento solo ante preempción).
