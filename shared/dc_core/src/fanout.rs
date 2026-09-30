@@ -1,8 +1,41 @@
 //! Fan-out de N θ: un lote de ticks, N detectores, hilos dentro del proceso.
 
-use crate::detector::{Detector, Event, Point, ThetaError};
+use crate::detector::{CarryOver, CarryOverError, Detector, Event, Point, ThetaError};
+use std::fmt;
 use std::num::NonZeroUsize;
 use std::thread;
+
+/// Por qué el fan-out no pudo tomar o retomar los carry-over de sus θ.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FanOutCarryError {
+    /// Hay otra cantidad de carry-over que de θ.
+    Count { expected: usize, found: usize },
+    /// El θ de la posición `index` (en el orden de `new`) falló.
+    Detector {
+        index: usize,
+        source: CarryOverError,
+    },
+}
+
+impl fmt::Display for FanOutCarryError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Count { expected, found } => {
+                write!(f, "{found} carry-over para {expected} theta")
+            }
+            Self::Detector { index, source } => write!(f, "theta en la posición {index}: {source}"),
+        }
+    }
+}
+
+impl std::error::Error for FanOutCarryError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Count { .. } => None,
+            Self::Detector { source, .. } => Some(source),
+        }
+    }
+}
 
 /// Ticks que un hilo procesa por detector antes de pasar al siguiente. Con
 /// 4096 ticks (96 KB en tres columnas) el trozo cabe en la caché L2: el hilo
@@ -50,8 +83,59 @@ impl FanOut {
             .iter()
             .map(|&theta| Detector::new(theta))
             .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self::from_detectors(detectors, threads))
+    }
+
+    /// Fan-out que retoma el carry-over de cada θ (uno por `thetas`, mismo
+    /// orden), con tantos hilos como núcleos disponibles. Falla si la cuenta
+    /// no coincide o si algún estado no lo acepta [`Detector::from_carry_over`].
+    pub fn from_carry_over(thetas: &[i64], carry: &[CarryOver]) -> Result<Self, FanOutCarryError> {
+        let cores = thread::available_parallelism().map_or(1, NonZeroUsize::get);
+        Self::from_carry_over_with_threads(thetas, carry, cores)
+    }
+
+    /// Igual que [`FanOut::from_carry_over`] con un máximo de `threads` hilos.
+    pub fn from_carry_over_with_threads(
+        thetas: &[i64],
+        carry: &[CarryOver],
+        threads: usize,
+    ) -> Result<Self, FanOutCarryError> {
+        if thetas.len() != carry.len() {
+            return Err(FanOutCarryError::Count {
+                expected: thetas.len(),
+                found: carry.len(),
+            });
+        }
+        let detectors = thetas
+            .iter()
+            .zip(carry)
+            .enumerate()
+            .map(|(index, (&theta, carry))| {
+                Detector::from_carry_over(theta, carry)
+                    .map_err(|source| FanOutCarryError::Detector { index, source })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self::from_detectors(detectors, threads))
+    }
+
+    fn from_detectors(detectors: Vec<Detector>, threads: usize) -> Self {
         let threads = threads.clamp(1, detectors.len().max(1));
-        Ok(Self { detectors, threads })
+        Self { detectors, threads }
+    }
+
+    /// El carry-over de cada θ, en el orden de `new`, para entregarlo al
+    /// cerrar la unidad de trabajo. Igual que [`Detector::carry_over`], exige
+    /// haber llamado a [`FanOut::finish`]. Falla con el índice del primer θ
+    /// que no pueda entregarlo.
+    pub fn carry_overs(&self) -> Result<Vec<CarryOver>, FanOutCarryError> {
+        self.detectors
+            .iter()
+            .enumerate()
+            .map(|(index, d)| {
+                d.carry_over()
+                    .map_err(|source| FanOutCarryError::Detector { index, source })
+            })
+            .collect()
     }
 
     /// Los detectores, en el orden de los θ de entrada.

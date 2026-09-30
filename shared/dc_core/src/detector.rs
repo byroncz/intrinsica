@@ -2,6 +2,10 @@
 
 use std::fmt;
 
+mod carry_over;
+
+pub use carry_over::{CarryOver, CarryOverError, CarryPending, STATE_VERSION};
+
 /// Escala compartida por precio y θ (ADR-L2-01): `DECIMAL(18,8)` → `10⁸`.
 pub const SCALE: i64 = 100_000_000;
 

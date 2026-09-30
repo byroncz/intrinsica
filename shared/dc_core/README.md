@@ -3,8 +3,8 @@
 Crate Rust del núcleo de Directional Change (DC). Definido en el
 [TRD maestro §8.1](../../docs/TRD/plataforma_directional_change.md#81-estrategia-de-repositorio-monorepo-políglota).
 Expone el detector de un solo θ, `Detector` (ITSC-239), y el fan-out de N θ
-multihilo sobre lotes, `FanOut` (ITSC-241); el carry-over y los bindings se
-construyen encima.
+multihilo sobre lotes, `FanOut` (ITSC-241), y el carry-over por θ
+(ITSC-242); los bindings se construyen encima.
 
 ## Toolchain
 
@@ -60,7 +60,8 @@ if let Some(event) = d.finish() { /* cierra un grupo de empate abierto */ }
   `0 < price < PRICE_LIMIT`; `feed` entra en pánico si el precio lo viola.
 - `discarded()` cuenta los DC sin tick descartados (§9.1); con un θ válido es
   una guarda inalcanzable y debe quedar en cero.
-- No serializa el estado ni lo restaura: eso es del carry-over.
+- El estado entre meses se guarda y se retoma con el carry-over (sección
+  siguiente).
 
 ## Equivalencia contra la v0
 
@@ -144,3 +145,52 @@ Cómo leerla:
   con el valor de un hilo, y medir en el hardware real.
 - La medición con un mes real de la landing corresponde a la hija 8 de la
   épica, no a esta card.
+
+## Carry-over por θ
+
+```rust
+// Cierre del mes M: cerrar el grupo abierto, escribir su evento y tomar el estado.
+if let Some(event) = d.finish() { /* ... */ }
+let bytes = d.carry_over()?.to_bytes()?;                    // CarryOver → bytes
+
+// Mes M+1: retomar como si el detector hubiera visto toda la serie anterior.
+let carry = CarryOver::from_bytes(&bytes)?;
+let mut d = Detector::from_carry_over(theta, &carry)?;
+// Con N θ: fan.carry_overs()? y FanOut::from_carry_over(&thetas, &carry)?
+```
+
+- **Los campos son los de [TRD-L2 §7.4](../../docs/TRD/l2.md)** que describen
+  al detector: `theta`, `state_version`, `direction` (`0`/`1`/`-1`), `ext_high`
+  y `ext_low` (precio, tiempo, `agg_trade_id`) y el evento pendiente sin
+  extremo (`pending`, que es `has_pending_event` más `pending_reference_*` y
+  `pending_confirm_*`). `provider`, `market`, `asset`, `year` y `month` son
+  coordenadas de la partición: las agrega quien escribe el archivo.
+- **Bytes, no Parquet.** El TRD fija Parquet de una fila, que escribe la capa
+  L2 en Python (hija 8); el crate solo convierte estado ↔ bytes, sin
+  dependencias. Formato de `to_bytes`: largo de `state_version` (1 byte),
+  `state_version` en UTF-8, y `theta`, `direction` (1 byte), `ext_high`,
+  `ext_low`, `has_pending_event` (1 byte) y los dos puntos pendientes (en
+  cero si no hay), todo entero little-endian de 8 bytes. Son 112 bytes con
+  `1.0.0`, vea la serie que vea: mismo estado, mismos bytes (sirve para el
+  `content_hash`).
+- **Estado acotado.** Solo escalares: sin ticks huérfanos y sin grupo de
+  empate. Un grupo abierto no se guarda: `carry_over()` devuelve `OpenGroup`
+  hasta que se llama `finish()`, igual que en el fin de la entrada de un mes
+  (TRD-L2 §8.1 paso 4). Ningún grupo cruza el borde de mes porque el primer
+  tick del mes siguiente tiene otro `transact_time`.
+- **`from_carry_over` falla cerrado** (ADR-L2-08), sin adivinar. Rechaza otra
+  `state_version` (igualdad exacta, también en `from_bytes`, antes de leer el
+  resto), otro θ que el pedido, y un estado que un detector no puede producir:
+  precios fuera de `0 < price < PRICE_LIMIT`, `ext_high < ext_low`, evento
+  pendiente sin tendencia, confirmación no posterior a su referencia o de
+  lado contrario a la tendencia, o extremo vigente anterior a la confirmación.
+- **`discarded()` arranca en cero** al retomar: cuenta por unidad de trabajo
+  (θ y mes, §9.1), no por cadena.
+- **Prueba del borde** (`tests/carry_over.rs`): la serie partida en dos, con
+  el estado pasando por bytes, da los mismos eventos, en el mismo orden, y el
+  mismo estado final que la entera, en **todos** los puntos de corte de una
+  serie a mano y de cuatro series sintéticas (en medio de un overshoot, al
+  final de un grupo de empate, justo tras una confirmación y con evento
+  pendiente), en una cadena de muchos tramos y con 50 θ por `FanOut`. Un corte
+  *dentro* de un grupo que sigue abierto con el tick siguiente no es un borde
+  válido y `carry_over` lo rechaza.
