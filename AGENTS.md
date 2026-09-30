@@ -1,17 +1,11 @@
-# intrinsica
+# ITSC
 
 Instrucciones para cualquier agente que trabaje en este repo. `CLAUDE.md`
 importa este archivo; Codex lo lee directamente. Es la única fuente.
 
 ## Qué es este proyecto
 
-intrinsica es un motor de análisis Directional Change (DC) para mercados
-financieros: en vez de agrupar precios en barras de tiempo fijo, detecta
-puntos de inflexión en la serie y construye indicadores a partir de esos
-eventos. La arquitectura de datos sigue el patrón Medallion (Bronze, Silver,
-Gold). El proyecto se rediseña desde cero a partir de 2026-09; lo que existe
-antes de esa fecha vive en `legacy/v0-local` como referencia, no como diseño
-vigente.
+<!-- Dos o tres líneas. Qué hace y para quién. Completar al crear el proyecto. -->
 
 ## Cómo se trabaja aquí
 
@@ -37,8 +31,12 @@ vigente.
   `.devkit/devkit.toml` (`apt`) y se reconstruye la imagen con
   `devkit rebuild`.
 - Si una conexión falla con "connection refused", el dominio no está en la
-  lista blanca del proxy. Ejecuta `devkit-net-denied`, añádelo a `domains`
-  en `.devkit/devkit.toml` y aplica con `devkit recreate`.
+  lista blanca del proxy. Ejecuta `devkit-net-denied` para confirmarlo,
+  añádelo a `domains` en `.devkit/devkit.toml`, comitea y pushea: `devkit
+  recreate` no lo aplica antes del merge, porque lee `domains` de `origin/main`,
+  donde la card aún no llegó (DEVKIT-182). Bloquea la card pidiendo
+  `devkit proxy <proyecto> --ref <rama>` al humano; el detalle está en "Un
+  dominio bloqueado" de `task-start` y `task-fix`.
 
 ## Notion y skills
 
