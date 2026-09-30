@@ -320,16 +320,17 @@ código. El plan debe mostrar solo cambios de `cpu`, `memory`, `timeout` y
 ## Timeouts y reintentos de los jobs de l2
 
 Cada job fija `timeout` y `max_retries` de forma explícita (módulo `layer`; el
-stack `l2` fija 1800 s y 1 reintento para todos y sobrescribe el timeout en
+stack `l2` fija 2400 s y 1 reintento para todos y sobrescribe el timeout en
 backfill):
 
 | Job | timeout | max_retries |
 |---|---|---|
 | `l2-backfill` | 54000 s | 1 |
-| `l2-monthly` | 1800 s | 1 |
+| `l2-monthly` | 2400 s | 1 |
 
-- **`l2-monthly`: 1800 s** es 6,2× la pared de la sonda con 2 vCPU (292,2 s, mes
-  2023-03, el más pesado). La regla de L1 pide al menos 6×.
+- **`l2-monthly`: 2400 s** es 8,2× la pared de la sonda con 2 vCPU (292,2 s, mes
+  2023-03, el más pesado) y 8,0× la peor corrida (301,1 s, con 8 vCPU). La regla
+  de L1 pide al menos 6×.
 - **`l2-backfill`: 54000 s (15 h)** es 1,7× la pared extrapolada de los 109
   meses (109 × 292,2 s = 31.850 s, 8,85 h). La regla pide al menos 1,5× y no
   más de 86.400 s. Es un techo: el mes más pesado se repite 109 veces y los

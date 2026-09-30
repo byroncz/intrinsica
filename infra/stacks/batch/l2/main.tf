@@ -51,10 +51,11 @@ module "layer" {
   cpu    = "2"
   memory = "4Gi"
 
-  # Timeout por defecto, el de monthly: un solo mes. 1800 s son 6,2x la pared de
-  # la sonda con 2 vCPU (292,2 s, el mes más pesado); monthly procesa un mes
-  # recién cerrado, de ordinario mucho más liviano.
-  timeout = 1800
+  # Timeout por defecto, el de monthly: un solo mes. 2400 s son 8,2x la pared de
+  # la sonda con 2 vCPU (292,2 s, el mes más pesado) y 8,0x la peor corrida
+  # (301,1 s, con 8 vCPU); monthly procesa un mes recién cerrado, de ordinario
+  # mucho más liviano.
+  timeout = 2400
 
   # 1 y no 0, por la misma razón que en L1: el reintento cubre fallos
   # transitorios de infraestructura y uno determinista (OOM, timeout, checksum)
