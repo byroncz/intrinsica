@@ -1,4 +1,4 @@
-"""Los 50 θ congelados en `config/thetas.yaml` (TRD-L2 §7.3, ADR-L2-10)."""
+"""Los 50 θ congelados en `config/thetas.yaml`, dentro del paquete (TRD-L2 §7.3, ADR-L2-10)."""
 
 from itertools import pairwise
 from pathlib import Path
@@ -6,7 +6,7 @@ from pathlib import Path
 import yaml
 
 SCALE = 10**8
-THETAS_CONFIG = Path(__file__).resolve().parents[2] / "config" / "thetas.yaml"
+THETAS_CONFIG = Path(__file__).resolve().parent / "config" / "thetas.yaml"
 
 
 class ThetasError(ValueError):
