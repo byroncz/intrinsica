@@ -10,13 +10,19 @@ import sys
 import time
 import uuid
 from collections.abc import Mapping, Sequence
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 from l2_dc_events.carry import CarryOverError
 from l2_dc_events.landing import LandingError
 from l2_dc_events.memory import tune_allocators
-from l2_dc_events.pipeline import Result, RunContext, Unit, process_unit
+from l2_dc_events.pipeline import (
+    Result,
+    RunContext,
+    Unit,
+    carry_over_complete,
+    process_unit,
+)
 
 MODES = ("backfill", "monthly")
 EXIT_USAGE = 2
@@ -42,8 +48,8 @@ def _parse(text: str) -> tuple[int, int]:
     return day.year, day.month
 
 
-def resolve_unit(from_: str, to: str | None, index: int) -> tuple[int, int]:
-    """Devuelve (año, mes) de la unidad `from_ + index` dentro de [from_, to].
+def resolve_range(from_: str, to: str | None) -> list[tuple[int, int]]:
+    """Los meses (año, mes) de [from_, to] en orden; solo `from_` si falta `to`.
 
     Pura: no lee entorno ni reloj.
     """
@@ -51,13 +57,17 @@ def resolve_unit(from_: str, to: str | None, index: int) -> tuple[int, int]:
     first, last = y0 * 12 + m0 - 1, y1 * 12 + m1 - 1
     if last < first:
         raise UsageError(f"--to {to} es anterior a --from {from_}")
-    if not 0 <= index <= last - first:
-        raise UsageError(
-            f"CLOUD_RUN_TASK_INDEX={index} fuera del rango de {last - first + 1} "
-            "unidades"
-        )
-    year, month = divmod(first + index, 12)
-    return year, month + 1
+    return [(n // 12, n % 12 + 1) for n in range(first, last + 1)]
+
+
+def _today() -> date:
+    return datetime.now(UTC).date()
+
+
+def previous_month(today: date) -> str:
+    """El mes anterior a `today` como YYYY-MM (el que cierra `monthly`)."""
+    last_month = today.replace(day=1) - timedelta(days=1)
+    return f"{last_month.year:04d}-{last_month.month:02d}"
 
 
 def _image_version(env: Mapping[str, str]) -> str:
@@ -85,12 +95,37 @@ def _context(
     )
 
 
-def _index(env: Mapping[str, str]) -> int:
+def _require_single_task(env: Mapping[str, str]) -> None:
+    """L2 corre en una sola tarea: la cadena de carry-over no admite task array."""
     raw = env.get("CLOUD_RUN_TASK_INDEX", "0")
     try:
-        return int(raw)
+        index = int(raw)
     except ValueError:
         raise UsageError(f"CLOUD_RUN_TASK_INDEX={raw!r} no es un entero") from None
+    if index != 0:
+        raise UsageError(
+            f"CLOUD_RUN_TASK_INDEX={index}: L2 corre en una sola tarea, nunca en "
+            "un task array (los meses se encadenan por carry-over)"
+        )
+
+
+def _pending_range(
+    months: list[tuple[int, int]], ctx: RunContext, asset: str, force: bool
+) -> list[tuple[int, int]]:
+    """Desde dónde procesa el backfill (RF-L2-09).
+
+    Arranca en el primer mes con algún θ sin `carry_over.parquet` válido y desde
+    ahí sigue con todos, tengan salida o no: un mes escrito en frío por la sonda
+    se reescribe encadenado. Con `force`, arranca en el primero.
+    """
+    if force:
+        return months
+    for i, (year, month) in enumerate(months):
+        unit = Unit(year, month, asset=asset)
+        if not carry_over_complete(unit, ctx):
+            return months[i:]
+        logger.info("unidad %s: carry-over completo, se salta", unit)
+    return []
 
 
 def _log_probe(
@@ -116,21 +151,51 @@ def _log_probe(
     logger.info(line)
 
 
+def _run_unit(unit: Unit, ctx: RunContext) -> bool:
+    """Procesa un mes y deja su sonda. False si la entrada o el carry-over faltan."""
+    started = time.monotonic()
+    result = None
+    try:
+        result = process_unit(unit, ctx)
+    except (LandingError, CarryOverError) as exc:
+        print(f"l2_dc_events: {exc}", file=sys.stderr)
+        return False
+    finally:
+        _log_probe(unit, ctx.mode, started, result)
+    logger.info(
+        "eventos cerrados por θ: min=%d max=%d",
+        min(result.events_per_theta),
+        max(result.events_per_theta),
+    )
+    return True
+
+
 def main(
     argv: Sequence[str] | None = None, env: Mapping[str, str] | None = None
 ) -> int:
-    started = time.monotonic()
     env = os.environ if env is None else env
     parser = argparse.ArgumentParser(prog="l2_dc_events")
     parser.add_argument("--mode", required=True, choices=MODES)
-    parser.add_argument("--from", dest="from_", required=True, metavar="DESDE")
-    parser.add_argument("--to", metavar="HASTA")
+    parser.add_argument(
+        "--from",
+        dest="from_",
+        metavar="DESDE",
+        help="primer mes (YYYY-MM); obligatorio en backfill. En monthly, por "
+        "defecto el mes anterior al actual (UTC)",
+    )
+    parser.add_argument("--to", metavar="HASTA", help="último mes; solo backfill")
     parser.add_argument("--asset", default="BTCUSDT")
     parser.add_argument(
         "--series-start",
         metavar="YYYY-MM",
         help="primer mes de la serie, el único que arranca sin carry-over "
-        "(ADR-L2-08); obligatorio, sin valor por defecto",
+        "(ADR-L2-08); si falta, se toma de L2_SERIES_START, y sin ninguno de los "
+        "dos es un error: se declara, no se infiere",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="backfill: arranca en --from aunque los meses ya tengan carry-over",
     )
     try:
         args = parser.parse_args(argv)
@@ -139,14 +204,25 @@ def main(
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
     try:
-        year, month = resolve_unit(args.from_, args.to, _index(env))
-        if args.series_start is None:
-            raise UsageError("falta --series-start: el primer mes se declara")
-        series_start = _parse(args.series_start)
-        if (year, month) < series_start:
+        _require_single_task(env)
+        if args.from_ is None:
+            if args.mode != "monthly":
+                raise UsageError("--from es obligatorio (solo monthly lo omite)")
+            # Se resuelve aquí para que resolve_range siga pura.
+            args.from_ = previous_month(_today())
+        if args.mode == "monthly" and args.to is not None:
+            raise UsageError("monthly procesa un solo mes: no admite --to")
+        months = resolve_range(args.from_, args.to)
+        declared = args.series_start or env.get("L2_SERIES_START")
+        if not declared:
             raise UsageError(
-                f"la unidad {year:04d}-{month:02d} es anterior a "
-                f"--series-start {args.series_start}"
+                "falta --series-start (o L2_SERIES_START): el primer mes se declara"
+            )
+        series_start = _parse(declared)
+        if months[0] < series_start:
+            raise UsageError(
+                f"la unidad {months[0][0]:04d}-{months[0][1]:02d} es anterior a "
+                f"la serie ({declared})"
             )
         ctx = _context(args.mode, series_start, env)
     except UsageError as exc:
@@ -154,18 +230,13 @@ def main(
         return EXIT_USAGE
 
     tune_allocators()
-    unit = Unit(year, month, asset=args.asset)
-    result = None
-    try:
-        result = process_unit(unit, ctx)
-    except (LandingError, CarryOverError) as exc:
-        print(f"l2_dc_events: {exc}", file=sys.stderr)
-        return 1
-    finally:
-        _log_probe(unit, args.mode, started, result)
-    logger.info(
-        "eventos cerrados por θ: min=%d max=%d",
-        min(result.events_per_theta),
-        max(result.events_per_theta),
-    )
+    if args.mode == "backfill":
+        months = _pending_range(months, ctx, args.asset, args.force)
+        if not months:
+            logger.info("backfill: todos los meses del rango tienen carry-over")
+    # En orden y en este proceso: cada mes lee el carry-over que el anterior
+    # acaba de escribir. Un fallo detiene el rango; los siguientes no se tocan.
+    for year, month in months:
+        if not _run_unit(Unit(year, month, asset=args.asset), ctx):
+            return 1
     return 0

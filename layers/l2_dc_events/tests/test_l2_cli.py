@@ -1,9 +1,12 @@
 import logging
+from datetime import date
 
 import pytest
-from l2_dc_events.cli import UsageError, main, resolve_unit
+from l2_dc_events import cli
+from l2_dc_events.cli import UsageError, main, previous_month, resolve_range
 
 SERIES = ["--series-start", "2017-08"]
+BACKFILL = [*SERIES, "--mode", "backfill"]
 
 
 def _env(tmp_path, **extra):
@@ -16,77 +19,239 @@ def _env(tmp_path, **extra):
     }
 
 
-@pytest.mark.parametrize(
-    ("from_", "to", "index", "expected"),
-    [
-        ("2023-11", "2024-02", 0, (2023, 11)),
-        ("2023-11", "2024-02", 2, (2024, 1)),
-        ("2023-11", "2024-02", 3, (2024, 2)),
-        ("2024-03", None, 0, (2024, 3)),
-    ],
-)
-def test_resolve_unit(from_, to, index, expected):
-    assert resolve_unit(from_, to, index) == expected
+def _carry_overs(tmp_path, year, month):
+    """Los `carry_over.parquet` que dejó el mes, uno por θ."""
+    return sorted(
+        (tmp_path / "events").rglob(
+            f"year={year:04d}/month={month:02d}/carry_over.parquet"
+        )
+    )
+
+
+def _three_months(write_month, fixture_ticks):
+    for month in (8, 9, 10):
+        write_month(fixture_ticks, row_group_size=1_000, year=2017, month=month)
 
 
 @pytest.mark.parametrize(
-    ("from_", "to", "index"),
+    ("from_", "to", "expected"),
     [
-        ("2024-03-01", None, 0),
-        ("2024-13", None, 0),
-        ("2024-3", None, 0),
-        ("2024-04", "2024-03", 0),
-        ("2024-03", "2024-04", 2),
-        ("2024-03", None, -1),
+        ("2023-11", "2024-02", [(2023, 11), (2023, 12), (2024, 1), (2024, 2)]),
+        ("2024-03", None, [(2024, 3)]),
+        ("2024-03", "2024-03", [(2024, 3)]),
     ],
 )
-def test_resolve_unit_invalid(from_, to, index):
+def test_resolve_range(from_, to, expected):
+    assert resolve_range(from_, to) == expected
+
+
+@pytest.mark.parametrize(
+    ("from_", "to"),
+    [
+        ("2024-03-01", None),
+        ("2024-13", None),
+        ("2024-3", None),
+        ("2024-04", "2024-03"),
+    ],
+)
+def test_resolve_range_invalid(from_, to):
     with pytest.raises(UsageError):
-        resolve_unit(from_, to, index)
+        resolve_range(from_, to)
 
 
-def test_main_processes_the_unit_of_the_task_index(
+@pytest.mark.parametrize(
+    ("today", "expected"),
+    [
+        (date(2024, 3, 15), "2024-02"),
+        (date(2024, 3, 1), "2024-02"),
+        (date(2024, 1, 31), "2023-12"),
+    ],
+)
+def test_previous_month(today, expected):
+    assert previous_month(today) == expected
+
+
+def test_backfill_chains_the_range_in_one_process(
     tmp_path, fixture_ticks, write_month, caplog
 ):
-    write_month(fixture_ticks, row_group_size=1_000, year=2017, month=8)
-    write_month(fixture_ticks, row_group_size=1_000, year=2017, month=9)
-    argv = [*SERIES, "--mode", "backfill", "--from", "2017-08", "--to", "2017-09"]
+    _three_months(write_month, fixture_ticks)
+    argv = [*BACKFILL, "--from", "2017-08", "--to", "2017-10"]
     with caplog.at_level(logging.INFO):
-        # El mes 0 es el primero de la serie; el 1 lee su carry-over.
-        assert main(argv, _env(tmp_path, CLOUD_RUN_TASK_INDEX="0")) == 0
-        caplog.clear()
-        assert main(argv, _env(tmp_path, CLOUD_RUN_TASK_INDEX="1")) == 0
-    assert "binance/spot/BTCUSDT/2017-09: 4735 ticks, 5 row groups" in caplog.text
-    assert "sonda: unit=binance/spot/BTCUSDT/2017-09 mode=backfill" in caplog.text
-    assert "ticks=4735" in caplog.text
+        assert main(argv, _env(tmp_path)) == 0
+    # Solo puede leer el carry-over de septiembre si agosto ya lo escribió.
+    for month in (8, 9, 10):
+        assert len(_carry_overs(tmp_path, 2017, month)) == 50
+    units = [
+        line.split("unit=")[1].split()[0]
+        for line in caplog.text.splitlines()
+        if "sonda:" in line
+    ]
+    assert units == [f"binance/spot/BTCUSDT/2017-{m:02d}" for m in (8, 9, 10)]
     assert "ticks_s_core=" in caplog.text
+
+
+@pytest.mark.parametrize("index", ["1", "2"])
+def test_backfill_refuses_a_task_array(tmp_path, fixture_ticks, write_month, index):
+    _three_months(write_month, fixture_ticks)
+    argv = [*BACKFILL, "--from", "2017-08", "--to", "2017-10"]
+    assert main(argv, _env(tmp_path, CLOUD_RUN_TASK_INDEX=index)) == 2
+    assert not list((tmp_path / "events").rglob("*.parquet"))
+
+
+def test_backfill_accepts_task_index_zero(tmp_path, fixture_ticks, write_month):
+    write_month(fixture_ticks, row_group_size=1_000, year=2017, month=8)
+    argv = [*BACKFILL, "--from", "2017-08"]
+    assert main(argv, _env(tmp_path, CLOUD_RUN_TASK_INDEX="0")) == 0
+
+
+def test_backfill_resumes_from_the_first_incomplete_month(
+    tmp_path, fixture_ticks, write_month, caplog
+):
+    _three_months(write_month, fixture_ticks)
+    argv = [*BACKFILL, "--from", "2017-08", "--to", "2017-10"]
+    assert main([*argv[:-1], "2017-08"], _env(tmp_path)) == 0
+    caplog.clear()
+    with caplog.at_level(logging.INFO):
+        assert main(argv, _env(tmp_path)) == 0
+    assert "unidad binance/spot/BTCUSDT/2017-08: carry-over completo" in caplog.text
+    assert "sonda: unit=binance/spot/BTCUSDT/2017-08" not in caplog.text
+    assert "sonda: unit=binance/spot/BTCUSDT/2017-09" in caplog.text
+    assert "sonda: unit=binance/spot/BTCUSDT/2017-10" in caplog.text
+
+
+def test_resuming_reprocesses_the_months_after_the_first_incomplete_one(
+    tmp_path, fixture_ticks, write_month, caplog
+):
+    """Un θ sin carry-over en septiembre arrastra a octubre aunque tenga salida."""
+    _three_months(write_month, fixture_ticks)
+    argv = [*BACKFILL, "--from", "2017-08", "--to", "2017-10"]
+    assert main(argv, _env(tmp_path)) == 0
+    _carry_overs(tmp_path, 2017, 9)[0].unlink()
+    caplog.clear()
+    with caplog.at_level(logging.INFO):
+        assert main(argv, _env(tmp_path)) == 0
+    assert "sonda: unit=binance/spot/BTCUSDT/2017-08" not in caplog.text
+    assert "sonda: unit=binance/spot/BTCUSDT/2017-09" in caplog.text
+    assert "sonda: unit=binance/spot/BTCUSDT/2017-10" in caplog.text
+    assert len(_carry_overs(tmp_path, 2017, 9)) == 50
+
+
+def test_an_invalid_carry_over_counts_as_missing(
+    tmp_path, fixture_ticks, write_month, caplog
+):
+    _three_months(write_month, fixture_ticks)
+    argv = [*BACKFILL, "--from", "2017-08", "--to", "2017-09"]
+    assert main(argv, _env(tmp_path)) == 0
+    _carry_overs(tmp_path, 2017, 8)[0].write_bytes(b"no es parquet")
+    caplog.clear()
+    with caplog.at_level(logging.INFO):
+        assert main(argv, _env(tmp_path)) == 0
+    assert "sonda: unit=binance/spot/BTCUSDT/2017-08" in caplog.text
+
+
+def test_backfill_with_everything_done_does_nothing(
+    tmp_path, fixture_ticks, write_month, caplog
+):
+    _three_months(write_month, fixture_ticks)
+    argv = [*BACKFILL, "--from", "2017-08", "--to", "2017-10"]
+    assert main(argv, _env(tmp_path)) == 0
+    caplog.clear()
+    with caplog.at_level(logging.INFO):
+        assert main(argv, _env(tmp_path)) == 0
+    assert "sonda:" not in caplog.text
+    assert "todos los meses del rango tienen carry-over" in caplog.text
+
+
+def test_force_starts_at_from(tmp_path, fixture_ticks, write_month, caplog):
+    _three_months(write_month, fixture_ticks)
+    argv = [*BACKFILL, "--from", "2017-08", "--to", "2017-10"]
+    assert main(argv, _env(tmp_path)) == 0
+    caplog.clear()
+    with caplog.at_level(logging.INFO):
+        assert main([*argv, "--force"], _env(tmp_path)) == 0
+    for month in (8, 9, 10):
+        assert f"sonda: unit=binance/spot/BTCUSDT/2017-{month:02d}" in caplog.text
+    assert "se salta" not in caplog.text
+
+
+def test_a_failure_stops_the_range(tmp_path, fixture_ticks, write_month, capsys):
+    write_month(fixture_ticks, row_group_size=1_000, year=2017, month=8)
+    # Falta septiembre: octubre existe pero no debe tocarse.
+    write_month(fixture_ticks, row_group_size=1_000, year=2017, month=10)
+    argv = [*BACKFILL, "--from", "2017-08", "--to", "2017-10"]
+    assert main(argv, _env(tmp_path)) == 1
+    assert "no ha publicado el mes" in capsys.readouterr().err
+    assert len(_carry_overs(tmp_path, 2017, 8)) == 50
+    assert not _carry_overs(tmp_path, 2017, 9)
+    assert not _carry_overs(tmp_path, 2017, 10)
+    assert not list((tmp_path / "events").rglob("month=10"))
 
 
 def test_main_fails_closed_without_the_previous_carry_over(
     tmp_path, fixture_ticks, write_month, capsys
 ):
     write_month(fixture_ticks, row_group_size=1_000, year=2017, month=9)
-    argv = [*SERIES, "--mode", "backfill", "--from", "2017-08", "--to", "2017-09"]
-    assert main(argv, _env(tmp_path, CLOUD_RUN_TASK_INDEX="1")) == 1
+    argv = [*BACKFILL, "--from", "2017-09"]
+    assert main(argv, _env(tmp_path)) == 1
     assert "carry-over" in capsys.readouterr().err
     assert not list((tmp_path / "events").rglob("*.parquet"))
 
 
-@pytest.mark.parametrize("mode", ["monthly", "backfill"])
-def test_every_mode_requires_the_series_start(
-    tmp_path, fixture_ticks, write_month, mode
+def test_monthly_defaults_to_the_previous_month(
+    tmp_path, fixture_ticks, write_month, monkeypatch, caplog
 ):
     write_month(fixture_ticks, row_group_size=1_000, year=2017, month=9)
+    monkeypatch.setattr(cli, "_today", lambda: date(2017, 10, 3))
+    argv = ["--mode", "monthly", "--series-start", "2017-09"]
+    with caplog.at_level(logging.INFO):
+        assert main(argv, _env(tmp_path)) == 0
+    assert "sonda: unit=binance/spot/BTCUSDT/2017-09 mode=monthly" in caplog.text
+
+
+def test_monthly_across_the_year_boundary(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(cli, "_today", lambda: date(2018, 1, 2))
+    argv = ["--mode", "monthly", "--series-start", "2017-08"]
+    assert main(argv, _env(tmp_path)) == 1
+    assert "year=2017/month=12" in capsys.readouterr().err
+
+
+def test_monthly_takes_the_series_start_from_the_environment(
+    tmp_path, fixture_ticks, write_month
+):
+    write_month(fixture_ticks, row_group_size=1_000, year=2017, month=9)
+    argv = ["--mode", "monthly", "--from", "2017-09"]
+    assert main(argv, _env(tmp_path, L2_SERIES_START="2017-09")) == 0
+
+
+def test_the_flag_wins_over_the_environment(tmp_path, fixture_ticks, write_month):
+    write_month(fixture_ticks, row_group_size=1_000, year=2017, month=9)
+    argv = ["--mode", "monthly", "--from", "2017-09", "--series-start", "2017-09"]
+    assert main(argv, _env(tmp_path, L2_SERIES_START="2017-08")) == 0
+
+
+@pytest.mark.parametrize("mode", ["monthly", "backfill"])
+@pytest.mark.parametrize("declared", [{}, {"L2_SERIES_START": ""}])
+def test_every_mode_requires_the_series_start(tmp_path, capsys, mode, declared):
     argv = ["--mode", mode, "--from", "2017-09"]
+    assert main(argv, _env(tmp_path, **declared)) == 2
+    assert "L2_SERIES_START" in capsys.readouterr().err
+
+
+def test_a_bad_series_start_in_the_environment_is_a_usage_error(tmp_path):
+    argv = ["--mode", "monthly", "--from", "2017-09"]
+    assert main(argv, _env(tmp_path, L2_SERIES_START="2017")) == 2
+
+
+def test_monthly_rejects_to(tmp_path):
+    argv = [*SERIES, "--mode", "monthly", "--from", "2017-08", "--to", "2017-09"]
     assert main(argv, _env(tmp_path)) == 2
-    assert main([*argv, "--series-start", "2017-09"], _env(tmp_path)) == 0
 
 
 def test_resuming_a_backfill_mid_series_does_not_start_cold(
     tmp_path, fixture_ticks, write_month, capsys
 ):
     write_month(fixture_ticks, row_group_size=1_000, year=2017, month=9)
-    argv = [*SERIES, "--mode", "backfill", "--from", "2017-09"]
+    argv = [*BACKFILL, "--from", "2017-09"]
     assert main(argv, _env(tmp_path)) == 1
     assert "carry-over" in capsys.readouterr().err
     assert not list((tmp_path / "events").rglob("*.parquet"))
@@ -95,7 +260,7 @@ def test_resuming_a_backfill_mid_series_does_not_start_cold(
 def test_a_unit_before_the_series_start_is_rejected(tmp_path, capsys):
     argv = ["--series-start", "2017-09", "--mode", "backfill", "--from", "2017-08"]
     assert main(argv, _env(tmp_path)) == 2
-    assert "anterior a --series-start" in capsys.readouterr().err
+    assert "anterior a la serie" in capsys.readouterr().err
 
 
 def test_main_uses_the_asset_flag(tmp_path, fixture_ticks, write_month, caplog):

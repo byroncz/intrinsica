@@ -35,7 +35,14 @@ from l2_dc_events.parallel import ParallelWriters
 from l2_dc_events.thetas import load_thetas
 from l2_dc_events.write import CARRY_OVER, EVENTS, partition_path
 
-__all__ = ["FEED_TICKS", "Result", "RunContext", "Unit", "process_unit"]
+__all__ = [
+    "FEED_TICKS",
+    "Result",
+    "RunContext",
+    "Unit",
+    "carry_over_complete",
+    "process_unit",
+]
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +96,23 @@ def _path(ctx: RunContext, unit: Unit, theta: int, filename: str) -> str:
         unit.month,
         filename,
     )
+
+
+def carry_over_complete(unit: Unit, ctx: RunContext) -> bool:
+    """¿Dejó el mes un `carry_over.parquet` válido para cada uno de los 50 θ?
+
+    Válido es lo que `read_carry_over` acepta (existe, de la `state_version` de
+    esta imagen, con el esquema y el θ de su partición). La publicación escribe
+    los eventos de un θ antes que su carry-over, así que un carry-over válido
+    significa que el mes de ese θ quedó completo (RF-L2-09). Se detiene en el
+    primer θ que falla.
+    """
+    for theta in load_thetas():
+        try:
+            read_carry_over(_path(ctx, unit, theta, CARRY_OVER), theta)
+        except CarryOverError:
+            return False
+    return True
 
 
 def _start(unit: Unit, ctx: RunContext) -> dc_pyo3.FanOut:

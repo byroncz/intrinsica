@@ -13,29 +13,45 @@ Parquet de L2"). CI construye su imagen (`Dockerfile`) y le corre el humo
 
 ```bash
 export L2_LANDING_ROOT=... L2_EVENTS_ROOT=... L2_DQ_ROOT=...   # local o gs://
-uv run python -m l2_dc_events --mode backfill --from 2020-01 --series-start 2020-01 [--to 2020-03] [--asset BTCUSDT]
-uv run python -m l2_dc_events --mode monthly --from 2020-04 --series-start 2020-01
+export L2_SERIES_START=2020-01                                   # o --series-start
+uv run python -m l2_dc_events --mode backfill --from 2020-01 [--to 2020-03] [--force] [--asset BTCUSDT]
+uv run python -m l2_dc_events --mode monthly [--from 2020-04]
 ```
 
 - `L2_LANDING_ROOT` es la raíz que escribió L1 (la ruta hive va debajo);
   `L2_EVENTS_ROOT`, dónde salen los eventos y el carry-over; `L2_DQ_ROOT`, el
   lago de hallazgos. Las tres son obligatorias.
-- `--mode backfill` procesa la unidad `--from + CLOUD_RUN_TASK_INDEX` (por
-  defecto 0) dentro de `[--from, --to]`. `--mode monthly` procesa un mes.
-  Ambos modos **exigen `--series-start`**.
-- **`--series-start`** es el primer mes de la serie: el único que arranca sin
-  carry-over previo. Se declara y no se infiere, porque "falta el carry-over"
-  y "es el primer mes" se ven igual en disco y confundirlos corrompe la serie
-  (ADR-L2-08). No tiene valor por defecto ni siquiera en `backfill`: al
-  reanudar desde un mes intermedio, `--from` es ese mes y `--series-start`
-  sigue siendo el de la serie. Una unidad anterior a `--series-start` termina
-  con código 2.
-- Los meses de una serie se procesan **en orden**: cada uno lee el carry-over
-  del anterior. Para un rango, corre `--from` con `CLOUD_RUN_TASK_INDEX=0`,
-  luego `1`, y así.
-- Uso inválido (argumentos, raíces faltantes, índice fuera de rango) termina
-  con código 2. Una entrada ausente o un carry-over que falta o es de otra
-  versión, con código 1 y un hallazgo en el lago de DQ.
+- **`--series-start`** (o `L2_SERIES_START` si falta el flag; el flag gana) es
+  el primer mes de la serie: el único que arranca sin carry-over previo. Se
+  declara y no se infiere, porque "falta el carry-over" y "es el primer mes" se
+  ven igual en disco y confundirlos corrompe la serie (ADR-L2-08). Sin flag ni
+  variable, el proceso termina con código 2, en los dos modos. Al reanudar
+  desde un mes intermedio sigue siendo el de la serie, no el de `--from`. Un
+  rango que arranca antes de la serie termina con código 2.
+- **`--mode backfill`** exige `--from` y procesa `[--from, --to]` (un solo mes
+  si falta `--to`) **en orden y en un solo proceso**: cada mes lee el
+  carry-over que el anterior acaba de escribir (TRD-L2 §8.2). Por eso corre en
+  **una sola tarea**: con `CLOUD_RUN_TASK_INDEX` distinto de 0 termina con
+  código 2 (el job de Cloud Run corre en una sola tarea, nunca como task
+  array).
+- **Reanudación (RF-L2-09).** El rango arranca en el primer mes de
+  `[--from, --to]` al que le falte a algún θ un `carry_over.parquet` válido
+  (existe, de la `state_version` de la imagen, con el esquema y el θ de su
+  partición); los anteriores se saltan con una línea de log. Desde ahí procesa
+  **todos** los meses en orden aunque ya tengan salida: así un mes escrito en
+  frío por la sonda se reescribe encadenado. Reprocesar es idempotente
+  (RF-L2-08). **`--force`** arranca en `--from` y reprocesa todo el rango. Si
+  todos los meses tienen carry-over, no hace nada y sale con 0.
+- **Un fallo detiene el rango.** Si el mes M falla (entrada ausente, carry-over
+  que falta o de otra versión), los meses siguientes no se tocan y el proceso
+  termina con código 1 y su hallazgo en el lago de DQ. Corregida la causa,
+  relanzar el mismo comando retoma desde M.
+- **`--mode monthly`** procesa un solo mes: `--from`, y sin él el mes anterior
+  al actual en UTC, igual que `monthly-close` de L1, así que corre sin
+  argumentos con `L2_SERIES_START` fijada. No admite `--to`.
+- Uso inválido (argumentos, raíces faltantes, `CLOUD_RUN_TASK_INDEX` ≠ 0,
+  serie sin declarar) termina con código 2. Una entrada ausente o un
+  carry-over que falta o es de otra versión, con código 1.
 
 Para producir la landing de un mes en local con L1 (los ZIP viven en RAM: un
 mes de 2020 cabe holgado en los 7 GiB del contenedor):
@@ -256,13 +272,15 @@ de DQ y la línea con `content_hash`.
   los buffers del binding sin cambiar los valores.
 - `test_l2_output_contract_doc.py`: que las tablas de `docs/data-contracts.md`
   coincidan con `EVENTS_SCHEMA` y `CARRY_OVER_SCHEMA`.
-- `test_l2_cli.py`: el CLI, incluida la cadena de dos meses y el fail-closed.
+- `test_l2_cli.py`: el CLI: el rango encadenado en un proceso, la reanudación
+  y `--force`, que un fallo detenga el rango, el índice de tarea distinto de 0,
+  `monthly` por defecto, `L2_SERIES_START` y el fail-closed.
 
 ## Acoplamiento con L1
 
 Ninguno por código (RNF-14 del maestro): L2 no importa `l1_ingest`. El único
 contrato es el Parquet de la landing
 ([`docs/data-contracts.md`](../../docs/data-contracts.md)); por eso `cli.py`
-repite la resolución de unidad de L1. El escritor atómico y el hash de
+repite el mes por defecto de `monthly-close` de L1. El escritor atómico y el hash de
 contenido (`PartitionWriter`, `ContentHasher`) vienen de
 [`shared/pyutils`](../../shared/pyutils), no de `l1_ingest`.
