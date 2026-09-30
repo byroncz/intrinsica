@@ -152,9 +152,11 @@ En el log que vuelca el paso "Logs de la ejecución" del run:
   - `wall_s`: pared de la unidad completa (lectura, 50 θ y escritura), no del
     arranque del contenedor.
   - `ticks`: ticks del mes; debe ser el mismo en las tres corridas.
-  - `cores`: núcleos visibles de la máquina, **no** el límite de vCPU del job
-    (la sonda del 2026-09-30 leyó 6, 6 y 9 con 2, 4 y 8 vCPU configurados).
-    No lo uses para validar la config: usa `gcloud run jobs describe`.
+  - `cores`: en las imágenes anteriores a 0.5.1, núcleos visibles de la
+    máquina, **no** el límite de vCPU del job (la sonda del 2026-09-30 leyó 6,
+    6 y 9 con 2, 4 y 8 vCPU configurados). Desde ITSC-289 es el límite
+    efectivo y `cores_visible` conserva el dato viejo; aun así, valida la
+    config con `gcloud run jobs describe`.
   - `ticks_s_core` = `ticks / wall_s / cores` y `theta_ticks_s_core` es lo
     mismo por los 50 θ (la unidad del benchmark de `dc_core`). Por lo dicho
     en `cores`, recalcúlalos dividiendo por el vCPU configurado.
@@ -275,9 +277,63 @@ Cloud Batch con Spot no hace falta.
   Pasar de 2 a 8 vCPU cuadruplica vCPU-s y costo sin ganar tiempo. Con una
   sola corrida por config, la diferencia entre 261 y 301 s puede ser ruido;
   lo sólido es que más CPU no acelera. Es lo que ITSC-282 debe pesar al elegir
-  los vCPU; esta sonda no explica la causa.
+  los vCPU; esta sonda no explica la causa. La separa por fase la
+  "Corrida por fases (ITSC-289)" del final.
 - **`cores` no es el límite del job.** La línea `sonda:` reportó 6, 6 y 9
   cores (los visibles de la máquina) contra 2, 4 y 8 configurados. Por eso
   `ticks_s_core` y `theta_ticks_s_core` de la línea `sonda:` no sirven: usa
-  los de la tabla. Falta que la sonda lea la cuota de CPU del cgroup; queda
-  como card aparte.
+  los de la tabla. Desde ITSC-289 la sonda lee la cuota del cgroup y reporta
+  `cores` (límite efectivo) y `cores_visible` por separado; estos números
+  de 2026-09-30 son de la imagen anterior y conservan el `cores` visible.
+
+## Corrida por fases (ITSC-289)
+
+La sonda de arriba dice *cuánto* tarda el mes más pesado, no *dónde*. Desde la
+versión 0.5.1 de la imagen, la línea `sonda:` y el hallazgo `unit_timing`
+separan el tiempo por fase. Una sola corrida, sobre 2023-03, con la
+configuración vigente del stack `l2` (no cambies CPU ni memoria: lo que se mide
+es esa config).
+
+**Cómo correrla.** Tras el `apply` del stack `l2` con la imagen 0.5.1 o
+posterior, *Actions → Run job* con los inputs de "Inputs de Run job" (`job` =
+`l2-backfill`, `from` = `to` = `series_start` = `2023-03`, `force` marcado).
+
+**Qué leer en la línea `sonda:`:**
+
+| Campo | Qué es |
+| --- | --- |
+| `cores` | Límite efectivo de CPU: cuota del cgroup (`cpu.max`) o, sin ella, los cores visibles. `ticks_s_core` y `theta_ticks_s_core` se calculan con él. |
+| `cores_visible` | Lo que ve la máquina (`sched_getaffinity`); es el `cores` de la sonda anterior. |
+| `cores_source` | Quién fijó `cores`: `cgroup-v2`, `cgroup-v1` o `affinity`. Si sale `affinity` en Cloud Run, la cuota no es legible desde el contenedor y `cores` no es fiable: vale el vCPU de `gcloud run jobs describe`. |
+| `read_s` | Espera de I/O al leer la landing: la pared de cada row group menos la CPU del hilo que lo decodifica, más abrir el archivo. |
+| `decode_s` | Parquet a Arrow: CPU del hilo de lectura. |
+| `detect_s` | El fan-out de los 50 θ. |
+| `carry_s` | Cargar el carry-over del mes anterior (50 lecturas). Cero en frío. |
+| `wait_s` | El hilo principal esperando a los escritores (incluye la publicación final). |
+| `write_s` | Codificar y subir Parquet (eventos y carry-over), **sumado entre los hilos de escritura**: puede pasar de `wall_s`. |
+| `other_s` | `wall_s` menos `carry_s`, `read_s`, `decode_s`, `detect_s` y `wait_s`. Es lo que ninguna fase explica; incluye emitir los hallazgos. |
+| `row_groups`, `bytes_in` | Row groups del mes y bytes comprimidos de las tres columnas que L2 lee. |
+| `cpu_throttled_s` | Segundos que el cgroup estuvo frenado por agotar su cuota durante la unidad. Si es alto, parte de `read_s` es CPU estrangulada, no I/O. |
+
+`read_s`, `decode_s`, `detect_s`, `carry_s` y `wait_s` son pared del hilo
+principal y se suman con `other_s` hasta `wall_s`; `write_s` no entra en esa
+suma porque corre en paralelo. Para saber si la escritura es el cuello,
+compara `wait_s` con `wall_s`.
+
+**Dónde queda el dato sin leer logs.** El hallazgo `unit_timing` (uno por mes,
+`metric_value` = `wall_s`, el resto en `details`) va al lago `dq-findings` con
+cada unidad, así que el backfill de ITSC-284 deja 109 puntos. Desde Cloud
+Shell, con el `gcloud storage cp` de "Qué leer y qué anotar":
+
+```bash
+python3 -c "
+import json, pyarrow.compute as pc, pyarrow.parquet as pq
+t = pq.read_table('/tmp/dq')
+t = t.filter(pc.equal(t['check_type'], 'unit_timing'))
+for r in t.select(['year', 'month', 'metric_value', 'details']).to_pylist():
+    print(r['year'], r['month'], r['metric_value'], json.loads(r['details']))"
+```
+
+**Qué anotar.** La línea `sonda:` completa va al README de la capa
+("Dónde se va el tiempo en la nube") y a la card ITSC-289, con un párrafo: qué
+fase domina y qué optimización propone la card siguiente.

@@ -9,6 +9,7 @@ import logging
 from dq import Finding, Severity, Stage, Status, emit_findings
 
 from l2_dc_events.context import RunContext, Unit
+from l2_dc_events.timing import Timing
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +80,23 @@ def events_summary(
             "events_content_hash": events_content_hash,
             "carry_over_content_hash": carry_over_content_hash,
         },
+    )
+
+
+def unit_timing(ctx: RunContext, unit: Unit, timing: Timing) -> Finding:
+    """Tiempo por fase de la unidad (uno por mes; `metric_value` es la pared).
+
+    Va aparte de `events_summary` porque este es por θ y debe dar el mismo
+    `details` en dos corridas del mes; los tiempos nunca coinciden.
+    """
+    return finding(
+        ctx,
+        unit,
+        "unit_timing",
+        severity=Severity.INFO,
+        status=Status.PASS,
+        metric_value=round(timing.wall_s, 3),
+        details=timing.details(),
     )
 
 

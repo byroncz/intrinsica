@@ -6,6 +6,7 @@ usa el detector.
 """
 
 import logging
+import time
 from collections.abc import Iterator
 from dataclasses import dataclass
 
@@ -13,6 +14,8 @@ import pyarrow as pa
 import pyarrow.fs as pafs
 import pyarrow.parquet as pq
 from pyutils import resolve_fs
+
+from l2_dc_events.timing import Phases
 
 logger = logging.getLogger(__name__)
 
@@ -153,18 +156,42 @@ def ticks_of(batch: pa.RecordBatch) -> Ticks:
     )
 
 
-def read_batches(parquet: pq.ParquetFile) -> Iterator[pa.RecordBatch]:
+def _compressed_bytes(parquet: pq.ParquetFile, index: int) -> int:
+    """Bytes comprimidos que ocupan en el archivo las columnas de `COLUMNS` del row group."""
+    group = parquet.metadata.row_group(index)
+    columns = (group.column(i) for i in range(group.num_columns))
+    return sum(c.total_compressed_size for c in columns if c.path_in_schema in COLUMNS)
+
+
+def read_batches(
+    parquet: pq.ParquetFile, phases: Phases | None = None
+) -> Iterator[pa.RecordBatch]:
     """Los ticks del archivo, un row group a la vez, en el orden del archivo.
 
     En RAM hay un solo row group: el anterior se suelta antes de leer el
     siguiente. Quien consume debe soltar cada lote antes de pedir el próximo,
     o el row group no se libera.
+
+    Con `phases`, separa cada lectura en decodificar y esperar, sin tocar cómo
+    se lee. Sin hilos, el hilo que llama decodifica (Parquet a Arrow): su tiempo
+    de CPU es `decode_s` y el resto de la pared es `read_s`, espera de I/O (la
+    lectura de GCS va en hilos propios de Arrow). Si la cuota de CPU estrangula
+    al proceso, esa espera también cae en `read_s`: `cpu_throttled_s` (ver
+    `cpu.throttled_s`) la distingue.
     """
     for index in range(parquet.num_row_groups):
+        wall, cpu = time.perf_counter(), time.thread_time()
         # Sin hilos: la decodificación de tres columnas es ínfima frente al
         # fan-out, y con hilos el lector retiene una cantidad variable de
         # buffers de más (~1,2 MB por row group de 1,6 MB medidos).
         group = parquet.read_row_group(index, columns=list(COLUMNS), use_threads=False)
+        if phases is not None:
+            wall = time.perf_counter() - wall
+            cpu = min(time.thread_time() - cpu, wall)
+            phases.decode_s += cpu
+            phases.read_s += wall - cpu
+            phases.row_groups += 1
+            phases.bytes_in += _compressed_bytes(parquet, index)
         # Un row group puede venir en varios trozos; cada uno es un lote.
         batches = group.to_batches()
         del group

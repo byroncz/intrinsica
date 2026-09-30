@@ -6,6 +6,7 @@ a medida que llegan, sin acumular el mes: por θ solo hay un tramo de a lo más
 `FLUSH_ROWS` filas (más lo que traiga el último tramo) en RAM (RNF-L2-01).
 """
 
+import time
 from typing import Self
 
 import dc_pyo3
@@ -57,6 +58,10 @@ class EventWriter:
         self._writer = PartitionWriter(path, EVENTS_SCHEMA, EVENTS_SORT_ORDER)
         self._hasher = ContentHasher(EVENTS_SCHEMA)
         self.n_events = 0
+        # Segundos en `add` y `commit` (codificar, hashear, subir): los mide el
+        # hilo que esté escribiendo, uno a la vez por escritor, así que no
+        # necesita candado. `pipeline` suma los de los 50 θ.
+        self.write_s = 0.0
 
     def __enter__(self) -> Self:
         self._writer.__enter__()
@@ -68,10 +73,12 @@ class EventWriter:
     def add(self, columns: dc_pyo3.EventColumns) -> None:
         if not len(columns):
             return
+        started = time.perf_counter()
         self._pending.append(to_batch(columns, self._theta))
         self._rows += len(columns)
         if self._rows >= FLUSH_ROWS:
             self._flush()
+        self.write_s += time.perf_counter() - started
 
     def _flush(self) -> None:
         """Escribe los tramos acumulados como un row group y los suelta."""
@@ -84,7 +91,9 @@ class EventWriter:
 
     def commit(self) -> str:
         """Escribe lo que quede, publica el archivo y devuelve su `content_hash`."""
+        started = time.perf_counter()
         if self._rows:
             self._flush()
         self._writer.commit()
+        self.write_s += time.perf_counter() - started
         return self._hasher.hexdigest()
