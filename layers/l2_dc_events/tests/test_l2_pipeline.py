@@ -67,6 +67,7 @@ def ctx(write_month, tmp_path):
         mode="backfill",
         run_id="test",
         image_version="0.1.0+test",
+        series_start=(2017, 8),
         landing_root=write_month.landing,
         events_root=tmp_path / "events",
         dq_root=tmp_path / "dq",
@@ -212,26 +213,36 @@ def test_process_unit_counts_the_closed_events_of_a_given_fanout(
 class SpyFanOut:
     """Un fan-out que anota qué recibe y cuánta memoria de Arrow hay en cada lote."""
 
-    def __init__(self, n):
-        self.n = n
+    def __init__(self, thetas):
+        self.thetas = thetas
         self.calls = []
 
     def __len__(self):
-        return self.n
+        return len(self.thetas)
 
     def feed_batch(self, prices, times, ids):
         self.calls.append((len(times), pa.total_allocated_bytes()))
-        return [[] for _ in range(self.n)]
+        return [[] for _ in self.thetas]
 
     def finish(self):
-        return [None] * self.n
+        return [None] * len(self.thetas)
+
+    def discarded(self):
+        return [0] * len(self.thetas)
+
+    def carry_overs(self):
+        point = (100_000_000, 1_000, 1)
+        return [
+            dc_pyo3.CarryOver(theta, dc_pyo3.STATE_VERSION, 0, point, point)
+            for theta in self.thetas
+        ]
 
 
 def test_process_unit_never_holds_more_than_one_row_group(write_month, tmp_path):
     groups, rows = 10, 50_000
     ticks = [(100_000_000 * (1 + i), 1_000 + i, 1 + i) for i in range(groups * rows)]
     write_month(ticks, row_group_size=rows)
-    spy = SpyFanOut(2)
+    spy = SpyFanOut([100_000, 200_000])
     baseline = pa.total_allocated_bytes()
     result = process_unit(UNIT, ctx(write_month, tmp_path), fanout=spy)
 

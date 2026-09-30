@@ -21,7 +21,21 @@ PRICE_TYPE = pa.decimal128(18, 8)
 
 
 class LandingError(Exception):
-    """La entrada de la unidad no existe o no cumple el contrato de L1."""
+    """La entrada de la unidad no existe o no cumple el contrato de L1.
+
+    `check_type` es el del hallazgo de TRD-L2 §9.3 que la describe (`None` si
+    el error no tiene uno) y `details` su payload.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        check_type: str | None = None,
+        details: dict | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.check_type = check_type
+        self.details = details or {}
 
 
 @dataclass(frozen=True)
@@ -61,7 +75,7 @@ def consolidated_path(
     )
 
 
-def _resolve_fs(path: str) -> tuple[pafs.FileSystem, str]:
+def resolve_fs(path: str) -> tuple[pafs.FileSystem, str]:
     if "://" not in path:
         return pafs.LocalFileSystem(), path
     return pafs.FileSystem.from_uri(path)
@@ -83,9 +97,15 @@ def _missing(fs: pafs.FileSystem, path: str, resolved: str) -> LandingError:
     if provisional:
         return LandingError(
             f"{path} no existe y solo hay {len(provisional)} provisionales: L2 "
-            "lee solo el consolidado (ADR-L2-09); espera al monthly-close de L1"
+            "lee solo el consolidado (ADR-L2-09); espera al monthly-close de L1",
+            "input_provisional_only",
+            {"expected_path": path, "provisionals": len(provisional)},
         )
-    return LandingError(f"{path} no existe: L1 no ha publicado el mes")
+    return LandingError(
+        f"{path} no existe: L1 no ha publicado el mes",
+        "input_missing",
+        {"expected_path": path},
+    )
 
 
 def _validate(parquet: pq.ParquetFile, path: str) -> None:
@@ -104,7 +124,7 @@ def open_consolidated(path: str) -> pq.ParquetFile:
 
     Quien lo llama debe cerrarlo (`parquet.close()` o `with`).
     """
-    fs, resolved = _resolve_fs(path)
+    fs, resolved = resolve_fs(path)
     if fs.get_file_info(resolved).type == pafs.FileType.NotFound:
         raise _missing(fs, path, resolved)
     # Con `filesystem=` el `ParquetFile` es dueño del archivo y `close()` lo
