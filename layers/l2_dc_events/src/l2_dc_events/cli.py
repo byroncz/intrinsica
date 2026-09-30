@@ -129,7 +129,7 @@ def main(
         "--series-start",
         metavar="YYYY-MM",
         help="primer mes de la serie, el único que arranca sin carry-over "
-        "(ADR-L2-08); por defecto --from en backfill, obligatorio en monthly",
+        "(ADR-L2-08); obligatorio, sin valor por defecto",
     )
     try:
         args = parser.parse_args(argv)
@@ -139,9 +139,14 @@ def main(
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
     try:
         year, month = resolve_unit(args.from_, args.to, _index(env))
-        if args.series_start is None and args.mode == "monthly":
-            raise UsageError("--mode monthly exige --series-start")
-        series_start = _parse(args.series_start or args.from_)
+        if args.series_start is None:
+            raise UsageError("falta --series-start: el primer mes se declara")
+        series_start = _parse(args.series_start)
+        if (year, month) < series_start:
+            raise UsageError(
+                f"la unidad {year:04d}-{month:02d} es anterior a "
+                f"--series-start {args.series_start}"
+            )
         ctx = _context(args.mode, series_start, env)
     except UsageError as exc:
         print(f"l2_dc_events: {exc}", file=sys.stderr)

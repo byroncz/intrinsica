@@ -13,7 +13,7 @@ CI (E4a). Corre con `uv run`.
 
 ```bash
 export L2_LANDING_ROOT=... L2_EVENTS_ROOT=... L2_DQ_ROOT=...   # local o gs://
-uv run python -m l2_dc_events --mode backfill --from 2020-01 [--to 2020-03] [--asset BTCUSDT]
+uv run python -m l2_dc_events --mode backfill --from 2020-01 --series-start 2020-01 [--to 2020-03] [--asset BTCUSDT]
 uv run python -m l2_dc_events --mode monthly --from 2020-04 --series-start 2020-01
 ```
 
@@ -21,12 +21,15 @@ uv run python -m l2_dc_events --mode monthly --from 2020-04 --series-start 2020-
   `L2_EVENTS_ROOT`, dónde salen los eventos y el carry-over; `L2_DQ_ROOT`, el
   lago de hallazgos. Las tres son obligatorias.
 - `--mode backfill` procesa la unidad `--from + CLOUD_RUN_TASK_INDEX` (por
-  defecto 0) dentro de `[--from, --to]`. `--mode monthly` procesa un mes y
-  **exige `--series-start`**.
+  defecto 0) dentro de `[--from, --to]`. `--mode monthly` procesa un mes.
+  Ambos modos **exigen `--series-start`**.
 - **`--series-start`** es el primer mes de la serie: el único que arranca sin
   carry-over previo. Se declara y no se infiere, porque "falta el carry-over"
   y "es el primer mes" se ven igual en disco y confundirlos corrompe la serie
-  (ADR-L2-08). En `backfill` es `--from` si no se da.
+  (ADR-L2-08). No tiene valor por defecto ni siquiera en `backfill`: al
+  reanudar desde un mes intermedio, `--from` es ese mes y `--series-start`
+  sigue siendo el de la serie. Una unidad anterior a `--series-start` termina
+  con código 2.
 - Los meses de una serie se procesan **en orden**: cada uno lee el carry-over
   del anterior. Para un rango, corre `--from` con `CLOUD_RUN_TASK_INDEX=0`,
   luego `1`, y así.
@@ -41,7 +44,7 @@ mes de 2020 cabe holgado en los 7 GiB del contenedor):
 export L1_LANDING_ROOT=$PWD/sandbox.local/x/landing L1_DQ_ROOT=$PWD/sandbox.local/x/dq L1_MANIFEST_ROOT=$PWD/sandbox.local/x/manifest
 uv run python -m l1_ingest --mode backfill --from 2020-01
 export L2_LANDING_ROOT=$L1_LANDING_ROOT L2_EVENTS_ROOT=$PWD/sandbox.local/x/events L2_DQ_ROOT=$PWD/sandbox.local/x/dq_l2
-uv run python -m l2_dc_events --mode backfill --from 2020-01
+uv run python -m l2_dc_events --mode backfill --from 2020-01 --series-start 2020-01
 ```
 
 ## Qué hace una unidad
