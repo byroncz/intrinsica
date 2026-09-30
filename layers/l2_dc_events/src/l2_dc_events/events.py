@@ -17,9 +17,10 @@ import pyarrow as pa
 from l2_dc_events.schema import EVENTS_SCHEMA, EVENTS_SORT_ORDER, PRICE_TYPE, THETA_TYPE
 from l2_dc_events.write import ContentHasher, PartitionWriter
 
-# Filas por row group de `events.parquet`. Un tramo son 12 columnas de 8 B
-# (~3 MiB con 32 768 filas); con 50 θ, el peor caso es ~150 MiB solo si los 50
-# llegan al límite a la vez, y los θ grandes casi nunca emiten.
+# Filas por row group de `events.parquet`. Un tramo son 11 columnas: 4 DECIMAL
+# de 16 B, 6 INT64 y 1 INT8, unos 113 B por fila (~3,5 MiB con 32 768 filas);
+# con 50 θ, el peor caso es ~175 MiB solo si los 50 llegan al límite a la vez,
+# y los θ grandes casi nunca emiten.
 FLUSH_ROWS = 32_768
 
 _LITTLE_ENDIAN = sys.byteorder == "little"
