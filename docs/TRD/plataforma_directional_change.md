@@ -324,14 +324,14 @@ Se introduce un **lago de hallazgos de calidad de datos (Data Quality findings)*
 | Inicio de la serie | 2017-08-17 | ~8 años, no 10 |
 | aggTrades totales (8 años) | ~2,5–3,5 mil millones | Estimado |
 | CSV crudo histórico | ~185 GB | Descomprimido |
-| Parquet comprimido histórico (L1) | ~30 GB | Snappy/ZSTD. Medido: 38,4 GiB en la landing (ITSC-228) |
+| Parquet comprimido histórico (L1) | 38,4 GiB (medido) | Snappy/ZSTD. Medido en la landing (ITSC-228); la estimación original era ~30 GB |
 | L2 (eventos, 50 θ) | ~73–103 GiB | Medido: 12,15 M de eventos y 421 MiB por mes en 2020-01 (14,05 M de ticks; ITSC-244), unos 30 MiB por millón de ticks. Extrapolado a 2,5–3,5 mil millones de ticks; la sonda de E4a lo afina |
 | L3 (resúmenes por evento y θ) | ~del orden de L2 | Una fila por evento y θ, con más columnas que L2 pero sin ticks. Supuesto: se mide con la sonda de L3 |
 | L4 (indicadores) | ~pequeño frente a L2 | Una columna con clave (θ, evento) por indicador. Supuesto: crece con el catálogo de indicadores |
 | Medallion completo (4 capas) | ~0,2–0,25 TB | L1 38,4 GiB + L2 ~73–103 GiB + L3 del orden de L2 + L4. Reemplaza los 45–75 GB de v2.1, que suponían las capas 2–4 "muy livianas" |
 | Ventana mensual reciente | ~30–40 M filas / ~2,5–5 GB CSV | ~0,5–0,6 GB precio+ts en memoria |
  
-> **Nota — tramas con ticks por θ.** Materializar los ticks de cada evento (la definición de L3 hasta v2.1) equivale a copiar L1 una vez por θ, porque los eventos de un θ cubren el mes sin huecos ni solapes: 50 copias de 38,4 GiB (50 × 38,4 GiB ≈ 1,9 TiB) y hasta 50 veces más lectura en cada indicador que mire todos los θ, frente a una lectura de L1 con fan-out. Queda **fuera del diseño**, salvo para un puñado de θ de investigación interactiva, nunca los 50. Una pasada histórica con fan-out cuesta minutos de cómputo (2,8 M ticks/s por core con 50 θ, ITSC-241) y una lectura de 38 GiB. Porqué completo: [Decisión: L3 guarda resúmenes por evento](https://app.notion.com/p/3eb27957d23d81d69ccac074bef2f8b3).
+> **Nota — tramas con ticks por θ.** Materializar los ticks de cada evento (la definición de L3 hasta v2.1) equivale a copiar L1 una vez por θ, porque los eventos de un θ cubren el mes sin huecos ni solapes: 50 copias de 38,4 GiB (50 × 38,4 GiB ≈ 1,9 TiB) y hasta 50 veces más lectura en cada indicador que mire todos los θ, frente a una lectura de L1 con fan-out. Queda **fuera del diseño**, salvo para un puñado de θ de investigación interactiva, nunca los 50. Una pasada histórica con fan-out cuesta una lectura de 38 GiB y, de cómputo, minutos-core si solo corre el detector (2,8 M ticks/s por core con 50 θ, ITSC-241) o unas 14 horas-core con la unidad completa de L2 (~58 k ticks/s por core sobre ~3 000 M de ticks, ITSC-244; el resto es Python serial, ver el README de `l2_dc_events`). Porqué completo: [Decisión: L3 guarda resúmenes por evento](https://app.notion.com/p/3eb27957d23d81d69ccac074bef2f8b3).
 
 ### 7.2 Tarifas de cómputo (us-east1, 2026)
  
