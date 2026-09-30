@@ -129,15 +129,17 @@ gcloud run jobs describe l2-backfill --project "<GCP_PROJECT_ID>" --region "<GCP
   --format='value(spec.template.spec.template.spec.containers[0].resources.limits,spec.template.spec.template.spec.timeoutSeconds,spec.template.spec.template.spec.maxRetries)'
 ```
 
-- `--task-timeout 86400` (24 h) evita que el timeout del stack (3600 s) corte
+- `--task-timeout 86400` (24 h) evita que el timeout provisional del stack (3600 s) corte
   una corrida de 2 vCPU que tarde más; lo que se mide es la pared real.
 - `--max-retries 0` evita que un reintento sume otra corrida al run y deje
   dos líneas `sonda:`; un fallo se lee y se relanza a mano.
-- **Es deriva temporal frente a Terraform.** El stack `l2` fija 4 vCPU,
-  16 GiB, 3600 s y 1 reintento (provisionales, `infra/stacks/batch/l2/main.tf`).
+- **Es deriva temporal frente a Terraform.** Antes de ITSC-282 el stack `l2`
+  fijaba 4 vCPU, 16 GiB, 3600 s y 1 reintento (provisionales). Desde ITSC-282
+  fija los valores finales: 2 vCPU, 4 GiB, 1 reintento, 2400 s en `monthly` y
+  54.000 s en `backfill` (`infra/stacks/batch/l2/main.tf`, TRD-L2 §10.2).
   No lo apliques entre corridas ni al terminar: `apply` desharía estos cambios.
-  El `apply` de ITSC-282 (hija 6) fija los valores finales y cierra la deriva;
-  hasta entonces, el job en la nube no coincide con el código.
+  El `apply` de ITSC-282 (hija 6) cierra la deriva; hasta entonces, el job en
+  la nube no coincide con el código.
 
 ## Qué leer y qué anotar
 
