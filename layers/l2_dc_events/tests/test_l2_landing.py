@@ -113,3 +113,16 @@ def test_the_whole_table_is_never_materialized(write_month):
     used = [in_flight for _, in_flight in seen]
     assert max(used) - min(used) < one_group / 2
     assert max(used) < groups * one_group / 3
+
+
+def test_a_uri_root_explains_a_month_with_only_provisionals(write_month):
+    """`file://` reproduce a `gs://`: el sistema de archivos rechaza URIs."""
+    path = write_month(ticks(3), row_group_size=3, name="provisional-day=05.parquet")
+    uri = f"file://{path.with_name('consolidated.parquet')}"
+    with pytest.raises(LandingError, match="solo hay 1 provisionales.*ADR-L2-09"):
+        open_consolidated(uri)
+
+
+def test_a_uri_root_explains_a_missing_month(tmp_path):
+    with pytest.raises(LandingError, match="no ha publicado el mes"):
+        open_consolidated(f"file://{tmp_path}/nada/consolidated.parquet")

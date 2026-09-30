@@ -67,9 +67,13 @@ def _resolve_fs(path: str) -> tuple[pafs.FileSystem, str]:
     return pafs.FileSystem.from_uri(path)
 
 
-def _missing(fs: pafs.FileSystem, path: str) -> LandingError:
-    """Explica por qué falta el consolidado: solo provisionales o nada."""
-    parent = path.rpartition("/")[0]
+def _missing(fs: pafs.FileSystem, path: str, resolved: str) -> LandingError:
+    """Explica por qué falta el consolidado: solo provisionales o nada.
+
+    `resolved` es la ruta sin esquema que entiende `fs` (un `FileSelector` con
+    un URI `gs://` o `file://` lo rechaza); `path` solo va en el mensaje.
+    """
+    parent = resolved.rpartition("/")[0]
     selector = pafs.FileSelector(parent, allow_not_found=True)
     provisional = [
         info.base_name
@@ -88,7 +92,7 @@ def open_consolidated(path: str) -> pq.ParquetFile:
     """Abre `path` sin leer datos y valida las columnas que L2 consume."""
     fs, resolved = _resolve_fs(path)
     if fs.get_file_info(resolved).type == pafs.FileType.NotFound:
-        raise _missing(fs, path)
+        raise _missing(fs, path, resolved)
     parquet = pq.ParquetFile(fs.open_input_file(resolved))
     schema = parquet.schema_arrow
     for name in COLUMNS:
