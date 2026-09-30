@@ -346,20 +346,20 @@ Se mantienen las tarifas de Cloud Batch + Spot como referencia para Capas 2–4 
  
 ### 7.3 Costo en estado estacionario (mensual)
  
-La estructura de costos se mantiene, con un matiz: el cómputo de **L1 migra de Spot a Cloud Run Jobs** (probablemente ~0 USD en estado estacionario por el free tier propio de Cloud Run). El resto (almacenamiento medallion, operaciones GCS, lago de meta-métricas y lago de hallazgos de DQ) no cambia materialmente.
+La estructura de costos se mantiene, con un matiz: el cómputo de **L1 migra de Spot a Cloud Run Jobs** (probablemente ~0 USD en estado estacionario por el free tier propio de Cloud Run). El almacenamiento del medallion sube con el volumen de v2.2 (nota al pie de la tabla). El resto (operaciones GCS, lago de meta-métricas y lago de hallazgos de DQ) no cambia materialmente.
  
 | Concepto | Conservador | Intensivo |
 |---|---|---|
 | Cómputo (Cloud Run Jobs L1 + Spot/Batch L2–L4) | ≈ 0,50–1,00 USD | ≈ 3–13 USD |
-| Almacenamiento (GCS, medallion) | ≈ 0,75–1,50 USD | ≈ 1,50 USD |
+| Almacenamiento (GCS, medallion) | ≈ 4–5 USD | ≈ 4–5 USD |
 | Operaciones GCS (Clase A/B) | ≈ 0,20 USD | ≈ 4,00 USD |
 | Disco / Artifact Registry / otros | ≈ 0,40 USD | ≈ 1,85 USD |
 | Egress (intra-región) | ≈ 0,00 USD | ≈ 0,00 USD |
-| **TOTAL ESTIMADO** | **≈ 2–4 USD/mes** | **≈ 18–22 USD/mes** |
+| **TOTAL ESTIMADO** | **≈ 5–7 USD/mes** | **≈ 21–26 USD/mes** |
  
-> **Holgura presupuestal.** Incluso el escenario intensivo (~18–22 USD/mes) deja > 75 % de margen frente a los 100 USD/mes. El backfill inicial (pico único, ~5–15 USD) lo absorbe el crédito de prueba de 300 USD válido por 90 días.
+> **Holgura presupuestal.** Incluso el escenario intensivo (~21–26 USD/mes) deja > 70 % de margen frente a los 100 USD/mes. El backfill inicial (pico único, ~5–15 USD) lo absorbe el crédito de prueba de 300 USD válido por 90 días.
 
-> **Nota — almacenamiento con el volumen de v2.2.** La fila de almacenamiento se dimensionó sobre 45–75 GB. Con el medallion recalculado en §7.1 (~0,2–0,25 TB) sube a ≈ 4–5 USD/mes en Standard (≈ 0,02 USD/GB-mes); el escenario intensivo pasa a ≈ 21–26 USD/mes y sigue dejando más de 70 % de margen.
+> **Nota — almacenamiento con el volumen de v2.2.** La fila de almacenamiento se dimensionó sobre 45–75 GB (0,75–1,50 USD en el conservador, 1,50 USD en el intensivo). Con el medallion recalculado en §7.1 (~0,2–0,25 TB) sube a ≈ 4–5 USD/mes en Standard (≈ 0,02 USD/GB-mes) en ambos escenarios: el total conservador pasa de ≈ 2–4 a ≈ 5–7 USD/mes y el intensivo de ≈ 18–22 a ≈ 21–26 USD/mes. El objetivo de diseño < 5 USD/mes (RNF-01, principio rector, criterio 3 de §11.1) queda en el límite o algo por encima en el conservador; el tope de 100 USD/mes no se acerca.
  
 > **Nota — modelo de free tier.** No existe una única bolsa *always-free* compartida entre servicios: **cada servicio tiene su propio cupo perpetuo** (Cloud Run, Compute Engine, GCS, BigQuery, …), contabilizado **por billing account** (compartido entre projects del mismo billing account, **no** multiplicado por project). La **única bolsa compartida** entre servicios es el **crédito de prueba de 300 USD** (90 días). **Cloud Batch no cobra por el servicio de orquestación**: solo se pagan los recursos de Compute Engine que provisiona.
  
@@ -465,7 +465,7 @@ dc-platform/                      # raíz del monorepo
 | Orquestación | Cloud Workflows + Scheduler | ≈ 0 USD |
 | Motor de datos | DuckDB + Polars + Arrow (embebidos) | Solo cómputo |
  
-> **Principio rector.** El único costo real del sistema es el pipeline de cómputo (Cloud Run Jobs / Cloud Batch + Cloud Storage), con objetivo < 5 USD/mes. Todo el plano de operaciones se mantiene en ~0 USD/mes mediante free tiers nativos.
+> **Principio rector.** El único costo real del sistema es el pipeline de cómputo (Cloud Run Jobs / Cloud Batch + Cloud Storage), con objetivo < 5 USD/mes (≈ 5–7 USD/mes con el almacenamiento de v2.2, §7.3). Todo el plano de operaciones se mantiene en ~0 USD/mes mediante free tiers nativos.
  
 ---
  
