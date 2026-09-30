@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
@@ -126,3 +128,31 @@ def test_a_uri_root_explains_a_month_with_only_provisionals(write_month):
 def test_a_uri_root_explains_a_missing_month(tmp_path):
     with pytest.raises(LandingError, match="no ha publicado el mes"):
         open_consolidated(f"file://{tmp_path}/nada/consolidated.parquet")
+
+
+def _open_fds_of(path):
+    """Descriptores abiertos sobre `path` (Linux); salta la prueba sin /proc."""
+    fd_dir = Path("/proc/self/fd")
+    if not fd_dir.is_dir():
+        pytest.skip("sin /proc/self/fd")
+    return [fd for fd in fd_dir.iterdir() if fd.exists() and fd.resolve() == path]
+
+
+def test_closing_the_parquet_file_releases_the_landing_file(write_month):
+    """`close()` suelta el archivo aunque el `ParquetFile` siga referenciado.
+
+    Sin depender del recolector: es lo que evita dejar abierta la conexión a GCS.
+    """
+    path = write_month(ticks(3), row_group_size=3).resolve()
+    parquet = open_consolidated(str(path))
+    assert len(_open_fds_of(path)) == 1
+    parquet.close()
+    assert _open_fds_of(path) == []
+
+
+def test_a_file_that_breaks_the_contract_is_not_left_open(tmp_path):
+    path = (tmp_path / "consolidated.parquet").resolve()
+    pq.write_table(pa.table({"price": [1]}), path)
+    with pytest.raises(LandingError, match="falta la columna"):
+        open_consolidated(str(path))
+    assert _open_fds_of(path) == []

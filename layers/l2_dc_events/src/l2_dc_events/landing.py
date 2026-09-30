@@ -88,12 +88,7 @@ def _missing(fs: pafs.FileSystem, path: str, resolved: str) -> LandingError:
     return LandingError(f"{path} no existe: L1 no ha publicado el mes")
 
 
-def open_consolidated(path: str) -> pq.ParquetFile:
-    """Abre `path` sin leer datos y valida las columnas que L2 consume."""
-    fs, resolved = _resolve_fs(path)
-    if fs.get_file_info(resolved).type == pafs.FileType.NotFound:
-        raise _missing(fs, path, resolved)
-    parquet = pq.ParquetFile(fs.open_input_file(resolved))
+def _validate(parquet: pq.ParquetFile, path: str) -> None:
     schema = parquet.schema_arrow
     for name in COLUMNS:
         if name not in schema.names:
@@ -102,6 +97,25 @@ def open_consolidated(path: str) -> pq.ParquetFile:
         raise LandingError(
             f"{path}: price es {schema.field('price').type}, se esperaba {PRICE_TYPE}"
         )
+
+
+def open_consolidated(path: str) -> pq.ParquetFile:
+    """Abre `path` sin leer datos y valida las columnas que L2 consume.
+
+    Quien lo llama debe cerrarlo (`parquet.close()` o `with`).
+    """
+    fs, resolved = _resolve_fs(path)
+    if fs.get_file_info(resolved).type == pafs.FileType.NotFound:
+        raise _missing(fs, path, resolved)
+    # Con `filesystem=` el `ParquetFile` es dueño del archivo y `close()` lo
+    # cierra (pasarle un `NativeFile` ya abierto lo dejaría abierto). En GCS
+    # eso libera la conexión sin esperar al recolector.
+    parquet = pq.ParquetFile(resolved, filesystem=fs)
+    try:
+        _validate(parquet, path)
+    except LandingError:
+        parquet.close()
+        raise
     return parquet
 
 

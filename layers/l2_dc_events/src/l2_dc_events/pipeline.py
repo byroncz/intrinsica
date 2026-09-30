@@ -103,21 +103,21 @@ def process_unit(
         unit.year,
         unit.month,
     )
-    parquet = open_consolidated(path)
     if fanout is None:
         fanout = dc_pyo3.FanOut(load_thetas())
 
     events = [0] * len(fanout)
     n_ticks = 0
-    for batch in read_batches(parquet):
-        n_ticks += _feed(fanout, batch, events)
-        # Soltar el lote antes de pedir el siguiente row group.
-        del batch
+    # `with`: el archivo se cierra al terminar la unidad, también si falla.
+    with open_consolidated(path) as parquet:
+        n_row_groups = parquet.num_row_groups
+        for batch in read_batches(parquet):
+            n_ticks += _feed(fanout, batch, events)
+            # Soltar el lote antes de pedir el siguiente row group.
+            del batch
     events = [
         total + (last is not None) for total, last in zip(events, fanout.finish())
     ]
 
-    logger.info(
-        "unidad %s: %d ticks, %d row groups", unit, n_ticks, parquet.num_row_groups
-    )
-    return Result(n_ticks, parquet.num_row_groups, events)
+    logger.info("unidad %s: %d ticks, %d row groups", unit, n_ticks, n_row_groups)
+    return Result(n_ticks, n_row_groups, events)
