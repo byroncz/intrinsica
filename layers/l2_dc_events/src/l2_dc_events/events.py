@@ -7,7 +7,8 @@ tramo de a lo más `FLUSH_ROWS` filas en RAM (RNF-L2-01).
 
 import sys
 from array import array
-from collections.abc import Iterable
+from collections.abc import Sequence
+from operator import attrgetter
 from typing import Self
 
 import dc_pyo3
@@ -22,6 +23,11 @@ from l2_dc_events.write import ContentHasher, PartitionWriter
 FLUSH_ROWS = 32_768
 
 _LITTLE_ENDIAN = sys.byteorder == "little"
+
+_REFERENCE = attrgetter("reference")
+_CONFIRM = attrgetter("confirm")
+_EXTREME = attrgetter("extreme")
+_DIRECTION = attrgetter("direction")
 
 
 def _int64(values: array) -> pa.Array:
@@ -56,15 +62,19 @@ class EventColumns:
     def __len__(self) -> int:
         return len(self._direction)
 
-    def extend(self, events: Iterable[dc_pyo3.Event]) -> None:
+    def extend(self, events: Sequence[dc_pyo3.Event]) -> None:
+        """Vuelca los eventos por columnas: un `extend` por columna, no un
+        `append` por valor (con 12 M de eventos por mes eso era el 75 % del
+        tiempo de la unidad)."""
+        if not events:
+            return
         columns = self._points
-        for event in events:
-            for start, point in ((0, event.reference), (3, event.confirm)):
-                for offset, value in enumerate(point):
-                    columns[start + offset].append(value)
-            for offset, value in enumerate(event.extreme):
-                columns[6 + offset].append(value)
-            self._direction.append(event.direction)
+        for start, point in ((0, _REFERENCE), (3, _CONFIRM), (6, _EXTREME)):
+            price, time, agg_trade_id = zip(*map(point, events))
+            columns[start].extend(price)
+            columns[start + 1].extend(time)
+            columns[start + 2].extend(agg_trade_id)
+        self._direction.extend(map(_DIRECTION, events))
 
     def take(self) -> pa.RecordBatch:
         """Las filas acumuladas como lote; deja el acumulador vacío.
@@ -110,7 +120,7 @@ class EventWriter:
     def __exit__(self, *exc_info) -> None:
         self._writer.__exit__(*exc_info)
 
-    def add(self, events: Iterable[dc_pyo3.Event]) -> None:
+    def add(self, events: Sequence[dc_pyo3.Event]) -> None:
         self._columns.extend(events)
         if len(self._columns) >= FLUSH_ROWS:
             self._flush()

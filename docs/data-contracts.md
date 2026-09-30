@@ -97,6 +97,121 @@ write_partition(table, path)  # table.schema debe ser OUTPUT_SCHEMA
 
 En GCS usa Application Default Credentials; no hay credenciales en código.
 
+## Salida Parquet de L2
+
+Contrato hacia L3: los eventos Directional Change de cada θ, una partición por
+θ y mes, y el carry-over que encadena un mes con el siguiente.
+Fuente de diseño: [TRD-L2 §7.2](TRD/l2.md#72-salida--eventsparquet-contrato-hacia-l3)
+y [§7.4](TRD/l2.md#74-carry-over--contrato-y-disposición-física).
+Fuente en código: `EVENTS_SCHEMA` y `CARRY_OVER_SCHEMA` en
+[`layers/l2_dc_events/src/l2_dc_events/schema.py`](../layers/l2_dc_events/src/l2_dc_events/schema.py)
+y el escritor en
+[`layers/l2_dc_events/src/l2_dc_events/write.py`](../layers/l2_dc_events/src/l2_dc_events/write.py).
+Una prueba (`layers/l2_dc_events/tests/test_l2_output_contract_doc.py`) rompe el
+CI si alguna de las dos tablas se desvía del código.
+
+Todo precio es el entero sin escalar de un `DECIMAL(18,8)` (escala `10⁸`, la
+misma que L1) y todo tiempo son microsegundos UTC. Un punto es el trío
+precio, tiempo y `agg_trade_id`.
+
+### Esquema de `events.parquet`
+
+Una fila por evento DC confirmado, con sus tres puntos completos.
+
+| Columna | Tipo Arrow/Parquet | Nulable | Descripción |
+|---|---|---|---|
+| `reference_price` | decimal128(18, 8) | no | Precio del extremo que define el arranque del evento (el extremo del evento anterior) |
+| `reference_time` | int64 | no | Tiempo de la referencia |
+| `reference_agg_trade_id` | int64 | no | `agg_trade_id` de la referencia |
+| `confirm_price` | decimal128(18, 8) | no | Precio de confirmación (DCC) según la regla conservadora de empates (ADR-L2-03) |
+| `confirm_time` | int64 | no | Tiempo del último tick del grupo de empate; clave de orden del archivo |
+| `confirm_agg_trade_id` | int64 | no | `agg_trade_id` del último tick del grupo de empate |
+| `extreme_price` | decimal128(18, 8) | no | Precio que cierra el Overshoot; es la `reference_price` del evento siguiente |
+| `extreme_time` | int64 | no | Tiempo del extremo; nunca anterior a `confirm_time` |
+| `extreme_agg_trade_id` | int64 | no | `agg_trade_id` del extremo; nunca anterior a `confirm_agg_trade_id` |
+| `direction` | int8 | no | `1` upturn, `-1` downturn |
+| `theta` | decimal128(9, 8) | no | θ del evento; redundante con la partición, para leer sin `hive_partitioning` |
+
+Un Overshoot vacío tiene `extreme_*` igual a `confirm_*`: L3 debe tratar su
+duración como cero, no como un dato inválido.
+
+### Esquema de `carry_over.parquet`
+
+Una fila por `(theta, year, month)`: el estado del detector de ese θ al cierre
+del mes. El mes siguiente la lee para continuar sin reprocesar ticks.
+
+| Columna | Tipo Arrow/Parquet | Nulable | Descripción |
+|---|---|---|---|
+| `provider` | string | no | Proveedor del dato, redundante con la partición |
+| `market` | string | no | Mercado del dato, redundante con la partición |
+| `asset` | string | no | Activo del dato, redundante con la partición |
+| `theta` | decimal128(9, 8) | no | θ de esta cadena |
+| `year` | int32 | no | Año del mes que produjo este estado (se consume desde el mes siguiente) |
+| `month` | int32 | no | Mes que produjo este estado (1 a 12) |
+| `state_version` | string | no | Versión semver del esquema del estado; si no coincide con la que la imagen sabe leer, el mes siguiente aborta (ADR-L2-08) |
+| `direction` | int8 | no | `0` indefinida (aún sin ninguna reversión), `1` upturn, `-1` downturn |
+| `ext_high_price` | decimal128(18, 8) | no | Precio del extremo alto vigente |
+| `ext_high_time` | int64 | no | Tiempo del extremo alto vigente |
+| `ext_high_agg_trade_id` | int64 | no | `agg_trade_id` del extremo alto vigente |
+| `ext_low_price` | decimal128(18, 8) | no | Precio del extremo bajo vigente |
+| `ext_low_time` | int64 | no | Tiempo del extremo bajo vigente |
+| `ext_low_agg_trade_id` | int64 | no | `agg_trade_id` del extremo bajo vigente |
+| `has_pending_event` | bool | no | `true` si hay un evento confirmado cuyo extremo aún no se conoce (el caso normal al cierre de un mes) |
+| `pending_reference_price` | decimal128(18, 8) | sí | Precio de la referencia del evento pendiente; nulo sin evento pendiente |
+| `pending_reference_time` | int64 | sí | Tiempo de esa referencia; nulo sin evento pendiente |
+| `pending_reference_agg_trade_id` | int64 | sí | `agg_trade_id` de esa referencia; nulo sin evento pendiente |
+| `pending_confirm_price` | decimal128(18, 8) | sí | Precio de la confirmación del evento pendiente; nulo sin evento pendiente |
+| `pending_confirm_time` | int64 | sí | Tiempo de esa confirmación; nulo sin evento pendiente |
+| `pending_confirm_agg_trade_id` | int64 | sí | `agg_trade_id` de esa confirmación; nulo sin evento pendiente |
+
+### Disposición física
+
+- **Raíz**: una ruta local o `gs://<bucket>/<prefijo>` de eventos.
+- **Partición**:
+  `<raíz>/provider=<p>/market=<m>/asset=<a>/theta=<t>/year=YYYY/month=MM/`.
+  `theta=<t>` es de ancho fijo, `0.` más ocho decimales sin recortar ceros
+  (`theta=0.00010000`, `theta=0.05000000`): ordena bien como texto y deja a la
+  vista la escala que comparte con el precio.
+- **Archivos**: `events.parquet` y `carry_over.parquet`, juntos en la
+  partición del mes que los produce. Un evento se escribe en el mes que
+  confirma el **evento siguiente**, el que conoce su extremo (ADR-L2-06), no en
+  el de su referencia ni necesariamente en el de `extreme_time`. El evento
+  que sigue abierto al cierre del mes va al carry-over como
+  `has_pending_event` y lo completa el mes que lo resuelve.
+- **Formato**: Parquet con compresión ZSTD nivel 3 y estadísticas (min/max) por
+  columna. `events.parquet` va ordenado por `confirm_time`
+  (`sorting_columns` en los metadatos), en row groups de hasta 32 768 filas:
+  se escriben a medida que los eventos cierran, para que la RAM no dependa
+  del tamaño del mes. Un θ sin eventos en el mes publica igual un
+  `events.parquet` válido con cero filas.
+- **Sobrescritura atómica**: `PartitionWriter` de L2 es el de L1 (temporal
+  `.<nombre>.<uuid>.tmp` en el mismo directorio o prefijo, y `commit` lo
+  renombra sobre el destino). Nunca queda un archivo a medias ni se toca el
+  anterior si algo falla; los detalles de GCS están en "Salida Parquet de L1".
+  Primero se publican los `events.parquet` y luego cada `carry_over.parquet`,
+  así que un carry-over presente significa que el mes de ese θ está completo.
+- **Idempotencia**: es contenido idéntico, no bytes idénticos. `ContentHasher`
+  calcula un SHA-256 del esquema más uno por columna sobre sus valores en orden,
+  sin importar cómo se parta la serie en lotes ni en row groups. Re-ejecutar un
+  mes con el mismo carry-over de entrada da el mismo `content_hash` en ambos
+  archivos de cada θ; el de cada θ queda en el hallazgo `events_summary`.
+- **Fail-closed**: para un mes que no es el primero de la serie, si falta el
+  carry-over del mes anterior o su `state_version` no es la de la imagen, la
+  unidad aborta sin escribir ningún evento y emite un hallazgo por θ
+  ([ADR-L2-08](TRD/l2.md#68-adr-l2-08--carry-over-faltante-o-de-otra-versión-fail-closed-no-log-and-continue)).
+  El primer mes de la serie se declara (`--series-start`), no se infiere.
+
+### Leer
+
+```python
+import pyarrow.parquet as pq
+
+events = pq.read_table(
+    "<raíz>/provider=binance/market=spot/asset=BTCUSDT"
+    "/theta=0.00010000/year=2020/month=01/events.parquet"
+)
+```
+
 ## Lago de hallazgos de calidad de datos
 
 Contrato del lago donde toda capa deja sus hallazgos de calidad de datos (DQ).
@@ -198,6 +313,37 @@ documentan aquí, con su porqué:
   `status = pass`, `metric_value` = número de miembros sobrantes y
   `details.members` con esa lista. Si ningún miembro coincide con el nombre
   esperado, sigue abortando con `ValueError`, como antes de ITSC-231.
+
+`check_type` de L2 (`layer = l2`, `stage = canonical`, `mode` `backfill` o
+`monthly`; el θ viaja en `details.theta`, no en una columna). Los cuatro
+primeros son los de [TRD-L2 §9.3](TRD/l2.md#93-tipos-de-chequeo-check_type);
+los tres últimos los sumó ITSC-244, cada uno con su porqué:
+
+- **`carry_over_missing`** (`error`, `fail`): mes distinto del primero de la
+  serie sin el carry-over del mes anterior. La unidad aborta y emite uno por θ
+  afectado, con `details.expected_path`.
+- **`carry_over_version_mismatch`** (`error`, `fail`): el `state_version` del
+  carry-over no es el de la imagen (`details.found`, `details.expected`), o el
+  archivo no tiene el esquema de esa versión.
+- **`theta_config_drift`** (`warning`, `fail`): la columna `theta` de un
+  carry-over no coincide con la partición `theta=<t>` donde está. Como el
+  estado no se puede usar, la unidad aborta igual que con los dos anteriores.
+- **`dc_zero_tick_discarded`** (`error`, `fail`): la guarda de "un DC tiene al
+  menos un tick" descartó eventos de un θ. Con el instante de confirmación
+  atómico se espera cero: solo se emite con conteo mayor (`metric_value`) y
+  señala un defecto del detector.
+- **`input_missing`** (`error`, `fail`): el mes no tiene `consolidated.parquet`
+  ni provisionales (`details.expected_path`). Es lo mismo que espera L1 en
+  `monthly-close`; L2 no puede empezar.
+- **`input_provisional_only`** (`error`, `fail`): el mes solo tiene
+  `provisional-day=DD.parquet` (`details.provisionals`). Se separa del
+  anterior porque la acción es distinta: no hay que re-ingestar, hay que
+  esperar el `monthly-close` de L1 (ADR-L2-09).
+- **`events_summary`** (`info`, `pass`): uno por θ al terminar el mes.
+  `metric_value` es el número de eventos escritos; `details` lleva
+  `events`, `has_pending_event` y los `content_hash` de `events.parquet` y
+  `carry_over.parquet`. Es la huella de la corrida: dos ejecuciones del mismo
+  mes deben dar los mismos hashes.
 
 ### Estado actual de un hallazgo
 
