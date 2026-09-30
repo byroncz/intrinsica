@@ -126,8 +126,9 @@ sirve igual con `uv run` que en la imagen, donde queda horneado (TRD-L2 §11).
 
 ## Resultado: un mes real de punta a punta (ITSC-244)
 
-Insumo para E4a (la sonda que cierra ADR-04). Contenedor de desarrollo de 10
-cores y 7 GiB; landing producida con L1 en local (`sandbox.local/itsc244/`).
+Insumo de la sonda que cerró ADR-04 (ITSC-281; cierre en
+[TRD-L2 §14.1](../../docs/TRD/l2.md#141-adr-04--cómputo-de-l2-cloud-run-jobs-cerrado):
+Cloud Run Jobs con 2 vCPU y 4 GiB). Contenedor de desarrollo de 10 cores y 7 GiB; landing producida con L1 en local (`sandbox.local/itsc244/`).
 
 | | 2020-01 (corrida 1) | 2020-01 (corrida 2) | 2020-02 (`monthly`, con carry-over de enero) |
 |---|---|---|---|
@@ -164,7 +165,7 @@ sonda: unit=binance/spot/BTCUSDT/2020-01 mode=backfill rss_peak_mib=263 wall_s=2
   1,4 GiB para el mismo mes. El pico no crece de enero a febrero (272 MiB con
   un 20 % más de ticks), que es lo que pide O(lote).
 
-### Dónde se va el tiempo (para E4a)
+### Dónde se va el tiempo
 
 El detector no es el cuello. Perfilado con `cProfile` sobre 2020-01 en la
 versión de ITSC-244 (los tiempos absolutos se inflan por el perfilador; la
@@ -226,11 +227,13 @@ pero no queda por debajo de la base como enero.
   lo resuelven, y la imagen fija las dos variables como `ENV`
   (`ARROW_DEFAULT_MEMORY_POOL=system`, `MALLOC_MMAP_THRESHOLD_=16384`). El
   detalle y las medidas están en el docstring de `memory.py`.
-- **Lo que queda para E4a:** el paralelismo de escritura es el número de
-  cores. Con un solo hilo de escritura (10 cores para el fan-out) la unidad
-  tardó 12,2 s: el volcado a columnas ya no pasa por Python, y eso solo bajó
-  la unidad a la mitad. Con 1 vCPU no está medido; conviene que la sonda de
-  E4a lo mida.
+- **Lo que quedó después de la sonda de ITSC-281:** el paralelismo de escritura
+  es el número de cores. Con un solo hilo de escritura (10 cores para el
+  fan-out) la unidad tardó 12,2 s: el volcado a columnas ya no pasa por Python,
+  y eso solo bajó la unidad a la mitad. Con 1 vCPU sigue sin medirse (TRD-L2
+  §14.1, pendiente a). La sonda leyó `cores` de la máquina y no el límite del
+  job, así que con 2 vCPU hubo 6 hilos de escritura sobre 2 vCPU; no invalida
+  el veredicto, porque con 8 vCPU (9 hilos) tampoco aceleró.
 
 ## Imagen
 
