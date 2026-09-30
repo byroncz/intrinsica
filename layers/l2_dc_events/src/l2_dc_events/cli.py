@@ -13,10 +13,11 @@ from collections.abc import Mapping, Sequence
 from datetime import date
 from pathlib import Path
 
+from l2_dc_events.carry import CarryOverError
 from l2_dc_events.landing import LandingError
-from l2_dc_events.pipeline import RunContext, Unit, process_unit
+from l2_dc_events.pipeline import Result, RunContext, Unit, process_unit
 
-MODES = ("backfill",)
+MODES = ("backfill", "monthly")
 EXIT_USAGE = 2
 ROOT_VARS = ("L2_LANDING_ROOT", "L2_EVENTS_ROOT", "L2_DQ_ROOT")
 
@@ -66,7 +67,9 @@ def _image_version(env: Mapping[str, str]) -> str:
     return f"{version}+local"
 
 
-def _context(mode: str, env: Mapping[str, str]) -> RunContext:
+def _context(
+    mode: str, series_start: tuple[int, int], env: Mapping[str, str]
+) -> RunContext:
     missing = [name for name in ROOT_VARS if not env.get(name)]
     if missing:
         raise UsageError(f"falta la variable de entorno {', '.join(missing)}")
@@ -74,6 +77,7 @@ def _context(mode: str, env: Mapping[str, str]) -> RunContext:
         mode=mode,
         run_id=str(uuid.uuid4()),
         image_version=_image_version(env),
+        series_start=series_start,
         landing_root=env["L2_LANDING_ROOT"],
         events_root=env["L2_EVENTS_ROOT"],
         dq_root=env["L2_DQ_ROOT"],
@@ -88,20 +92,27 @@ def _index(env: Mapping[str, str]) -> int:
         raise UsageError(f"CLOUD_RUN_TASK_INDEX={raw!r} no es un entero") from None
 
 
-def _log_probe(unit: Unit, mode: str, started: float) -> None:
+def _log_probe(
+    unit: Unit, mode: str, started: float, result: Result | None = None
+) -> None:
     """Línea de cierre de la sonda §14.1: RSS pico (KiB en Linux → MiB) y pared.
 
-    La pared se redondea hacia arriba a 0.1 s para que nunca salga 0.0.
+    La pared se redondea hacia arriba a 0.1 s para que nunca salga 0.0. Con
+    `result`, agrega los ticks y los ticks/s por core (los de la unidad entera:
+    lectura, 50 θ y escritura, sobre los núcleos disponibles), y θ·ticks/s por
+    core, la unidad con que `dc_core` reporta su benchmark.
     """
     rss_mib = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss // 1024
     wall_s = math.ceil((time.monotonic() - started) * 10) / 10
-    logger.info(
-        "sonda: unit=%s mode=%s rss_peak_mib=%d wall_s=%.1f",
-        unit,
-        mode,
-        rss_mib,
-        wall_s,
-    )
+    line = f"sonda: unit={unit} mode={mode} rss_peak_mib={rss_mib} wall_s={wall_s:.1f}"
+    if result is not None:
+        cores = len(os.sched_getaffinity(0))
+        per_core = result.n_ticks / wall_s / cores
+        line += (
+            f" ticks={result.n_ticks} cores={cores} ticks_s_core={per_core:.0f}"
+            f" theta_ticks_s_core={per_core * len(result.events_per_theta):.0f}"
+        )
+    logger.info(line)
 
 
 def main(
@@ -114,6 +125,12 @@ def main(
     parser.add_argument("--from", dest="from_", required=True, metavar="DESDE")
     parser.add_argument("--to", metavar="HASTA")
     parser.add_argument("--asset", default="BTCUSDT")
+    parser.add_argument(
+        "--series-start",
+        metavar="YYYY-MM",
+        help="primer mes de la serie, el único que arranca sin carry-over "
+        "(ADR-L2-08); por defecto --from en backfill, obligatorio en monthly",
+    )
     try:
         args = parser.parse_args(argv)
     except SystemExit as exc:  # argparse ya imprimió el motivo
@@ -122,19 +139,23 @@ def main(
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
     try:
         year, month = resolve_unit(args.from_, args.to, _index(env))
-        ctx = _context(args.mode, env)
+        if args.series_start is None and args.mode == "monthly":
+            raise UsageError("--mode monthly exige --series-start")
+        series_start = _parse(args.series_start or args.from_)
+        ctx = _context(args.mode, series_start, env)
     except UsageError as exc:
         print(f"l2_dc_events: {exc}", file=sys.stderr)
         return EXIT_USAGE
 
     unit = Unit(year, month, asset=args.asset)
+    result = None
     try:
         result = process_unit(unit, ctx)
-    except LandingError as exc:
+    except (LandingError, CarryOverError) as exc:
         print(f"l2_dc_events: {exc}", file=sys.stderr)
         return 1
     finally:
-        _log_probe(unit, args.mode, started)
+        _log_probe(unit, args.mode, started, result)
     logger.info(
         "eventos cerrados por θ: min=%d max=%d",
         min(result.events_per_theta),

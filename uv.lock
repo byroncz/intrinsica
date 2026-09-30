@@ -132,6 +132,7 @@ version = "0.1.0"
 source = { editable = "layers/l2_dc_events" }
 dependencies = [
     { name = "dc-pyo3" },
+    { name = "dq" },
     { name = "pyarrow" },
     { name = "pyyaml" },
 ]
@@ -139,6 +140,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "dc-pyo3", editable = "shared/dc_pyo3" },
+    { name = "dq", editable = "shared/dq" },
     { name = "pyarrow", specifier = ">=25.0.1" },
     { name = "pyyaml", specifier = ">=6.0" },
 ]
