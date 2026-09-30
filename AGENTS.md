@@ -1,11 +1,17 @@
-# ITSC
+# intrinsica
 
 Instrucciones para cualquier agente que trabaje en este repo. `CLAUDE.md`
 importa este archivo; Codex lo lee directamente. Es la única fuente.
 
 ## Qué es este proyecto
 
-<!-- Dos o tres líneas. Qué hace y para quién. Completar al crear el proyecto. -->
+intrinsica es un motor de análisis Directional Change (DC) para mercados
+financieros: en vez de agrupar precios en barras de tiempo fijo, detecta
+puntos de inflexión en la serie y construye indicadores a partir de esos
+eventos. La arquitectura de datos sigue el patrón Medallion (Bronze, Silver,
+Gold). El proyecto se rediseña desde cero a partir de 2026-09; lo que existe
+antes de esa fecha vive en `legacy/v0-local` como referencia, no como diseño
+vigente.
 
 ## Cómo se trabaja aquí
 
