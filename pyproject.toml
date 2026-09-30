@@ -39,6 +39,7 @@ extend-select = ["I"]
 testpaths = [
     "tests",
     "shared/dq/tests",
+    "shared/pyutils/tests",
     "shared/dc_pyo3/tests",
     "layers/l1_ingest/tests",
     "layers/l2_dc_events/tests",

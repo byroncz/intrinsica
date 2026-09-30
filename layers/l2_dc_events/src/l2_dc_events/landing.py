@@ -12,6 +12,7 @@ from dataclasses import dataclass
 import pyarrow as pa
 import pyarrow.fs as pafs
 import pyarrow.parquet as pq
+from pyutils import resolve_fs
 
 logger = logging.getLogger(__name__)
 
@@ -73,12 +74,6 @@ def consolidated_path(
         f"{root.rstrip('/')}/provider={provider}/market={market}/asset={asset}"
         f"/year={year:04d}/month={month:02d}/{CONSOLIDATED}"
     )
-
-
-def resolve_fs(path: str) -> tuple[pafs.FileSystem, str]:
-    if "://" not in path:
-        return pafs.LocalFileSystem(), path
-    return pafs.FileSystem.from_uri(path)
 
 
 def _missing(fs: pafs.FileSystem, path: str, resolved: str) -> LandingError:

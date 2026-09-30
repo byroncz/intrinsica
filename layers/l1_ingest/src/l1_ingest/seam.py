@@ -13,9 +13,9 @@ from itertools import pairwise
 import pyarrow.fs as pafs
 import pyarrow.parquet as pq
 from dq import Finding, Severity, Status, emit_findings
+from pyutils import resolve_fs
 
 from l1_ingest.checks import CheckResult
-from l1_ingest.manifest import resolve_fs
 from l1_ingest.pipeline import RunContext, Unit, _finding
 from l1_ingest.write import CONSOLIDATED, day_filename, partition_path
 

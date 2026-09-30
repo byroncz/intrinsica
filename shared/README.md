@@ -12,14 +12,9 @@ Un paquete por subcarpeta, cada uno con su `pyproject.toml` (o `Cargo.toml`).
 | Paquete | Qué es |
 |---|---|
 | [`dq`](dq/) | Contrato del hallazgo de DQ (esquema Arrow) |
+| [`pyutils`](pyutils/) | Escritor Parquet atómico, `content_hash` y `resolve_fs` compartidos por L1 y L2 (ITSC-245) |
 | [`dc_core`](dc_core/) | Crate Rust del núcleo de Directional Change: detector DC de un θ (ITSC-239) |
 | [`dc_pyo3`](dc_pyo3/) | Bindings PyO3 sobre `dc_core`: fan-out de N θ y carry-over para Python (ITSC-243) |
-
-## Nombres reservados (aún no existen)
-
-| Nombre | Qué será | Épica |
-|---|---|---|
-| `pyutils` | Utilidades Python comunes | E1 |
 
 ## Qué no contiene
 

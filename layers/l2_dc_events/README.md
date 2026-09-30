@@ -244,6 +244,6 @@ pero no queda por debajo de la base como enero.
 Ninguno por código (RNF-14 del maestro): L2 no importa `l1_ingest`. El único
 contrato es el Parquet de la landing
 ([`docs/data-contracts.md`](../../docs/data-contracts.md)); por eso `cli.py`
-repite la resolución de unidad de L1 y `write.py` copia el patrón de
-`PartitionWriter` y `ContentHasher` en vez de importarlo. Extraerlo a
-`shared/` es una card aparte.
+repite la resolución de unidad de L1. El escritor atómico y el hash de
+contenido (`PartitionWriter`, `ContentHasher`) vienen de
+[`shared/pyutils`](../../shared/pyutils), no de `l1_ingest`.

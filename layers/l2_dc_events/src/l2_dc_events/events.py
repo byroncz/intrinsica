@@ -10,9 +10,9 @@ from typing import Self
 
 import dc_pyo3
 import pyarrow as pa
+from pyutils import ContentHasher, PartitionWriter
 
 from l2_dc_events.schema import EVENTS_SCHEMA, EVENTS_SORT_ORDER, THETA_TYPE
-from l2_dc_events.write import ContentHasher, PartitionWriter
 
 # Filas por row group de `events.parquet`. Un tramo son 11 columnas: 4 DECIMAL
 # de 16 B, 6 INT64 y 1 INT8, unos 113 B por fila (~3,5 MiB con 32 768 filas);

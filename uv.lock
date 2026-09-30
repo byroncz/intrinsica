@@ -9,6 +9,7 @@ members = [
     "intrinsica",
     "l1-ingest",
     "l2-dc-events",
+    "pyutils",
 ]
 
 [[package]]
@@ -117,6 +118,7 @@ dependencies = [
     { name = "dq" },
     { name = "fsspec" },
     { name = "pyarrow" },
+    { name = "pyutils" },
 ]
 
 [package.metadata]
@@ -124,6 +126,7 @@ requires-dist = [
     { name = "dq", editable = "shared/dq" },
     { name = "fsspec", specifier = ">=2026.9.0" },
     { name = "pyarrow", specifier = ">=25.0.1" },
+    { name = "pyutils", editable = "shared/pyutils" },
 ]
 
 [[package]]
@@ -134,6 +137,7 @@ dependencies = [
     { name = "dc-pyo3" },
     { name = "dq" },
     { name = "pyarrow" },
+    { name = "pyutils" },
     { name = "pyyaml" },
 ]
 
@@ -142,6 +146,7 @@ requires-dist = [
     { name = "dc-pyo3", editable = "shared/dc_pyo3" },
     { name = "dq", editable = "shared/dq" },
     { name = "pyarrow", specifier = ">=25.0.1" },
+    { name = "pyutils", editable = "shared/pyutils" },
     { name = "pyyaml", specifier = ">=6.0" },
 ]
 
@@ -209,6 +214,17 @@ sdist = { url = "https://files.pythonhosted.org/packages/e4/47/b9efed96c114afcfa
 wheels = [
     { url = "https://files.pythonhosted.org/packages/24/25/1de2678b631f5a49215c6c96fff41ba892b0a34df68d6d80292b1b48aa7f/pytest-9.1.1-py3-none-any.whl", hash = "sha256:37a86b45efb9a47a61a36449063e8e18d0cab3161329fc099eb21783169c4f0c", size = 386536, upload-time = "2026-06-19T10:58:31.347Z" },
 ]
+
+[[package]]
+name = "pyutils"
+version = "0.0.0"
+source = { editable = "shared/pyutils" }
+dependencies = [
+    { name = "pyarrow" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "pyarrow", specifier = ">=25.0.1" }]
 
 [[package]]
 name = "pyyaml"

@@ -11,6 +11,9 @@ Fuente en código: `OUTPUT_SCHEMA` en
 [`layers/l1_ingest/src/l1_ingest/schema.py`](../layers/l1_ingest/src/l1_ingest/schema.py)
 y `write_partition` en
 [`layers/l1_ingest/src/l1_ingest/write.py`](../layers/l1_ingest/src/l1_ingest/write.py).
+La sobrescritura atómica (`PartitionWriter`) y el hash de contenido
+(`ContentHasher`, `content_hash`) viven en
+[`shared/pyutils`](../shared/pyutils/src/pyutils/) y son los mismos para L1 y L2.
 Una prueba (`layers/l1_ingest/tests/test_output_contract_doc.py`) rompe el CI si esta
 tabla se desvía del código.
 
@@ -41,7 +44,8 @@ tabla se desvía del código.
   columna, un row group por bloque de CSV de 64 MiB (~800k filas) y `sorting_columns`
   (`transact_time`, `agg_trade_id`) en los metadatos. `write_partition`
   rechaza una tabla que no llegue ordenada por esas claves.
-- **Sobrescritura atómica**: `PartitionWriter` escribe a un temporal
+- **Sobrescritura atómica**: `pyutils.PartitionWriter` (código en
+  [`shared/pyutils`](../shared/pyutils/src/pyutils/parquet.py)) escribe a un temporal
   `.<nombre>.<uuid>.tmp` del mismo directorio (o del mismo prefijo en GCS) y
   `commit` lo renombra sobre el destino: nunca queda un archivo a medias ni
   se toca el anterior si algo falla. En local es `os.replace`; en GCS,
@@ -67,7 +71,8 @@ tabla se desvía del código.
   (`with_state = "ARCHIVED"`): nunca lo alcanza. Solo una limpieza a mano con
   `gsutil rm` lo retira.
 - **Idempotencia**: es contenido idéntico, no bytes idénticos. Se mide con
-  `content_hash(table)` (o `ContentHasher`, que lo calcula lote a lote): el
+  `pyutils.content_hash(table)` (o `pyutils.ContentHasher`, que lo calcula lote a lote;
+  código en [`shared/pyutils`](../shared/pyutils/src/pyutils/hashing.py)): el
   SHA-256 del esquema más un SHA-256 por columna sobre los bytes de sus
   valores en orden, sin importar el chunking. Se hashea el contenido lógico y
   no el archivo porque el Parquet puede diferir en bytes entre versiones de
@@ -184,13 +189,13 @@ del mes. El mes siguiente la lee para continuar sin reprocesar ticks.
   se escriben a medida que los eventos cierran, para que la RAM no dependa
   del tamaño del mes. Un θ sin eventos en el mes publica igual un
   `events.parquet` válido con cero filas.
-- **Sobrescritura atómica**: `PartitionWriter` de L2 es el de L1 (temporal
+- **Sobrescritura atómica**: L2 usa el mismo `pyutils.PartitionWriter` que L1 (temporal
   `.<nombre>.<uuid>.tmp` en el mismo directorio o prefijo, y `commit` lo
   renombra sobre el destino). Nunca queda un archivo a medias ni se toca el
   anterior si algo falla; los detalles de GCS están en "Salida Parquet de L1".
   Primero se publican los `events.parquet` y luego cada `carry_over.parquet`,
   así que un carry-over presente significa que el mes de ese θ está completo.
-- **Idempotencia**: es contenido idéntico, no bytes idénticos. `ContentHasher`
+- **Idempotencia**: es contenido idéntico, no bytes idénticos. `pyutils.ContentHasher`
   calcula un SHA-256 del esquema más uno por columna sobre sus valores en orden,
   sin importar cómo se parta la serie en lotes ni en row groups. Re-ejecutar un
   mes con el mismo carry-over de entrada da el mismo `content_hash` en ambos

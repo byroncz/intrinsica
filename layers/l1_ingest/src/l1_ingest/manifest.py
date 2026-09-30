@@ -9,6 +9,7 @@ import pyarrow as pa
 import pyarrow.dataset as ds
 import pyarrow.fs as pafs
 import pyarrow.parquet as pq
+from pyutils import resolve_fs
 
 GRANULARITIES = ("monthly", "daily")
 
@@ -50,13 +51,6 @@ class ManifestEntry:
             raise ValueError(
                 f"granularity debe ser una de {GRANULARITIES}, no {self.granularity!r}"
             )
-
-
-def resolve_fs(root: str | Path) -> tuple[pafs.FileSystem, str]:
-    """Devuelve el sistema de archivos y la ruta base dentro de él."""
-    if isinstance(root, str) and root.startswith("gs://"):
-        return pafs.FileSystem.from_uri(root)
-    return pafs.LocalFileSystem(), str(Path(root).resolve())
 
 
 def _to_table(entries: list[ManifestEntry]) -> pa.Table:
