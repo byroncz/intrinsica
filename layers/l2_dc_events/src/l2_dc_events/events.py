@@ -55,7 +55,9 @@ class EventWriter:
         self._theta = theta
         self._pending: list[pa.RecordBatch] = []
         self._rows = 0
-        self._writer = PartitionWriter(path, EVENTS_SCHEMA, EVENTS_SORT_ORDER)
+        self._writer = PartitionWriter(
+            path, EVENTS_SCHEMA, EVENTS_SORT_ORDER, compact_encoding=True
+        )
         self._hasher = ContentHasher(EVENTS_SCHEMA)
         self.n_events = 0
         # Segundos en `add` y `commit` (codificar, hashear, subir): los mide el

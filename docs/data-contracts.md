@@ -189,6 +189,13 @@ del mes. El mes siguiente la lee para continuar sin reprocesar ticks.
   se escriben a medida que los eventos cierran, para que la RAM no dependa
   del tamaño del mes. Un θ sin eventos en el mes publica igual un
   `events.parquet` válido con cero filas.
+- **Codificación física** (ITSC-290): sin diccionario; las columnas enteras en
+  `DELTA_BINARY_PACKED` y los decimales y el texto en `PLAIN`
+  (`PartitionWriter(compact_encoding=True)`). Es un detalle físico sin efecto
+  en el contrato: ni los tipos, ni los valores, ni el `content_hash` cambian, y
+  pyarrow, DuckDB y Polars leen el archivo igual. Solo cambian los bytes (los
+  `events.parquet` de 2020-01 pasan de 442 a 258 MB) y lo que cuesta
+  codificarlos y decodificarlos. L1 no lo usa.
 - **Sobrescritura atómica**: L2 usa el mismo `pyutils.PartitionWriter` que L1 (temporal
   `.<nombre>.<uuid>.tmp` en el mismo directorio o prefijo, y `commit` lo
   renombra sobre el destino). Nunca queda un archivo a medias ni se toca el
@@ -351,13 +358,17 @@ los tres últimos los sumó ITSC-244, cada uno con su porqué:
   mes deben dar los mismos hashes.
 - **`unit_timing`** (`info`, `pass`): uno por unidad (mes) al terminar, no por
   θ. `metric_value` es la pared en segundos (`wall_s`); `details` lleva los
-  segundos por fase (`read_s`, `decode_s`, `detect_s`, `write_s`, `carry_s`,
-  `wait_s`, `other_s`), `row_groups`, `bytes_in`, el límite efectivo de CPU
-  (`cores`, `cores_visible`, `cores_source`), `write_workers` y
-  `cpu_throttled_s` (`null` si el cgroup no lo expone). `read_s`, `decode_s`,
-  `detect_s`, `carry_s` y `wait_s` son pared del hilo principal y, con
-  `other_s`, suman `wall_s`; `write_s` se acumula entre hilos y puede
-  pasarla. Va aparte de `events_summary` porque sus tiempos cambian en cada
+  segundos por fase (`read_s`, `decode_s`, `detect_s`, `detect_cpu_s`,
+  `write_s`, `carry_s`, `wait_s`, `other_s`), `row_groups`, `bytes_in`, el
+  límite efectivo de CPU (`cores`, `cores_visible`, `cores_source`),
+  `fanout_threads`, `write_workers` y `cpu_throttled_s` (`null` si el cgroup
+  no lo expone). `read_s`, `detect_s`, `carry_s` y `wait_s` son pared del hilo
+  principal y, con `other_s`, suman `wall_s`; `decode_s` (CPU del hilo lector),
+  `detect_cpu_s` (CPU del hilo principal durante el fan-out) y `write_s` se
+  acumulan entre hilos y no entran en esa suma (`write_s` puede pasar la
+  pared). `detect_cpu_s` frente a `detect_s` distingue un detector lento (CPU
+  alta) de uno desalojado (CPU baja). Desde ITSC-290 `read_s` es la espera del
+  hilo principal por el lector anticipado y `decode_s` ya no es pared. Va aparte de `events_summary` porque sus tiempos cambian en cada
   corrida y el de `events_summary` no puede.
 
 ### Estado actual de un hallazgo

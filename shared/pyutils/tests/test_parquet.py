@@ -1,7 +1,10 @@
+import os
+from decimal import Decimal
+
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
-from pyutils import PartitionWriter, resolve_fs
+from pyutils import PartitionWriter, content_hash, resolve_fs
 
 SCHEMA = pa.schema(
     [
@@ -135,3 +138,72 @@ def test_resolve_fs_local_paths_come_back_absolute(tmp_path, monkeypatch):
     assert resolved == str(tmp_path / "rel" / "x.parquet")
     _, from_path = resolve_fs(tmp_path)
     assert from_path == str(tmp_path)
+
+
+def _compact_table(n: int = 5_000) -> pa.Table:
+    schema = pa.schema(
+        [
+            pa.field("price", pa.decimal128(18, 8), nullable=False),
+            pa.field("time", pa.int64(), nullable=False),
+            pa.field("direction", pa.int8(), nullable=False),
+            pa.field("month", pa.int32(), nullable=True),
+            pa.field("name", pa.string(), nullable=False),
+        ]
+    )
+    return pa.table(
+        {
+            "price": pa.array(
+                [
+                    Decimal(3_000_000_000_000 + i % 977 * 1_234_567).scaleb(-8)
+                    for i in range(n)
+                ],
+                pa.decimal128(18, 8),
+            ),
+            "time": [1_600_000_000_000_000 + i * 37 for i in range(n)],
+            "direction": [1 if i % 3 else -1 for i in range(n)],
+            "month": [None if i % 5 == 0 else i % 12 + 1 for i in range(n)],
+            "name": ["BTCUSDT"] * n,
+        },
+        schema=schema,
+    )
+
+
+def test_compact_encoding_has_no_dictionary_and_delta_on_integers(tmp_path):
+    table = _compact_table()
+    path = str(tmp_path / "compact.parquet")
+    with PartitionWriter(path, table.schema, compact_encoding=True) as writer:
+        writer.write_table(table)
+        writer.commit()
+
+    column = {
+        c.path_in_schema: c
+        for c in map(pq.ParquetFile(path).metadata.row_group(0).column, range(5))
+    }
+    for name in ("time", "direction", "month"):
+        assert "DELTA_BINARY_PACKED" in column[name].encodings, name
+    for name in ("price", "name"):
+        assert "DELTA_BINARY_PACKED" not in column[name].encodings, name
+    for name, c in column.items():
+        assert not c.has_dictionary_page, name
+        assert "PLAIN_DICTIONARY" not in c.encodings, name
+        assert "RLE_DICTIONARY" not in c.encodings, name
+        assert c.compression == "ZSTD"
+    assert pq.read_table(path).equals(table)
+
+
+def test_compact_encoding_keeps_the_logical_content_and_shrinks_the_file(tmp_path):
+    table = _compact_table(50_000)
+    paths = {}
+    for compact in (False, True):
+        paths[compact] = str(tmp_path / f"{compact}.parquet")
+        with PartitionWriter(
+            paths[compact], table.schema, compact_encoding=compact
+        ) as writer:
+            writer.write_table(table)
+            writer.commit()
+
+    assert pq.read_table(paths[True]).equals(pq.read_table(paths[False]))
+    assert content_hash(pq.read_table(paths[True])) == content_hash(
+        pq.read_table(paths[False])
+    )
+    assert os.path.getsize(paths[True]) < os.path.getsize(paths[False])

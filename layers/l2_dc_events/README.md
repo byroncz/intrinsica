@@ -297,7 +297,79 @@ Pendiente (la corre el humano, runbook
 [`sonda-l2.md`](../../docs/runbooks/sonda-l2.md#corrida-por-fases-itsc-289)):
 una corrida con `force=true` en la config vigente del stack `l2`. Su línea
 `sonda:` y el párrafo con la fase dominante y la optimización que propone la
-card siguiente van aquí.
+card siguiente van aquí. La corrida que tiene la tubería de ITSC-290 está en la
+sección siguiente.
+
+## Optimización de la tubería sin cambiar la salida (ITSC-290)
+
+La corrida de 2023-03 con 0.5.1 en Cloud Run (2 vCPU) tardó 613 a 733 s, y la
+misma imagen 0.5.0, 262 a 301 s. El laboratorio (cgroup v1, cuota 1,97, 4 cores
+visibles, 100 M de ticks sintéticos) no reprodujo esa diferencia, pero encontró
+cuatro cuellos que explican por qué más vCPU no aceleraba. Se atacaron en dos
+bloques; ninguno cambia el contrato de datos.
+
+**Bloque 1, sin cambiar ni un byte de salida:**
+
+- **GIL retenido durante la detección.** `feed_batch_columns` no lo soltaba, así
+  que los hilos de escritura de Parquet (que viven en Python) esperaban a que
+  terminara cada tramo. Ahora `dc_pyo3` valida y detecta dentro de `py.detach`.
+  Laboratorio: pared 103,3 a 84,5 s (−18 %), `write_s` 218 a 78 s, `wait_s`
+  25 a 7 s.
+- **Hilos del fan-out = `floor(cuota)`.** `thread::available_parallelism` divide
+  cuota entre período con enteros: con cuota 1,97 daba 1 hilo (`detect_s` 41 s
+  con cuota 2,00; 62 s con 1,97). Cloud Run entregó 1,61, 1,86 y 1,97 para
+  2 vCPU, así que el detector corrió siempre con un hilo. Ahora `cpu.py` decide:
+  `ceil(cuota)` acotado a los cores visibles. `FanOut` recibe `threads`
+  explícito desde Python.
+- **Escritores = cores visibles, no cuota.** Con 5 o 6 hilos de escritura sobre
+  una cuota de 2, el cgroup se sobresuscribía y desalojaba al hilo principal,
+  que alimenta el detector. Ahora son `max(1, round(cuota))`.
+- **Lectura de GCS en serie.** 237 row groups a ~0,3 s de latencia son 70 s de
+  `read_s` con la CPU ociosa. Ahora un hilo lector pide `L2_READ_AHEAD` row
+  groups (2 por defecto) por delante del que se procesa. En RAM hay a lo más
+  1 + k row groups, que es el crecimiento que permite RNF-L2-01: en 2020-01
+  (~30 MiB por row group) el pico pasa de ~247 MiB a ~270 con k = 1 y ~305 con
+  k = 2.
+- `cpu.py` también lee, en cgroup v1, la cuota del cgroup del proceso (antes
+  leía la raíz, sin cuota) y `throttled_time` de su `cpu.stat`.
+- La sonda suma `detect_cpu_s` (CPU del hilo principal durante el fan-out,
+  `thread_time`) y `fanout_threads`. Frente a `detect_s`, distingue un
+  detector lento de uno desalojado. `decode_s` pasa a ser la CPU del hilo
+  lector y `read_s`, la espera del principal: ya no se suman a `other_s`.
+
+**Bloque 2, mismo contenido lógico, otros bytes:** `events.parquet` y
+`carry_over.parquet` se escriben sin diccionario, con los enteros en
+`DELTA_BINARY_PACKED` y los decimales en `PLAIN`
+(`PartitionWriter(compact_encoding=True)`). El diccionario no comprime precios,
+tiempos ni ids, que son de alta cardinalidad. Sobre 3,8 M de eventos reales y
+un core, zstd 3: con diccionario 179,6 MiB y 6,49 s; sin él, 107,0 MiB y
+1,28 s (−40 % de volumen, 5× para codificar, 3,5× para decodificar).
+`content_hash` no cambia: hashea valores, no bytes. L1 no usa esta opción.
+
+### Medido en local sobre 2020-01 (10 cores, 14 051 798 ticks)
+
+| 2020-01 | 0.5.1 | 0.5.2 |
+|---|---|---|
+| Pared, 10 cores | 8,2 s | 3,8 s |
+| Pared, 1 core (`taskset -c 0`) | n. d. | 12,5 s |
+| `events.parquet` de los 50 θ | 442 MB | 258 MB |
+| RSS pico (k = 2) | ~247 MiB | ~266-312 MiB |
+| `content_hash` de `events.parquet` y `carry_over.parquet` (50 θ) | los de la línea base | idénticos, con 1, 4 y 10 cores y con `L2_READ_AHEAD` = 0, 1 y 2 |
+
+El RSS sube lo que permite k: ~30 MiB por row group de lectura anticipada. La
+cuota fraccionaria no se puede fijar en un contenedor sin cgroup propio, así que
+la prueba de regresión (`test_l2_parallelism.py`) la simula con
+`CpuLimit(1.97, ...)` y las pruebas de `cpu.py` cubren la lectura de la cuota.
+
+### Corrida en la nube, antes y después de ITSC-290
+
+Pendiente (la corre el humano, runbook
+[`sonda-l2.md`](../../docs/runbooks/sonda-l2.md#corrida-antes-y-después-itsc-290)):
+2023-03 con la config vigente del stack `l2`, antes (0.5.1: pared 613 a 733 s,
+`detect_s` 390 a 457 s, `write_s` 896 a 1 556 s de hilo, `read_s` 67 a 81 s) y
+después (0.5.2). Meta: pared ≤ 50 % de la línea base de 0.5.1 en el mismo host
+(comparar `cores_visible`). Las dos líneas `sonda:` completas y el párrafo con
+la fase dominante van aquí.
 
 ## Imagen
 
@@ -343,7 +415,11 @@ de DQ y la línea con `content_hash`.
   y `--force`, que un fallo detenga el rango, el índice de tarea distinto de 0,
   `monthly` por defecto, `L2_SERIES_START` y el fail-closed.
 - `test_l2_cpu.py` y `test_l2_timing.py`: el límite efectivo de CPU (cuota del
-  cgroup v1 y v2, jerarquía, sin cuota) y la aritmética de `other_s`.
+  cgroup v1 y v2, jerarquía, sin cuota), los hilos y escritores que de él salen
+  y la aritmética de `other_s`.
+- `test_l2_parallelism.py` y `test_l2_encoding.py` (ITSC-290): los hashes de los
+  50 θ no dependen de la cuota ni de la lectura anticipada, y la salida sin
+  diccionario se lee igual con pyarrow, DuckDB y Polars.
 
 ## Acoplamiento con L1
 

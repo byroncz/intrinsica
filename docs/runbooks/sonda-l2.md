@@ -305,19 +305,21 @@ posterior, *Actions → Run job* con los inputs de "Inputs de Run job" (`job` =
 | `cores` | Límite efectivo de CPU: cuota del cgroup (`cpu.max`) o, sin ella, los cores visibles. `ticks_s_core` y `theta_ticks_s_core` se calculan con él. |
 | `cores_visible` | Lo que ve la máquina (`sched_getaffinity`); es el `cores` de la sonda anterior. |
 | `cores_source` | Quién fijó `cores`: `cgroup-v2`, `cgroup-v1` o `affinity`. Si sale `affinity` en Cloud Run, la cuota no es legible desde el contenedor y `cores` no es fiable: vale el vCPU de `gcloud run jobs describe`. |
-| `read_s` | Espera de I/O al leer la landing: la pared de cada row group menos la CPU del hilo que lo decodifica, más abrir el archivo. |
-| `decode_s` | Parquet a Arrow: CPU del hilo de lectura. |
-| `detect_s` | El fan-out de los 50 θ. |
+| `read_s` | Lo que el hilo principal esperó por la landing: abrir el archivo y, por cada row group, lo que tardó en llegar el que pidió el lector anticipado (ITSC-290; 0.5.1 lo medía en serie). |
+| `decode_s` | Parquet a Arrow: CPU del hilo lector. No es pared del principal: no entra en la suma de abajo. |
+| `detect_s` | El fan-out de los 50 θ, pared del hilo principal. |
+| `detect_cpu_s` | CPU del hilo principal durante el fan-out (`thread_time`). Con `detect_s` distingue un detector lento (CPU ≈ pared de su parte) de uno desalojado (CPU mucho menor que la pared: lo frena la cuota o otros hilos). |
+| `fanout_threads`, `write_workers` | Hilos que usó el fan-out (`ceil(cores)`, acotado a `cores_visible`) y escritores de Parquet (`round(cores)`). Los decide `cpu.py`. |
 | `carry_s` | Cargar el carry-over del mes anterior (50 lecturas). Cero en frío. |
 | `wait_s` | El hilo principal esperando a los escritores (incluye la publicación final). |
 | `write_s` | Codificar y subir Parquet (eventos y carry-over), **sumado entre los hilos de escritura**: puede pasar de `wall_s`. |
-| `other_s` | `wall_s` menos `carry_s`, `read_s`, `decode_s`, `detect_s` y `wait_s`. Es lo que ninguna fase explica; incluye emitir los hallazgos. |
+| `other_s` | `wall_s` menos `carry_s`, `read_s`, `detect_s` y `wait_s`. Es lo que ninguna fase explica; incluye emitir los hallazgos. |
 | `row_groups`, `bytes_in` | Row groups del mes y bytes comprimidos de las tres columnas que L2 lee. |
 | `cpu_throttled_s` | Segundos que el cgroup estuvo frenado por agotar su cuota durante la unidad. Si es alto, parte de `read_s` es CPU estrangulada, no I/O. |
 
-`read_s`, `decode_s`, `detect_s`, `carry_s` y `wait_s` son pared del hilo
-principal y se suman con `other_s` hasta `wall_s`; `write_s` no entra en esa
-suma porque corre en paralelo. Para saber si la escritura es el cuello,
+`read_s`, `detect_s`, `carry_s` y `wait_s` son pared del hilo principal y se
+suman con `other_s` hasta `wall_s`; `decode_s`, `detect_cpu_s` y `write_s` no
+entran en esa suma porque corren en otros hilos o miden CPU. Para saber si la escritura es el cuello,
 compara `wait_s` con `wall_s`.
 
 **Dónde queda el dato sin leer logs.** El hallazgo `unit_timing` (uno por mes,
@@ -337,3 +339,32 @@ for r in t.select(['year', 'month', 'metric_value', 'details']).to_pylist():
 **Qué anotar.** La línea `sonda:` completa va al README de la capa
 ("Dónde se va el tiempo en la nube") y a la card ITSC-289, con un párrafo: qué
 fase domina y qué optimización propone la card siguiente.
+
+## Corrida antes y después (ITSC-290)
+
+ITSC-290 cambia la tubería de L2 (GIL, hilos según la cuota, lectura anticipada,
+Parquet sin diccionario) sin tocar la salida. Esta corrida mide cuánto bajó la
+pared de 2023-03 en la nube.
+
+**Antes** es la línea base de 0.5.1 en el mismo host: pared 613 a 733 s en
+cuatro corridas (ITSC-289). Si el host cambió o hay dudas, repite una corrida
+con 0.5.1. **Después** es una corrida de la versión 0.5.2 o posterior, con los
+mismos inputs de "Inputs de Run job" (`job` = `l2-backfill`, `from` = `to` =
+`series_start` = `2023-03`, `force` marcado) y la config vigente del stack
+`l2` (no cambies CPU ni memoria).
+
+**Qué comparar.** `wall_s` de las dos, con `cores` y `cores_visible` al lado: la
+cuota que entrega Cloud Run varía entre corridas (1,61, 1,86 y 1,97 para
+2 vCPU) y un `cores_visible` distinto cambia cuántos hilos usa 0.5.1. La meta
+de la card es `wall_s` ≤ 50 % de la línea base de 0.5.1 en el mismo host. Anota
+también `fanout_threads` (debe ser 2), `write_workers` (2), `detect_cpu_s`
+frente a `detect_s`, `wait_s` y `cpu_throttled_s`.
+
+**Regla de decisión posterior** (no es parte de la card): si `other_s` más las
+esperas (`wait_s` y `read_s`) siguen por encima del 20 % de `wall_s`, la
+cáscara Python estorba y se abre la card de mover la tubería a Rust. Si no, la
+frontera Rust/Python se queda como está.
+
+**Qué anotar.** La línea `sonda:` completa de las dos corridas va al README de
+la capa ("Corrida en la nube, antes y después de ITSC-290") y a la card
+ITSC-290, con un párrafo: cuánto bajó la pared y qué fase domina ahora.

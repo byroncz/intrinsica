@@ -96,7 +96,7 @@ def write_carry_over(
     batch = to_batch(carry, where)
     hasher = ContentHasher(CARRY_OVER_SCHEMA)
     hasher.update(batch)
-    with PartitionWriter(path, CARRY_OVER_SCHEMA) as writer:
+    with PartitionWriter(path, CARRY_OVER_SCHEMA, compact_encoding=True) as writer:
         writer.write_batch(batch)
         return writer.commit(), hasher.hexdigest()
 

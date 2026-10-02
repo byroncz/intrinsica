@@ -16,6 +16,17 @@ from pyutils.fs import resolve_fs
 logger = logging.getLogger(__name__)
 
 
+def _column_encodings(schema: pa.Schema) -> dict[str, str]:
+    """`DELTA_BINARY_PACKED` en las columnas enteras (físicamente INT32 o
+    INT64); lo demás, `PLAIN`, que es lo que deja `use_dictionary=False`.
+    Un decimal es `FIXED_LEN_BYTE_ARRAY`, al que el delta no aplica."""
+    return {
+        field.name: "DELTA_BINARY_PACKED"
+        for field in schema
+        if pa.types.is_integer(field.type)
+    }
+
+
 class PartitionWriter:
     """Escribe un Parquet por lotes con las propiedades físicas de §7.2.
 
@@ -24,6 +35,16 @@ class PartitionWriter:
     `schema`. Con `row_group_size` fijo, una escritura mayor se parte en row
     groups de ese tamaño; sin él, cada lote o tabla es su propio row group
     (los lotes ya vienen del tamaño que se quiere).
+
+    Con `compact_encoding` (ITSC-290) no se usa diccionario: las columnas
+    enteras van en `DELTA_BINARY_PACKED` y el resto, decimales incluidos, en
+    `PLAIN`. Precios, tiempos e ids son de alta cardinalidad: el diccionario
+    crece sin comprimir y cae a `PLAIN` en cada página, mientras que el delta
+    de enteros casi monótonos (tiempos, ids) ocupa una fracción. Medido sobre
+    3,8 M de eventos reales y un core, zstd 3: con diccionario 179,6 MiB y
+    6,49 s; sin él y con delta, 107,0 MiB y 1,28 s. Cambia los bytes del
+    archivo, no sus valores: `ContentHasher` hashea valores, así que el
+    `content_hash` es el mismo.
 
     El archivo se escribe a un temporal del mismo directorio (o del mismo
     prefijo en GCS) y `commit` lo renombra sobre el destino: nunca queda un
@@ -46,6 +67,7 @@ class PartitionWriter:
         schema: pa.Schema,
         sort_order: list[tuple[str, str]] | None = None,
         row_group_size: int | None = None,
+        compact_encoding: bool = False,
     ) -> None:
         self.path = path
         self.schema = schema
@@ -58,6 +80,9 @@ class PartitionWriter:
             "compression_level": 3,
             "write_statistics": True,
         }
+        if compact_encoding:
+            self._options["use_dictionary"] = False
+            self._options["column_encoding"] = _column_encodings(schema)
         if sort_order:
             self._options["sorting_columns"] = pq.SortingColumn.from_ordering(
                 schema, sort_order

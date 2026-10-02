@@ -7,10 +7,14 @@ común vive aquí.
 
 ## Qué contiene
 
-- `pyutils.PartitionWriter(path, schema, sort_order=None, row_group_size=None)`:
+- `pyutils.PartitionWriter(path, schema, sort_order=None, row_group_size=None,
+  compact_encoding=False)`:
   escribe un Parquet por lotes (ZSTD-3, estadísticas, `sorting_columns` si hay
   `sort_order`) a un temporal y `commit` lo renombra sobre el destino. Sin
-  `row_group_size`, cada lote o tabla es su propio row group. Detalle de la
+  `row_group_size`, cada lote o tabla es su propio row group. Con
+  `compact_encoding` no usa diccionario y codifica los enteros en
+  `DELTA_BINARY_PACKED` (L2, ITSC-290): −40 % de bytes y 5× menos tiempo de
+  codificación sobre eventos reales, con el mismo `content_hash`. Detalle de la
   sobrescritura atómica y de GCS en
   [`docs/data-contracts.md`](../../docs/data-contracts.md).
 - `pyutils.ContentHasher(schema)` y `pyutils.content_hash(table)`: SHA-256 del
