@@ -157,9 +157,9 @@ def process_unit(
     semilla de `config/thetas.yaml`); el llamador decide cuáles, según la
     frontera de cada uno (`frontier.py`).
 
-    Cada lote se conforma como buffers sin copia, se alimenta a los 50 θ y se
+    Cada lote se conforma como buffers sin copia, se alimenta a los θ del mes y se
     suelta antes de pedir el siguiente; los eventos salen del binding ya en
-    columnas y los 50 escritores los codifican a `events.parquet` en paralelo
+    columnas y los escritores de cada θ los codifican a `events.parquet` en paralelo
     (`parallel.py`), a medida que cierran. La RAM de la unidad es O(row group). Al final se cierra
     el grupo de empate abierto (RF-L2-12) y se publica todo: primero los
     eventos de cada θ y luego su carry-over, así un carry-over presente

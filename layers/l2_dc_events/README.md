@@ -95,13 +95,13 @@ uv run python -m l2_dc_events --mode backfill --from 2020-01 --series-start 2020
    **sin escribir nada** (fail-closed, ADR-L2-08): los θ del mes comparten la
    lectura, así que uno atrasado los detiene a todos.
 3. Lee el mes **row group por row group**, solo `price`, `transact_time` y
-   `agg_trade_id` (`landing.py`). Cada lote va a los 50 θ como buffers de Arrow
+   `agg_trade_id` (`landing.py`). Cada lote va a los θ del mes como buffers de Arrow
    sin copia, en tramos de 65 536 ticks (`FEED_TICKS`), y se suelta antes de
    pedir el siguiente.
 4. Los eventos que cada tramo cierra salen de `dc_pyo3` **ya en columnas**
-   (`feed_batch_columns`, sin un objeto `Event` por evento) y van a 50
-   escritores abiertos (`events.py`), que los envuelven sin copia y los
-   escriben en row groups de hasta 32 768 filas. Los 50 escritores codifican
+   (`feed_batch_columns`, sin un objeto `Event` por evento) y van a un
+   escritor abierto por θ (`events.py`), que los envuelven sin copia y los
+   escriben en row groups de hasta 32 768 filas. Los escritores codifican
    **en paralelo** (`parallel.py`): un pool de hilos, un θ a la vez y en orden
    cada uno, y a lo más 2 tramos sin escribir (`MAX_CHUNKS_IN_FLIGHT`), así que
    nunca se acumula el mes de un θ ni la cola de escritura: la RAM es O(lote).
