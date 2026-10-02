@@ -1,15 +1,19 @@
 """Tiempo por fase de una unidad de L2 (ITSC-289): dónde se va la pared.
 
-El hilo principal encadena fases en serie (carga del carry-over, lectura,
-decodificación, detección y espera de los escritores); los escritores corren en
-otros hilos. Por eso hay dos clases de número:
+El hilo principal encadena fases en serie (carga del carry-over, espera de la
+lectura, detección y espera de los escritores); la lectura anticipada y los
+escritores corren en otros hilos. Por eso hay dos clases de número:
 
-- **Pared del hilo principal** (`carry_s`, `read_s`, `decode_s`, `detect_s`,
-  `wait_s`): son disjuntas, suman a lo más `wall_s` y lo que falta es `other_s`.
-- **Acumulado entre hilos** (`write_s`): el tiempo que los 50 θ pasan
-  codificando y subiendo Parquet, sumado. Con k hilos puede llegar a k veces la
-  pared, así que no entra en `other_s`; se compara con `wait_s`, lo que el hilo
-  principal esperó por ellos.
+- **Pared del hilo principal** (`carry_s`, `read_s`, `detect_s`, `wait_s`): son
+  disjuntas, suman a lo más `wall_s` y lo que falta es `other_s`.
+- **CPU o tiempo acumulado entre hilos** (`decode_s`, `detect_cpu_s`,
+  `write_s`): `decode_s` es la CPU del hilo lector al decodificar (ITSC-290: ya
+  no es pared del principal); `detect_cpu_s`, la CPU del hilo principal durante
+  el fan-out; `write_s`, el tiempo que los 50 θ pasan codificando y subiendo
+  Parquet, sumado. Con k hilos `write_s` puede llegar a k veces la pared, así
+  que no entra en `other_s`; se compara con `wait_s`, lo que el hilo principal
+  esperó por ellos. `detect_cpu_s` contra `detect_s` distingue un detector lento
+  (CPU alta) de uno desalojado (CPU baja).
 """
 
 from dataclasses import dataclass
@@ -23,6 +27,7 @@ class Phases:
         "bytes_in",
         "carry_s",
         "decode_s",
+        "detect_cpu_s",
         "detect_s",
         "read_s",
         "row_groups",
@@ -34,6 +39,7 @@ class Phases:
         self.read_s = 0.0
         self.decode_s = 0.0
         self.detect_s = 0.0
+        self.detect_cpu_s = 0.0
         self.wait_s = 0.0
         self.carry_s = 0.0
         self.write_s = 0.0
@@ -60,12 +66,14 @@ class Timing:
     cores_source: str
     write_workers: int
     cpu_throttled_s: float | None
+    detect_cpu_s: float = 0.0
+    fanout_threads: int = 1
 
     @property
     def other_s(self) -> float:
         """La pared que ninguna fase explica (apertura de escritores, troceo de
         lotes, reloj entre fases); las fases del hilo principal no se solapan."""
-        serial = self.carry_s + self.read_s + self.decode_s + self.detect_s
+        serial = self.carry_s + self.read_s + self.detect_s
         return max(0.0, self.wall_s - serial - self.wait_s)
 
     def details(self) -> dict:
@@ -75,6 +83,7 @@ class Timing:
             "read_s": self.read_s,
             "decode_s": self.decode_s,
             "detect_s": self.detect_s,
+            "detect_cpu_s": self.detect_cpu_s,
             "write_s": self.write_s,
             "carry_s": self.carry_s,
             "wait_s": self.wait_s,
@@ -87,6 +96,7 @@ class Timing:
             "cores": self.cores,
             "cores_visible": self.cores_visible,
             "cores_source": self.cores_source,
+            "fanout_threads": self.fanout_threads,
             "write_workers": self.write_workers,
             "cpu_throttled_s": (
                 None if self.cpu_throttled_s is None else round(self.cpu_throttled_s, 3)

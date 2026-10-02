@@ -76,8 +76,10 @@ impl FanOut {
     /// - `ids`: `agg_trade_id`, `int64`.
     ///
     /// Se valida todo el lote antes de alimentar: si falla con `ValueError`, el
-    /// fan-out no se tocó. El GIL se mantiene durante el lote, porque los
-    /// buffers son de Python.
+    /// fan-out no se tocó. El GIL se suelta mientras se valida y se detecta
+    /// (ITSC-290): otros hilos de Python, como los escritores de Parquet,
+    /// siguen corriendo. Los `PyBuffer` retienen los buffers hasta que la
+    /// llamada vuelve, así que las vistas que usa el detector no se liberan.
     ///
     /// Un objeto `Event` por evento: para pruebas y usos pequeños. La capa usa
     /// `feed_batch_columns`.
@@ -127,8 +129,9 @@ impl FanOut {
     /// `finish` con los eventos como columnas: un `EventColumns` por θ, de 0
     /// o 1 evento.
     fn finish_columns(&mut self, py: Python<'_>) -> PyResult<Vec<EventColumns>> {
-        self.inner
-            .finish()
+        let inner = &mut self.inner;
+        let closed = py.detach(|| inner.finish());
+        closed
             .into_iter()
             .map(|e| EventColumns::new(py, e.as_slice()))
             .collect()
@@ -159,6 +162,9 @@ impl FanOut {
 impl FanOut {
     /// Valida el lote y lo alimenta por tramos; devuelve los eventos cerrados
     /// por θ, en el tipo de `dc_core`.
+    ///
+    /// Las vistas se toman con el GIL y el cómputo corre sin él: los
+    /// `PyBuffer` que las respaldan siguen vivos hasta el final de la llamada.
     fn feed_core(
         &mut self,
         py: Python<'_>,
@@ -166,43 +172,53 @@ impl FanOut {
         times: &PyBuffer<i64>,
         ids: &PyBuffer<i64>,
     ) -> PyResult<Vec<Vec<CoreEvent>>> {
-        let (prices, times, ids) = (view(py, prices)?, view(py, times)?, view(py, ids)?);
-        let n = times.len();
-        if ids.len() != n || prices.len() != n * DECIMAL_LEN {
-            return Err(PyValueError::new_err(format!(
-                "columnas de distinto largo: prices {} bytes ({} ticks), times {n}, ids {}",
-                prices.len(),
-                prices.len() / DECIMAL_LEN,
-                ids.len()
-            )));
-        }
-        for (i, raw) in prices.chunks_exact(DECIMAL_LEN).enumerate() {
-            decode_price(raw).map_err(|why| {
-                PyValueError::new_err(format!(
-                    "prices[{i}] no cumple 0 < price < {PRICE_LIMIT}: {why}"
-                ))
-            })?;
-        }
-
-        let mut out = vec![Vec::new(); self.thetas.len()];
-        let mut scratch: Vec<i64> = Vec::with_capacity(n.min(CHUNK));
-        for start in (0..n).step_by(CHUNK) {
-            let end = (start + CHUNK).min(n);
-            scratch.clear();
-            scratch.extend(
-                prices[start * DECIMAL_LEN..end * DECIMAL_LEN]
-                    .chunks_exact(DECIMAL_LEN)
-                    .map(|raw| decode_price(raw).expect("validado arriba")),
-            );
-            let closed = self
-                .inner
-                .feed_batch(&scratch, &times[start..end], &ids[start..end]);
-            for (acc, events) in out.iter_mut().zip(closed) {
-                acc.extend(events);
-            }
-        }
-        Ok(out)
+        let (prices, times, ids) = (view(prices)?, view(times)?, view(ids)?);
+        let inner = &mut self.inner;
+        let n_thetas = self.thetas.len();
+        py.detach(|| feed_slices(inner, n_thetas, prices, times, ids))
+            .map_err(PyValueError::new_err)
     }
+}
+
+/// El cuerpo de `feed_core`, sin tocar Python: valida y alimenta por tramos.
+/// El error es el mensaje de un `ValueError`.
+fn feed_slices(
+    inner: &mut CoreFanOut,
+    n_thetas: usize,
+    prices: &[u8],
+    times: &[i64],
+    ids: &[i64],
+) -> Result<Vec<Vec<CoreEvent>>, String> {
+    let n = times.len();
+    if ids.len() != n || prices.len() != n * DECIMAL_LEN {
+        return Err(format!(
+            "columnas de distinto largo: prices {} bytes ({} ticks), times {n}, ids {}",
+            prices.len(),
+            prices.len() / DECIMAL_LEN,
+            ids.len()
+        ));
+    }
+    for (i, raw) in prices.chunks_exact(DECIMAL_LEN).enumerate() {
+        decode_price(raw)
+            .map_err(|why| format!("prices[{i}] no cumple 0 < price < {PRICE_LIMIT}: {why}"))?;
+    }
+
+    let mut out = vec![Vec::new(); n_thetas];
+    let mut scratch: Vec<i64> = Vec::with_capacity(n.min(CHUNK));
+    for start in (0..n).step_by(CHUNK) {
+        let end = (start + CHUNK).min(n);
+        scratch.clear();
+        scratch.extend(
+            prices[start * DECIMAL_LEN..end * DECIMAL_LEN]
+                .chunks_exact(DECIMAL_LEN)
+                .map(|raw| decode_price(raw).expect("validado arriba")),
+        );
+        let closed = inner.feed_batch(&scratch, &times[start..end], &ids[start..end]);
+        for (acc, events) in out.iter_mut().zip(closed) {
+            acc.extend(events);
+        }
+    }
+    Ok(out)
 }
 
 /// Precio entero de un `decimal128` little-endian: el valor completo cabe en
@@ -218,18 +234,28 @@ fn decode_price(raw: &[u8]) -> Result<i64, &'static str> {
 }
 
 /// Un buffer contiguo de Python como slice, sin copia.
-fn view<'a, T: Element>(py: Python<'a>, buffer: &'a PyBuffer<T>) -> PyResult<&'a [T]> {
+///
+/// El slice vive lo que el `PyBuffer`, no el token de Python: así se puede
+/// usar con el GIL suelto.
+fn view<T: Element>(buffer: &PyBuffer<T>) -> PyResult<&[T]> {
     if buffer.item_count() == 0 {
         // Un buffer vacío puede tener puntero nulo: no hay nada que mirar.
         return Ok(&[]);
     }
-    // `as_slice` es `None` si el buffer no es contiguo, de un eje y alineado.
-    let cells = buffer.as_slice(py).ok_or_else(|| {
-        PyValueError::new_err("el buffer debe ser contiguo, alineado y de un solo eje")
-    })?;
-    // SAFETY: `ReadOnlyCell<T>` es `repr(transparent)` sobre `T`, así que
-    // `&[ReadOnlyCell<T>]` y `&[T]` tienen el mismo layout. Los buffers de
-    // Arrow son inmutables y el GIL se mantiene mientras dure el préstamo,
-    // así que nadie los escribe desde Python.
-    Ok(unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<T>(), cells.len()) })
+    let ptr = buffer.buf_ptr().cast::<T>();
+    if buffer.dimensions() != 1
+        || !buffer.is_c_contiguous()
+        || !ptr.is_aligned()
+        || buffer.item_size() != std::mem::size_of::<T>()
+    {
+        return Err(PyValueError::new_err(
+            "el buffer debe ser contiguo, alineado y de un solo eje",
+        ));
+    }
+    // SAFETY: el `PyBuffer` mantiene exportado el buffer (y a su dueño vivo)
+    // hasta que se suelta, y el préstamo no sobrevive a `buffer`. Los buffers
+    // de Arrow son inmutables, así que nadie los escribe desde Python mientras
+    // el GIL está suelto. El puntero es no nulo, está alineado y cubre
+    // `item_count` elementos contiguos de un eje (comprobado arriba).
+    Ok(unsafe { std::slice::from_raw_parts(ptr, buffer.item_count()) })
 }

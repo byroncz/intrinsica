@@ -3,6 +3,8 @@
 from dataclasses import dataclass
 from pathlib import Path
 
+from l2_dc_events.landing import READ_AHEAD
+
 
 @dataclass(frozen=True)
 class Unit:
@@ -37,3 +39,5 @@ class RunContext:
     landing_root: str | Path
     events_root: str | Path
     dq_root: str | Path
+    # Row groups de la landing que el lector pide por delante (`landing.read_batches`).
+    read_ahead: int = READ_AHEAD
