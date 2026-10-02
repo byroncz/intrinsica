@@ -8,6 +8,8 @@ con que sigue el mes siguiente (`carry_over.parquet`). El contrato de la salida
 está en [`docs/data-contracts.md`](../../docs/data-contracts.md) ("Salida
 Parquet de L2"). CI construye su imagen (`Dockerfile`) y le corre el humo
 (`smoke.sh`). En local corre con `uv run`.
+La operación en la nube (backfill histórico, reproducibilidad, seam-check, costo y volumen)
+está en [`docs/runbooks/operacion-l2.md`](../../docs/runbooks/operacion-l2.md).
 
 ## Uso en local
 
