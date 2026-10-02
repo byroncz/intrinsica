@@ -38,26 +38,30 @@ module "layer" {
   image      = "${local.data.artifact_registry}/l2_dc_events:${trimspace(file("${path.module}/../../../../layers/l2_dc_events/VERSION"))}"
 
   # ADR-04 (TRD-L2 §10.2 y §14, docs/runbooks/sonda-l2.md): L2 corre en Cloud
-  # Run Jobs; Cloud Batch no hace falta. Sonda del 2026-09-30, mes 2023-03
-  # (190.227.841 ticks, imagen 0.5.0, 4 GiB en las tres corridas, sin OOM):
+  # Run Jobs; Cloud Batch no hace falta. Dimensionado con la sonda de ITSC-286,
+  # mes 2023-03 (190.227.841 ticks, 4 GiB en las tres, sin OOM), imagen 0.5.2
+  # en 2 vCPU y 0.6.0 (mismo rendimiento) en 4 y 8:
   #
-  #   vCPU | RSS pico (MiB) | pared (s) | vCPU-s | costo de lista (USD)
-  #      2 |            446 |     292,2 |    584 | 0,0129
-  #      4 |            446 |     261,5 |  1.046 | 0,0209
-  #      8 |            445 |     301,1 |  2.409 | 0,0458
+  #   vCPU | RSS pico (MiB) | pared (s) | freno cgroup (s) | vCPU-s | costo de lista (USD)
+  #      2 |            487 |     311,7 |             99,4 |    623 | 0,0137
+  #      4 |            489 |     184,1 |              4,5 |    736 | 0,0147
+  #      8 |            491 |     133,4 |              0,0 |  1.067 | 0,0203
   #
-  # La pared no baja con más vCPU (261 a 301 s entre 2 y 8), así que más CPU solo
-  # encarece: 2 vCPU cuestan 3,5x menos que 8 por la misma pared.
-  # Regla de L1: RSS <= 75 % de la memoria y sin OOM. 446 MiB son 11 % de 4 GiB.
+  # Se fija 4 vCPU. Por costo de lista gana 2 vCPU, pero por 0,001 USD al mes
+  # (menos de 10 %: empate, y el backfill cabe en el cupo gratis con cualquiera);
+  # en el empate gana la pared (-41 %), y 2 vCPU está limitado por la CPU (32 %
+  # de la pared frenada por el cgroup). 8 vCPU cuesta 38 % más por 27 % menos de
+  # pared y sin freno: lo que frena ahí es un tramo serial (wait_s 38 %), no la
+  # CPU, y va a otra card.
+  # Regla de L1: RSS <= 75 % de la memoria y sin OOM. 491 MiB son 12 % de 4 GiB.
   # Se fija 4 GiB y no menos porque es la memoria medida, no una extrapolada.
-  cpu    = "2"
+  cpu    = "4"
   memory = "4Gi"
 
-  # Timeout por defecto, el de monthly: un solo mes. 2400 s son 8,2x la pared de
-  # la sonda con 2 vCPU (292,2 s, el mes más pesado) y 8,0x la peor corrida
-  # (301,1 s, con 8 vCPU); monthly procesa un mes recién cerrado, de ordinario
-  # mucho más liviano.
-  timeout = 2400
+  # Timeout por defecto, el de monthly: un solo mes. 1200 s son 6,5x la pared de
+  # la sonda con 4 vCPU (184,1 s, el mes más pesado); monthly procesa un mes
+  # recién cerrado, de ordinario mucho más liviano.
+  timeout = 1200
 
   # 1 y no 0, por la misma razón que en L1: el reintento cubre fallos
   # transitorios de infraestructura y uno determinista (OOM, timeout, checksum)
@@ -81,10 +85,10 @@ module "layer" {
   # deja revocar o auditar cada uno por su cuenta.
   modes = {
     # Una sola tarea encadena los 109 meses por carry-over (sin task array).
-    # Techo: 109 x 292,2 s = 31.850 s (8,85 h), con el mes más pesado repetido.
-    # 54.000 s (15 h) son 1,7x ese techo (la regla pide >= 1,5x) y quedan bajo
+    # Techo: 109 x 184,1 s = 20.067 s (5,57 h), con el mes más pesado repetido.
+    # 36.000 s (10 h) son 1,79x ese techo (la regla pide >= 1,5x) y quedan bajo
     # el tope de 86.400 s que acepta el módulo.
-    backfill = { timeout = 54000, access = local.access }
+    backfill = { timeout = 36000, access = local.access }
     monthly  = { access = local.access }
   }
 }
