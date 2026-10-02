@@ -89,9 +89,14 @@ las tres corridas:
 | `force` | marcado (`true`) |
 | `series_start` | `2023-03` |
 
-- `from` = `to` = `2023-03`: un solo mes. El workflow omite `--to` si es igual
-  a `from`; es lo esperado. L2 corre siempre en una sola tarea
-  (`--tasks 1`), sin task array.
+- `from` = `to` = `2023-03`: un solo mes. En `l2-backfill` el workflow pasa
+  `--to` siempre que `to` venga, aunque sea igual a `from`. Con `to` vacío, en
+  cambio, el backfill recorre hasta el último mes cerrado de L1 (desde la
+  imagen 0.6.0, ITSC-285): la sonda no es eso, así que no lo dejes vacío. El
+  2026-10-02 una corrida con `to` omitido procesó 42 meses en vez de uno
+  (ITSC-292). L2 corre siempre en una sola tarea (`--tasks 1`), sin task
+  array. Una corrida bien armada de un mes deja una sola línea `sonda:` y
+  termina en 3 a 5 minutos.
 - `series_start` = `2023-03` declara ese mes como el primero de la serie, y
   así arranca **en frío**, sin carry-over del mes anterior. Sin este input, la
   CLI toma `L2_SERIES_START` = `2017-08` del stack y el mes falla por falta del
