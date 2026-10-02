@@ -449,7 +449,7 @@ ITSC-281.
   pared: el hilo principal termina de repartir y espera a los escritores. Es la
   firma de un tramo serial al final, no de falta de CPU. La medición no separa
   si es el θ pesado (21 % de los eventos en un hilo, también en el escritor) o
-  la subida a GCS; es una card nueva (ver abajo), no se arregla aquí.
+  la subida a GCS; es la card ITSC-293 (ver abajo), no se arregla aquí.
 
 ### Decisión: 4 vCPU y 4 GiB
 
@@ -485,7 +485,7 @@ Aplicada la regla:
   La regla de L2 pide al menos 1,5× y no más de 86.400 s.
 - `max_retries` = 1, igual que antes.
 
-**Siguiente card (no se arregla aquí):** separar el tramo serial que aparece con
+**Siguiente card, ITSC-293 (no se arregla aquí):** separar el tramo serial que aparece con
 8 vCPU: `wait_s` del 38 % con freno cero. Medir qué θ cierra último y cuánto
 tarda su escritura, y comparar con la subida a GCS. Si es el θ pesado, partir su
 escritura o repartir mejor el fan-out; si es la subida, paralelizarla.

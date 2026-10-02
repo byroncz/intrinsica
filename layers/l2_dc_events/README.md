@@ -406,7 +406,7 @@ está limitado por la CPU (el cgroup lo frenó 32 % de la pared); a 4 el freno
 casi desaparece. De 4 a 8 la pared baja menos de lo que sube el costo (+38 %)
 y sin freno: `wait_s` pasa de 23 % a 38 %, el hilo principal espera a los
 escritores. Es un tramo serial, y la medición no separa si es el θ pesado (21 %
-de los eventos en un hilo) o la subida a GCS: card nueva, no se arregla aquí.
+de los eventos en un hilo) o la subida a GCS: card ITSC-293, no se arregla aquí.
 
 **Decisión: 4 vCPU y 4 GiB** ([TRD-L2 §14.1](../../docs/TRD/l2.md#141-adr-04--cómputo-de-l2-cloud-run-jobs-cerrado)).
 Por costo de lista gana 2 vCPU (0,0137 USD) por 0,001 USD al mes sobre 4 vCPU
