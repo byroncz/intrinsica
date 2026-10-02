@@ -199,7 +199,7 @@ gratis; agregar θ diminutos multiplica el volumen de `dc-events`.
 
 Insumo de la sonda que cerró ADR-04 (ITSC-281; cierre en
 [TRD-L2 §14.1](../../docs/TRD/l2.md#141-adr-04--cómputo-de-l2-cloud-run-jobs-cerrado):
-Cloud Run Jobs con 2 vCPU y 4 GiB). Contenedor de desarrollo de 10 cores y 7 GiB; landing producida con L1 en local (`sandbox.local/itsc244/`).
+Cloud Run Jobs; el tamaño final, 4 vCPU y 4 GiB, lo fijó ITSC-286). Contenedor de desarrollo de 10 cores y 7 GiB; landing producida con L1 en local (`sandbox.local/itsc244/`).
 
 | | 2020-01 (corrida 1) | 2020-01 (corrida 2) | 2020-02 (`monthly`, con carry-over de enero) |
 |---|---|---|---|
@@ -301,8 +301,8 @@ pero no queda por debajo de la base como enero.
 - **Lo que quedó después de la sonda de ITSC-281:** el paralelismo de escritura
   es el número de cores. Con un solo hilo de escritura (10 cores para el
   fan-out) la unidad tardó 12,2 s: el volcado a columnas ya no pasa por Python,
-  y eso solo bajó la unidad a la mitad. Con 1 vCPU sigue sin medirse (TRD-L2
-  §14.1, pendiente a). La sonda leyó `cores` de la máquina y no el límite del
+  y eso solo bajó la unidad a la mitad. Con 1 vCPU no se midió y se descartó
+  (TRD-L2 §14.1, pendiente a, cerrado por ITSC-286). La sonda leyó `cores` de la máquina y no el límite del
   job, así que con 2 vCPU hubo 6 hilos de escritura sobre 2 vCPU; no invalida
   el veredicto, porque con 8 vCPU (9 hilos) tampoco aceleró.
 
@@ -363,12 +363,56 @@ no crece más de lo que varía entre corridas (244 a 254 MiB).
 
 ### Corrida en la nube sobre 2023-03
 
-Pendiente (la corre el humano, runbook
-[`sonda-l2.md`](../../docs/runbooks/sonda-l2.md#corrida-por-fases-itsc-289)):
-una corrida con `force=true` en la config vigente del stack `l2`. Su línea
-`sonda:` y el párrafo con la fase dominante y la optimización que propone la
-card siguiente van aquí. La corrida que tiene la tubería de ITSC-290 está en la
-sección siguiente.
+La corrida con 0.5.1 (2 vCPU, runbook
+[`sonda-l2.md`](../../docs/runbooks/sonda-l2.md#corrida-por-fases-itsc-289))
+tardó 613 a 733 s en cuatro corridas: `detect_s` 390 a 457 s, `write_s` 896 a
+1 556 s de hilo, `read_s` 67 a 81 s. Domina el detector
+(hilos del fan-out por `floor(cuota)`, escritores esperando el GIL), y de eso
+salió ITSC-290.
+
+La sonda de 0.5.2 sobre 2023-03 con 2, 4 y 8 vCPU (ITSC-286; 4 GiB, `force`,
+190.227.841 ticks) es el "después" de ITSC-290 y fija el tamaño del job. 4 y 8
+vCPU corrieron con 0.6.0, que no cambia el rendimiento. Detalle, regla de
+decisión y enlaces a los runs en
+[`sonda-l2.md`](../../docs/runbooks/sonda-l2.md#redimensionamiento-de-vcpu-con-la-imagen-052-itsc-286).
+
+| 2023-03 | 0.5.1, 2 vCPU (4 corridas) | 0.5.2, 2 vCPU | 0.6.0, 4 vCPU | 0.6.0, 8 vCPU |
+|---|---|---|---|---|
+| Pared (`wall_s`) | 613 a 733 s | 311,7 s | **184,1 s** | 133,4 s |
+| `cores` (cuota) / `cores_visible` | n. d. | 1,86 / 5 | 3,944 / 5 | 7,441 / 9 |
+| `fanout_threads` / `write_workers` | n. d. | 2 / 2 | 4 / 4 | 8 / 7 |
+| `detect_s` | 390 a 457 s | 275,1 s | 135,2 s | 75,6 s |
+| `detect_cpu_s` | n. d. | 231,1 s | 106,3 s | 13,8 s (*) |
+| `wait_s` | n. d. | 31,2 s (10 %) | 43,2 s (23 %) | 51,3 s (38 %) |
+| `cpu_throttled_s` | n. d. | 99,4 s (32 %) | 4,5 s (2 %) | 0,0 s |
+| `write_s` (suma de hilos) | 896 a 1 556 s | 164,0 s | 165,9 s | 173,3 s |
+| RSS pico | n. d. | 487 MiB | 489 MiB | 491 MiB |
+| Costo de lista del mes (USD) | n. d. | 0,0137 | 0,0147 | 0,0203 |
+
+(*) `detect_cpu_s` es la CPU del hilo principal: con 8 hilos solo reparte y no
+es el costo del detector.
+
+Líneas `sonda:` completas de la imagen 0.5.2 y 0.6.0:
+
+```
+sonda: unit=binance/spot/BTCUSDT/2023-03 mode=backfill rss_peak_mib=487 wall_s=311.7 ticks=190227841 cores=1.86 cores_visible=5 cores_source=cgroup-v1 read_s=1.2 decode_s=21.7 detect_s=275.1 detect_cpu_s=231.1 write_s=164.0 carry_s=0.0 wait_s=31.2 other_s=4.2 row_groups=237 bytes_in=928036671 fanout_threads=2 write_workers=2 cpu_throttled_s=99.4
+sonda: unit=binance/spot/BTCUSDT/2023-03 mode=backfill rss_peak_mib=489 wall_s=184.1 ticks=190227841 cores=3.944 cores_visible=5 cores_source=cgroup-v1 read_s=1.1 decode_s=24.3 detect_s=135.2 detect_cpu_s=106.3 write_s=165.9 carry_s=0.0 wait_s=43.2 other_s=4.6 row_groups=237 bytes_in=928036671 fanout_threads=4 write_workers=4 cpu_throttled_s=4.5
+sonda: unit=binance/spot/BTCUSDT/2023-03 mode=backfill rss_peak_mib=491 wall_s=133.4 ticks=190227841 cores=7.441 cores_visible=9 cores_source=cgroup-v1 read_s=1.9 decode_s=21.1 detect_s=75.6 detect_cpu_s=13.8 write_s=173.3 carry_s=0.0 wait_s=51.3 other_s=4.6 row_groups=237 bytes_in=928036671 fanout_threads=8 write_workers=7 cpu_throttled_s=0.0
+```
+
+**Lectura.** Con 0.5.2 la pared de 2 vCPU baja a 311,7 s (42 a 51 % de la de
+0.5.1) y más vCPU sí acelera: −41 % de 2 a 4 y −27 % de 4 a 8. A 2 vCPU el job
+está limitado por la CPU (el cgroup lo frenó 32 % de la pared); a 4 el freno
+casi desaparece. De 4 a 8 la pared baja menos de lo que sube el costo (+38 %)
+y sin freno: `wait_s` pasa de 23 % a 38 %, el hilo principal espera a los
+escritores. Es un tramo serial, y la medición no separa si es el θ pesado (21 %
+de los eventos en un hilo) o la subida a GCS: card nueva, no se arregla aquí.
+
+**Decisión: 4 vCPU y 4 GiB** ([TRD-L2 §14.1](../../docs/TRD/l2.md#141-adr-04--cómputo-de-l2-cloud-run-jobs-cerrado)).
+Por costo de lista gana 2 vCPU (0,0137 USD) por 0,001 USD al mes sobre 4 vCPU
+(0,0147): un empate, y el backfill cabe en el cupo gratis con cualquiera. En el
+empate gana la pared. Timeouts: `monthly` 1200 s (6,5× 184,1 s) y `backfill`
+36 000 s (1,79× 109 × 184,1 s).
 
 ## Optimización de la tubería sin cambiar la salida (ITSC-290)
 
@@ -433,13 +477,16 @@ la prueba de regresión (`test_l2_parallelism.py`) la simula con
 
 ### Corrida en la nube, antes y después de ITSC-290
 
-Pendiente (la corre el humano, runbook
-[`sonda-l2.md`](../../docs/runbooks/sonda-l2.md#corrida-antes-y-después-itsc-290)):
-2023-03 con la config vigente del stack `l2`, antes (0.5.1: pared 613 a 733 s,
-`detect_s` 390 a 457 s, `write_s` 896 a 1 556 s de hilo, `read_s` 67 a 81 s) y
-después (0.5.2). Meta: pared ≤ 50 % de la línea base de 0.5.1 en el mismo host
-(comparar `cores_visible`). Las dos líneas `sonda:` completas y el párrafo con
-la fase dominante van aquí.
+2023-03 a 2 vCPU, antes (0.5.1: pared 613 a 733 s, `detect_s` 390 a 457 s,
+`write_s` 896 a 1 556 s de hilo, `read_s` 67 a 81 s) y después (0.5.2: pared
+311,7 s, `detect_s` 275,1 s, `write_s` 164,0 s, `read_s` 1,2 s): la pared queda
+en 42 a 51 % de la línea base. Contra la corrida más rápida de 0.5.1 (613 s)
+son 50,8 %, apenas sobre la meta de 50 %; los hosts no son idénticos
+(`cores_visible` = 5 en 0.5.2). La línea `sonda:` completa de 0.5.2 y la
+comparación con 4 y 8 vCPU están en "Corrida en la nube sobre 2023-03", arriba
+(ITSC-286). Con 2 vCPU domina todavía el detector (`detect_s` 275 de 312 s),
+con 99,4 s de freno del cgroup: el job está limitado por la CPU, que es lo que
+la remedición con 4 y 8 vCPU resolvió.
 
 ## Imagen
 

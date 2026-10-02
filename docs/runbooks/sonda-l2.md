@@ -6,9 +6,9 @@ Mide cuánta memoria y tiempo necesita el mes más pesado de BTCUSDT en L2 con
 (Cloud Run Jobs o Cloud Batch con Spot) y la configuración final del stack
 `l2`. Mismo patrón que la [sonda de L1](sonda-l1.md) (TRD-L1 §14.1); aquí solo
 cambia lo que L2 hace distinto. Referencia: [TRD-L2 §10.2 y §14](../TRD/l2.md).
-La decisión y la configuración final las registra la card ITSC-282 (hija 6);
-esta card (ITSC-281) solo mide. Los números de las tres corridas van en
-"Resultados".
+ITSC-281 midió con la imagen 0.5.0 y ITSC-282 fijó 2 vCPU con esos números;
+ITSC-286 remidió con la 0.5.2 y fijó 4 vCPU (ver "Redimensionamiento de vCPU con
+la imagen 0.5.2"). Los números de ITSC-281 van en "Resultados".
 
 ## Regla de decisión (escrita antes de correr)
 
@@ -26,8 +26,8 @@ de 2 y 4 vCPU tampoco deciden nada.
      menos.
 - **Cloud Batch con Spot** solo si falla alguna de las dos.
 
-Esta regla decide *dónde* corre L2. Cuántos vCPU se fijan (2, 4 u 8) lo elige
-ITSC-282 comparando pared, GiB-s, vCPU-s y costo de las tres corridas.
+Esta regla decide *dónde* corre L2. Cuántos vCPU se fijan (2, 4 u 8) lo decide
+la regla de "Redimensionamiento de vCPU con la imagen 0.5.2" (ITSC-286).
 
 ## Antes de empezar
 
@@ -138,13 +138,12 @@ gcloud run jobs describe l2-backfill --project "<GCP_PROJECT_ID>" --region "<GCP
   una corrida de 2 vCPU que tarde más; lo que se mide es la pared real.
 - `--max-retries 0` evita que un reintento sume otra corrida al run y deje
   dos líneas `sonda:`; un fallo se lee y se relanza a mano.
-- **Es deriva temporal frente a Terraform.** Antes de ITSC-282 el stack `l2`
-  fijaba 4 vCPU, 16 GiB, 3600 s y 1 reintento (provisionales). Desde ITSC-282
-  fija los valores finales: 2 vCPU, 4 GiB, 1 reintento, 2400 s en `monthly` y
-  54.000 s en `backfill` (`infra/stacks/batch/l2/main.tf`, TRD-L2 §10.2).
-  No lo apliques entre corridas ni al terminar: `apply` desharía estos cambios.
-  El `apply` de ITSC-282 (hija 6) cierra la deriva; hasta entonces, el job en
-  la nube no coincide con el código.
+- **Es deriva temporal frente a Terraform.** El stack `l2` fija los valores
+  finales (`infra/stacks/batch/l2/main.tf`, TRD-L2 §10.2): 4 vCPU, 4 GiB,
+  1 reintento, 1200 s en `monthly` y 36.000 s en `backfill`, tras ITSC-286
+  (antes, desde ITSC-282, eran 2 vCPU, 2400 s y 54.000 s). `apply` desharía los
+  cambios de la sonda: no lo apliques entre corridas. El `apply` del final de
+  "Redimensionamiento de vCPU con la imagen 0.5.2" cierra la deriva.
 
 ## Qué leer y qué anotar
 
@@ -373,3 +372,130 @@ frontera Rust/Python se queda como está.
 **Qué anotar.** La línea `sonda:` completa de las dos corridas va al README de
 la capa ("Corrida en la nube, antes y después de ITSC-290") y a la card
 ITSC-290, con un párrafo: cuánto bajó la pared y qué fase domina ahora.
+
+## Redimensionamiento de vCPU con la imagen 0.5.2 (ITSC-286)
+
+La sonda de ITSC-281 no decidía el tamaño: con 0.5.0 la pared no cambiaba entre
+2, 4 y 8 vCPU (292, 262 y 301 s) porque el detector corría con un hilo y los
+escritores esperaban el GIL. Con 0.5.2 (ITSC-290) el job sí usa su cuota, así
+que se repitió la sonda de 2023-03 con los tres tamaños. Solo cambia la CPU:
+memoria 4 GiB, `force`, `from` = `to` = `series_start` = `2023-03`, sin
+reintentos y con `--task-timeout 86400`, como en "Cambiar la CPU entre corridas".
+1 vCPU se descartó sin medir: a 2 vCPU el cgroup ya frenó 99,4 s, y con uno solo
+la pared se duplicaría.
+
+### Regla de decisión
+
+Se escribió antes de aplicarla, con un desempate que se agregó al ver los datos
+(lo explica el punto 2):
+
+1. **Candidatos:** los tamaños cuya pared del mes más pesado cumple 6× contra el
+   timeout de `monthly` (el 6× de L1) y cuyo backfill de 109 meses cabe en
+   menos de 86.400 s con 1,5× de holgura.
+2. **Elección:** el de menor costo de lista por mes. **Desempate:** dos costos a
+   menos de 10 % entre sí cuentan como iguales, porque un mes cuesta centavos y
+   el backfill entero cae dentro del cupo gratis; en un empate gana el de menor
+   pared. Un tamaño con `cpu_throttled_s` > 10 % de `wall_s` solo gana si no
+   hay otro en el empate: está limitado por la CPU y su pared depende de la
+   cuota que Cloud Run entregue (1,61 a 1,97 de 2 en 0.5.x).
+3. **Techo del escalado**, para decir qué frena a los tamaños mayores: si
+   `cpu_throttled_s` sigue alto a 4 vCPU, el techo es la CPU. Si la pared se
+   estanca entre 4 y 8 con freno cero, el techo es el θ pesado (21 % de los
+   eventos en un hilo) o la subida a GCS, y va a una card nueva; no se arregla
+   en esta.
+
+### Mediciones
+
+Mes 2023-03, 190.227.841 ticks y 237 row groups en las tres. 2 vCPU corrió con
+la imagen 0.5.2 y 4 y 8 vCPU con la 0.6.0, que no cambia el rendimiento (solo
+la frontera por θ de ITSC-285). Tarifas de lista del 2026-09-30 (vCPU-s
+0,000018 USD, GiB-s 0,000002 USD, `us-east1`), las mismas de la sonda de
+ITSC-281.
+
+| vCPU | Run | Imagen | `wall_s` | `cores` | `cores_visible` | `fanout_threads` | `write_workers` | `detect_s` | `detect_cpu_s` | `wait_s` | `cpu_throttled_s` | RSS pico (MiB) | vCPU-s | GiB-s | Costo de lista (USD) |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 2 | [36956085713](https://github.com/byroncz/intrinsica/actions/runs/36956085713) | 0.5.2 | 311,7 | 1,86 | 5 | 2 | 2 | 275,1 | 231,1 | 31,2 | 99,4 | 487 | 623,4 | 1.246,8 | 0,0137 |
+| 4 | [37061790059](https://github.com/byroncz/intrinsica/actions/runs/37061790059) | 0.6.0 | 184,1 | 3,944 | 5 | 4 | 4 | 135,2 | 106,3 | 43,2 | 4,5 | 489 | 736,4 | 736,4 | 0,0147 |
+| 8 | [37069958118](https://github.com/byroncz/intrinsica/actions/runs/37069958118) | 0.6.0 | 133,4 | 7,441 | 9 | 8 | 7 | 75,6 | 13,8 | 51,3 | 0,0 | 491 | 1.067,2 | 533,6 | 0,0203 |
+
+- **De la corrida de 4 vCPU solo vale la primera línea `sonda:`**, la de 2023-03.
+  Esa ejecución siguió hasta 2026-08 porque `l2-backfill` no pasaba `--to` si
+  era igual a `from` (ITSC-292, corregido en `main`); las demás líneas son de
+  otros meses.
+- **`detect_cpu_s` solo es comparable entre 2 y 4 vCPU.** Es la CPU del hilo
+  principal; con 8 hilos en el fan-out ese hilo solo reparte, así que baja a
+  13,8 s y no es el costo del detector.
+- `write_s` (164,0, 165,9 y 173,3 s, sumados entre hilos) casi no cambia: el
+  trabajo de codificar y subir es el mismo, solo se reparte entre más hilos.
+- `read_s` 1,2, 1,1 y 1,9 s; `decode_s` 21,7, 24,3 y 21,1 s; `carry_s` 0 (en
+  frío). La lectura anticipada de ITSC-290 dejó de ser un cuello.
+- RSS pico 487 a 491 MiB: no depende de la CPU y sube ~40 MiB frente a 0.5.0
+  (446), lo que permite `L2_READ_AHEAD` = 2. Son 12 % de 4 GiB.
+
+### Lectura
+
+| Paso | Pared | Costo de lista | `cpu_throttled_s` / `wall_s` | `wait_s` / `wall_s` |
+| --- | --- | --- | --- | --- |
+| 2 → 4 vCPU | −40,9 % (1,69×; ideal 2×) | +7,4 % | 31,9 % → 2,4 % | 10,0 % → 23,5 % |
+| 4 → 8 vCPU | −27,5 % (1,38×; ideal 2×) | +37,8 % | 2,4 % → 0,0 % | 23,5 % → 38,5 % |
+
+- **2 vCPU está limitado por la CPU:** el cgroup lo frenó 99,4 s de 311,7 (32 %).
+  Su pared depende de la cuota entregada, y la de 0.5.1 varió 613 a 733 s entre
+  corridas del mismo tamaño.
+- **A 4 vCPU el freno casi desaparece** (4,5 s, 2,4 %). El techo ya no es la
+  CPU.
+- **De 4 a 8 el escalado se acaba sin freno.** Con `cpu_throttled_s` = 0 la
+  pared solo baja 27 % por el doble de CPU, y `wait_s` pasa de 23 % a 38 % de la
+  pared: el hilo principal termina de repartir y espera a los escritores. Es la
+  firma de un tramo serial al final, no de falta de CPU. La medición no separa
+  si es el θ pesado (21 % de los eventos en un hilo, también en el escritor) o
+  la subida a GCS; es una card nueva (ver abajo), no se arregla aquí.
+
+### Decisión: 4 vCPU y 4 GiB
+
+| Tamaño | Costo de lista por mes (USD) | Backfill de 109 meses: pared | Backfill: vCPU-s / GiB-s, contra el cupo (180.000 / 360.000) | Backfill a precio de lista (USD) |
+| --- | --- | --- | --- | --- |
+| 2 vCPU | 0,0137 | 33.975 s (9,44 h) | 67.951 (37,7 %) / 135.901 (37,7 %) | 1,49 |
+| 4 vCPU | 0,0147 | 20.067 s (5,57 h) | 80.268 (44,6 %) / 80.268 (22,3 %) | 1,60 |
+| 8 vCPU | 0,0203 | 14.541 s (4,04 h) | 116.325 (64,6 %) / 58.162 (16,2 %) | 2,21 |
+
+(109 × el mes más pesado, techo; el cupo es compartido con L1.)
+
+Aplicada la regla:
+
+1. Los tres tamaños son candidatos: 6× la pared de 8 vCPU son 800 s y 6× la de
+   2 vCPU, 1.870 s, y los 109 meses caben en 9,4 h como máximo.
+2. Por costo de lista gana 2 vCPU (0,0137 USD), pero por **0,001 USD al mes**,
+   menos de 10 % de diferencia con 4 vCPU (0,0147): son un empate. El backfill
+   entero cabe en el cupo gratis con cualquiera de los tres, así que en dinero
+   real la diferencia es cero. En el empate gana la pared (−41 %) y 2 vCPU,
+   además, está limitado por la CPU (32 % de freno). **Se elige 4 vCPU.**
+   El desempate lo propuso el arquitecto al ver los números; sin él, la regla
+   literal daba 2 vCPU. Queda escrito para que no parezca otra cosa.
+3. 8 vCPU cuesta 38 % más que 4 por 27 % menos de pared, y sin freno: lo que
+   frena ya no es la CPU. No se justifica hasta que la card siguiente resuelva
+   el tramo serial.
+
+**Timeouts** (`infra/stacks/batch/l2/main.tf`):
+
+- `monthly` = **1200 s**: 6× 184,1 s = 1.105 s, redondeado hacia arriba (6,5×).
+  Cubre también una cuota de 2 vCPU con freno, que es el peor caso de la
+  imagen anterior.
+- `backfill` = **36.000 s** (10 h): 1,79× el techo de 109 × 184,1 s (20.067 s).
+  La regla de L2 pide al menos 1,5× y no más de 86.400 s.
+- `max_retries` = 1, igual que antes.
+
+**Siguiente card (no se arregla aquí):** separar el tramo serial que aparece con
+8 vCPU: `wait_s` del 38 % con freno cero. Medir qué θ cierra último y cuánto
+tarda su escritura, y comparar con la subida a GCS. Si es el θ pesado, partir su
+escritura o repartir mejor el fan-out; si es la subida, paralelizarla.
+
+### Deriva a cerrar
+
+La última corrida dejó `l2-backfill` en 8 vCPU, 4 GiB, 86.400 s y sin
+reintentos por `gcloud run jobs update`. El `apply` del stack `l2` lo lleva a
+4 vCPU, 4 GiB, 36.000 s y 1 reintento, y deja `l2-monthly` en 4 vCPU, 4 GiB,
+1.200 s y 1 reintento. Lo aplica el humano en *Actions → Terraform → `l2` →
+`apply`*. El plan debe mostrar cambios de `cpu`, `timeout` y `max_retries` en
+`l2-backfill` y de `cpu` y `timeout` en `l2-monthly`; la memoria no cambia.
+Cualquier otro cambio es una sorpresa y se revisa antes de aprobar.

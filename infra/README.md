@@ -312,35 +312,35 @@ Orden de apply, todo por el humano:
 3. Actions → *Terraform* → `l2` → `apply`.
 
 Los recursos salen de la sonda de L2 ([runbook](../docs/runbooks/sonda-l2.md),
-ITSC-281) y de la decisión ADR-04 (ITSC-282, [TRD-L2 §14](../docs/TRD/l2.md)):
-2 vCPU y 4 GiB en ambos jobs, sobre Cloud Run Jobs.
+ITSC-281 e ITSC-286) y de la decisión ADR-04 ([TRD-L2 §14](../docs/TRD/l2.md)):
+4 vCPU y 4 GiB en ambos jobs, sobre Cloud Run Jobs.
 
 **Aplicar este cambio cierra la deriva de la sonda.** Las corridas de la sonda
 cambiaron el job `l2-backfill` a mano con `gcloud run jobs update` (CPU variable,
-4 GiB, timeout de 24 h, sin reintentos). El `apply` de `l2` lo devuelve al
-código. El plan debe mostrar cambios de `cpu`, `memory` y `timeout` en los dos
-jobs, y de `max_retries` (0 a 1) solo en `l2-backfill`: `l2-monthly` ya tenía 1
-reintento. En `l2-backfill` también puede quitar `client` y `client_version`,
-que `gcloud run jobs update` deja puestos y el módulo no fija; eso es parte de
-cerrar la deriva. Cualquier otro cambio es una sorpresa y se revisa antes de
-aprobar el `apply`.
+4 GiB, timeout de 24 h, sin reintentos); la última lo dejó en 8 vCPU. El
+`apply` de `l2` lo devuelve al código. El plan debe mostrar cambios de `cpu`,
+`timeout` y `max_retries` (0 a 1) en `l2-backfill`, y de `cpu` (2 a 4) y
+`timeout` (2400 s a 1200 s) en `l2-monthly`, que ya tenía 1 reintento. La
+memoria no cambia. En `l2-backfill` también puede quitar `client` y
+`client_version`, que `gcloud run jobs update` deja puestos y el módulo no fija;
+eso es parte de cerrar la deriva. Cualquier otro cambio es una sorpresa y se
+revisa antes de aprobar el `apply`.
 
 ## Timeouts y reintentos de los jobs de l2
 
 Cada job fija `timeout` y `max_retries` de forma explícita (módulo `layer`; el
-stack `l2` fija 2400 s y 1 reintento para todos y sobrescribe el timeout en
+stack `l2` fija 1200 s y 1 reintento para todos y sobrescribe el timeout en
 backfill):
 
 | Job | timeout | max_retries |
 |---|---|---|
-| `l2-backfill` | 54000 s | 1 |
-| `l2-monthly` | 2400 s | 1 |
+| `l2-backfill` | 36000 s | 1 |
+| `l2-monthly` | 1200 s | 1 |
 
-- **`l2-monthly`: 2400 s** es 8,2× la pared de la sonda con 2 vCPU (292,2 s, mes
-  2023-03, el más pesado) y 8,0× la peor corrida (301,1 s, con 8 vCPU). La regla
-  de L1 pide al menos 6×.
-- **`l2-backfill`: 54000 s (15 h)** es 1,7× la pared extrapolada de los 109
-  meses (109 × 292,2 s = 31.850 s, 8,85 h). La regla pide al menos 1,5× y no
+- **`l2-monthly`: 1200 s** es 6,5× la pared de la sonda con 4 vCPU (184,1 s, mes
+  2023-03, el más pesado, imagen 0.6.0). La regla de L1 pide al menos 6×.
+- **`l2-backfill`: 36000 s (10 h)** es 1,79× la pared extrapolada de los 109
+  meses (109 × 184,1 s = 20.067 s, 5,57 h). La regla pide al menos 1,5× y no
   más de 86.400 s. Es un techo: el mes más pesado se repite 109 veces y los
   demás tardan menos. L2 no usa task array, porque los meses se encadenan por
   carry-over, y el timeout de Cloud Run es por tarea, así que la tarea única
