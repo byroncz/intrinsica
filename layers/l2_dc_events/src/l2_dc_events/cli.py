@@ -203,7 +203,7 @@ def _log_probe(
 
     La pared se redondea hacia arriba a 0.1 s para que nunca salga 0.0. Con
     `result`, agrega los ticks y los ticks/s por core (los de la unidad entera:
-    lectura, 50 θ y escritura, sobre el límite efectivo de CPU), y θ·ticks/s por
+    lectura, θ del mes y escritura, sobre el límite efectivo de CPU), y θ·ticks/s por
     core, la unidad con que `dc_core` reporta su benchmark.
 
     `cores` es el límite efectivo (cuota del cgroup o, sin ella, los cores

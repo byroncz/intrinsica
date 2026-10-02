@@ -1,4 +1,4 @@
-"""Escritura de los eventos de los 50 θ en paralelo, con RAM acotada.
+"""Escritura de los eventos de los θ del mes en paralelo, con RAM acotada.
 
 Cada θ escribe su propio Parquet, así que los escritores codifican y hashean a
 la vez en un pool de hilos (pyarrow y `hashlib` sueltan el GIL). Dos reglas:

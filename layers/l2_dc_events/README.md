@@ -1,6 +1,6 @@
 # l2_dc_events
 
-Capa L2: eventos Directional Change de 50 θ sobre la landing de L1. Diseño en
+Capa L2: eventos Directional Change de los θ del catálogo sobre la landing de L1. Diseño en
 [`docs/TRD/l2.md`](../../docs/TRD/l2.md). Lee el `consolidated.parquet` de un
 mes, alimenta el fan-out de [`dc_pyo3`](../../shared/dc_pyo3/README.md) lote a
 lote y escribe, por cada θ, los eventos del mes (`events.parquet`) y el estado
@@ -190,7 +190,7 @@ bucket.
 
 **Quitar un θ no borra nada.** L2 deja de avanzarlo y cada corrida lo reporta
 como `theta_config_drift` (`info`). Para forzar solo un subconjunto del
-catálogo, `--thetas`; para reprocesarlo, `--force`.
+catálogo, `--thetas`; para reprocesarlo, `--force` con `--from`.
 
 **Escala:** los eventos los dominan los θ pequeños. Agregar θ grandes es casi
 gratis; agregar θ diminutos multiplica el volumen de `dc-events`.
