@@ -384,13 +384,13 @@ def test_monthly_skips_a_lagging_theta_and_leaves_a_finding(
     assert _partition(tmp_path, never, 10).exists()
 
 
-def test_monthly_with_every_theta_behind_does_not_read_l1_and_does_not_fail(
+def test_monthly_with_every_theta_behind_does_not_read_l1_and_fails(
     tmp_path, monkeypatch, caplog
 ):
     monkeypatch.setattr(cli, "_today", lambda: date(2017, 11, 2))
     argv = ["--mode", "monthly", *SERIES, "--thetas-uri", _catalog(tmp_path, *OLD)]
     with caplog.at_level(logging.INFO):
-        assert _run(tmp_path, *argv) == 0
+        assert _run(tmp_path, *argv) == 1
     assert "sonda:" not in caplog.text
     assert len(_findings(tmp_path, "theta_behind_frontier")) == 2
     assert not list((tmp_path / "events").rglob("*.parquet"))

@@ -65,8 +65,9 @@ export L2_THETAS_URI=gs://<proyecto>-manifest/l2/thetas.yaml     # o --thetas-ur
   argumentos con `L2_SERIES_START` fijada. No admite `--to`. Lleva solo los θ
   cuya frontera es el mes previo. Un θ **rezagado** (agregado al catálogo sin
   backfill) no se procesa: deja el hallazgo `theta_behind_frontier` con su
-  frontera y la unidad no falla. Si ningún θ está listo, termina con código 0
-  sin leer L1.
+  frontera y la unidad no falla mientras otros θ avancen. Si ningún θ está listo
+  y hay rezagados, termina con código 1 sin leer L1 (por ejemplo, tras un
+  `monthly` perdido); si todos ya tienen el mes, con código 0.
 - Uso inválido (argumentos, raíces faltantes, `CLOUD_RUN_TASK_INDEX` ≠ 0,
   serie sin declarar, catálogo de θ inválido) termina con código 2. Una entrada ausente o un
   carry-over que falta o es de otra versión, con código 1.
@@ -132,7 +133,7 @@ hallazgos"):
 | `input_missing`, `input_provisional_only` | El mes no tiene consolidado |
 | `carry_over_missing`, `carry_over_version_mismatch` | La compuerta aborta la unidad; uno por θ afectado |
 | `theta_catalog_invalid` | El catálogo de θ no existe o incumple §7.3: código 2, sin escribir datos |
-| `theta_behind_frontier` | `monthly` no procesó un θ rezagado (warning); no falla la unidad |
+| `theta_behind_frontier` | `monthly` no procesó un θ rezagado (warning); solo falla la unidad (código 1) si ningún θ quedó listo |
 | `theta_config_drift` | Informativo (`info`): el lago tiene un θ que el catálogo ya no incluye |
 | `dc_zero_tick_discarded` | La guarda de §9.1 descartó eventos (esperado: cero, nunca se emite) |
 | `events_summary` | Uno por θ al terminar: eventos escritos y `content_hash` de ambos archivos |

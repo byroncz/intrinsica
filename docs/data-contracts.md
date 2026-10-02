@@ -356,8 +356,9 @@ documentan aquí, con su porqué:
 - **`theta_behind_frontier`** (`warning`, `fail`): `monthly` no procesó un θ
   porque su frontera no es el mes previo (se agregó al catálogo sin backfill,
   o su cadena tiene un hueco). `details.theta` y `details.frontier`
-  (`YYYY-MM`, o `null` si el θ no tiene carry-over). No falla la unidad: el
-  resto de los θ avanza. Se resuelve lanzando `l2-backfill` sin `--from`.
+  (`YYYY-MM`, o `null` si el θ no tiene carry-over). No falla la unidad mientras
+  otros θ avancen; si ninguno está listo, `monthly` termina con código 1
+  (fail-closed) y el workflow L1→L2 lo ve como fallo. Se resuelve lanzando `l2-backfill` sin `--from`.
 - **`dc_zero_tick_discarded`** (`error`, `fail`): la guarda de "un DC tiene al
   menos un tick" descartó eventos de un θ. Con el instante de confirmación
   atómico se espera cero: solo se emite con conteo mayor (`metric_value`) y
