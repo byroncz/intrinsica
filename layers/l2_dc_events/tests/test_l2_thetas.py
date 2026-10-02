@@ -57,15 +57,14 @@ def test_the_config_scale_is_the_price_scale():
 @pytest.mark.parametrize(
     "body",
     [
-        "scale: 1000\nthetas: [1, 2]\n",
+        "scale: 1000\nthetas: [20000, 30000]\n",
         "scale: 100000000\nthetas: []\n",
-        "scale: 100000000\nthetas: [2, 1]\n",
-        "scale: 100000000\nthetas: [1, 1]\n",
-        "scale: 100000000\nthetas: [0, 1]\n",
-        "scale: 100000000\nthetas: [1, 100000000]\n",
-        "scale: 100000000\nthetas: [0.5, 1]\n",
+        "scale: 100000000\nthetas: [20000, 20000]\n",
+        "scale: 100000000\nthetas: [0, 20000]\n",
+        "scale: 100000000\nthetas: [20000, 100000000]\n",
+        "scale: 100000000\nthetas: [0.5, 20000]\n",
         "scale: 100000000\nthetas: [true]\n",
-        "thetas: [1]\n",
+        "thetas: [20000]\n",
         "[]\n",
     ],
 )
