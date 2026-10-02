@@ -396,7 +396,7 @@ def main(
         "--force",
         action="store_true",
         help="backfill: reprocesa el rango completo aunque los θ ya tengan "
-        "carry-over (ignora la frontera)",
+        "carry-over (ignora la frontera); exige --from",
     )
     try:
         args = parser.parse_args(argv)
@@ -418,6 +418,10 @@ def main(
             # Se resuelve aquí para que resolve_range siga pura.
             first = args.from_ or previous_month(_today())
         else:
+            if args.force and args.from_ is None:
+                raise UsageError(
+                    "--force exige --from: sin él reprocesaría toda la serie"
+                )
             first = args.from_ or declared
         start = resolve_range(first, args.to)[0]
         if start < series_start:

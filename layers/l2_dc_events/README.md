@@ -53,7 +53,8 @@ export L2_THETAS_URI=gs://<proyecto>-manifest/l2/thetas.yaml     # o --thetas-ur
   el catálogo sin cambios y todo al día, la corrida termina en segundos y no
   escribe. Reprocesar es idempotente (RF-L2-08).
 - **`--force`** ignora la frontera: reprocesa todo `[--from, --to]` para los θ
-  elegidos. **`--thetas`** (decimales como en la ruta de la partición, p. ej.
+  elegidos. Exige `--from` (código 2 sin él): así un `--force` suelto no
+  reprocesa toda la serie por accidente. **`--thetas`** (decimales como en la ruta de la partición, p. ej.
   `0.00010000,0.00031313`) acota la corrida a un subconjunto del catálogo; uno
   que no esté en el catálogo termina con código 2.
 - **Un fallo detiene el rango.** Si el mes M falla (entrada ausente, carry-over

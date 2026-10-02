@@ -276,6 +276,12 @@ def test_a_bad_series_start_in_the_environment_is_a_usage_error(tmp_path):
     assert main(argv, _env(tmp_path, L2_SERIES_START="2017")) == 2
 
 
+def test_force_requires_from(tmp_path, capsys):
+    argv = [*BACKFILL, "--force"]
+    assert main(argv, _env(tmp_path)) == 2
+    assert "--force exige --from" in capsys.readouterr().err
+
+
 def test_monthly_rejects_to(tmp_path):
     argv = [*SERIES, "--mode", "monthly", "--from", "2017-08", "--to", "2017-09"]
     assert main(argv, _env(tmp_path)) == 2
