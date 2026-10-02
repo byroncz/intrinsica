@@ -118,8 +118,8 @@ def read_carry_over(path: str, theta: int) -> dc_pyo3.CarryOver:
     Falla con `CarryOverError`: `carry_over_missing` si el archivo no existe,
     `carry_over_version_mismatch` si su `state_version` no es la de
     `dc_pyo3.STATE_VERSION` (se lee primero, sola, porque otra versión puede
-    tener otras columnas) y `theta_config_drift` si su columna `theta` no es
-    la de la partición en la que está.
+    tener otras columnas), y también si su columna `theta` no es
+    la de la partición en la que está (el archivo no sirve como estado).
     """
     fs, resolved = resolve_fs(path)
     if not fs.get_file_info(resolved).is_file:
@@ -138,9 +138,14 @@ def read_carry_over(path: str, theta: int) -> dc_pyo3.CarryOver:
         ) from exc
     if int(row["theta"].scaleb(8)) != theta:
         raise CarryOverError(
-            "theta_config_drift",
+            "carry_over_version_mismatch",
             f"{path}: theta={row['theta']} no es el de la partición ({theta})",
-            {"theta": theta, "found": str(row["theta"]), "path": path},
+            {
+                "theta": theta,
+                "found": str(row["theta"]),
+                "path": path,
+                "reason": "theta distinto del de la partición",
+            },
         )
     pending = None
     if row["has_pending_event"]:

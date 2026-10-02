@@ -1,4 +1,4 @@
-"""Núcleo de una unidad de L2: un mes de un activo para los 50 θ (§8.1 del TRD-L2).
+"""Núcleo de una unidad de L2: un mes de un activo para los θ que le tocan (§8.1 del TRD-L2).
 
 Carga el carry-over del mes anterior (o arranca en frío si es el primero de la
 serie), lee la landing y alimenta el fan-out lote a lote, escribe los eventos de
@@ -8,6 +8,7 @@ cada θ a medida que cierran y, al final, publica `events.parquet` y
 
 import logging
 import time
+from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, closing
 from dataclasses import dataclass
@@ -41,7 +42,6 @@ __all__ = [
     "Result",
     "RunContext",
     "Unit",
-    "carry_over_complete",
     "process_unit",
 ]
 
@@ -107,33 +107,17 @@ def _path(ctx: RunContext, unit: Unit, theta: int, filename: str) -> str:
     )
 
 
-def carry_over_complete(unit: Unit, ctx: RunContext) -> bool:
-    """¿Dejó el mes un `carry_over.parquet` válido para cada uno de los 50 θ?
-
-    Válido es lo que `read_carry_over` acepta (existe, de la `state_version` de
-    esta imagen, con el esquema y el θ de su partición). La publicación escribe
-    los eventos de un θ antes que su carry-over, así que un carry-over válido
-    significa que el mes de ese θ quedó completo (RF-L2-09). Se detiene en el
-    primer θ que falla.
-    """
-    for theta in load_thetas():
-        try:
-            read_carry_over(_path(ctx, unit, theta, CARRY_OVER), theta)
-        except CarryOverError:
-            return False
-    return True
-
-
-def _start(unit: Unit, ctx: RunContext, threads: int) -> dc_pyo3.FanOut:
+def _start(
+    unit: Unit, ctx: RunContext, threads: int, thetas: list[int]
+) -> dc_pyo3.FanOut:
     """El fan-out del mes: en frío si es el primero de la serie, si no con el
     carry-over del mes anterior de cada θ.
 
     Compuerta fail-closed (ADR-L2-08, §9.2): si al menos un θ no tiene
     carry-over utilizable, emite un hallazgo por cada uno y aborta la unidad
-    entera con el primer `CarryOverError`. Los 50 θ comparten la lectura del
-    mes, así que uno atrasado detiene a todos hasta que se resuelva.
+    entera con el primer `CarryOverError`. Los θ del mes comparten la lectura,
+    así que uno atrasado detiene a todos hasta que se resuelva.
     """
-    thetas = load_thetas()
     if ctx.series_start == (unit.year, unit.month):
         return dc_pyo3.FanOut(thetas, threads)
 
@@ -165,12 +149,17 @@ def process_unit(
     unit: Unit,
     ctx: RunContext,
     fanout: dc_pyo3.FanOut | None = None,
+    thetas: Sequence[int] | None = None,
 ) -> Result:
-    """Procesa el mes: eventos y carry-over de los 50 θ a partir del consolidado.
+    """Procesa el mes: eventos y carry-over de los θ pedidos a partir del consolidado.
 
-    Cada lote se conforma como buffers sin copia, se alimenta a los 50 θ y se
+    `thetas` son los θ que el mes lleva en el fan-out (por defecto, los de la
+    semilla de `config/thetas.yaml`); el llamador decide cuáles, según la
+    frontera de cada uno (`frontier.py`).
+
+    Cada lote se conforma como buffers sin copia, se alimenta a los θ del mes y se
     suelta antes de pedir el siguiente; los eventos salen del binding ya en
-    columnas y los 50 escritores los codifican a `events.parquet` en paralelo
+    columnas y los escritores de cada θ los codifican a `events.parquet` en paralelo
     (`parallel.py`), a medida que cierran. La RAM de la unidad es O(row group). Al final se cierra
     el grupo de empate abierto (RF-L2-12) y se publica todo: primero los
     eventos de cada θ y luego su carry-over, así un carry-over presente
@@ -211,7 +200,12 @@ def process_unit(
     with parquet, ExitStack() as stack:
         if fanout is None:
             carry_started = time.perf_counter()
-            fanout = _start(unit, ctx, limit.fanout_threads)
+            fanout = _start(
+                unit,
+                ctx,
+                limit.fanout_threads,
+                load_thetas() if thetas is None else list(thetas),
+            )
             phases.carry_s = time.perf_counter() - carry_started
         thetas = fanout.thetas
         writers = [

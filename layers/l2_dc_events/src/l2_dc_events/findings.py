@@ -47,11 +47,57 @@ def finding(
 
 def failure(ctx: RunContext, unit: Unit, check_type: str, details: dict) -> Finding:
     """Un chequeo que falló y que detiene (o debería detener) la unidad."""
-    severity = (
-        Severity.WARNING if check_type == "theta_config_drift" else Severity.ERROR
-    )
     return finding(
-        ctx, unit, check_type, severity=severity, status=Status.FAIL, details=details
+        ctx,
+        unit,
+        check_type,
+        severity=Severity.ERROR,
+        status=Status.FAIL,
+        details=details,
+    )
+
+
+def theta_catalog_invalid(
+    ctx: RunContext, unit: Unit, *, source: str, problems: list[str]
+) -> Finding:
+    """El catálogo de θ no se pudo leer o no cumple §7.3: la corrida no escribe."""
+    return failure(
+        ctx,
+        unit,
+        "theta_catalog_invalid",
+        {"source": source, "problems": problems},
+    )
+
+
+def theta_behind_frontier(
+    ctx: RunContext, unit: Unit, *, theta: int, frontier: str | None
+) -> Finding:
+    """`monthly` no procesó el θ porque no llegó al mes previo (se agregó sin backfill)."""
+    return finding(
+        ctx,
+        unit,
+        "theta_behind_frontier",
+        severity=Severity.WARNING,
+        status=Status.FAIL,
+        details={"theta": theta, "frontier": frontier},
+    )
+
+
+def theta_config_drift(
+    ctx: RunContext, unit: Unit, *, theta: int, months: int, last_month: str
+) -> Finding:
+    """El lago tiene particiones de un θ que el catálogo ya no incluye.
+
+    Es informativo: quitar un θ del catálogo no borra nada.
+    """
+    return finding(
+        ctx,
+        unit,
+        "theta_config_drift",
+        severity=Severity.INFO,
+        status=Status.PASS,
+        metric_value=float(months),
+        details={"theta": theta, "months": months, "last_month": last_month},
     )
 
 

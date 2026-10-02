@@ -29,15 +29,15 @@ on:
           - l2-monthly
         required: true
       from:
-        description: "Inicio: YYYY-MM (backfill, monthly, monthly-close) o YYYY-MM-DD (l1-daily)"
+        description: "Inicio: YYYY-MM (backfill, monthly, monthly-close) o YYYY-MM-DD (l1-daily). Solo l2-backfill admite vacío: la frontera de cada θ decide desde dónde avanza"
         type: string
-        required: true
+        required: false
       to:
         description: Fin inclusivo, mismo formato que from (por defecto, igual a from; l2-monthly no admite otro valor)
         type: string
         required: false
       force:
-        description: "Reprocesar aunque ya esté hecho. L1: el .CHECKSUM coincide con el manifiesto (úsalo si cambió el código). L2 (backfill): arrancar en from aunque los meses ya tengan carry-over"
+        description: "Reprocesar aunque ya esté hecho. L1: el .CHECKSUM coincide con el manifiesto (úsalo si cambió el código). L2 (backfill): arrancar en from aunque los meses ya tengan carry-over; exige from"
         type: boolean
         default: false
       series_start:
@@ -75,6 +75,10 @@ jobs:
             echo "::error::series_start solo aplica a los jobs l2-*, no a $JOB"
             exit 1
           fi
+          if [[ "$FORCE" == "true" && -z "$FROM" ]]; then
+            echo "::error::force exige from: sin él reprocesaría toda la serie"
+            exit 1
+          fi
           units="$(.github/scripts/run-job-tasks.sh "$JOB" "$FROM" ${TO:+"$TO"})" || {
             echo "::error::Rango inválido, ver el mensaje anterior"
             exit 1
@@ -101,7 +105,10 @@ jobs:
           # sola pieza --opción=valor, así dos meses iguales no chocan. Aun así,
           # --to se omite si es igual a from: el CLI de la capa asume to = from
           # cuando falta, y el de l2-monthly rechaza --to.
-          args="--mode,${MODE},--from=${FROM}"
+          args="--mode,${MODE}"
+          if [[ -n "$FROM" ]]; then
+            args="${args},--from=${FROM}"
+          fi
           if [[ -n "$TO" && "$TO" != "$FROM" ]]; then
             args="${args},--to=${TO}"
           fi

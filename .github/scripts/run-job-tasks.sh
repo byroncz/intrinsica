@@ -8,9 +8,12 @@
 #   l1-backfill, l1-monthly-close: meses YYYY-MM del rango inclusivo
 #   l1-daily:                      días YYYY-MM-DD del rango inclusivo
 #   l1-seam-check:                 una sola unidad ("1")
-#   l2-backfill:                   una sola unidad ("1") para todo el rango
+#   l2-backfill:                   una sola unidad ("1") para todo el rango; from
+#                                  puede ir vacío (la frontera de cada θ decide
+#                                  desde dónde avanza) y entonces to, si viene,
+#                                  se valida solo
 #   l2-monthly:                    una sola unidad ("1"); to vacío o igual a from
-# to por defecto es from. Entrada inválida: mensaje en stderr y salida 2.
+# to por defecto es from. En los demás jobs from es obligatorio. Entrada inválida: mensaje en stderr y salida 2.
 set -euo pipefail
 
 fail() {
@@ -67,8 +70,17 @@ case "$job" in
       day=$(date -u -d "$day + 1 day" +%F)
     done
     ;;
-  l1-seam-check | l2-backfill)
+  l1-seam-check)
     check_month_range
+    echo 1
+    ;;
+  l2-backfill)
+    if [[ -z "$from" ]]; then
+      # Sin from no hay rango que comparar: solo se valida to, si vino.
+      [[ -z "${3:-}" ]] || valid_month "$to" || fail "to inválido '$to': se espera YYYY-MM"
+    else
+      check_month_range
+    fi
     echo 1
     ;;
   l2-monthly)

@@ -478,7 +478,7 @@ def test_a_corrupt_carry_over_emits_a_finding_and_aborts_the_unit(
     assert json_details(row)["theta"] == THETAS[7]
 
 
-def test_a_carry_over_of_another_theta_is_config_drift(fixture_ticks, write_month, ctx):
+def test_a_carry_over_of_another_theta_is_unusable(fixture_ticks, write_month, ctx):
     write_month(fixture_ticks[:2_000], row_group_size=1_000, month=8)
     process_unit(AUG, ctx)
     # El carry-over de θ₃ copiado a la partición de θ₄: la columna no coincide.
@@ -486,12 +486,15 @@ def test_a_carry_over_of_another_theta_is_config_drift(fixture_ticks, write_mont
     wrong.write_bytes(Path(path_of(ctx, AUG, THETAS[3], CARRY_OVER)).read_bytes())
     with pytest.raises(CarryOverError) as error:
         read_carry_over(str(wrong), THETAS[4])
-    assert error.value.check_type == "theta_config_drift"
+    assert error.value.check_type == "carry_over_version_mismatch"
     write_month(fixture_ticks[2_000:], row_group_size=1_000, month=9)
     with pytest.raises(CarryOverError):
         process_unit(SEP, ctx)
-    (row,) = [r for r in findings_of(ctx) if r["check_type"] == "theta_config_drift"]
-    assert (row["severity"], row["status"]) == ("warning", "fail")
+    (row,) = [
+        r for r in findings_of(ctx) if r["check_type"] == "carry_over_version_mismatch"
+    ]
+    assert (row["severity"], row["status"]) == ("error", "fail")
+    assert json_details(row)["reason"] == "theta distinto del de la partición"
 
 
 def test_the_first_month_of_the_series_needs_no_carry_over(

@@ -62,7 +62,7 @@ class EventWriter:
         self.n_events = 0
         # Segundos en `add` y `commit` (codificar, hashear, subir): los mide el
         # hilo que esté escribiendo, uno a la vez por escritor, así que no
-        # necesita candado. `pipeline` suma los de los 50 θ.
+        # necesita candado. `pipeline` suma los de los θ del mes.
         self.write_s = 0.0
 
     def __enter__(self) -> Self:

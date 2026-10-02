@@ -9,7 +9,7 @@ escritores corren en otros hilos. Por eso hay dos clases de número:
 - **CPU o tiempo acumulado entre hilos** (`decode_s`, `detect_cpu_s`,
   `write_s`): `decode_s` es la CPU del hilo lector al decodificar (ITSC-290: ya
   no es pared del principal); `detect_cpu_s`, la CPU del hilo principal durante
-  el fan-out; `write_s`, el tiempo que los 50 θ pasan codificando y subiendo
+  el fan-out; `write_s`, el tiempo que los θ del mes pasan codificando y subiendo
   Parquet, sumado. Con k hilos `write_s` puede llegar a k veces la pared, así
   que no entra en `other_s`; se compara con `wait_s`, lo que el hilo principal
   esperó por ellos. `detect_cpu_s` contra `detect_s` distingue un detector lento
