@@ -180,7 +180,8 @@ bucket.
    gcloud storage cp thetas.yaml gs://<proyecto>-manifest/l2/thetas.yaml
    ```
 
-2. Lanza el job `l2-backfill` **sin `--from` ni `--to`**. Los θ que ya llegaron
+2. Lanza el job `l2-backfill` **sin `--from` ni `--to`** (en el workflow, deja
+   `from` y `to` vacíos). Los θ que ya llegaron
    al último mes cerrado de L1 se saltan; los nuevos recorren la serie desde
    `--series-start`, un mes a la vez y leyendo cada mes de L1 una sola vez.
 3. Mientras el backfill no termina, `monthly` no avanza los θ nuevos: los deja
