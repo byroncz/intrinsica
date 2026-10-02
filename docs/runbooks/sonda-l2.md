@@ -498,4 +498,7 @@ reintentos por `gcloud run jobs update`. El `apply` del stack `l2` lo lleva a
 1.200 s y 1 reintento. Lo aplica el humano en *Actions → Terraform → `l2` →
 `apply`*. El plan debe mostrar cambios de `cpu`, `timeout` y `max_retries` en
 `l2-backfill` y de `cpu` y `timeout` en `l2-monthly`; la memoria no cambia.
-Cualquier otro cambio es una sorpresa y se revisa antes de aprobar.
+En `l2-backfill` el plan también puede quitar `client` y `client_version`, que
+`gcloud run jobs update` deja puestos y el módulo no fija; es parte de cerrar la
+deriva (ver `infra/README.md`). Cualquier otro cambio es una sorpresa y se
+revisa antes de aprobar.
