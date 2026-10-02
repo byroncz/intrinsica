@@ -437,7 +437,7 @@ ITSC-281.
 | Paso | Pared | Costo de lista | `cpu_throttled_s` / `wall_s` | `wait_s` / `wall_s` |
 | --- | --- | --- | --- | --- |
 | 2 → 4 vCPU | −40,9 % (1,69×; ideal 2×) | +7,4 % | 31,9 % → 2,4 % | 10,0 % → 23,5 % |
-| 4 → 8 vCPU | −27,5 % (1,38×; ideal 2×) | +37,8 % | 2,4 % → 0,0 % | 23,5 % → 38,5 % |
+| 4 → 8 vCPU | −27,5 % (1,38×; ideal 2×) | +37,7 % | 2,4 % → 0,0 % | 23,5 % → 38,5 % |
 
 - **2 vCPU está limitado por la CPU:** el cgroup lo frenó 99,4 s de 311,7 (32 %).
   Su pared depende de la cuota entregada, y la de 0.5.1 varió 613 a 733 s entre
@@ -456,7 +456,7 @@ ITSC-281.
 | Tamaño | Costo de lista por mes (USD) | Backfill de 109 meses: pared | Backfill: vCPU-s / GiB-s, contra el cupo (180.000 / 360.000) | Backfill a precio de lista (USD) |
 | --- | --- | --- | --- | --- |
 | 2 vCPU | 0,0137 | 33.975 s (9,44 h) | 67.951 (37,7 %) / 135.901 (37,7 %) | 1,49 |
-| 4 vCPU | 0,0147 | 20.067 s (5,57 h) | 80.268 (44,6 %) / 80.268 (22,3 %) | 1,60 |
+| 4 vCPU | 0,0147 | 20.067 s (5,57 h) | 80.268 (44,6 %) / 80.268 (22,3 %) | 1,61 |
 | 8 vCPU | 0,0203 | 14.541 s (4,04 h) | 116.325 (64,6 %) / 58.162 (16,2 %) | 2,21 |
 
 (109 × el mes más pesado, techo; el cupo es compartido con L1.)
