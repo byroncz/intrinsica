@@ -33,7 +33,7 @@ on:
         type: string
         required: false
       to:
-        description: Fin inclusivo, mismo formato que from (por defecto, igual a from; l2-monthly no admite otro valor)
+        description: "Fin inclusivo, mismo formato que from. Por defecto, igual a from; l2-monthly no admite otro valor. Excepción l2-backfill: vacío = hasta el último mes cerrado de L1; to = from = un solo mes"
         type: string
         required: false
       force:
@@ -62,9 +62,6 @@ jobs:
       GCP_REGION: ${{ vars.GCP_REGION }}
     steps:
       - uses: actions/checkout@v4
-
-      - name: Derivar el modo del nombre del job
-        run: echo "MODE=${JOB#*-}" >> "$GITHUB_ENV" # <capa>-<modo>: la capa no lleva guion
 
       - name: Contar las tareas del rango
         id: tasks
@@ -100,24 +97,12 @@ jobs:
         env:
           TASKS: ${{ steps.tasks.outputs.tasks }}
         run: |
-          # gcloud rechaza un --args con un valor repetido en la lista (ITSC-232:
-          # to == from; ITSC-280: series_start == from). Cada opción va como una
-          # sola pieza --opción=valor, así dos meses iguales no chocan. Aun así,
-          # --to se omite si es igual a from: el CLI de la capa asume to = from
-          # cuando falta, y el de l2-monthly rechaza --to.
-          args="--mode,${MODE}"
-          if [[ -n "$FROM" ]]; then
-            args="${args},--from=${FROM}"
-          fi
-          if [[ -n "$TO" && "$TO" != "$FROM" ]]; then
-            args="${args},--to=${TO}"
-          fi
-          if [[ "$FORCE" == "true" ]]; then
-            args="${args},--force"
-          fi
-          if [[ -n "$SERIES_START" ]]; then
-            args="${args},--series-start=${SERIES_START}"
-          fi
+          # run-job-args.sh arma los argumentos (ITSC-292). Semántica de to:
+          # en L1 y l2-monthly se omite si es igual a from (la CLI asume
+          # to = from; la de l2-monthly rechaza --to). En l2-backfill siempre
+          # se pasa: to vacío = hasta el último mes cerrado de L1; to = from =
+          # un solo mes.
+          args="$(.github/scripts/run-job-args.sh "$JOB" "$FROM" "$TO" "$FORCE" "$SERIES_START")"
           # --args reemplaza los argumentos del contenedor, no el ENTRYPOINT.
           # Con --format, gcloud imprime el nombre de la ejecución al terminar.
           inicio="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
