@@ -6,6 +6,7 @@ usa el detector.
 """
 
 import logging
+import re
 import time
 from collections import deque
 from collections.abc import Iterator
@@ -81,6 +82,30 @@ def consolidated_path(
         f"{root.rstrip('/')}/provider={provider}/market={market}/asset={asset}"
         f"/year={year:04d}/month={month:02d}/{CONSOLIDATED}"
     )
+
+
+_CONSOLIDATED = re.compile(
+    rf"/year=(\d{{4}})/month=(\d{{2}})/{re.escape(CONSOLIDATED)}$"
+)
+
+
+def last_consolidated(
+    root: str, provider: str, market: str, asset: str
+) -> tuple[int, int] | None:
+    """El último mes (año, mes) con `consolidated.parquet` en la landing, o `None`.
+
+    Un solo listado recursivo del activo. Los provisionales no cuentan
+    (ADR-L2-09): un mes con solo `provisional-day=DD.parquet` no está cerrado.
+    """
+    prefix = f"{root.rstrip('/')}/provider={provider}/market={market}/asset={asset}"
+    fs, resolved = resolve_fs(prefix)
+    selector = pafs.FileSelector(resolved, recursive=True, allow_not_found=True)
+    months = (
+        (int(match[1]), int(match[2]))
+        for info in fs.get_file_info(selector)
+        if (match := _CONSOLIDATED.search(info.path))
+    )
+    return max(months, default=None)
 
 
 def _missing(fs: pafs.FileSystem, path: str, resolved: str) -> LandingError:

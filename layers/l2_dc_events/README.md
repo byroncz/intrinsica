@@ -14,8 +14,9 @@ Parquet de L2"). CI construye su imagen (`Dockerfile`) y le corre el humo
 ```bash
 export L2_LANDING_ROOT=... L2_EVENTS_ROOT=... L2_DQ_ROOT=...   # local o gs://
 export L2_SERIES_START=2020-01                                   # o --series-start
-uv run python -m l2_dc_events --mode backfill --from 2020-01 [--to 2020-03] [--force] [--asset BTCUSDT]
+uv run python -m l2_dc_events --mode backfill [--from 2020-01] [--to 2020-03] [--force] [--thetas 0.00010000,...] [--asset BTCUSDT]
 uv run python -m l2_dc_events --mode monthly [--from 2020-04]
+export L2_THETAS_URI=gs://<proyecto>-manifest/l2/thetas.yaml     # o --thetas-uri; sin él, la semilla
 ```
 
 - `L2_LANDING_ROOT` es la raíz que escribió L1 (la ruta hive va debajo);
@@ -28,29 +29,46 @@ uv run python -m l2_dc_events --mode monthly [--from 2020-04]
   variable, el proceso termina con código 2, en los dos modos. Al reanudar
   desde un mes intermedio sigue siendo el de la serie, no el de `--from`. Un
   rango que arranca antes de la serie termina con código 2.
-- **`--mode backfill`** exige `--from` y procesa `[--from, --to]` (un solo mes
-  si falta `--to`) **en orden y en un solo proceso**: cada mes lee el
-  carry-over que el anterior acaba de escribir (TRD-L2 §8.2). Por eso corre en
-  **una sola tarea**: con `CLOUD_RUN_TASK_INDEX` distinto de 0 termina con
-  código 2 (el job de Cloud Run corre en una sola tarea, nunca como task
-  array).
-- **Reanudación (RF-L2-09).** El rango arranca en el primer mes de
-  `[--from, --to]` al que le falte a algún θ un `carry_over.parquet` válido
+- **`--mode backfill`** recorre `[--from, --to]` **en orden y en un solo
+  proceso**: cada mes lee el carry-over que el anterior acaba de escribir
+  (TRD-L2 §8.2). Por eso corre en **una sola tarea**: con
+  `CLOUD_RUN_TASK_INDEX` distinto de 0 termina con código 2 (el job de Cloud
+  Run corre en una sola tarea, nunca como task array). **`--from`** es
+  opcional y por defecto es `--series-start`: la frontera de cada θ decide
+  desde dónde avanza. **`--to`** por defecto es el último mes con
+  `consolidated.parquet` en L1 (nunca provisionales); si L1 no tiene ninguno,
+  termina con código 1.
+- **Frontera por θ (RF-L2-09).** Antes de procesar, la unidad calcula la
+  frontera de cada θ del catálogo: el último mes de su cadena de carry-over,
+  contigua desde `--series-start` y con un `carry_over.parquet` válido
   (existe, de la `state_version` de la imagen, con el esquema y el θ de su
-  partición); los anteriores se saltan con una línea de log. Desde ahí procesa
-  **todos** los meses en orden aunque ya tengan salida: así un mes escrito en
-  frío por la sonda se reescribe encadenado. Reprocesar es idempotente
-  (RF-L2-08). **`--force`** arranca en `--from` y reprocesa todo el rango. Si
-  todos los meses tienen carry-over, no hace nada y sale con 0.
+  partición; si el último no lo es, retrocede al anterior). Sale de **un solo
+  listado** de `L2_EVENTS_ROOT` más la lectura del carry-over de la frontera de
+  cada θ, no de listar partición por partición. La corrida deja una línea
+  `θ=<t> frontera=<YYYY-MM>` por θ. Un θ sin frontera arranca en
+  `--series-start`.
+- **Un mes se lee una sola vez para todos los θ que lo necesitan.** En cada
+  mes el fan-out lleva solo los θ cuya frontera es anterior; un mes que ningún
+  θ necesita se salta **sin leer L1** (línea de log `ningún θ la necesita`). Con
+  el catálogo sin cambios y todo al día, la corrida termina en segundos y no
+  escribe. Reprocesar es idempotente (RF-L2-08).
+- **`--force`** ignora la frontera: reprocesa todo `[--from, --to]` para los θ
+  elegidos. **`--thetas`** (decimales como en la ruta de la partición, p. ej.
+  `0.00010000,0.00031313`) acota la corrida a un subconjunto del catálogo; uno
+  que no esté en el catálogo termina con código 2.
 - **Un fallo detiene el rango.** Si el mes M falla (entrada ausente, carry-over
   que falta o de otra versión), los meses siguientes no se tocan y el proceso
   termina con código 1 y su hallazgo en el lago de DQ. Corregida la causa,
   relanzar el mismo comando retoma desde M.
 - **`--mode monthly`** procesa un solo mes: `--from`, y sin él el mes anterior
   al actual en UTC, igual que `monthly-close` de L1, así que corre sin
-  argumentos con `L2_SERIES_START` fijada. No admite `--to`.
+  argumentos con `L2_SERIES_START` fijada. No admite `--to`. Lleva solo los θ
+  cuya frontera es el mes previo. Un θ **rezagado** (agregado al catálogo sin
+  backfill) no se procesa: deja el hallazgo `theta_behind_frontier` con su
+  frontera y la unidad no falla. Si ningún θ está listo, termina con código 0
+  sin leer L1.
 - Uso inválido (argumentos, raíces faltantes, `CLOUD_RUN_TASK_INDEX` ≠ 0,
-  serie sin declarar) termina con código 2. Una entrada ausente o un
+  serie sin declarar, catálogo de θ inválido) termina con código 2. Una entrada ausente o un
   carry-over que falta o es de otra versión, con código 1.
 
 Para producir la landing de un mes en local con L1 (los ZIP viven en RAM: un
@@ -69,10 +87,11 @@ uv run python -m l2_dc_events --mode backfill --from 2020-01 --series-start 2020
    o solo hay `provisional-day=DD.parquet`, emite `input_missing` o
    `input_provisional_only` y falla.
 2. **Compuerta de carry-over.** Si el mes no es el primero de la serie, carga
-   el `carry_over.parquet` del mes anterior de cada uno de los 50 θ. Si a
-   alguno le falta, o es de otra `state_version`, emite un hallazgo por cada
-   uno y aborta la unidad **sin escribir nada** (fail-closed, ADR-L2-08): los
-   50 θ comparten la lectura del mes, así que uno atrasado los detiene a todos.
+   el `carry_over.parquet` del mes anterior de cada θ que el mes procesa (los
+   que no han llegado a él, según su frontera). Si a alguno le falta, o es de
+   otra `state_version`, emite un hallazgo por cada uno y aborta la unidad
+   **sin escribir nada** (fail-closed, ADR-L2-08): los θ del mes comparten la
+   lectura, así que uno atrasado los detiene a todos.
 3. Lee el mes **row group por row group**, solo `price`, `transact_time` y
    `agg_trade_id` (`landing.py`). Cada lote va a los 50 θ como buffers de Arrow
    sin copia, en tramos de 65 536 ticks (`FEED_TICKS`), y se suelta antes de
@@ -111,19 +130,60 @@ hallazgos"):
 | `check_type` | Cuándo |
 |---|---|
 | `input_missing`, `input_provisional_only` | El mes no tiene consolidado |
-| `carry_over_missing`, `carry_over_version_mismatch`, `theta_config_drift` | La compuerta aborta la unidad; uno por θ afectado |
+| `carry_over_missing`, `carry_over_version_mismatch` | La compuerta aborta la unidad; uno por θ afectado |
+| `theta_catalog_invalid` | El catálogo de θ no existe o incumple §7.3: código 2, sin escribir datos |
+| `theta_behind_frontier` | `monthly` no procesó un θ rezagado (warning); no falla la unidad |
+| `theta_config_drift` | Informativo (`info`): el lago tiene un θ que el catálogo ya no incluye |
 | `dc_zero_tick_discarded` | La guarda de §9.1 descartó eventos (esperado: cero, nunca se emite) |
 | `events_summary` | Uno por θ al terminar: eventos escritos y `content_hash` de ambos archivos |
 | `unit_timing` | Uno por mes al terminar: pared y tiempo por fase, límite efectivo de CPU y bytes leídos (ITSC-289) |
 
-## Los 50 θ
+## El catálogo de θ
 
-[`src/l2_dc_events/config/thetas.yaml`](src/l2_dc_events/config/thetas.yaml): los enteros `round(θ × 10⁸)` de la
-regla log-espaciada de ADR-L2-10. Los valores, no la fórmula, son la fuente de
-verdad, y `tests/test_l2_thetas.py` verifica que siguen la regla (con 60
-dígitos de precisión, para que ningún redondeo de float decida un empate). El
-archivo viaja dentro del paquete y se resuelve relativo al módulo, así que
-sirve igual con `uv run` que en la imagen, donde queda horneado (TRD-L2 §11).
+θ es un parámetro del experimento, no código (TRD-L2 §7.3). La fuente de verdad
+en la nube es `gs://<proyecto>-manifest/l2/thetas.yaml` (`L2_THETAS_URI` o
+`--thetas-uri`); sin ninguno de los dos, la CLI usa la **semilla**
+[`src/l2_dc_events/config/thetas.yaml`](src/l2_dc_events/config/thetas.yaml)
+(local y pruebas), con los enteros `round(θ × 10⁸)` de la regla log-espaciada de
+ADR-L2-10. Los valores, no la fórmula, son la fuente de verdad, y
+`tests/test_l2_thetas.py` verifica que la semilla sigue la regla (con 60 dígitos
+de precisión, para que ningún redondeo de float decida un empate). La semilla
+viaja dentro del paquete y se resuelve relativo al módulo, así que sirve igual
+con `uv run` que en la imagen.
+
+Antes de tocar nada, la CLI valida el catálogo: `scale: 100000000`, una lista de
+enteros **únicos** y dentro de **[10⁻⁴, 5·10⁻²]** (`10000 ≤ θ ≤ 5000000`), en
+cualquier orden. Si falla, termina con código 2 y deja el hallazgo
+`theta_catalog_invalid` en `L2_DQ_ROOT`, sin escribir datos.
+
+### Cómo agregar θ
+
+Sin PR y sin reprocesar los θ que ya existen. La trazabilidad la dan la
+partición `theta=<t>`, la columna `theta`, `image_version` y el versionado del
+bucket.
+
+1. Desde Cloud Shell, baja el catálogo, agrega los θ como `round(θ × 10⁸)` (por
+   ejemplo `θ = 0,0003` es `30000`) y súbelo de nuevo. La primera vez, el objeto
+   se crea a partir de la semilla:
+
+   ```bash
+   gcloud storage cp gs://<proyecto>-manifest/l2/thetas.yaml thetas.yaml   # la primera vez: la semilla del repo
+   $EDITOR thetas.yaml
+   gcloud storage cp thetas.yaml gs://<proyecto>-manifest/l2/thetas.yaml
+   ```
+
+2. Lanza el job `l2-backfill` **sin `--from` ni `--to`**. Los θ que ya llegaron
+   al último mes cerrado de L1 se saltan; los nuevos recorren la serie desde
+   `--series-start`, un mes a la vez y leyendo cada mes de L1 una sola vez.
+3. Mientras el backfill no termina, `monthly` no avanza los θ nuevos: los deja
+   en `theta_behind_frontier` (warning) y sigue con los demás.
+
+**Quitar un θ no borra nada.** L2 deja de avanzarlo y cada corrida lo reporta
+como `theta_config_drift` (`info`). Para forzar solo un subconjunto del
+catálogo, `--thetas`; para reprocesarlo, `--force`.
+
+**Escala:** los eventos los dominan los θ pequeños. Agregar θ grandes es casi
+gratis; agregar θ diminutos multiplica el volumen de `dc-events`.
 
 ## Resultado: un mes real de punta a punta (ITSC-244)
 
@@ -394,7 +454,8 @@ de DQ y la línea con `content_hash`.
 
 `uv run pytest layers/l2_dc_events`:
 
-- `test_l2_thetas.py`: los θ contra la regla del TRD.
+- `test_l2_thetas.py`: la semilla contra la regla del TRD y la validación del catálogo (único, entero, rango).
+- `test_l2_catalog.py` (ITSC-285): catálogo inválido, un θ nuevo sobre un lago de 3 meses y 2 θ (solo el nuevo se procesa, los viejos no cambian), todo al día sin escribir, meses sin θ pendiente, hueco en la cadena, `--to` por defecto, `--thetas`, drift informativo y `monthly` con un θ rezagado.
 - `test_l2_landing.py`: el lector (un lote por row group, sin materializar la
   tabla).
 - `test_l2_pipeline.py`: los eventos a través del lector y el binding contra
@@ -412,7 +473,7 @@ de DQ y la línea con `content_hash`.
 - `test_l2_output_contract_doc.py`: que las tablas de `docs/data-contracts.md`
   coincidan con `EVENTS_SCHEMA` y `CARRY_OVER_SCHEMA`.
 - `test_l2_cli.py`: el CLI: el rango encadenado en un proceso, la reanudación
-  y `--force`, que un fallo detenga el rango, el índice de tarea distinto de 0,
+  por frontera y `--force`, que un fallo detenga el rango, el índice de tarea distinto de 0,
   `monthly` por defecto, `L2_SERIES_START` y el fail-closed.
 - `test_l2_cpu.py` y `test_l2_timing.py`: el límite efectivo de CPU (cuota del
   cgroup v1 y v2, jerarquía, sin cuota), los hilos y escritores que de él salen

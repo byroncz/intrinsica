@@ -295,8 +295,12 @@ anterior falla porque el tag aún no existe. El plan debe mostrar
 Instancia del módulo `layer` con dos modos: `l2-backfill` y `l2-monthly`, cada
 uno con su service account. Lee la landing de L1 (`roles/storage.objectViewer`
 bajo `l1/`) y escribe en `dc-events` y `dq-findings` (`roles/storage.objectUser`
-bajo `l2/`). No toca `manifest`: L2 no escribe manifiesto (TRD-L2 §7). No
-tiene scheduler propio: la encadena el workflow de L1 (ITSC-283).
+bajo `l2/`). También lee el catálogo de θ, `manifest/l2/thetas.yaml`
+(`roles/storage.objectViewer` bajo `l2/`; la variable `L2_THETAS_URI` apunta
+a él, TRD-L2 §7.3): solo lectura, porque lo edita el humano. Antes de la
+primera corrida hay que subirlo una vez desde Cloud Shell (ver "Cómo agregar
+θ" en el [README de la capa](../layers/l2_dc_events/README.md)). No tiene
+scheduler propio: la encadena el workflow de L1 (ITSC-283).
 
 Orden de apply, todo por el humano:
 

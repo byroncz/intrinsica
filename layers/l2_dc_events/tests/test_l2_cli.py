@@ -114,7 +114,7 @@ def test_backfill_resumes_from_the_first_incomplete_month(
     caplog.clear()
     with caplog.at_level(logging.INFO):
         assert main(argv, _env(tmp_path)) == 0
-    assert "unidad binance/spot/BTCUSDT/2017-08: carry-over completo" in caplog.text
+    assert "unidad binance/spot/BTCUSDT/2017-08: ningún θ la necesita" in caplog.text
     assert "sonda: unit=binance/spot/BTCUSDT/2017-08" not in caplog.text
     assert "sonda: unit=binance/spot/BTCUSDT/2017-09" in caplog.text
     assert "sonda: unit=binance/spot/BTCUSDT/2017-10" in caplog.text
@@ -143,11 +143,14 @@ def test_an_invalid_carry_over_counts_as_missing(
     _three_months(write_month, fixture_ticks)
     argv = [*BACKFILL, "--from", "2017-08", "--to", "2017-09"]
     assert main(argv, _env(tmp_path)) == 0
-    _carry_overs(tmp_path, 2017, 8)[0].write_bytes(b"no es parquet")
+    # La frontera de ese θ retrocede a agosto: solo septiembre se reprocesa.
+    _carry_overs(tmp_path, 2017, 9)[0].write_bytes(b"no es parquet")
     caplog.clear()
     with caplog.at_level(logging.INFO):
         assert main(argv, _env(tmp_path)) == 0
-    assert "sonda: unit=binance/spot/BTCUSDT/2017-08" in caplog.text
+    assert "sonda: unit=binance/spot/BTCUSDT/2017-08" not in caplog.text
+    assert "sonda: unit=binance/spot/BTCUSDT/2017-09" in caplog.text
+    assert len(_carry_overs(tmp_path, 2017, 9)) == 50
 
 
 def test_backfill_with_everything_done_does_nothing(
@@ -160,7 +163,7 @@ def test_backfill_with_everything_done_does_nothing(
     with caplog.at_level(logging.INFO):
         assert main(argv, _env(tmp_path)) == 0
     assert "sonda:" not in caplog.text
-    assert "todos los meses del rango tienen carry-over" in caplog.text
+    assert "los 50 θ están al día" in caplog.text
 
 
 def test_force_starts_at_from(tmp_path, fixture_ticks, write_month, caplog):
@@ -231,11 +234,19 @@ def test_monthly_defaults_to_the_previous_month(
     assert "sonda: unit=binance/spot/BTCUSDT/2017-09 mode=monthly" in caplog.text
 
 
-def test_monthly_across_the_year_boundary(tmp_path, monkeypatch, capsys):
+def test_monthly_across_the_year_boundary(
+    tmp_path, fixture_ticks, write_month, monkeypatch, caplog
+):
+    for month in (11, 12):
+        write_month(fixture_ticks, row_group_size=1_000, year=2017, month=month)
+    series = ["--series-start", "2017-11"]
+    assert main([*series, "--mode", "backfill", "--to", "2017-11"], _env(tmp_path)) == 0
+    # Hoy es 2018-01-02: el mes anterior es 2017-12 y su carry-over previo, 2017-11.
     monkeypatch.setattr(cli, "_today", lambda: date(2018, 1, 2))
-    argv = ["--mode", "monthly", "--series-start", "2017-08"]
-    assert main(argv, _env(tmp_path)) == 1
-    assert "year=2017/month=12" in capsys.readouterr().err
+    with caplog.at_level(logging.INFO):
+        assert main([*series, "--mode", "monthly"], _env(tmp_path)) == 0
+    assert "sonda: unit=binance/spot/BTCUSDT/2017-12 mode=monthly" in caplog.text
+    assert len(_carry_overs(tmp_path, 2017, 12)) == 50
 
 
 def test_monthly_takes_the_series_start_from_the_environment(
@@ -326,4 +337,4 @@ def test_main_rejects_a_bad_task_index(tmp_path, index):
 def test_main_fails_without_a_consolidated_month(tmp_path, capsys):
     argv = [*SERIES, "--mode", "backfill", "--from", "2017-08"]
     assert main(argv, _env(tmp_path)) == 1
-    assert "no ha publicado el mes" in capsys.readouterr().err
+    assert "L1 no ha publicado ningún mes" in capsys.readouterr().err

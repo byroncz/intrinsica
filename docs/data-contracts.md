@@ -327,19 +327,37 @@ documentan aquí, con su porqué:
   esperado, sigue abortando con `ValueError`, como antes de ITSC-231.
 
 `check_type` de L2 (`layer = l2`, `stage = canonical`, `mode` `backfill` o
-`monthly`; el θ viaja en `details.theta`, no en una columna). Los cuatro
-primeros son los de [TRD-L2 §9.3](TRD/l2.md#93-tipos-de-chequeo-check_type);
-los tres últimos los sumó ITSC-244, cada uno con su porqué:
+`monthly`; el θ viaja en `details.theta`, no en una columna). Son los de
+[TRD-L2 §9.3](TRD/l2.md#93-tipos-de-chequeo-check_type). Los dos de catálogo
+(`theta_catalog_invalid` y `theta_behind_frontier`) son de ITSC-285 y
+`theta_config_drift` cambió de sentido en esa misma card:
 
 - **`carry_over_missing`** (`error`, `fail`): mes distinto del primero de la
   serie sin el carry-over del mes anterior. La unidad aborta y emite uno por θ
   afectado, con `details.expected_path`.
 - **`carry_over_version_mismatch`** (`error`, `fail`): el `state_version` del
   carry-over no es el de la imagen (`details.found`, `details.expected`), o el
-  archivo no tiene el esquema de esa versión.
-- **`theta_config_drift`** (`warning`, `fail`): la columna `theta` de un
-  carry-over no coincide con la partición `theta=<t>` donde está. Como el
-  estado no se puede usar, la unidad aborta igual que con los dos anteriores.
+  archivo no tiene el esquema de esa versión. También lo emite un
+  carry-over cuya columna `theta` no coincide con la partición `theta=<t>`
+  donde está (`details.reason`): el estado no se puede usar y la unidad aborta.
+- **`theta_config_drift`** (`info`, `pass`): el lago tiene particiones de un θ
+  que ya no está en el catálogo (`details.theta`, `details.months`,
+  `details.last_month`; `metric_value` = meses). Informa, nunca es error:
+  quitar un θ del catálogo no borra nada. Desde ITSC-285 ya no significa una
+  columna `theta` distinta de la partición (ahora es
+  `carry_over_version_mismatch`).
+- **`theta_catalog_invalid`** (`error`, `fail`): el catálogo de θ
+  (`L2_THETAS_URI`, [TRD-L2 §7.3](TRD/l2.md#73-el-catálogo-de-θ)) no existe, no
+  se puede leer o incumple su contrato (`scale` ≠ 10⁸, θ no entero, repetido
+  o fuera de [10⁻⁴, 5·10⁻²]). `details.source` es el objeto y
+  `details.problems`, la lista de incumplimientos. La corrida termina con
+  código 2 sin escribir datos; `year` y `month` son los del primer mes que
+  iba a procesar.
+- **`theta_behind_frontier`** (`warning`, `fail`): `monthly` no procesó un θ
+  porque su frontera no es el mes previo (se agregó al catálogo sin backfill,
+  o su cadena tiene un hueco). `details.theta` y `details.frontier`
+  (`YYYY-MM`, o `null` si el θ no tiene carry-over). No falla la unidad: el
+  resto de los θ avanza. Se resuelve lanzando `l2-backfill` sin `--from`.
 - **`dc_zero_tick_discarded`** (`error`, `fail`): la guarda de "un DC tiene al
   menos un tick" descartó eventos de un θ. Con el instante de confirmación
   atómico se espera cero: solo se emite con conteo mayor (`metric_value`) y

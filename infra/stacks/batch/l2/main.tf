@@ -13,10 +13,12 @@ locals {
   data    = data.terraform_remote_state.data.outputs
   buckets = local.data.buckets
 
-  # TRD-L2 §7: L2 lee la landing de L1 y escribe eventos y hallazgos de DQ. No
-  # escribe manifiesto, por eso no pide nada sobre manifest.
+  # TRD-L2 §7: L2 lee la landing de L1 y el catálogo de θ (manifest/l2/thetas.yaml,
+  # TRD-L2 §7.3), y escribe eventos y hallazgos de DQ. El catálogo lo edita el
+  # humano, así que la cuenta solo lo lee: objectViewer, nunca escritura.
   access = {
     (local.buckets["landing"])     = { role = "roles/storage.objectViewer", prefixes = ["l1/"] }
+    (local.buckets["manifest"])    = { role = "roles/storage.objectViewer", prefixes = ["l2/"] }
     (local.buckets["dc-events"])   = { role = "roles/storage.objectUser", prefixes = ["l2/"] }
     (local.buckets["dq-findings"]) = { role = "roles/storage.objectUser", prefixes = ["l2/"] }
   }
@@ -69,6 +71,10 @@ module "layer" {
     L2_DQ_ROOT      = "gs://${local.buckets["dq-findings"]}/l2"
     # Primer mes de la serie: el único que se procesa sin carry-over previo.
     L2_SERIES_START = "2017-08"
+    # Catálogo de θ (TRD-L2 §7.3): agregar un θ es editar este objeto y lanzar
+    # l2-backfill sin from; no requiere PR ni apply. Hay que subirlo una vez,
+    # a partir de config/thetas.yaml, antes de la primera corrida.
+    L2_THETAS_URI = "gs://${local.buckets["manifest"]}/l2/thetas.yaml"
   }
 
   # Una service account por modo. Ambos modos escriben lo mismo; la separación

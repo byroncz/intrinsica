@@ -11,18 +11,16 @@ import time
 import uuid
 from collections.abc import Mapping, Sequence
 from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 
+from l2_dc_events import findings
 from l2_dc_events.carry import CarryOverError
-from l2_dc_events.landing import READ_AHEAD, LandingError
+from l2_dc_events.frontier import frontiers, label, list_carry_overs, ordinal
+from l2_dc_events.landing import READ_AHEAD, LandingError, last_consolidated
 from l2_dc_events.memory import tune_allocators
-from l2_dc_events.pipeline import (
-    Result,
-    RunContext,
-    Unit,
-    carry_over_complete,
-    process_unit,
-)
+from l2_dc_events.pipeline import Result, RunContext, Unit, process_unit
+from l2_dc_events.thetas import THETAS_CONFIG, ThetasError, load_thetas
 
 MODES = ("backfill", "monthly")
 EXIT_USAGE = 2
@@ -124,23 +122,78 @@ def _require_single_task(env: Mapping[str, str]) -> None:
         )
 
 
-def _pending_range(
-    months: list[tuple[int, int]], ctx: RunContext, asset: str, force: bool
-) -> list[tuple[int, int]]:
-    """Desde dónde procesa el backfill (RF-L2-09).
+def _catalog(
+    args: argparse.Namespace, env: Mapping[str, str], ctx: RunContext, reference: Unit
+) -> list[int]:
+    """El catálogo de θ, validado antes de tocar nada (TRD-L2 §7.3).
 
-    Arranca en el primer mes con algún θ sin `carry_over.parquet` válido y desde
-    ahí sigue con todos, tengan salida o no: un mes escrito en frío por la sonda
-    se reescribe encadenado. Con `force`, arranca en el primero.
+    Si no se puede leer o no cumple el contrato, deja el hallazgo
+    `theta_catalog_invalid` y termina con código 2 sin escribir salida.
     """
-    if force:
-        return months
-    for i, (year, month) in enumerate(months):
-        unit = Unit(year, month, asset=asset)
-        if not carry_over_complete(unit, ctx):
-            return months[i:]
-        logger.info("unidad %s: carry-over completo, se salta", unit)
-    return []
+    source = args.thetas_uri or env.get("L2_THETAS_URI") or THETAS_CONFIG
+    try:
+        return load_thetas(source)
+    except ThetasError as exc:
+        findings.emit(
+            ctx,
+            [
+                findings.theta_catalog_invalid(
+                    ctx, reference, source=exc.source, problems=exc.problems
+                )
+            ],
+        )
+        raise UsageError(f"catálogo de θ inválido: {exc}") from exc
+
+
+def _select(catalog: list[int], raw: str | None) -> list[int]:
+    """`--thetas` (decimales como en la ruta, p. ej. `0.00010000`) acota el catálogo."""
+    if raw is None:
+        return catalog
+    chosen = set()
+    for text in raw.split(","):
+        try:
+            scaled = Decimal(text.strip()).scaleb(8)
+            valid = scaled.is_finite() and scaled == scaled.to_integral_value()
+        except ArithmeticError:
+            valid = False
+        if not valid:
+            raise UsageError(f"--thetas: {text!r} no es un θ con a lo más 8 decimales")
+        if int(scaled) not in catalog:
+            raise UsageError(f"--thetas: {text.strip()} no está en el catálogo")
+        chosen.add(int(scaled))
+    return sorted(chosen)
+
+
+def _report_drift(
+    ctx: RunContext,
+    reference: Unit,
+    catalog: list[int],
+    listed: dict[int, set[int]],
+) -> None:
+    """Informa los θ con particiones en el lago que el catálogo ya no incluye.
+
+    Quitar un θ del catálogo no borra nada: es un hecho a la vista, no un error.
+    """
+    removed = sorted(set(listed) - set(catalog))
+    for theta in removed:
+        logger.info(
+            "θ=%d tiene %d meses en el lago y ya no está en el catálogo",
+            theta,
+            len(listed[theta]),
+        )
+    findings.emit(
+        ctx,
+        [
+            findings.theta_config_drift(
+                ctx,
+                reference,
+                theta=theta,
+                months=len(listed[theta]),
+                last_month=label(max(listed[theta])),
+            )
+            for theta in removed
+        ],
+    )
 
 
 def _log_probe(
@@ -184,12 +237,13 @@ def _log_probe(
     logger.info(line)
 
 
-def _run_unit(unit: Unit, ctx: RunContext) -> bool:
-    """Procesa un mes y deja su sonda. False si la entrada o el carry-over faltan."""
+def _run_unit(unit: Unit, ctx: RunContext, thetas: list[int]) -> bool:
+    """Procesa un mes para `thetas` y deja su sonda. False si la entrada o el
+    carry-over faltan."""
     started = time.monotonic()
     result = None
     try:
-        result = process_unit(unit, ctx)
+        result = process_unit(unit, ctx, thetas=thetas)
     except (LandingError, CarryOverError) as exc:
         print(f"l2_dc_events: {exc}", file=sys.stderr)
         return False
@@ -203,6 +257,92 @@ def _run_unit(unit: Unit, ctx: RunContext) -> bool:
     return True
 
 
+def _before(reached: int | None, n: int) -> bool:
+    """¿El θ, que llegó hasta `reached`, necesita el mes `n`?"""
+    return reached is None or reached < n
+
+
+def _backfill(
+    months: list[tuple[int, int]],
+    ctx: RunContext,
+    asset: str,
+    thetas: list[int],
+    frontier: dict[int, int | None],
+    force: bool,
+) -> int:
+    """Recorre `months` en orden; cada mes lleva solo los θ cuya frontera es anterior.
+
+    Un mes se procesa una sola vez para todos los θ que lo necesitan, y uno que
+    ningún θ necesita se salta sin leer L1. Con `force`, todos los θ de `thetas`
+    reprocesan todos los meses. Al terminar un mes, la frontera de sus θ es ese
+    mes. Un fallo detiene el rango; los siguientes no se tocan.
+    """
+    processed = 0
+    for year, month in months:
+        n = ordinal((year, month))
+        unit = Unit(year, month, asset=asset)
+        pending = [t for t in thetas if force or _before(frontier.get(t), n)]
+        if not pending:
+            logger.info("unidad %s: ningún θ la necesita, se salta", unit)
+            continue
+        # En orden y en este proceso: cada mes lee el carry-over que el anterior
+        # acaba de escribir.
+        if not _run_unit(unit, ctx, pending):
+            return 1
+        frontier.update(dict.fromkeys(pending, n))
+        processed += 1
+    if not processed:
+        logger.info("backfill: los %d θ están al día en el rango", len(thetas))
+    return 0
+
+
+def _monthly(
+    month: tuple[int, int],
+    ctx: RunContext,
+    asset: str,
+    thetas: list[int],
+    frontier: dict[int, int | None],
+) -> int:
+    """Procesa el mes solo para los θ cuya frontera es el mes previo.
+
+    Un θ que ya llegó al mes se salta (re-ejecutarlo daría los mismos archivos).
+    Uno rezagado (agregado sin backfill, o con un hueco) no se procesa: deja el
+    hallazgo `theta_behind_frontier` con su frontera y la unidad no falla.
+    """
+    n = ordinal(month)
+    unit = Unit(*month, asset=asset)
+    ready, behind = [], []
+    for theta in thetas:
+        reached = frontier[theta]
+        if reached is not None and reached >= n:
+            continue
+        # Sin frontera solo puede arrancar el primer mes de la serie.
+        if reached == n - 1 or (reached is None and ctx.series_start == month):
+            ready.append(theta)
+        else:
+            behind.append(theta)
+    for theta in behind:
+        logger.warning(
+            "unidad %s: θ=%d rezagado (frontera %s), no se procesa; lanzar backfill",
+            unit,
+            theta,
+            label(frontier[theta]),
+        )
+    findings.emit(
+        ctx,
+        [
+            findings.theta_behind_frontier(
+                ctx, unit, theta=theta, frontier=label(frontier[theta])
+            )
+            for theta in behind
+        ],
+    )
+    if not ready:
+        logger.info("unidad %s: ningún θ la necesita, se salta", unit)
+        return 0
+    return 0 if _run_unit(unit, ctx, ready) else 1
+
+
 def main(
     argv: Sequence[str] | None = None, env: Mapping[str, str] | None = None
 ) -> int:
@@ -213,10 +353,16 @@ def main(
         "--from",
         dest="from_",
         metavar="DESDE",
-        help="primer mes (YYYY-MM); obligatorio en backfill. En monthly, por "
-        "defecto el mes anterior al actual (UTC)",
+        help="primer mes (YYYY-MM). En backfill es opcional: sin él, la frontera "
+        "de cada θ decide desde dónde avanza (el piso es --series-start). En "
+        "monthly, por defecto el mes anterior al actual (UTC)",
     )
-    parser.add_argument("--to", metavar="HASTA", help="último mes; solo backfill")
+    parser.add_argument(
+        "--to",
+        metavar="HASTA",
+        help="último mes; solo backfill. Por defecto, el último mes con "
+        "consolidated.parquet en L1 (nunca provisionales)",
+    )
     parser.add_argument("--asset", default="BTCUSDT")
     parser.add_argument(
         "--series-start",
@@ -226,9 +372,22 @@ def main(
         "dos es un error: se declara, no se infiere",
     )
     parser.add_argument(
+        "--thetas-uri",
+        metavar="URI",
+        help="catálogo de θ (ruta local o gs://); si falta, L2_THETAS_URI, y sin "
+        "ninguno de los dos, la semilla del paquete (config/thetas.yaml)",
+    )
+    parser.add_argument(
+        "--thetas",
+        metavar="θ,θ,...",
+        help="acota la corrida a estos θ del catálogo, en decimal como en la ruta "
+        "de la partición (p. ej. 0.00010000,0.00031313)",
+    )
+    parser.add_argument(
         "--force",
         action="store_true",
-        help="backfill: arranca en --from aunque los meses ya tengan carry-over",
+        help="backfill: reprocesa el rango completo aunque los θ ya tengan "
+        "carry-over (ignora la frontera)",
     )
     try:
         args = parser.parse_args(argv)
@@ -238,38 +397,67 @@ def main(
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
     try:
         _require_single_task(env)
-        if args.from_ is None:
-            if args.mode != "monthly":
-                raise UsageError("--from es obligatorio (solo monthly lo omite)")
-            # Se resuelve aquí para que resolve_range siga pura.
-            args.from_ = previous_month(_today())
-        if args.mode == "monthly" and args.to is not None:
-            raise UsageError("monthly procesa un solo mes: no admite --to")
-        months = resolve_range(args.from_, args.to)
         declared = args.series_start or env.get("L2_SERIES_START")
         if not declared:
             raise UsageError(
                 "falta --series-start (o L2_SERIES_START): el primer mes se declara"
             )
         series_start = _parse(declared)
-        if months[0] < series_start:
+        if args.mode == "monthly":
+            if args.to is not None:
+                raise UsageError("monthly procesa un solo mes: no admite --to")
+            # Se resuelve aquí para que resolve_range siga pura.
+            first = args.from_ or previous_month(_today())
+        else:
+            first = args.from_ or declared
+        start = resolve_range(first, args.to)[0]
+        if start < series_start:
             raise UsageError(
-                f"la unidad {months[0][0]:04d}-{months[0][1]:02d} es anterior a "
+                f"la unidad {start[0]:04d}-{start[1]:02d} es anterior a "
                 f"la serie ({declared})"
             )
         ctx = _context(args.mode, series_start, env)
+        reference = Unit(*start, asset=args.asset)
+        catalog = _catalog(args, env, ctx, reference)
+        thetas = _select(catalog, args.thetas)
     except UsageError as exc:
         print(f"l2_dc_events: {exc}", file=sys.stderr)
         return EXIT_USAGE
 
     tune_allocators()
-    if args.mode == "backfill":
-        months = _pending_range(months, ctx, args.asset, args.force)
-        if not months:
-            logger.info("backfill: todos los meses del rango tienen carry-over")
-    # En orden y en este proceso: cada mes lee el carry-over que el anterior
-    # acaba de escribir. Un fallo detiene el rango; los siguientes no se tocan.
-    for year, month in months:
-        if not _run_unit(Unit(year, month, asset=args.asset), ctx):
+    listed = list_carry_overs(str(ctx.events_root), reference)
+    _report_drift(ctx, reference, catalog, listed)
+    forced = args.force and args.mode == "backfill"
+    frontier = (
+        {}
+        if forced
+        else frontiers(thetas, listed, series_start, str(ctx.events_root), reference)
+    )
+    for theta in thetas:
+        logger.info("θ=%d frontera=%s", theta, label(frontier.get(theta)))
+
+    if args.mode == "monthly":
+        return _monthly(start, ctx, args.asset, thetas, frontier)
+
+    if args.to is None:
+        last = last_consolidated(
+            str(ctx.landing_root), reference.provider, reference.market, args.asset
+        )
+        if last is None:
+            print(
+                f"l2_dc_events: L1 no ha publicado ningún mes de {args.asset} "
+                f"en {ctx.landing_root}",
+                file=sys.stderr,
+            )
             return 1
-    return 0
+        args.to = f"{last[0]:04d}-{last[1]:02d}"
+        if last < start:
+            logger.info(
+                "backfill: el último mes cerrado de L1 es %s, anterior a %s; "
+                "no hay nada que procesar",
+                args.to,
+                first,
+            )
+            return 0
+    months = resolve_range(first, args.to)
+    return _backfill(months, ctx, args.asset, thetas, frontier, forced)
