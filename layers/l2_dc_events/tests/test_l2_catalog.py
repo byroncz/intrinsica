@@ -396,6 +396,24 @@ def test_monthly_with_every_theta_behind_does_not_read_l1_and_fails(
     assert not list((tmp_path / "events").rglob("*.parquet"))
 
 
+def test_monthly_with_a_theta_already_at_the_month_and_another_behind_does_not_fail(
+    tmp_path, fixture_ticks, write_month, monkeypatch, caplog
+):
+    _three_months(write_month, fixture_ticks)
+    assert _run(tmp_path, *BACKFILL, "--thetas-uri", _catalog(tmp_path, OLD[0])) == 0
+    monkeypatch.setattr(cli, "_today", lambda: date(2017, 11, 2))
+    catalog = _catalog(tmp_path, OLD[0], NEW, name="mixed.yaml")
+    with caplog.at_level(logging.INFO):
+        # El mes ya corrió para OLD[0]; NEW no tiene carry-over: nada se detuvo.
+        assert (
+            _run(tmp_path, "--mode", "monthly", *SERIES, "--thetas-uri", catalog) == 0
+        )
+    assert "ningún θ está listo" not in caplog.text
+    (row,) = _findings(tmp_path, "theta_behind_frontier")
+    assert json.loads(row["details"]) == {"theta": NEW, "frontier": None}
+    assert not _partition(tmp_path, NEW, 10).exists()
+
+
 def test_monthly_does_not_repeat_a_month_a_theta_already_has(
     tmp_path, fixture_ticks, write_month, monkeypatch, caplog
 ):

@@ -308,15 +308,17 @@ def _monthly(
     Un θ que ya llegó al mes se salta (re-ejecutarlo daría los mismos archivos).
     Uno rezagado (agregado sin backfill, o con un hueco) no se procesa: deja el
     hallazgo `theta_behind_frontier` con su frontera y la unidad no falla, salvo
-    que ninguno esté listo: con rezagados y sin nada que avanzar termina con
-    código 1 (fail-closed), para que un mes perdido no detenga a L2 en silencio.
+    que ninguno esté listo ni tenga ya el mes: con rezagados y sin nada que
+    avanzar termina con código 1 (fail-closed), para que un mes perdido no
+    detenga a L2 en silencio.
     """
     n = ordinal(month)
     unit = Unit(*month, asset=asset)
-    ready, behind = [], []
+    ready, behind, done = [], [], []
     for theta in thetas:
         reached = frontier[theta]
         if reached is not None and reached >= n:
+            done.append(theta)
             continue
         # Sin frontera solo puede arrancar el primer mes de la serie.
         if reached == n - 1 or (reached is None and ctx.series_start == month):
@@ -340,7 +342,8 @@ def _monthly(
         ],
     )
     if not ready:
-        if behind:
+        # Con algún θ ya al día el mes se procesó: los rezagados no son un mes perdido.
+        if behind and not done:
             logger.error(
                 "unidad %s: ningún θ está listo y %d rezagados; lanzar backfill",
                 unit,

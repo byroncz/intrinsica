@@ -66,9 +66,10 @@ export L2_THETAS_URI=gs://<proyecto>-manifest/l2/thetas.yaml     # o --thetas-ur
   argumentos con `L2_SERIES_START` fijada. No admite `--to`. Lleva solo los θ
   cuya frontera es el mes previo. Un θ **rezagado** (agregado al catálogo sin
   backfill) no se procesa: deja el hallazgo `theta_behind_frontier` con su
-  frontera y la unidad no falla mientras otros θ avancen. Si ningún θ está listo
-  y hay rezagados, termina con código 1 sin leer L1 (por ejemplo, tras un
-  `monthly` perdido); si todos ya tienen el mes, con código 0.
+  frontera y la unidad no falla mientras otros θ avancen o ya tengan el mes. Si
+  ningún θ está listo, ninguno tiene el mes y hay rezagados, termina con código 1
+  sin leer L1 (por ejemplo, tras un `monthly` perdido); si todos ya tienen el
+  mes, o alguno lo tiene y otros están rezagados, con código 0.
 - Uso inválido (argumentos, raíces faltantes, `CLOUD_RUN_TASK_INDEX` ≠ 0,
   serie sin declarar, catálogo de θ inválido) termina con código 2. Una entrada ausente o un
   carry-over que falta o es de otra versión, con código 1.
