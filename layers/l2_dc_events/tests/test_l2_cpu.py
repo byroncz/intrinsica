@@ -1,3 +1,4 @@
+import pytest
 from l2_dc_events.cpu import CpuLimit, cpu_limit, throttled_s
 
 
@@ -75,3 +76,59 @@ def test_throttled_seconds_come_from_cpu_stat(tmp_path):
 
 def test_throttled_seconds_are_unknown_without_cpu_stat(tmp_path):
     assert throttled_s(tmp_path, tmp_path / "no-existe") is None
+
+
+def test_cgroup_v1_reads_the_quota_of_the_process_cgroup(tmp_path):
+    cpu = tmp_path / "cpu"
+    _write(cpu, "cpu.cfs_quota_us", "-1\n")
+    _write(cpu, "cpu.cfs_period_us", "100000\n")
+    _write(cpu / "job", "cpu.cfs_quota_us", "197000\n")
+    _write(cpu / "job", "cpu.cfs_period_us", "100000\n")
+    proc = _proc(tmp_path, "4:cpu,cpuacct:/job\n3:memory:/job\n")
+    assert cpu_limit(tmp_path, proc, visible=4) == CpuLimit(1.97, 4, "cgroup-v1")
+
+
+def test_cgroup_v1_tightest_quota_up_the_hierarchy_wins(tmp_path):
+    cpu = tmp_path / "cpu"
+    for directory, quota in ((cpu / "job", "300000"), (cpu / "job" / "task", "-1")):
+        _write(directory, "cpu.cfs_quota_us", f"{quota}\n")
+        _write(directory, "cpu.cfs_period_us", "100000\n")
+    proc = _proc(tmp_path, "4:cpu:/job/task\n")
+    assert cpu_limit(tmp_path, proc, visible=8) == CpuLimit(3.0, 8, "cgroup-v1")
+
+
+def test_cgroup_v1_path_missing_under_the_mount_uses_the_controller_root(tmp_path):
+    cpu = tmp_path / "cpu"
+    _write(cpu, "cpu.cfs_quota_us", "200000\n")
+    _write(cpu, "cpu.cfs_period_us", "100000\n")
+    proc = _proc(tmp_path, "4:cpu,cpuacct:/docker/abc123\n")
+    assert cpu_limit(tmp_path, proc, visible=6) == CpuLimit(2.0, 6, "cgroup-v1")
+
+
+def test_cgroup_v1_throttled_seconds_come_from_throttled_time(tmp_path):
+    _write(
+        tmp_path / "cpu" / "job",
+        "cpu.stat",
+        "nr_periods 10\nnr_throttled 4\nthrottled_time 2500000000\n",
+    )
+    proc = _proc(tmp_path, "4:cpu,cpuacct:/job\n")
+    assert throttled_s(tmp_path, proc) == 2.5
+
+
+@pytest.mark.parametrize(
+    ("cores", "visible", "threads", "writers"),
+    [
+        (1.97, 4, 2, 2),  # Cloud Run, 2 vCPU: el detector no puede quedar en 1 hilo
+        (1.61, 6, 2, 2),
+        (2.0, 6, 2, 2),
+        (0.5, 4, 1, 1),
+        (1.0, 1, 1, 1),
+        (3.0, 2, 2, 3),  # la cuota no pasa de los cores visibles en la práctica
+        (4.0, 4, 4, 4),
+        (1.4, 8, 2, 1),
+    ],
+)
+def test_parallelism_follows_the_quota(cores, visible, threads, writers):
+    limit = CpuLimit(cores, visible, "cgroup-v2")
+    assert limit.fanout_threads == threads
+    assert limit.writers == writers

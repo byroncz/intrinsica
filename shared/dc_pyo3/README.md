@@ -52,8 +52,14 @@ Las tres entradas son objetos con protocolo de buffer, que en la capa son los
   iguales) antes de alimentar nada, y lo decodifica a `i64` por tramos de
   65 536 ticks (512 KB), no el lote entero. Si falla con `ValueError`, el
   fan-out no se tocó.
-- **El GIL se mantiene durante el lote**: los buffers son de Python. El
-  fan-out multihilo corre dentro de la llamada.
+- **El GIL se suelta durante el lote** (ITSC-290): `feed_batch*` y
+  `finish_columns` validan y detectan dentro de `py.detach`, así que los
+  escritores de Parquet de otros hilos de Python corren mientras se detecta. Las
+  vistas de los buffers se toman antes de soltarlo y el `PyBuffer` las retiene
+  hasta que la llamada vuelve; los buffers de Arrow son inmutables. El fan-out
+  multihilo corre dentro de la llamada. `FanOut(thetas, threads)`: la capa pasa
+  `threads` explícito (`cpu.py`); sin él se usan los núcleos que reporta
+  `available_parallelism`, que con cuota fraccionaria redondea hacia abajo.
 - **El orden es del llamador**: los ticks van en orden estricto de
   `(time, agg_trade_id)`, como los entrega L1. El resultado no depende de cómo
   se parta la serie en lotes (lo verifican las pruebas).

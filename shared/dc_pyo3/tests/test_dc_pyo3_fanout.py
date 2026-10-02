@@ -286,3 +286,87 @@ def test_feed_batch_columns_validates_like_feed_batch():
     # No se tocó: sigue aceptando una serie válida desde cero.
     ok = [(100 * SCALE, 1, 1), (111 * SCALE, 2, 2)]
     assert [len(b) for b in fanout.feed_batch_columns(*columns(ok))] == [0]
+
+
+def _wide_series(n):
+    """`n` ticks en zigzag: muchos eventos y cómputo suficiente para medir el GIL."""
+    prices = array("q")
+    for i in range(n):
+        prices.extend((50_000 * SCALE + (i * 7_919 % 1_001) * 20 * SCALE // 1_000, 0))
+    return (
+        memoryview(prices).cast("B"),
+        memoryview(array("q", range(1_000, 1_000 + n))),
+        memoryview(array("q", range(1, n + 1))),
+    )
+
+
+def test_feed_batch_columns_releases_the_gil():
+    """Mientras un hilo detecta, otro de Python sigue corriendo (ITSC-290)."""
+    import threading
+    import time
+
+    n = 3_000_000
+    prices, times, ids = _wide_series(n)
+    fanout = dc_pyo3.FanOut([THETA_10_PCT // 100 * k for k in range(1, 9)], 1)
+    ticking, stop, gaps = threading.Event(), threading.Event(), []
+
+    def watch():
+        """Anota cuánto tarda en volver a correr cada vez que cede el GIL."""
+        last = time.perf_counter()
+        while not stop.is_set():
+            time.sleep(0)
+            now = time.perf_counter()
+            gaps.append(now - last)
+            last = now
+            if len(gaps) > 100:
+                ticking.set()
+
+    watcher = threading.Thread(target=watch)
+    watcher.start()
+    ticking.wait()
+    gaps.clear()
+    started = time.perf_counter()
+    fanout.feed_batch_columns(prices, times, ids)
+    seconds = time.perf_counter() - started
+    stop.set()
+    watcher.join()
+    # Reteniendo el GIL el vigía quedaría parado casi toda la llamada.
+    assert seconds > 0.2, "la serie es muy corta para medir el GIL"
+    assert max(gaps) < seconds / 4
+    assert len(gaps) > 100
+
+
+def test_writing_while_detecting_does_not_change_the_events():
+    """Un hilo hashea los eventos del lote anterior mientras otro detecta el siguiente."""
+    import hashlib
+    import threading
+
+    chunks = [_wide_series(400_000) for _ in range(3)]
+    thetas = [THETA_10_PCT // 100 * k for k in range(1, 9)]
+
+    def digest(closed):
+        h = hashlib.sha256()
+        for columns in closed:
+            for buffer in columns.buffers():
+                h.update(buffer)
+        return h.hexdigest()
+
+    serial = dc_pyo3.FanOut(thetas, 2)
+    expected = [digest(serial.feed_batch_columns(*c)) for c in chunks]
+
+    fanout = dc_pyo3.FanOut(thetas, 2)
+    got, previous = [], None
+    for chunk in chunks:
+        closed = []
+
+        def detect(chunk=chunk, closed=closed):
+            closed.append(fanout.feed_batch_columns(*chunk))
+
+        detector = threading.Thread(target=detect)
+        detector.start()
+        if previous is not None:
+            got.append(digest(previous))  # escribe lo anterior en este hilo
+        detector.join()
+        previous = closed[0]
+    got.append(digest(previous))
+    assert got == expected

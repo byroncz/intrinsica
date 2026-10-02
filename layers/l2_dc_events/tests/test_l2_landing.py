@@ -1,3 +1,4 @@
+import threading
 import time
 from pathlib import Path
 
@@ -106,7 +107,7 @@ def test_the_whole_table_is_never_materialized(write_month):
     one_group = rows * (16 + 8 + 8)  # price decimal128 + tiempo + id
     baseline = pa.total_allocated_bytes()
     seen = []
-    for batch in read_batches(parquet):
+    for batch in read_batches(parquet, in_flight=0):
         seen.append((batch.num_rows, pa.total_allocated_bytes() - baseline))
         del batch  # el consumidor suelta el lote antes de pedir el siguiente
 
@@ -118,6 +119,56 @@ def test_the_whole_table_is_never_materialized(write_month):
     used = [in_flight for _, in_flight in seen]
     assert max(used) - min(used) < one_group / 2
     assert max(used) < groups * one_group / 3
+
+
+@pytest.mark.parametrize("in_flight", [1, 2, 3])
+def test_read_ahead_adds_at_most_k_row_groups(write_month, in_flight):
+    """RNF-L2-01: con k row groups pedidos por delante, la RAM crece a lo más
+    k row groups sobre la de la lectura en serie, y el contenido no cambia."""
+    groups, rows = 10, 50_000
+    path = write_month(ticks(groups * rows), row_group_size=rows)
+    one_group = rows * (16 + 8 + 8)
+
+    def peak(k):
+        baseline = pa.total_allocated_bytes()
+        used, times = [], []
+        with open_consolidated(str(path)) as parquet:
+            batches = read_batches(parquet, in_flight=k)
+            try:
+                for batch in batches:
+                    used.append(pa.total_allocated_bytes() - baseline)
+                    times.extend(batch.column("transact_time").to_pylist()[:1])
+                    del batch
+            finally:
+                batches.close()
+        return max(used), times
+
+    serial_peak, serial_times = peak(0)
+    ahead_peak, ahead_times = peak(in_flight)
+    assert ahead_times == serial_times
+    assert ahead_peak <= serial_peak + in_flight * one_group * 1.25
+
+
+def test_read_ahead_accounts_the_wait_as_read_and_the_cpu_as_decode(write_month):
+    path = write_month(ticks(30_000), row_group_size=10_000)
+    phases = Phases()
+    with open_consolidated(str(path)) as parquet:
+        n = sum(b.num_rows for b in read_batches(parquet, phases, in_flight=2))
+    assert n == 30_000
+    assert phases.row_groups == 3
+    assert phases.bytes_in > 0
+    assert phases.decode_s > 0
+    assert phases.read_s >= 0
+
+
+def test_closing_the_reader_early_stops_its_thread(write_month):
+    path = write_month(ticks(30_000), row_group_size=10_000)
+    with open_consolidated(str(path)) as parquet:
+        batches = read_batches(parquet, in_flight=2)
+        next(batches)
+        batches.close()
+        names = [t.name for t in threading.enumerate()]
+    assert not [n for n in names if n.startswith("ThreadPoolExecutor")]
 
 
 def test_a_uri_root_explains_a_month_with_only_provisionals(write_month):

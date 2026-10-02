@@ -1,4 +1,5 @@
 import csv
+import dataclasses
 
 import dc_pyo3
 import pyarrow as pa
@@ -249,7 +250,8 @@ def test_process_unit_never_holds_more_than_one_row_group(write_month, tmp_path)
     write_month(ticks, row_group_size=rows)
     spy = SpyFanOut([100_000, 200_000])
     baseline = pa.total_allocated_bytes()
-    result = process_unit(UNIT, ctx(write_month, tmp_path), fanout=spy)
+    serial = dataclasses.replace(ctx(write_month, tmp_path), read_ahead=0)
+    result = process_unit(UNIT, serial, fanout=spy)
 
     assert result.n_ticks == groups * rows
     assert sum(n for n, _ in spy.calls) == groups * rows
@@ -260,6 +262,26 @@ def test_process_unit_never_holds_more_than_one_row_group(write_month, tmp_path)
     # group por lote) y muy inferior al mes entero.
     used = [in_flight - baseline for _, in_flight in spy.calls]
     assert max(used) - min(used) < one_group / 2
+    assert max(used) < groups * one_group / 3
+
+
+def test_process_unit_with_read_ahead_holds_at_most_k_more_row_groups(
+    write_month, tmp_path
+):
+    """RNF-L2-01: con k row groups por delante, 1 + k en RAM, no el mes entero."""
+    groups, rows, k = 20, 50_000, 2
+    ticks = [(100_000_000 * (1 + i), 1_000 + i, 1 + i) for i in range(groups * rows)]
+    write_month(ticks, row_group_size=rows)
+    spy = SpyFanOut([100_000, 200_000])
+    baseline = pa.total_allocated_bytes()
+    ahead = dataclasses.replace(ctx(write_month, tmp_path), read_ahead=k)
+    result = process_unit(UNIT, ahead, fanout=spy)
+
+    assert result.n_ticks == groups * rows
+    one_group = rows * (16 + 8 + 8)
+    used = [in_flight - baseline for _, in_flight in spy.calls]
+    # El lector retiene ~1,65 row groups por cada uno (ver la prueba del lector).
+    assert max(used) <= (1 + k) * one_group * 1.8
     assert max(used) < groups * one_group / 3
 
 

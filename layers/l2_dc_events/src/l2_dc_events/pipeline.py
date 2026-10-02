@@ -7,10 +7,9 @@ cada θ a medida que cierran y, al final, publica `events.parquet` y
 """
 
 import logging
-import os
 import time
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import ExitStack
+from contextlib import ExitStack, closing
 from dataclasses import dataclass
 
 import dc_pyo3
@@ -82,14 +81,15 @@ def _feed(
     """
     ticks = ticks_of(batch)
     for chunk in ticks.chunks(FEED_TICKS):
-        started = time.perf_counter()
+        started, cpu_started = time.perf_counter(), time.thread_time()
         closed = fanout.feed_batch_columns(
             chunk.prices, chunk.times, chunk.agg_trade_ids
         )
-        detected = time.perf_counter()
+        detected, cpu_detected = time.perf_counter(), time.thread_time()
         # `submit` se bloquea si los escritores van atrasados: esa es la espera.
         writes.submit(closed)
         phases.detect_s += detected - started
+        phases.detect_cpu_s += cpu_detected - cpu_started
         phases.wait_s += time.perf_counter() - detected
     return len(ticks)
 
@@ -124,7 +124,7 @@ def carry_over_complete(unit: Unit, ctx: RunContext) -> bool:
     return True
 
 
-def _start(unit: Unit, ctx: RunContext) -> dc_pyo3.FanOut:
+def _start(unit: Unit, ctx: RunContext, threads: int) -> dc_pyo3.FanOut:
     """El fan-out del mes: en frío si es el primero de la serie, si no con el
     carry-over del mes anterior de cada θ.
 
@@ -135,7 +135,7 @@ def _start(unit: Unit, ctx: RunContext) -> dc_pyo3.FanOut:
     """
     thetas = load_thetas()
     if ctx.series_start == (unit.year, unit.month):
-        return dc_pyo3.FanOut(thetas)
+        return dc_pyo3.FanOut(thetas, threads)
 
     previous = unit.previous()
     carries, errors = [], []
@@ -158,7 +158,7 @@ def _start(unit: Unit, ctx: RunContext) -> dc_pyo3.FanOut:
             previous,
         )
         raise errors[0]
-    return dc_pyo3.FanOut.from_carry_over(thetas, carries)
+    return dc_pyo3.FanOut.from_carry_over(thetas, carries, threads)
 
 
 def process_unit(
@@ -183,6 +183,9 @@ def process_unit(
     """
     started = time.perf_counter()
     throttled_before = cpu.throttled_s()
+    # Un solo lugar decide el paralelismo (`cpu.py`): hilos del fan-out y
+    # escritores salen de la cuota del cgroup, no de los cores visibles.
+    limit = cpu.cpu_limit()
     phases = Phases()
     path = consolidated_path(
         str(ctx.landing_root),
@@ -208,7 +211,7 @@ def process_unit(
     with parquet, ExitStack() as stack:
         if fanout is None:
             carry_started = time.perf_counter()
-            fanout = _start(unit, ctx)
+            fanout = _start(unit, ctx, limit.fanout_threads)
             phases.carry_s = time.perf_counter() - carry_started
         thetas = fanout.thetas
         writers = [
@@ -217,22 +220,24 @@ def process_unit(
         ]
         # Después de los escritores: al salir, primero se cancela y se espera
         # al pool y solo entonces se cierran (o se borran) los temporales.
-        write_workers = len(os.sched_getaffinity(0))
-        pool = ThreadPoolExecutor(max_workers=write_workers)
+        pool = ThreadPoolExecutor(max_workers=limit.writers)
         stack.callback(pool.shutdown, wait=True, cancel_futures=True)
         writes = ParallelWriters(pool, writers)
         n_ticks = 0
         n_row_groups = parquet.num_row_groups
-        for batch in read_batches(parquet, phases):
-            n_ticks += _feed(fanout, batch, writes, phases)
-            # Soltar el lote antes de pedir el siguiente row group.
-            del batch
-        started_tail = time.perf_counter()
-        closing = fanout.finish_columns()
-        closed = time.perf_counter()
-        writes.submit(closing)
+        # `closing`: el hilo lector termina antes de que `with parquet` cierre el archivo.
+        with closing(read_batches(parquet, phases, ctx.read_ahead)) as batches:
+            for batch in batches:
+                n_ticks += _feed(fanout, batch, writes, phases)
+                # Soltar el lote antes de pedir el siguiente row group.
+                del batch
+        started_tail, cpu_tail = time.perf_counter(), time.thread_time()
+        tail = fanout.finish_columns()
+        closed, cpu_closed = time.perf_counter(), time.thread_time()
+        writes.submit(tail)
         writes.wait()
         phases.detect_s += closed - started_tail
+        phases.detect_cpu_s += cpu_closed - cpu_tail
         phases.wait_s += time.perf_counter() - closed
 
         discarded = fanout.discarded()
@@ -257,7 +262,6 @@ def process_unit(
         )
 
     events = [writer.n_events for writer in writers]
-    limit = cpu.cpu_limit()
     throttled_after = cpu.throttled_s()
     timing = Timing(
         wall_s=time.perf_counter() - started,
@@ -272,7 +276,9 @@ def process_unit(
         cores=limit.cores,
         cores_visible=limit.visible,
         cores_source=limit.source,
-        write_workers=write_workers,
+        fanout_threads=limit.fanout_threads,
+        write_workers=limit.writers,
+        detect_cpu_s=phases.detect_cpu_s,
         cpu_throttled_s=(
             None
             if throttled_before is None or throttled_after is None

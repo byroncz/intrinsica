@@ -7,7 +7,9 @@ usa el detector.
 
 import logging
 import time
+from collections import deque
 from collections.abc import Iterator
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 
 import pyarrow as pa
@@ -22,6 +24,8 @@ logger = logging.getLogger(__name__)
 CONSOLIDATED = "consolidated.parquet"
 COLUMNS = ("price", "transact_time", "agg_trade_id")
 PRICE_TYPE = pa.decimal128(18, 8)
+# Row groups que el lector pide por delante del que se consume (`read_batches`).
+READ_AHEAD = 2
 
 
 class LandingError(Exception):
@@ -163,43 +167,73 @@ def _compressed_bytes(parquet: pq.ParquetFile, index: int) -> int:
     return sum(c.total_compressed_size for c in columns if c.path_in_schema in COLUMNS)
 
 
+def _read_group(parquet: pq.ParquetFile, index: int) -> tuple[pa.Table, float]:
+    """El row group `index` y la CPU que costó decodificarlo (`thread_time`)."""
+    cpu = time.thread_time()
+    group = parquet.read_row_group(index, columns=list(COLUMNS), use_threads=False)
+    return group, time.thread_time() - cpu
+
+
 def read_batches(
-    parquet: pq.ParquetFile, phases: Phases | None = None
+    parquet: pq.ParquetFile,
+    phases: Phases | None = None,
+    in_flight: int = READ_AHEAD,
 ) -> Iterator[pa.RecordBatch]:
     """Los ticks del archivo, un row group a la vez, en el orden del archivo.
 
-    En RAM hay un solo row group: el anterior se suelta antes de leer el
-    siguiente. Quien consume debe soltar cada lote antes de pedir el próximo,
-    o el row group no se libera.
+    Con `in_flight` = k > 0, un hilo lector pide hasta k row groups por delante
+    del que se consume: en GCS cada row group cuesta ~0,3 s de latencia con la
+    CPU ociosa, y en serie eran 70 s de `read_s` sobre 237 row groups. En RAM
+    hay a lo más 1 + k row groups (el que se consume y los k pedidos), que es
+    lo que RNF-L2-01 permite crecer. Con k = 0 se lee en serie en el hilo que
+    llama. El lector decodifica sin hilos de Arrow (`use_threads=False`): la
+    decodificación de tres columnas es ínfima frente al fan-out, y con hilos el
+    lector retiene una cantidad variable de buffers de más (~1,2 MB por row
+    group de 1,6 MB medidos).
 
-    Con `phases`, separa cada lectura en decodificar y esperar, sin tocar cómo
-    se lee. Sin hilos, el hilo que llama decodifica (Parquet a Arrow): su tiempo
-    de CPU es `decode_s` y el resto de la pared es `read_s`, espera de I/O (la
-    lectura de GCS va en hilos propios de Arrow). Si la cuota de CPU estrangula
-    al proceso, esa espera también cae en `read_s`: `cpu_throttled_s` (ver
+    Quien consume debe soltar cada lote antes de pedir el próximo, o el row
+    group no se libera, y cerrar el generador (`contextlib.closing`) para que
+    el hilo lector termine antes de cerrar el archivo.
+
+    Con `phases`, `read_s` es lo que el hilo principal esperó por cada row
+    group (con k = 0, lo que tardó en leerlo) y `decode_s`, la CPU que costó
+    decodificarlo en el hilo lector. Si la cuota de CPU estrangula al proceso,
+    esa espera también cae en `read_s`: `cpu_throttled_s` (ver
     `cpu.throttled_s`) la distingue.
     """
-    for index in range(parquet.num_row_groups):
-        wall, cpu = time.perf_counter(), time.thread_time()
-        # Sin hilos: la decodificación de tres columnas es ínfima frente al
-        # fan-out, y con hilos el lector retiene una cantidad variable de
-        # buffers de más (~1,2 MB por row group de 1,6 MB medidos).
-        group = parquet.read_row_group(index, columns=list(COLUMNS), use_threads=False)
-        if phases is not None:
-            wall = time.perf_counter() - wall
-            cpu = min(time.thread_time() - cpu, wall)
-            phases.decode_s += cpu
-            phases.read_s += wall - cpu
-            phases.row_groups += 1
-            phases.bytes_in += _compressed_bytes(parquet, index)
-        # Un row group puede venir en varios trozos; cada uno es un lote.
-        batches = group.to_batches()
-        del group
-        # `pop(0)` saca el lote de la lista: sin esto la lista lo retendría
-        # mientras el consumidor trabaja con el siguiente trozo.
-        while batches:
-            batch = batches.pop(0)
-            if batch.num_rows:
-                yield batch
-            del batch
-        del batches
+    count = parquet.num_row_groups
+    pool = ThreadPoolExecutor(max_workers=1) if in_flight > 0 else None
+    pending: deque[Future[tuple[pa.Table, float]]] = deque()
+    requested = 0
+    try:
+        for index in range(count):
+            wall = time.perf_counter()
+            if pool is None:
+                group, cpu = _read_group(parquet, index)
+            else:
+                while requested < min(count, index + in_flight + 1):
+                    pending.append(pool.submit(_read_group, parquet, requested))
+                    requested += 1
+                group, cpu = pending.popleft().result()
+            if phases is not None:
+                phases.read_s += time.perf_counter() - wall
+                phases.decode_s += cpu
+                phases.row_groups += 1
+                phases.bytes_in += _compressed_bytes(parquet, index)
+            # Un row group puede venir en varios trozos; cada uno es un lote.
+            batches = group.to_batches()
+            del group
+            # `pop(0)` saca el lote de la lista: sin esto la lista lo retendría
+            # mientras el consumidor trabaja con el siguiente trozo.
+            while batches:
+                batch = batches.pop(0)
+                if batch.num_rows:
+                    yield batch
+                del batch
+            del batches
+    finally:
+        if pool is not None:
+            # Lo pedido y no consumido se descarta; esperar al lector en curso
+            # evita que lea de un archivo que el llamador ya cerró.
+            pool.shutdown(wait=True, cancel_futures=True)
+            pending.clear()

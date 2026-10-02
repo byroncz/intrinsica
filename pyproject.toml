@@ -8,6 +8,7 @@ dependencies = ["dc_pyo3", "dq[reader]", "l1_ingest", "l2_dc_events"]
 
 [dependency-groups]
 dev = [
+    "polars>=1.44.2",
     "pytest",
     "ruff",
 ]
