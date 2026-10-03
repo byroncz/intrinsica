@@ -13,6 +13,23 @@ resource "google_storage_bucket" "tfstate" {
     enabled = true
   }
 
+  # ITSC-291: el job plan de _terraform-stack.yml guarda aquí, bajo plans/, el
+  # plan que el job apply aplica tras la aprobación (privado: el repo es
+  # público y un artefacto de Actions lo descargaría cualquiera). El apply lo
+  # borra al terminar; esto limpia los que quedaron por un apply rechazado,
+  # cancelado o fallido. Solo plans/: el estado (stacks/) nunca vence. Sin
+  # with_state, igual que results/ de ops: toma vigentes y no vigentes.
+  lifecycle_rule {
+    action {
+      type = "Delete"
+    }
+    condition {
+      with_state     = "ANY"
+      matches_prefix = ["plans/"]
+      age            = 7
+    }
+  }
+
   lifecycle {
     prevent_destroy = true
   }

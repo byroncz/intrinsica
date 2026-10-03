@@ -165,15 +165,10 @@ Sin PR y sin reprocesar los θ que ya existen. La trazabilidad la dan la
 partición `theta=<t>`, la columna `theta`, `image_version` y el versionado del
 bucket.
 
-1. **Solo la primera vez**, el objeto no existe: súbelo desde un clon del repo
-   en Cloud Shell, a partir de la semilla:
-
-   ```bash
-   gcloud storage cp layers/l2_dc_events/src/l2_dc_events/config/thetas.yaml gs://<proyecto>-manifest/l2/thetas.yaml
-   ```
-
-   Desde entonces, baja el catálogo, agrega los θ como `round(θ × 10⁸)` (por
-   ejemplo `θ = 0,0003` es `30000`) y súbelo de nuevo:
+1. El objeto no se sube a mano la primera vez: el stack `l2` lo siembra desde
+   la semilla si falta y nunca lo sobrescribe (`infra/README.md`, "Stack l2").
+   Baja el catálogo, agrega los θ como `round(θ × 10⁸)` (por ejemplo
+   `θ = 0,0003` es `30000`) y súbelo de nuevo:
 
    ```bash
    gcloud storage cp gs://<proyecto>-manifest/l2/thetas.yaml thetas.yaml

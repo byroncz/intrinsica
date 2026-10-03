@@ -200,3 +200,28 @@ resource "google_storage_bucket_iam_member" "deploy_bucket_iam" {
   role   = google_project_iam_custom_role.bucket_iam_admin.id
   member = local.deploy_member
 }
+
+# Sembrar el catálogo de θ (stack l2, ITSC-291): leer y crear SOLO el objeto
+# manifest/l2/thetas.yaml. El apply de l2 corre `gcloud storage cp --no-clobber`,
+# que mira si el objeto existe (objects.get, objectViewer) y, si falta, lo crea
+# (objects.create, objectCreator). Ningún rol da update ni delete: el catálogo
+# vivo, que edita el humano, no se puede pisar ni borrar desde el deploy. Los dos
+# bindings llevan la misma condición, que los acota a ese único objeto y no al
+# prefijo l2/.
+locals {
+  thetas_seed_roles = toset(["roles/storage.objectViewer", "roles/storage.objectCreator"])
+}
+
+resource "google_storage_bucket_iam_member" "deploy_thetas_seed" {
+  for_each = local.thetas_seed_roles
+
+  bucket = google_storage_bucket.manifest.name
+  role   = each.value
+  member = local.deploy_member
+
+  condition {
+    title       = "deploy-thetas-seed"
+    description = "deploy-github solo gestiona l2/thetas.yaml, la semilla del catálogo de θ"
+    expression  = "resource.name == \"projects/_/buckets/${google_storage_bucket.manifest.name}/objects/l2/thetas.yaml\""
+  }
+}

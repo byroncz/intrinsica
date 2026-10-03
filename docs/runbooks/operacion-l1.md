@@ -82,9 +82,13 @@ otro log `ERROR` no dispara el correo (ese fallo se ve en la ejecución en rojo)
 Un hallazgo `warning` o `info` entra con otra severidad y no cumple el filtro.
 El filtro no mira texto libre.
 
-**A quién llega.** Al correo de la variable `ALERT_EMAIL` del environment `gcp`
-de Actions, que el stack `alerting` lee como `TF_VAR_alert_email`. No está en
-el repo. Para cambiar de destinatario, edita `ALERT_EMAIL` y vuelve a aplicar
+**A quién llega.** Al correo del secret de repositorio `ALERT_EMAIL` de
+Actions, que el stack `alerting` lee como `TF_VAR_alert_email`. Es de
+repositorio y no del environment `gcp` porque el job `plan` no usa el
+environment y el correo queda dentro del plan que luego se aplica; es secret y
+no variable para que GitHub lo enmascare en los logs
+([infra/README.md](../../infra/README.md), "Secret `ALERT_EMAIL`"). No
+está en el repo. Para cambiar de destinatario, edita `ALERT_EMAIL` y vuelve a aplicar
 el stack.
 
 **Qué trae.** Job, capa, modo, check, unidad, detalle y `run_id`, más el enlace
@@ -105,12 +109,12 @@ hallazgos nuevos.
 - Un rato (mantenimiento, backfill que sabes que deja errores): *Monitoring →
   Alerting → Snooze → Create snooze*, elige la política, define las horas. No
   toca Terraform ni deja deriva.
-- Un destinatario: cambia `ALERT_EMAIL` y aplica `alerting`. No la borres: la
+- Un destinatario: cambia `ALERT_EMAIL` y aplica `alerting`. No lo borres: la
   variable `alert_email` valida que sea un correo y un valor vacío hace fallar
   el apply. Para no recibir más correos, usa el snooze o el `destroy`.
 - Todo: *Actions → Terraform → `alerting` → `destroy`*. El correo deja de llegar
   hasta que se vuelva a aplicar. Terraform valida las variables también en
-  `destroy`, así que `ALERT_EMAIL` debe seguir definida (con un correo válido)
+  `destroy`, así que `ALERT_EMAIL` debe seguir definido (con un correo válido)
   al lanzarlo.
 
 **Puesta en marcha (solo el humano).**
@@ -123,7 +127,7 @@ hallazgos nuevos.
    `l1_ingest:0.6.0` y `l2_dc_events:0.7.0`, y aplica `l1` y `l2` (*Actions →
    Terraform*) para que los jobs las usen. Sin la imagen nueva el log sigue
    siendo texto y la alerta no ve nada.
-3. Crea `ALERT_EMAIL` como variable del environment `gcp` y aplica `alerting`.
+3. Crea `ALERT_EMAIL` como secret de repositorio y aplica `alerting`.
    El plan debe mostrar solo el canal y la política (2 recursos a crear).
 4. **Prueba extremo a extremo**, desde Cloud Shell. Para un `error` hace falta
    un mes ya vencido que Binance no tenga y hoy no existe ninguno, así que se

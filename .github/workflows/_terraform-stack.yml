@@ -1,0 +1,218 @@
+# Workflow reutilizable: apply o destroy de un stack de capa en dos puertas. El
+# job `plan` no usa environment, así que corre sin aprobación: deja el plan
+# completo en su log y en el resumen del run, y guarda el archivo del plan
+# (`terraform plan -out`). El job `apply` usa el environment gcp, que exige la
+# aprobación del humano, y aplica ese mismo archivo: lo aprobado es exactamente
+# lo revisado, nunca un plan nuevo. Sin cambios en el plan no hay `apply`, y por
+# tanto nada queda esperando. Lo llaman terraform.yml (tras CI en main y a mano).
+name: Terraform stack
+
+on:
+  workflow_call:
+    inputs:
+      stack:
+        description: Stack de capa (carpeta de infra/stacks/batch/; data nunca)
+        type: string
+        required: true
+      action:
+        description: apply o destroy
+        type: string
+        required: true
+      ref:
+        description: Commit que se planea y se aplica
+        type: string
+        required: true
+    secrets:
+      ALERT_EMAIL:
+        description: Correo del stack alerting (secret de repositorio; solo se exporta para ese stack)
+        required: false
+
+env:
+  CHECKPOINT_DISABLE: "1"
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # WIF: el token OIDC de GitHub se canjea por credenciales de GCP
+    outputs:
+      changes: ${{ steps.plan.outputs.changes }}
+      plan_uri: ${{ steps.upload.outputs.uri }}
+      plan_sha256: ${{ steps.upload.outputs.sha256 }}
+    env:
+      STACK: ${{ inputs.stack }}
+      ACTION: ${{ inputs.action }}
+      TFSTATE_BUCKET: ${{ vars.GCP_PROJECT_ID }}-tfstate
+      # Este job no usa el environment gcp y no ve sus secrets: ALERT_EMAIL
+      # debe ser secret del repositorio. Un secret se enmascara en los logs
+      # (una variable saldría en claro en el encabezado `env:` de cada paso, y
+      # los logs de este repo público los lee cualquiera) y solo se exporta para
+      # el stack alerting. El correo queda dentro del plan guardado, y por eso el
+      # plan va a un bucket privado y no a un artefacto (cualquier cuenta de
+      # GitHub descarga los artefactos de un repo público).
+      TF_VAR_alert_email: ${{ inputs.stack == 'alerting' && secrets.ALERT_EMAIL || '' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Validar el stack y la acción
+        run: |
+          if [[ "$STACK" == "data" || ! -d "infra/stacks/batch/${STACK}" ]]; then
+            echo "::error::Stack inválido: '${STACK}'. data no se despliega aquí y infra/stacks/batch/${STACK} debe existir."
+            exit 1
+          fi
+          if [[ "$ACTION" != "apply" && "$ACTION" != "destroy" ]]; then
+            echo "::error::Acción inválida: '${ACTION}'. Solo apply o destroy."
+            exit 1
+          fi
+          # La variable alert_email valida que sea un correo: sin ALERT_EMAIL a nivel de repo, fallar aquí y con el motivo.
+          if [[ "$STACK" == "alerting" && -z "$TF_VAR_alert_email" ]]; then
+            echo "::error::Falta el secret de repositorio ALERT_EMAIL. Este job no ve los secrets del environment gcp: crea ALERT_EMAIL en Settings > Secrets and variables > Actions > Secrets (ver infra/README.md, stack alerting)."
+            exit 1
+          fi
+          echo "STACK_DIR=infra/stacks/batch/${STACK}" >> "$GITHUB_ENV"
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.16.4 # misma versión que infra/bin/install-terraform.sh
+          terraform_wrapper: false
+
+      - name: Autenticar en GCP (WIF, sin llaves)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: terraform init
+        run: |
+          terraform -chdir="$STACK_DIR" init -input=false \
+            -backend-config="bucket=${TFSTATE_BUCKET}"
+
+      # -detailed-exitcode: 0 sin cambios, 2 con cambios, 1 error. El plan se
+      # imprime en el log y queda en plan.txt para el resumen.
+      - name: terraform plan (${{ inputs.action }})
+        id: plan
+        run: |
+          flags=()
+          if [[ "$ACTION" == "destroy" ]]; then flags+=(-destroy); fi
+          set +e
+          terraform -chdir="$STACK_DIR" plan -input=false -no-color -detailed-exitcode \
+            "${flags[@]}" -out="$RUNNER_TEMP/tfplan" \
+            -var "tfstate_bucket=${TFSTATE_BUCKET}" | tee "$RUNNER_TEMP/plan.txt"
+          code="${PIPESTATUS[0]}"
+          set -e
+          case "$code" in
+            0) echo "changes=false" >> "$GITHUB_OUTPUT" ;;
+            2) echo "changes=true" >> "$GITHUB_OUTPUT" ;;
+            *) exit "$code" ;;
+          esac
+
+      # Se publica aunque el plan falle; el paso anterior ya deja el job en rojo.
+      - name: Publicar plan en el resumen
+        if: always()
+        env:
+          CHANGES: ${{ steps.plan.outputs.changes }}
+        run: |
+          {
+            echo "## terraform plan (${ACTION}): ${STACK}"
+            echo "- Commit: \`${{ inputs.ref }}\`"
+            case "$CHANGES" in
+              true) echo "- Hay cambios: el job apply espera la aprobación en *Review deployments*." ;;
+              false) echo "- Sin cambios: no hay nada que aplicar y nada queda esperando." ;;
+              *) echo "- El plan no terminó." ;;
+            esac
+            echo '```'
+            head -c 900000 "$RUNNER_TEMP/plan.txt" 2>/dev/null || echo "(sin salida)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Un directorio por run e intento; el apply recibe la ruta exacta por output.
+      # También recibe el sha256 del archivo que produjo este job: el bucket lo
+      # pueden escribir otros workflows del repo con deploy-github, y el apply
+      # solo aplica el archivo cuyo hash coincide.
+      - name: Guardar el plan en el bucket de estado
+        id: upload
+        if: steps.plan.outputs.changes == 'true'
+        run: |
+          uri="gs://${TFSTATE_BUCKET}/plans/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/${STACK}.tfplan"
+          gcloud storage cp "$RUNNER_TEMP/tfplan" "$uri"
+          echo "uri=${uri}" >> "$GITHUB_OUTPUT"
+          echo "sha256=$(sha256sum "$RUNNER_TEMP/tfplan" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+  apply:
+    needs: plan
+    if: needs.plan.outputs.changes == 'true'
+    runs-on: ubuntu-latest
+    environment: gcp
+    permissions:
+      contents: read
+      id-token: write # WIF: el token OIDC de GitHub se canjea por credenciales de GCP
+    env:
+      STACK: ${{ inputs.stack }}
+      ACTION: ${{ inputs.action }}
+      TFSTATE_BUCKET: ${{ vars.GCP_PROJECT_ID }}-tfstate
+      PLAN_URI: ${{ needs.plan.outputs.plan_uri }}
+      PLAN_SHA256: ${{ needs.plan.outputs.plan_sha256 }}
+    steps:
+      # El mismo commit que planeó el job anterior: el plan guardado exige la
+      # misma configuración y los mismos proveedores.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.16.4 # misma versión que infra/bin/install-terraform.sh
+          terraform_wrapper: false
+
+      - name: Autenticar en GCP (WIF, sin llaves)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: terraform init
+        run: |
+          terraform -chdir="infra/stacks/batch/${STACK}" init -input=false \
+            -backend-config="bucket=${TFSTATE_BUCKET}"
+
+      # Si el hash no coincide, alguien reemplazó el archivo entre el plan y la
+      # aprobación: no se aplica.
+      - name: Descargar el plan aprobado y verificar su hash
+        run: |
+          gcloud storage cp "$PLAN_URI" "$RUNNER_TEMP/tfplan"
+          echo "${PLAN_SHA256}  ${RUNNER_TEMP}/tfplan" | sha256sum --check --strict -
+
+      # Lo que se va a aplicar, tal como lo guardó el job plan.
+      - name: Mostrar el plan guardado
+        run: terraform -chdir="infra/stacks/batch/${STACK}" show -no-color "$RUNNER_TEMP/tfplan"
+
+      # Si el estado cambió desde el plan (otro apply, deriva), Terraform rechaza
+      # el archivo con "Saved plan is stale": rechaza ese run, no lo fuerces.
+      - name: terraform apply del plan guardado (${{ inputs.action }})
+        run: |
+          terraform -chdir="infra/stacks/batch/${STACK}" apply -input=false -no-color \
+            "$RUNNER_TEMP/tfplan"
+
+      # Aplicado, el plan no sirve más. Si el apply falla queda en el bucket, y
+      # la regla de ciclo de vida de plans/ lo borra a los 7 días.
+      - name: Borrar el plan del bucket
+        run: gcloud storage rm "$PLAN_URI"
+
+      # Se publica aunque el apply falle. La salida completa queda en el log del run.
+      - name: Publicar resumen
+        if: always()
+        env:
+          RESULT: ${{ job.status }}
+        run: |
+          {
+            echo "## terraform ${ACTION}: ${STACK}"
+            echo "- Commit: \`${{ inputs.ref }}\`"
+            echo "- Resultado: ${RESULT}"
+          } >> "$GITHUB_STEP_SUMMARY"

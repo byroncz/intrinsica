@@ -1,7 +1,21 @@
-# Terraform de los stacks de capa. En PRs: fmt, validate y plan de los afectados,
-# sin aplicar nunca. Manual (workflow_dispatch): apply o destroy de un stack de
-# capa dentro del environment gcp, que exige la aprobación del humano.
+# Terraform de los stacks de capa, en tres caminos:
+# - PR: fmt, validate y plan informativo de los afectados. Nunca aplica.
+# - Merge a main (workflow_run): cuando CI termina en verde sobre un push a main,
+#   plan de los stacks afectados y un apply por stack que espera la aprobación del
+#   humano en el environment gcp. Va tras CI porque la imagen con el tag nuevo
+#   (layers/<capa>/VERSION) solo se publica allí: aplicar antes falla con "tag no existe".
+# - Manual (workflow_dispatch): apply o destroy de un stack sin cambio de código.
+# Merge y manual comparten _terraform-stack.yml: plan sin aprobación, apply del
+# mismo plan guardado con aprobación. `data` nunca entra: lo aplica el humano.
 name: Terraform
+
+# En un run por merge, el título es el del commit que despliega (con varios en
+# espera, el humano aprueba el más reciente).
+run-name: >-
+  ${{ github.event_name == 'workflow_run'
+  && format('Deploy: {0}', github.event.workflow_run.display_title)
+  || github.event.pull_request.title
+  || 'Terraform' }}
 
 on:
   pull_request:
@@ -9,6 +23,11 @@ on:
       - "infra/**"
       - "layers/*/VERSION" # el stack de la capa deriva el tag de la imagen de este archivo
       - ".github/workflows/terraform.yml"
+      - ".github/workflows/_terraform-stack.yml"
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
   workflow_dispatch:
     inputs:
       stack:
@@ -36,7 +55,13 @@ env:
 jobs:
   # Calcula los stacks de capa afectados. `data` nunca entra: lo aplica el humano.
   changes:
-    if: github.event_name == 'pull_request'
+    # En workflow_run solo cuenta un push a main de este repo con CI en verde.
+    if: >-
+      github.event_name == 'pull_request'
+      || (github.event_name == 'workflow_run'
+      && github.event.workflow_run.conclusion == 'success'
+      && github.event.workflow_run.event == 'push'
+      && github.event.workflow_run.head_repository.full_name == github.repository)
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -46,15 +71,25 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: ${{ github.event.workflow_run.head_sha }} # vacío en un PR: el checkout por defecto
 
       - name: Calcular matriz de stacks
         id: matrix
         env:
+          EVENT_NAME: ${{ github.event_name }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
-          changed="$(git diff --name-only "${BASE_SHA}...HEAD")"
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            range="${BASE_SHA}...HEAD"
+          else
+            # Push a main: el commit contra su primer padre. Cubre un squash o un
+            # merge commit; un rebase merge de varios commits se despliega a mano.
+            range="${HEAD_SHA}^1..${HEAD_SHA}"
+          fi
+          changed="$(git diff --name-only "$range")"
           layers="$(find infra/stacks/batch -mindepth 1 -maxdepth 1 -type d ! -name data -printf '%f\n' | sort)"
-          if grep -qE '^(infra/modules/|\.github/workflows/terraform\.yml$)' <<< "$changed"; then
+          if grep -qE '^(infra/modules/|\.github/workflows/(_terraform-stack|terraform)\.yml$)' <<< "$changed"; then
             selected="$layers"
           else
             # layers/<capa>/VERSION -> stack <capa> sin el sufijo (l1_ingest -> l1)
@@ -80,10 +115,10 @@ jobs:
       STACK_DIR: infra/stacks/batch/${{ matrix.layer }}
       # Plan solo si WIF ya está configurado (tras aplicar deploy-github).
       PLAN: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT != '' }}
-      # Este job no usa el environment gcp y no ve su ALERT_EMAIL: el plan del
-      # stack alerting lleva un correo de relleno (la variable es sensible, no
-      # se imprime) y el valor real solo entra en el apply.
-      TF_VAR_alert_email: ${{ vars.ALERT_EMAIL || 'plan@example.invalid' }}
+      # El plan de un PR nunca usa el correo real: el stack alerting lleva un
+      # relleno (la variable es sensible, no se imprime) y el valor real, el
+      # secret ALERT_EMAIL, solo entra en el job plan que sigue a un merge.
+      TF_VAR_alert_email: plan@example.invalid
     steps:
       - uses: actions/checkout@v4
 
@@ -132,62 +167,37 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-  # Camino manual: apply o destroy de un stack de capa. `data` no está entre las
-  # opciones y lo aplica el humano; el environment gcp exige su aprobación.
+  # Merge a main: plan de cada stack afectado y, si hay cambios, un apply que
+  # espera la aprobación del humano en el environment gcp. Cada stack va por su
+  # cuenta (el plan fallido de uno no frena a los demás). Se omite mientras WIF
+  # no esté configurado, igual que el plan de los PR.
   deploy:
-    if: github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    environment: gcp
+    needs: changes
+    if: github.event_name == 'workflow_run' && needs.changes.outputs.matrix != '[]' && vars.GCP_DEPLOY_SERVICE_ACCOUNT != ''
+    strategy:
+      fail-fast: false
+      matrix:
+        layer: ${{ fromJSON(needs.changes.outputs.matrix) }}
     permissions:
       contents: read
       id-token: write # WIF: el token OIDC de GitHub se canjea por credenciales de GCP
-    env:
-      STACK: ${{ inputs.stack }}
-      ACTION: ${{ inputs.action }}
-      TFSTATE_BUCKET: ${{ vars.GCP_PROJECT_ID }}-tfstate
-      # Correo de la alerta (stack alerting): variable del environment gcp, no
-      # del repo. Los demás stacks ignoran TF_VAR_alert_email.
-      TF_VAR_alert_email: ${{ vars.ALERT_EMAIL }}
-    steps:
-      - uses: actions/checkout@v4
+    uses: ./.github/workflows/_terraform-stack.yml
+    with:
+      stack: ${{ matrix.layer }}
+      action: apply
+      ref: ${{ github.event.workflow_run.head_sha }}
+    secrets: inherit # ALERT_EMAIL, para el plan del stack alerting
 
-      - name: Validar el stack
-        run: |
-          if [[ "$STACK" == "data" || ! -d "infra/stacks/batch/${STACK}" ]]; then
-            echo "::error::Stack inválido: '${STACK}'. data no se despliega aquí y infra/stacks/batch/${STACK} debe existir."
-            exit 1
-          fi
-          echo "STACK_DIR=infra/stacks/batch/${STACK}" >> "$GITHUB_ENV"
-
-      - uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: 1.16.4 # misma versión que infra/bin/install-terraform.sh
-          terraform_wrapper: false
-
-      - name: Autenticar en GCP (WIF, sin llaves)
-        uses: google-github-actions/auth@v2
-        with:
-          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
-          service_account: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
-
-      - name: terraform init
-        run: |
-          terraform -chdir="$STACK_DIR" init -input=false \
-            -backend-config="bucket=${TFSTATE_BUCKET}"
-
-      - name: terraform ${{ inputs.action }}
-        run: |
-          terraform -chdir="$STACK_DIR" "$ACTION" -auto-approve -input=false -no-color \
-            -var "tfstate_bucket=${TFSTATE_BUCKET}"
-
-      # Se publica aunque el paso anterior falle. La salida completa queda en el log del run.
-      - name: Publicar resumen
-        if: always()
-        env:
-          RESULT: ${{ job.status }}
-        run: |
-          {
-            echo "## terraform ${ACTION}: ${STACK}"
-            echo "- Rama: \`${GITHUB_REF_NAME}\`"
-            echo "- Resultado: ${RESULT}"
-          } >> "$GITHUB_STEP_SUMMARY"
+  # Camino manual: reaplicar sin cambio de código (cerrar deriva) o destroy. `data`
+  # no está entre las opciones y lo aplica el humano.
+  manual:
+    if: github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: read
+      id-token: write # WIF: el token OIDC de GitHub se canjea por credenciales de GCP
+    uses: ./.github/workflows/_terraform-stack.yml
+    with:
+      stack: ${{ inputs.stack }}
+      action: ${{ inputs.action }}
+      ref: ${{ github.sha }}
+    secrets: inherit # ALERT_EMAIL, para el plan del stack alerting

@@ -4,7 +4,7 @@ variable "project_id" {
 }
 
 variable "alert_email" {
-  description = "Correo que recibe la alerta. Es dato personal: no se versiona, llega por TF_VAR_alert_email desde el environment gcp de Actions."
+  description = "Correo que recibe la alerta. Es dato personal: no se versiona, llega por TF_VAR_alert_email desde el secret de repositorio ALERT_EMAIL de Actions."
   type        = string
   sensitive   = true
 

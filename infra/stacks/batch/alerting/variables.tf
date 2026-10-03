@@ -4,7 +4,7 @@ variable "tfstate_bucket" {
 }
 
 variable "alert_email" {
-  description = "Correo que recibe la alerta. Llega por TF_VAR_alert_email desde la variable ALERT_EMAIL del environment gcp; nunca se escribe en el repo."
+  description = "Correo que recibe la alerta. Llega por TF_VAR_alert_email desde el secret de repositorio ALERT_EMAIL; nunca se escribe en el repo."
   type        = string
   sensitive   = true
 }
