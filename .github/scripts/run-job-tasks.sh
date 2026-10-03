@@ -4,7 +4,7 @@
 # CLOUD_RUN_TASK_INDEX. L2 no usa task array: sus meses son secuenciales (cada
 # uno lee el carry-over del anterior), así que su CLI exige una sola tarea.
 #
-# Uso: run-job-tasks.sh <job> <from> [to]   (job = <capa>-<modo>)
+# Uso: run-job-tasks.sh <job> <from> [to] [script]   (job = <capa>-<modo>)
 #   l1-backfill, l1-monthly-close: meses YYYY-MM del rango inclusivo
 #   l1-daily:                      días YYYY-MM-DD del rango inclusivo
 #   l1-seam-check:                 una sola unidad ("1")
@@ -13,7 +13,11 @@
 #                                  desde dónde avanza) y entonces to, si viene,
 #                                  se valida solo
 #   l2-monthly:                    una sola unidad ("1"); to vacío o igual a from
-# to por defecto es from. En los demás jobs from es obligatorio. Entrada inválida: mensaje en stderr y salida 2.
+#   ops-script:                    una sola unidad ("1"); exige script (URI
+#                                  gs://<bucket>/<objeto>) y no admite from ni to
+# to por defecto es from. En los demás jobs from es obligatorio. script solo
+# lo mira ops-script; los demás jobs lo ignoran. Entrada inválida: mensaje en
+# stderr y salida 2.
 set -euo pipefail
 
 fail() {
@@ -21,10 +25,11 @@ fail() {
   exit 2
 }
 
-[[ $# -ge 2 && $# -le 3 ]] || fail "uso: run-job-tasks.sh <job> <from> [to]"
+[[ $# -ge 2 && $# -le 4 ]] || fail "uso: run-job-tasks.sh <job> <from> [to] [script]"
 job=$1
 from=$2
 to=${3:-$2}
+script=${4:-}
 
 # Un día válido sobrevive al viaje de ida y vuelta por date (rechaza 2025-02-30).
 valid_day() {
@@ -88,7 +93,16 @@ case "$job" in
     [[ "$to" == "$from" ]] || fail "l2-monthly procesa un solo mes: to '$to' debe estar vacío o ser igual a from '$from'"
     echo 1
     ;;
+  ops-script)
+    # Un script no tiene rango: from y to no significan nada y aceptarlos
+    # escondería un error de quien lanza (creyó correr un mes).
+    [[ -z "$from" && -z "${3:-}" ]] || fail "ops-script no usa from ni to: indica solo script y args"
+    [[ -n "$script" ]] || fail "ops-script exige script: gs://<bucket>/<objeto>"
+    [[ "$script" =~ ^gs://[a-z0-9][a-z0-9._-]*/[^[:space:]]*[^[:space:]/]$ ]] \
+      || fail "script inválido '$script': se espera gs://<bucket>/<objeto>, sin espacios"
+    echo 1
+    ;;
   *)
-    fail "job inválido '$job': l1-backfill, l1-daily, l1-monthly-close, l1-seam-check, l2-backfill o l2-monthly"
+    fail "job inválido '$job': l1-backfill, l1-daily, l1-monthly-close, l1-seam-check, l2-backfill, l2-monthly u ops-script"
     ;;
 esac

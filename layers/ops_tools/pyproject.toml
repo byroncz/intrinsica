@@ -1,0 +1,19 @@
+[project]
+name = "ops_tools"
+version = "0.1.0"
+description = "Imagen de operación de intrinsica: corre un script Python ad hoc tomado de GCS con acceso de solo lectura al lago."
+requires-python = ">=3.14"
+dependencies = [
+    "dq[reader]",
+    "google-cloud-storage>=3.0.0",
+    "pyarrow>=25.0.1",
+    "pyutils",
+]
+
+[build-system]
+requires = ["uv_build"]
+build-backend = "uv_build"
+
+[tool.uv.sources]
+dq = { workspace = true }
+pyutils = { workspace = true }

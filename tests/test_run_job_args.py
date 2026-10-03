@@ -54,3 +54,43 @@ def test_l1_rango_pasa_to():
 
 def test_sin_from_ni_to():
     assert args("l2-backfill") == "--mode,backfill"
+
+
+SCRIPT_URI = "gs://proj-ops/scripts/seam.py"
+
+
+def ops(script: str = SCRIPT_URI, texto: str = "") -> str:
+    return args("ops-script", "", "", "", "", script, texto)
+
+
+def test_ops_script_sin_args_solo_pasa_el_script():
+    assert ops() == f"^;;^--script={SCRIPT_URI}"
+
+
+def test_ops_script_args_van_como_una_sola_pieza():
+    # Comas y valores repetidos rompen la lista de gcloud: por eso no se parten.
+    assert ops(texto="--a 5 --b 5, 'dos palabras'") == (
+        f"^;;^--script={SCRIPT_URI};;--script-args=--a 5 --b 5, 'dos palabras'"
+    )
+
+
+def test_ops_script_sin_mode():
+    assert "--mode" not in ops()
+
+
+def test_ops_script_rechaza_el_separador_en_el_texto():
+    out = subprocess.run(
+        [SCRIPT, "ops-script", "", "", "", "", SCRIPT_URI, "a;;b"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert out.returncode == 2
+    assert ";;" in out.stderr
+
+
+def test_los_demas_jobs_ignoran_script_y_args():
+    assert (
+        args("l2-monthly", "2023-03", "2023-03", "", "", SCRIPT_URI, "x")
+        == "--mode,monthly,--from=2023-03"
+    )

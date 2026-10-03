@@ -162,3 +162,54 @@ resource "google_storage_bucket" "manifest" {
 
   depends_on = [google_project_service.apis]
 }
+
+# Scripts y salidas de operación (ITSC-298): el job ops-script lee de scripts/
+# lo que el humano sube desde Cloud Shell y deja salidas grandes en results/.
+# No es un dato del lago: es el espacio de trabajo de las verificaciones ad hoc.
+resource "google_storage_bucket" "ops" {
+  name                        = "${var.project_id}-ops"
+  project                     = google_project.this.project_id
+  location                    = var.region
+  uniform_bucket_level_access = true
+  public_access_prevention    = "enforced"
+
+  # El script se sube siempre a la misma ruta y se sobrescribe: el versionado
+  # es la trazabilidad de lo que corrió (el job registra su generation y hash).
+  versioning {
+    enabled = true
+  }
+
+  # Una versión no vigente de un script se conserva 90 días y se borra. La
+  # vigente no vence: es el script que se vuelve a lanzar.
+  lifecycle_rule {
+    action {
+      type = "Delete"
+    }
+    condition {
+      with_state                 = "ARCHIVED"
+      matches_prefix             = ["scripts/"]
+      days_since_noncurrent_time = 90
+    }
+  }
+
+  # Todo lo de results/ se borra a los 7 días. Sin with_state, la regla toma
+  # vigentes y no vigentes: con el bucket versionado, borrar una vigente la deja
+  # como no vigente, y como su age ya pasó de 7 días, la siguiente evaluación la
+  # borra de verdad.
+  lifecycle_rule {
+    action {
+      type = "Delete"
+    }
+    condition {
+      with_state     = "ANY"
+      matches_prefix = ["results/"]
+      age            = 7
+    }
+  }
+
+  lifecycle {
+    prevent_destroy = true
+  }
+
+  depends_on = [google_project_service.apis]
+}
