@@ -24,6 +24,30 @@ locals {
   }
 }
 
+# Semilla del catálogo de θ (ITSC-291): Terraform lo crea solo si no existe y
+# nunca lo actualiza ni lo borra. El contenido vivo es del humano, que lo edita
+# en GCS (TRD-L2 §7.3), así que content, detect_md5hash y source se ignoran y
+# una edición no aparece como deriva en el plan. prevent_destroy protege el
+# objeto: un destroy del stack l2 falla en el plan mientras esté en el estado.
+resource "google_storage_bucket_object" "thetas_seed" {
+  bucket  = local.buckets["manifest"]
+  name    = "l2/thetas.yaml"
+  content = file("${path.module}/../../../../layers/l2_dc_events/src/l2_dc_events/config/thetas.yaml")
+
+  lifecycle {
+    ignore_changes  = [content, detect_md5hash, source]
+    prevent_destroy = true
+  }
+}
+
+# El objeto ya existía (subido a mano el 2026-10-02): el primer apply lo
+# importa al estado en vez de recrearlo. Con el objeto ya en el estado, el
+# bloque no hace nada.
+import {
+  to = google_storage_bucket_object.thetas_seed
+  id = "${local.buckets["manifest"]}/l2/thetas.yaml"
+}
+
 provider "google" {
   project = local.data.project_id
   region  = local.data.region
@@ -76,8 +100,8 @@ module "layer" {
     # Primer mes de la serie: el único que se procesa sin carry-over previo.
     L2_SERIES_START = "2017-08"
     # Catálogo de θ (TRD-L2 §7.3): agregar un θ es editar este objeto y lanzar
-    # l2-backfill sin from; no requiere PR ni apply. Hay que subirlo una vez,
-    # a partir de config/thetas.yaml, antes de la primera corrida.
+    # l2-backfill sin from; no requiere PR ni apply. Lo siembra
+    # google_storage_bucket_object.thetas_seed si falta.
     L2_THETAS_URI = "gs://${local.buckets["manifest"]}/l2/thetas.yaml"
   }
 

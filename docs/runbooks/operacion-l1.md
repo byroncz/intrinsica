@@ -82,9 +82,12 @@ otro log `ERROR` no dispara el correo (ese fallo se ve en la ejecución en rojo)
 Un hallazgo `warning` o `info` entra con otra severidad y no cumple el filtro.
 El filtro no mira texto libre.
 
-**A quién llega.** Al correo de la variable `ALERT_EMAIL` del environment `gcp`
-de Actions, que el stack `alerting` lee como `TF_VAR_alert_email`. No está en
-el repo. Para cambiar de destinatario, edita `ALERT_EMAIL` y vuelve a aplicar
+**A quién llega.** Al correo de la variable de repositorio `ALERT_EMAIL` de
+Actions, que el stack `alerting` lee como `TF_VAR_alert_email`. Es de
+repositorio y no del environment `gcp` porque el job `plan` no usa el
+environment y el correo queda dentro del plan que luego se aplica
+([infra/README.md](../../infra/README.md), "Desplegar un cambio de capa"). No
+está en el repo. Para cambiar de destinatario, edita `ALERT_EMAIL` y vuelve a aplicar
 el stack.
 
 **Qué trae.** Job, capa, modo, check, unidad, detalle y `run_id`, más el enlace
@@ -123,7 +126,7 @@ hallazgos nuevos.
    `l1_ingest:0.6.0` y `l2_dc_events:0.7.0`, y aplica `l1` y `l2` (*Actions →
    Terraform*) para que los jobs las usen. Sin la imagen nueva el log sigue
    siendo texto y la alerta no ve nada.
-3. Crea `ALERT_EMAIL` como variable del environment `gcp` y aplica `alerting`.
+3. Crea `ALERT_EMAIL` como variable de repositorio y aplica `alerting`.
    El plan debe mostrar solo el canal y la política (2 recursos a crear).
 4. **Prueba extremo a extremo**, desde Cloud Shell. Para un `error` hace falta
    un mes ya vencido que Binance no tenga y hoy no existe ninguno, así que se

@@ -200,3 +200,20 @@ resource "google_storage_bucket_iam_member" "deploy_bucket_iam" {
   role   = google_project_iam_custom_role.bucket_iam_admin.id
   member = local.deploy_member
 }
+
+# Sembrar el catálogo de θ (stack l2, ITSC-291): crear y leer SOLO el objeto
+# manifest/l2/thetas.yaml. Terraform lo lee en cada plan y lo crea si falta; la
+# edición del catálogo sigue siendo del humano. objectUser y no objectCreator
+# porque el plan necesita storage.objects.get; la condición lo acota a ese
+# único objeto, no al prefijo l2/.
+resource "google_storage_bucket_iam_member" "deploy_thetas_seed" {
+  bucket = google_storage_bucket.manifest.name
+  role   = "roles/storage.objectUser"
+  member = local.deploy_member
+
+  condition {
+    title       = "deploy-thetas-seed"
+    description = "deploy-github solo gestiona l2/thetas.yaml, la semilla del catálogo de θ"
+    expression  = "resource.name == \"projects/_/buckets/${google_storage_bucket.manifest.name}/objects/l2/thetas.yaml\""
+  }
+}

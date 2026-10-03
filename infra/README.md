@@ -174,8 +174,8 @@ Lo hace el humano, en este orden. Ningún agente ejecuta el apply.
 
 2. Crea el environment `gcp` del repositorio (*Settings → Environments →
    New environment*) con tu usuario como revisor requerido. Debe existir
-   antes del paso 3: un `workflow_dispatch` que referencia un environment
-   inexistente lo crea sin protección.
+   antes del paso 3: un run que referencia un environment inexistente lo crea
+   sin protección.
 3. Carga como variables de repositorio `GCP_DEPLOY_SERVICE_ACCOUNT`
    (output `deploy_service_account_email`), `GCP_PROJECT_ID` (output
    `project_id`) y `GCP_REGION` (output `region`), como en la sección 4.
@@ -282,19 +282,87 @@ los meses que faltan.
 
 Todo cambio de código de una capa (incluidos `shared/`, `uv.lock` y el
 `pyproject.toml` raíz, que entran en cada imagen) sube su `layers/<capa>/VERSION`
-(estrictamente mayor que la de `main`) y CI
-publica la imagen con ese tag al mergear. El job de Cloud Run no la toma solo:
-el humano espera a que el run de CI en `main` termine de publicar
-`<capa>:<versión>` y, recién entonces, lanza desde Actions
-*Terraform → `<capa>` → apply* para que el job pase al tag nuevo. Un apply
-anterior falla porque el tag aún no existe. El plan debe mostrar
-`image: ...:<versión anterior> -> ...:<versión nueva>`.
+(estrictamente mayor que la de `main`) y CI publica la imagen con ese tag al
+mergear. El job de Cloud Run no toma la imagen solo: lo mueve un `apply` del
+stack, y desde ITSC-291 ese `apply` te llega solo, como una pregunta.
+
+### Mergear y aprobar
+
+1. Mergeas el PR. Si tocó `infra/stacks/batch/<stack>/`, `infra/modules/`,
+   `layers/<capa>/VERSION` o los workflows `terraform.yml` y
+   `_terraform-stack.yml`, al terminar CI en verde sobre `main` arranca el run
+   *Terraform* titulado *Deploy: \<título del commit\>*. Un merge que no toca nada
+   de eso deja un run corto (`changes`, sin plan) y ninguno esperando.
+2. Por cada stack de capa afectado, el job `plan` (sin aprobación) corre
+   `terraform plan -out` y deja el plan completo en su log y en el resumen del
+   run. Si no hay cambios, el stack termina ahí: no hay `apply` ni nada espera.
+3. Si hay cambios, el job `apply` queda en *waiting*. Lee el plan y, en la página
+   del run, pulsa *Review deployments* (environment `gcp`): apruebas o rechazas.
+   Aprobado, el `apply` baja el plan guardado, lo muestra y lo aplica tal cual.
+   Sin respuesta, GitHub cancela el deployment pendiente a los 30 días y no se
+   toca GCP. El plan debe mostrar, por ejemplo,
+   `image: ...:<versión anterior> -> ...:<versión nueva>`.
+
+Por qué el deploy cuelga de CI (`workflow_run`) y no de un `needs` al job de
+build: el build vive en `ci.yml`, que corre en cada push y construye solo las
+capas que cambiaron, y `terraform.yml` también corre en PR y a mano. Encadenarlos
+con `needs` obligaría a fundir ambos workflows o a reconstruir las imágenes en
+`terraform.yml`. Con `workflow_run`, "CI en verde sobre `main`" garantiza que la
+imagen ya existe, que es exactamente lo que faltaba (aplicar antes falla con
+"tag no existe"). Costo: si otro job de CI falla (lint, Rust), no hay deploy
+aunque la imagen se haya publicado; se arregla en `main` o se lanza el manual.
+
+**El plan guardado vive en un bucket, no en un artefacto.** El repositorio es
+público y cualquier cuenta de GitHub descarga los artefactos de un run; un plan
+guardado lleva dentro los valores de sus variables, entre ellos el correo de
+`alerting`. Por eso el job `plan` lo sube a
+`gs://<proyecto>-tfstate/plans/<run>-<intento>/<stack>.tfplan` (privado), el
+`apply` lo borra al terminar y una regla de ciclo de vida de `data` borra a los 7
+días los que quedaron (rechazados, cancelados o con apply fallido). La regla
+llega con el próximo apply de `data`; sin él el flujo funciona igual, solo que
+los planes huérfanos no se limpian solos.
+
+**Dos merges seguidos dejan dos runs esperando.** Aprueba el más reciente y
+rechaza el anterior: su plan ya no coincide con `main`. Si aprobaras el viejo
+después de aplicar el nuevo, Terraform lo rechaza con *Saved plan is stale*
+porque el estado cambió. Esa es la red de seguridad; la regla es no depender de
+ella.
+
+**Si el apply falla a mitad de camino**, el plan guardado ya no sirve (el estado
+cambió). Corrige la causa y re-ejecuta *todo* el run (*Re-run all jobs*), que
+planea de nuevo y pide otra aprobación; o lanza el manual.
+
+Límites: el cálculo de afectados compara el commit de `main` contra su primer
+padre, así que cubre un *squash* o un *merge commit*. Un *rebase merge* de varios
+commits solo ve el último: despliega a mano con el manual. El stack `data` nunca
+entra: lo aplica el humano desde Cloud Shell.
+
+### Manual: reaplicar sin cambio de código o destroy
+
+*Actions → Terraform → Run workflow* (stack, `apply` o `destroy`) sirve cuando
+no hay cambio de código que dispare el flujo anterior: cerrar la deriva de un
+`gcloud run jobs update` hecho a mano, reintentar tras corregir un permiso en
+`data`, o un `destroy`. Se divide igual: `plan` sin aprobación (`plan` o
+`plan -destroy`, visible en el log y el resumen) y `apply` con aprobación del
+plan guardado. Si el plan no tiene cambios, no hay nada que aprobar. Un stack con
+un recurso `prevent_destroy` (hoy `l2`, por el catálogo de θ) no admite
+`destroy`: el plan falla. Es el freno buscado; quítalo del estado a propósito con
+`terraform state rm` antes de destruir.
 
 Si el merge no disparó el CI de push, el rescate es lanzar *CI* a mano en
 `main` (Actions → *CI* → *Run workflow*, rama `main`): construye y publica las
 tres capas, aunque no hayan cambiado. Los tags que ya existían se sobrescriben
 con el mismo contenido. Un run manual sobre otra rama solo construye y corre la
-prueba de humo, sin publicar.
+prueba de humo, sin publicar. Ese run manual no dispara el deploy (solo lo hace
+un push): lánzalo después con el manual de Terraform.
+
+### Variable `ALERT_EMAIL`
+
+El job `plan` no usa el environment `gcp`, así que no ve sus variables.
+`ALERT_EMAIL` (el correo del stack `alerting`) debe ser **variable de
+repositorio** (*Settings → Secrets and variables → Actions → Variables*). Sin
+ella el job `plan` de `alerting` falla de entrada con el motivo, en vez de
+planear con un correo de relleno que luego se aplicaría.
 
 ## Stack l2 (DC Events)
 
@@ -303,19 +371,37 @@ uno con su service account. Lee la landing de L1 (`roles/storage.objectViewer`
 bajo `l1/`) y escribe en `dc-events` y `dq-findings` (`roles/storage.objectUser`
 bajo `l2/`). También lee el catálogo de θ, `manifest/l2/thetas.yaml`
 (`roles/storage.objectViewer` bajo `l2/`; la variable `L2_THETAS_URI` apunta
-a él, TRD-L2 §7.3): solo lectura, porque lo edita el humano. Antes de la
-primera corrida hay que subirlo una vez desde Cloud Shell (ver "Cómo agregar
+a él, TRD-L2 §7.3): solo lectura, porque lo edita el humano (ver "Cómo agregar
 θ" en el [README de la capa](../layers/l2_dc_events/README.md)). No tiene
 scheduler propio: la encadena el workflow de L1 (ITSC-283).
 
-Orden de apply, todo por el humano:
+**Semilla del catálogo (ITSC-291).** El stack declara el objeto como
+`google_storage_bucket_object.thetas_seed`, con el contenido de
+`layers/l2_dc_events/src/l2_dc_events/config/thetas.yaml`, y
+`ignore_changes = [content, detect_md5hash, source]` más `prevent_destroy`:
+Terraform lo crea solo si no existe y nunca lo actualiza ni lo borra, así que
+editarlo en GCS no aparece como deriva en el plan. El objeto ya existía (subido a
+mano el 2026-10-02), por eso el stack trae un bloque `import`: el primer apply lo
+importa al estado y no lo recrea. El plan de ese primer apply debe decir
+`1 to import` para `thetas_seed` y ningún `add` para ese objeto; si dice
+`will be created`, no apruebes. Con el objeto ya en el estado, el bloque `import`
+no hace nada. Para sembrarlo de nuevo en un bucket de prueba basta borrar el
+objeto y aplicar.
 
-1. `data` desde Cloud Shell (ver "Habilitar el despliegue desde GitHub
-   Actions"), para que `deploy-github` tenga `bucketIamAdmin` sobre `dc-events`.
-2. Esperar a que el run de CI en `main` publique `l2_dc_events:<versión>`, con
-   la versión de `layers/l2_dc_events/VERSION`. Un apply anterior falla
-   porque el tag aún no existe.
-3. Actions → *Terraform* → `l2` → `apply`.
+Para eso `deploy-github` necesita leer y crear ese único objeto
+(`roles/storage.objectUser` con condición sobre `l2/thetas.yaml`, en `data`).
+Terraform lo lee en cada plan: sin el permiso, el plan de `l2` falla con 403.
+
+Orden de apply:
+
+1. El humano aplica `data` desde Cloud Shell (ver "Habilitar el despliegue desde
+   GitHub Actions"), para que `deploy-github` tenga `bucketIamAdmin` sobre
+   `dc-events` y acceso al objeto de la semilla.
+2. Mergear el PR que sube `layers/l2_dc_events/VERSION` o toca el stack. Al
+   terminar CI en `main`, que publica `l2_dc_events:<versión>`, el run
+   *Terraform* deja el `apply` de `l2` esperando.
+3. Revisar el plan y aprobar en *Review deployments* (ver "Desplegar un cambio de
+   capa").
 
 Los recursos salen de la sonda de L2 ([runbook](../docs/runbooks/sonda-l2.md),
 ITSC-281 e ITSC-286) y de la decisión ADR-04 ([TRD-L2 §14](../docs/TRD/l2.md)):
@@ -368,12 +454,11 @@ Orden de apply, todo por el humano:
    antes de aprobar (`main` aún no tiene el bucket `ops`); luego re-ejecuta
    `stack (ops)`. Su plan (la service account, ocho bindings y el job) es la
    evidencia de que `ops` crea solo eso.
-2. Esperar a que el run de CI en `main` publique `ops_tools:<versión>`, con la
-   versión de `layers/ops_tools/VERSION`. Un apply anterior falla porque el tag
-   aún no existe.
-3. Actions → *Terraform* → `ops` → `apply`. El plan debe mostrar solo la
-   service account, sus bindings (siete de lectura y uno de escritura) y el
-   job.
+2. Mergear. Al terminar CI en `main`, que publica `ops_tools:<versión>` (la de
+   `layers/ops_tools/VERSION`), el run *Terraform* deja el `apply` de `ops`
+   esperando; no se aprueba antes porque el apply falla si el tag aún no existe.
+3. Aprobar en *Review deployments*. El plan debe mostrar solo la service
+   account, sus bindings (siete de lectura y uno de escritura) y el job.
 4. Correr la prueba de permisos del runbook (`permisos.py`).
 
 Un cambio de código de `ops_tools` sube su `VERSION` y se despliega como
@@ -389,21 +474,25 @@ alertas. Qué dispara, a quién llega y cómo silenciarla:
 [runbook de operación](../docs/runbooks/operacion-l1.md#alerta-por-correo-itsc-296).
 
 - El correo es la variable sensible `alert_email`, que el workflow toma de
-  `ALERT_EMAIL` en el environment `gcp` (`TF_VAR_alert_email`); no está en el
-  repo. El plan de los PR usa un correo de relleno y no lo imprime.
+  `ALERT_EMAIL` (`TF_VAR_alert_email`); no está en el repo. Debe ser variable de
+  **repositorio**, no del environment `gcp` (ver "Variable `ALERT_EMAIL`"): el
+  humano la crea ahí antes del próximo deploy de `alerting`. Mientras no exista,
+  el plan de los PR usa un correo de relleno y no lo imprime, y el job `plan` de
+  merge y manual falla con el motivo.
 - Antes del primer apply, el humano aplica `data` desde Cloud Shell: habilita
   `monitoring.googleapis.com` y da a `deploy-github` los roles
   `monitoring.alertPolicyEditor`, `monitoring.notificationChannelEditor` y
   `logging.configWriter` (una política log match crea por debajo una
   notification rule en Cloud Logging). Sin eso el apply falla con 403 o con la
   API deshabilitada.
-- Actions → *Terraform* → `alerting` → `apply`. El plan debe mostrar solo el
-  canal y la política.
-- Diferencia esperada en el plan de un PR: tras el primer apply, el plan del PR
-  (que usa el correo de relleno `plan@example.invalid`) muestra
+- El `apply` de `alerting` llega por el flujo de merge o por el manual (ver
+  "Desplegar un cambio de capa"). El plan debe mostrar solo el canal y la
+  política.
+- Con `ALERT_EMAIL` solo en el environment `gcp` (antes de ITSC-291), el plan de
+  un PR usaba el correo de relleno `plan@example.invalid` y mostraba
   `~ update in place` en `google_monitoring_notification_channel.email`, en
-  `labels` (valor sensible). Es ruido: ese plan no se aplica, y el apply real
-  usa `ALERT_EMAIL`. Cualquier otro cambio en `alerting` sí es una sorpresa.
+  `labels` (valor sensible). Con la variable de repositorio ese ruido desaparece:
+  cualquier cambio en `alerting` es una sorpresa.
 - Costo: 0 USD hoy. Google anunció 0,35 USD/mes por referencia de métrica "no
   antes del 1 de septiembre de 2027"; una alerta log match cuenta como una. El
   canal de correo no cobra y los logs caben en los 50 GiB/mes gratis
