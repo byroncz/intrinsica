@@ -75,11 +75,14 @@ def test_sin_marcas_el_hallazgo_pasa(tmp_path):
     )
 
 
-# price = 0 pero con first_trade_id >= 0; y quantity = 0 con price válido.
+# price = 0 pero con first_trade_id >= 0; quantity = 0 con price válido; y
+# price y quantity válidos con first_trade_id = -1 o last_trade_id < first_trade_id.
 CORRUPT = [
     [MARKED[0], f"1195416,0.00000000,0.00000000,5,5,{T},True,True", MARKED[3]],
     [MARKED[0], f"1195416,0.00000000,0.00000000,-1,5,{T},True,True", MARKED[3]],
     [MARKED[0], f"1195416,11500.00000000,0.00000000,-1,-1,{T},True,True", MARKED[3]],
+    [MARKED[0], f"1195416,11500.00000000,0.10000000,-1,5,{T},True,True", MARKED[3]],
+    [MARKED[0], f"1195416,11500.00000000,0.10000000,5,4,{T},True,True", MARKED[3]],
 ]
 
 

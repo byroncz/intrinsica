@@ -7,7 +7,8 @@ duplicados con `p = 0, q = 0, f = -1, l = -1`, conservando `agg_trade_id` y
 entrada 2022-04-12). No son transacciones: L1 las descarta antes de escribir.
 
 Una fila es marca si y solo si cumple las cuatro igualdades. Cualquier otra
-fila con `price <= 0` o `quantity <= 0` es dato corrupto y la unidad falla.
+fila con `price <= 0`, `quantity <= 0`, `first_trade_id < 0` o
+`last_trade_id < first_trade_id` es dato corrupto y la unidad falla.
 """
 
 from decimal import Decimal
@@ -25,7 +26,7 @@ ZERO = Decimal(0)
 
 
 class ValueRangeError(ValueError):
-    """Hay filas con price o quantity <= 0 que no son marca; lleva el hallazgo."""
+    """Hay filas con valores fuera de rango que no son marca; lleva el hallazgo."""
 
     def __init__(self, message: str, check: CheckResult) -> None:
         super().__init__(message)
@@ -55,8 +56,12 @@ class MarkFilter:
                 pc.equal(data.column("last_trade_id"), -1),
             ),
         )
-        non_positive = pc.or_(pc.less_equal(price, ZERO), pc.less_equal(quantity, ZERO))
-        is_invalid = pc.and_(non_positive, pc.invert(is_mark))
+        first, last = data.column("first_trade_id"), data.column("last_trade_id")
+        out_of_range = pc.or_(
+            pc.or_(pc.less_equal(price, ZERO), pc.less_equal(quantity, ZERO)),
+            pc.or_(pc.less(first, 0), pc.less(last, first)),
+        )
+        is_invalid = pc.and_(out_of_range, pc.invert(is_mark))
 
         ids = data.column("agg_trade_id")
         self.n_invalid += _count(is_invalid)
@@ -90,8 +95,9 @@ class MarkFilter:
             {"ids": self.invalid_ids},
         )
         raise ValueRangeError(
-            f"{self.n_invalid} filas con price <= 0 o quantity <= 0 que no son "
-            f"marca del proveedor; primeros agg_trade_id: {self.invalid_ids}",
+            f"{self.n_invalid} filas con price <= 0, quantity <= 0, first_trade_id < 0 "
+            f"o last_trade_id < first_trade_id que no son marca del proveedor; "
+            f"primeros agg_trade_id: {self.invalid_ids}",
             check,
         )
 

@@ -39,8 +39,9 @@ en abril de 2022, con `price = 0`, `quantity = 0`, `first_trade_id = -1` y
 `last_trade_id = -1`, y conservó su `agg_trade_id` y `transact_time`
 ([changelog de la API Spot, entrada 2022-04-12](https://github.com/binance/binance-spot-api-docs/blob/master/CHANGELOG_CN.md)). No son
 transacciones: L1 las descarta antes de escribir y emite
-`provider_invalid_marker`. Cualquier otra fila con `price <= 0` o
-`quantity <= 0` hace fallar la unidad (`price_out_of_range`). Por eso el
+`provider_invalid_marker`. Cualquier otra fila con `price <= 0`,
+`quantity <= 0`, `first_trade_id < 0` o `last_trade_id < first_trade_id` hace
+fallar la unidad (`price_out_of_range`). Por eso el
 Parquet puede tener huecos de `agg_trade_id` solo donde el proveedor los
 tenga, nunca por las marcas. Detalle en el runbook
 [Marcas de Binance](runbooks/operacion-l1.md#marcas-de-binance).
@@ -319,8 +320,10 @@ documentan aquí, con su porqué:
   marcas: `severity = info`, `status = pass`, `metric_value = 0`. Con marcas:
   `severity = warning`, `status = corrected`. Se emite siempre, en cada
   unidad.
-- **`price_out_of_range`** (ITSC-294): fila con `price <= 0` o `quantity <= 0`
-  que no es marca completa, es decir, dato corrupto. `severity = error`,
+- **`price_out_of_range`** (ITSC-294): fila con `price <= 0`, `quantity <= 0`,
+  `first_trade_id < 0` o `last_trade_id < first_trade_id` que no es marca
+  completa, es decir, dato corrupto. El nombre quedó por el caso original
+  (precio) pero cubre también los trade ids. `severity = error`,
   `status = fail`, `metric_value` = filas corruptas y `details.ids` = hasta 10
   `agg_trade_id`. La unidad falla y no escribe Parquet ni manifiesto. Solo
   existe cuando falla.

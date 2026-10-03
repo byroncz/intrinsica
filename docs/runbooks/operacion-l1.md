@@ -186,8 +186,9 @@ No son transacciones.
   `quantity = 0`, `first_trade_id = -1` y `last_trade_id = -1`.
 - L1 la descarta antes de escribir `consolidated.parquet` y emite
   `provider_invalid_marker` con el conteo y hasta 10 `agg_trade_id`.
-- Cualquier otra fila con `price <= 0` o `quantity <= 0` es dato corrupto:
-  `price_out_of_range` (`error`) y la unidad falla sin escribir.
+- Cualquier otra fila con `price <= 0`, `quantity <= 0`, `first_trade_id < 0`
+  o `last_trade_id < first_trade_id` es dato corrupto: `price_out_of_range`
+  (`error`) y la unidad falla sin escribir.
 - `aggid_gap` y `aggid_duplicate` se calculan sobre los ids crudos, antes del
   descarte, así que las marcas no aparecen como huecos. Una marca nunca es la
   primera ni la última fila del mes, por eso la costura entre meses no cambia.
