@@ -55,6 +55,7 @@ def test_lotes_dan_mismo_hash_y_hallazgos_que_la_ruta_materializada(tmp_path):
         "reorder_applied",
         "aggid_gap",
         "aggid_duplicate",
+        "provider_invalid_marker",
     ]
     assert checks[2].metric_value > 0 and checks[3].metric_value > 0
 

@@ -30,6 +30,21 @@ tabla se desvía del código.
 | `is_buyer_maker` | bool | no | Si el comprador fue el maker |
 | `is_best_match` | bool | no | Si el precio fue el mejor del libro; se conserva del proveedor |
 
+### Invariante de valores
+
+Toda fila del Parquet cumple `price > 0`, `quantity > 0`,
+`first_trade_id >= 0` y `last_trade_id >= first_trade_id`. Binance marcó como
+inválidos los agg trades duplicados que detectó al auditar su histórico Spot
+en abril de 2022, con `price = 0`, `quantity = 0`, `first_trade_id = -1` y
+`last_trade_id = -1`, y conservó su `agg_trade_id` y `transact_time`
+([changelog de la API Spot, entrada 2022-04-12](https://github.com/binance/binance-spot-api-docs/blob/master/CHANGELOG_CN.md)). No son
+transacciones: L1 las descarta antes de escribir y emite
+`provider_invalid_marker`. Cualquier otra fila con `price <= 0` o
+`quantity <= 0` hace fallar la unidad (`price_out_of_range`). Por eso el
+Parquet puede tener huecos de `agg_trade_id` solo donde el proveedor los
+tenga, nunca por las marcas. Detalle en el runbook
+[Marcas de Binance](runbooks/operacion-l1.md#marcas-de-binance).
+
 ### Disposición física
 
 - **Raíz**: una ruta local o `gs://<bucket landing>/l1`. El stack `l1` solo
@@ -297,6 +312,18 @@ En GCS usa Application Default Credentials; no hay credenciales en código.
 `daily_monthly_drift`. Los que se agregan después de un bug real se
 documentan aquí, con su porqué:
 
+- **`provider_invalid_marker`** (ITSC-294): filas que Binance marcó como
+  inválidas (`price = 0`, `quantity = 0`, `first_trade_id = -1`,
+  `last_trade_id = -1`) y L1 descartó antes de escribir. `metric_value` =
+  número de filas descartadas y `details.ids` = hasta 10 `agg_trade_id`. Sin
+  marcas: `severity = info`, `status = pass`, `metric_value = 0`. Con marcas:
+  `severity = warning`, `status = corrected`. Se emite siempre, en cada
+  unidad.
+- **`price_out_of_range`** (ITSC-294): fila con `price <= 0` o `quantity <= 0`
+  que no es marca completa, es decir, dato corrupto. `severity = error`,
+  `status = fail`, `metric_value` = filas corruptas y `details.ids` = hasta 10
+  `agg_trade_id`. La unidad falla y no escribe Parquet ni manifiesto. Solo
+  existe cuando falla.
 - **`seam_skipped`** (ITSC-233): `daily` evalúa la costura del día recién
   escrito contra su día previo apenas termina de procesar la unidad. Cloud
   Run corre varias tareas del mismo Job en paralelo y no garantiza el orden:

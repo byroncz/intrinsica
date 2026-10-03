@@ -6,6 +6,7 @@ import pytest
 from l1_ingest import download, pipeline
 from l1_ingest.download import ChecksumError, fetch
 from l1_ingest.manifest import last_sha256
+from l1_ingest.marks import ValueRangeError
 from l1_ingest.pipeline import RunContext, Unit, process_unit
 
 CHECKS = {
@@ -15,6 +16,7 @@ CHECKS = {
     "reorder_applied",
     "aggid_gap",
     "aggid_duplicate",
+    "provider_invalid_marker",
 }
 
 
@@ -47,7 +49,7 @@ def _files(root):
     return sorted(p for p in root.rglob("*") if p.is_file())
 
 
-def test_day_is_provisional_with_six_findings(tmp_path, publish_zip):
+def test_day_is_provisional_with_seven_findings(tmp_path, publish_zip):
     publish, base = publish_zip
     publish(day=5)
     result = process_unit(Unit(2024, 3, 5), _ctx(tmp_path, base, "daily"))
@@ -57,7 +59,7 @@ def test_day_is_provisional_with_six_findings(tmp_path, publish_zip):
         "provisional-day=05.parquet"
     )
     assert {f.check_type for f in result.findings} == CHECKS
-    assert len(result.findings) == 6
+    assert len(result.findings) == 7
     assert {f.stage for f in result.findings} == {"provisional"}
     assert len(result.content_hash) == 64
 
@@ -188,7 +190,7 @@ def test_drift_reprocesses_and_emits_checksum_drift(tmp_path, publish_zip):
     assert len(drift) == 1
     assert (drift[0].severity, drift[0].status) == ("warning", "corrected")
     assert drift[0].details == {"previous_sha256": old, "new_sha256": new}
-    assert len(result.findings) == 7
+    assert len(result.findings) == 8
     assert (
         last_sha256(tmp_path / "manifest", "binance", "spot", "BTCUSDT", 2024, 3, url)
         == new
@@ -291,3 +293,18 @@ def test_drift_with_failed_write_does_not_skip_next_run(
 
     assert not result.skipped
     assert [f for f in result.findings if f.check_type == "checksum_drift"]
+
+
+def test_fila_corrupta_emite_price_out_of_range_y_no_escribe(tmp_path, publish_zip):
+    publish, base = publish_zip
+    publish(rows=["1,0.00000000,0.50000000,1,1,1709600000000,True,True"])
+    with pytest.raises(ValueRangeError):
+        process_unit(Unit(2024, 3), _ctx(tmp_path, base))
+
+    from dq.reader import current_findings
+
+    rows = current_findings(tmp_path / "dq").to_pylist()
+    failed = [r for r in rows if r["check_type"] == "price_out_of_range"]
+    assert [(r["severity"], r["status"]) for r in failed] == [("error", "fail")]
+    assert _files(tmp_path / "landing") == []
+    assert not (tmp_path / "manifest").exists()

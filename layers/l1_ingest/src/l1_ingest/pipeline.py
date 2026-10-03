@@ -19,6 +19,7 @@ from l1_ingest.download import (
 )
 from l1_ingest.integrity import check_agg_trade_id, ensure_order
 from l1_ingest.manifest import ManifestEntry, last_sha256, write_manifest
+from l1_ingest.marks import MarkFilter, ValueRangeError
 from l1_ingest.parse import open_zip_batches, read_zip
 from l1_ingest.stream import NotStreamable, stream_partition
 from l1_ingest.write import (
@@ -107,8 +108,13 @@ def _materialized(data: bytes, path: str, unit: Unit) -> tuple[list[CheckResult]
     table, _ = read_zip(data, unit.asset, unit.year, unit.month, unit.day)
     table, time_check = conform(table)
     table, reorder = ensure_order(table)
+    integrity = check_agg_trade_id(table)  # sobre los ids crudos, antes del descarte
+    marks = MarkFilter()
+    table = marks.feed(table)
+    marks.raise_if_invalid()
     write_partition(table, path)
-    return [time_check, reorder, *check_agg_trade_id(table)], content_hash(table)
+    checks = [time_check, reorder, *integrity, marks.marker_result()]
+    return checks, content_hash(table)
 
 
 def _exists(path: str) -> bool:
@@ -131,7 +137,7 @@ def process_unit(unit: Unit, ctx: RunContext) -> Result:
     En `daily`, si el mes ya tiene consolidated.parquet no se descarga ni se
     escribe, tampoco con `force`.
 
-    Si aborta por checksum o por unidad temporal, emite antes el hallazgo
+    Si aborta por checksum, unidad temporal o valores fuera de rango, emite antes el hallazgo
     error/fail y relanza. Un fallo de red no es un chequeo: se relanza sin más.
     """
     logger.info("inicio unidad=%s modo=%s run_id=%s", unit, ctx.mode, ctx.run_id)
@@ -220,7 +226,7 @@ def process_unit(unit: Unit, ctx: RunContext) -> Result:
             # Fuera del `except`: su traceback retendría el generador y el lote.
             logger.warning("unidad=%s sin orden creciente: ruta materializada", unit)
             rest, digest = _materialized(download.data, path, unit)
-    except TimestampUnitError as exc:
+    except (TimestampUnitError, ValueRangeError) as exc:
         _emit([*checks, exc.check], unit, ctx)
         raise
     # El manifiesto se registra tras la escritura atómica: si la unidad se corta

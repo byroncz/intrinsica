@@ -88,6 +88,7 @@ def test_main_day_end_to_end(tmp_path, publish_zip):
         "reorder_applied",
         "aggid_gap",
         "aggid_duplicate",
+        "provider_invalid_marker",
         "seam_skipped",  # sin día previo: 2024-03-05 no existe en el landing
     }
     assert {f["layer"] for f in findings} == {"l1"}

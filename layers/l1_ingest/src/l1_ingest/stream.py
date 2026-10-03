@@ -17,6 +17,7 @@ from pyutils import ContentHasher
 from l1_ingest.checks import CheckResult
 from l1_ingest.conform import classify_unit, conform_batch, unit_check, unit_error
 from l1_ingest.integrity import DETAILS_MAX, aggid_results
+from l1_ingest.marks import MarkFilter
 from l1_ingest.schema import OUTPUT_SCHEMA
 from l1_ingest.write import output_writer
 
@@ -99,11 +100,16 @@ def stream_partition(
     """Conforma, verifica y escribe los lotes RAW en `path`; devuelve sus hallazgos y el hash.
 
     Los hallazgos vienen en el orden del pipeline: unidad de tiempo, reorden,
-    huecos y duplicados. Si la unidad temporal no es válida lanza
-    `TimestampUnitError` con el mín y máx de toda la unidad, sin dejar archivo.
+    huecos y duplicados, marcas del proveedor. Si la unidad temporal no es válida
+    lanza `TimestampUnitError` con el mín y máx de toda la unidad; si hay filas
+    con price o quantity <= 0 que no son marca, `ValueRangeError`. Ninguna deja archivo.
+
+    La integridad de ids se calcula sobre los ids crudos y las marcas se
+    descartan después, para que no aparezcan como huecos falsos.
     """
     hasher = ContentHasher(OUTPUT_SCHEMA)
     sequence = _SequenceCheck()
+    marks = MarkFilter()
     lo = hi = unit = None
     invalid = False
 
@@ -125,10 +131,17 @@ def stream_partition(
             out = conform_batch(batch, unit)
             del batch
             sequence.feed(out)
-            writer.write_batch(out)
-            hasher.update(out)
+            clean = marks.feed(out)
+            if clean is not out:
+                del out
+            if marks.n_invalid or clean.num_rows == 0:
+                continue  # con filas corruptas la unidad falla: solo se sigue contando
+            writer.write_batch(clean)
+            hasher.update(clean)
         if invalid or unit is None:
             raise unit_error(lo, hi)
+        marks.raise_if_invalid()
         writer.commit()
 
-    return [unit_check(unit, lo, hi), *sequence.results()], hasher.hexdigest()
+    checks = [unit_check(unit, lo, hi), *sequence.results(), marks.marker_result()]
+    return checks, hasher.hexdigest()
