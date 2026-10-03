@@ -172,6 +172,41 @@ cierre.
    siguiente. Debe haber un `daily_monthly_drift` de 2026-08 y hallazgos
    `stage = canonical` del mes que superan a los `provisional`.
 
+## Marcas de Binance
+
+En abril de 2022 Binance auditó su histórico Spot, recuperó agg trades
+faltantes y marcó como inválidos los duplicados, con `p = 0`, `q = 0`,
+`f = -1`, `l = -1`, conservando su `agg_trade_id` y `transact_time` para no
+romper la secuencia ([changelog de la API Spot, entrada 2022-04-12](https://github.com/binance/binance-spot-api-docs/blob/master/CHANGELOG_CN.md)).
+No son transacciones.
+
+**Regla de L1** (ITSC-294):
+
+- Una fila es marca si y solo si cumple las cuatro igualdades: `price = 0`,
+  `quantity = 0`, `first_trade_id = -1` y `last_trade_id = -1`.
+- L1 la descarta antes de escribir `consolidated.parquet` y emite
+  `provider_invalid_marker` con el conteo y hasta 10 `agg_trade_id`.
+- Cualquier otra fila con `price <= 0`, `quantity <= 0`, `first_trade_id < 0`
+  o `last_trade_id < first_trade_id` es dato corrupto: `price_out_of_range`
+  (`error`) y la unidad falla sin escribir.
+- `aggid_gap` y `aggid_duplicate` se calculan sobre los ids crudos, antes del
+  descarte, así que las marcas no aparecen como huecos. Una marca nunca es la
+  primera ni la última fila del mes, por eso la costura entre meses no cambia.
+
+**Meses afectados en BTCUSDT:** 2017-12 y 2018-01. Son los únicos dos de los
+360 ZIP mensuales regenerados que incluyen BTCUSDT en la
+[lista oficial de archivos regenerados](https://github.com/binance/binance-public-data) (`updates/2022-04-21_aggregate_trade_updates.zip`).
+Un escaneo de los 109 meses de L1 (mínimo de `price` por row group) confirma
+que solo esos dos tenían precio 0.
+
+**Si L1 ya había escrito esos meses sin la regla** (imagen anterior a 0.5.14),
+reprocésalos: `l1-backfill` con `from = 2017-12`, `to = 2018-01` y `force`
+marcado. Después, `l2-backfill` con todos los campos vacíos: la frontera
+reanuda en 2017-12 (2017-11 no cambió, su carry-over sigue válido). Los
+SHA-256 esperados de los ZIP corregidos son `2017-12`
+`45261b647c70862edd60e788ce20f32d3b78d0753f9841ba3ca0e50afdbfbefe` y `2018-01`
+`645f8f581a6e4828df12f16b73f9f7451f12bef2ab24d4fc4b0466805e793e7d`.
+
 ## Consultar los hallazgos
 
 Los hallazgos son Parquet append-only bajo

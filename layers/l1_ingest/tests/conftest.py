@@ -41,7 +41,9 @@ def publish_zip(http_server):
     """Publica un ZIP de aggTrades (header, tiempos en ms) y su .CHECKSUM."""
     root, base = http_server
 
-    def publish(year=2024, month=3, day=None, checksum=None, extra_members=()):
+    def publish(
+        year=2024, month=3, day=None, checksum=None, extra_members=(), rows=None
+    ):
         kind, suffix = (
             ("monthly", f"{month:02d}")
             if day is None
@@ -53,7 +55,7 @@ def publish_zip(http_server):
         directory = root / "data/spot" / kind / "aggTrades/BTCUSDT"
         directory.mkdir(parents=True, exist_ok=True)
         name = f"BTCUSDT-aggTrades-{year}-{suffix}"
-        content = HEADER + "\n".join(ROWS) + "\n"
+        content = HEADER + "\n".join(rows or ROWS) + "\n"
         buffer = io.BytesIO()
         with zipfile.ZipFile(buffer, "w") as zf:
             zf.writestr(f"{name}.csv", content)
