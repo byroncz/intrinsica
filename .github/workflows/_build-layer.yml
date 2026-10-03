@@ -1,5 +1,5 @@
-# Workflow reutilizable: construye la imagen de una capa y, solo en push a
-# main, la publica en Artifact Registry. Lo llama el job `build` de ci.yml.
+# Workflow reutilizable: construye la imagen de una capa y, solo en main
+# (push o run manual), la publica en Artifact Registry. Lo llama el job `build` de ci.yml.
 name: Build layer
 
 on:
@@ -20,8 +20,8 @@ jobs:
       LAYER: ${{ inputs.layer }}
       REGISTRY: ${{ vars.GCP_ARTIFACT_REGISTRY }}
       WIF_PROVIDER: ${{ vars.GCP_WIF_PROVIDER }}
-      # Publica solo en push a main y si WIF ya está configurado (tras el primer apply).
-      PUBLISH: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.GCP_WIF_PROVIDER != '' }}
+      # Publica solo en main (push o run manual) y si WIF ya está configurado (tras el primer apply).
+      PUBLISH: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main' && vars.GCP_WIF_PROVIDER != '' }}
     steps:
       - uses: actions/checkout@v4
 
