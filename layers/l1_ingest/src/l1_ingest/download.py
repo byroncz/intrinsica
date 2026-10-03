@@ -3,6 +3,7 @@
 import hashlib
 import http.client
 import time
+import urllib.error
 import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -24,6 +25,14 @@ class ChecksumError(L1DownloadError):
 
 class DownloadError(L1DownloadError):
     """Fallo de red, del servidor o un .CHECKSUM ilegible."""
+
+
+class SourceNotPublished(L1DownloadError):
+    """La fuente respondió 404: el archivo no existe (todavía).
+
+    Es un hecho determinista, no un fallo transitorio: no se reintenta. Quien
+    llama decide si es esperado o un retraso según el calendario de Binance.
+    """
 
 
 @dataclass(frozen=True)
@@ -78,10 +87,21 @@ def _parse_checksum(url: str, checksum: bytes) -> str:
     return published
 
 
-def _get_checksum(url: str) -> str:
+def _is_not_found(exc: Exception) -> bool:
+    return isinstance(exc, urllib.error.HTTPError) and exc.code == 404
+
+
+def _get_checksum(url: str, *, missing_is_unpublished: bool = False) -> str:
+    """SHA-256 publicado. Un 404 del .CHECKSUM solo es "no publicado" si se pide.
+
+    Dentro de `fetch` el ZIP ya existe: que le falte el .CHECKSUM es una carrera
+    de publicación pasajera y sí se reintenta.
+    """
     try:
         return _parse_checksum(url, _get(url + ".CHECKSUM"))
     except (OSError, http.client.HTTPException) as exc:
+        if missing_is_unpublished and _is_not_found(exc):
+            raise SourceNotPublished(f"{url}.CHECKSUM: {exc}") from exc
         raise DownloadError(f"{url}.CHECKSUM: {exc}") from exc
 
 
@@ -89,6 +109,8 @@ def _attempt(url: str) -> Download:
     try:
         data = _get(url)
     except (OSError, http.client.HTTPException) as exc:
+        if _is_not_found(exc):
+            raise SourceNotPublished(f"{url}: {exc}") from exc
         raise DownloadError(f"{url}: {exc}") from exc
     published = _get_checksum(url)
     actual = hashlib.sha256(data).hexdigest()
@@ -103,6 +125,8 @@ def _retry[T](
     for n in range(1, attempts + 1):
         try:
             return call()
+        except SourceNotPublished:
+            raise  # un 404 no cambia por esperar
         except L1DownloadError:
             if n == attempts:
                 raise
@@ -118,9 +142,15 @@ def fetch_checksum(
 ) -> str:
     """SHA-256 publicado en el .CHECKSUM de `url`, sin descargar el ZIP.
 
-    Mismos reintentos que `fetch`.
+    Mismos reintentos que `fetch`, salvo el 404 (`SourceNotPublished`), que no
+    se reintenta.
     """
-    return _retry(lambda: _get_checksum(url), attempts, backoff, sleep)
+    return _retry(
+        lambda: _get_checksum(url, missing_is_unpublished=True),
+        attempts,
+        backoff,
+        sleep,
+    )
 
 
 def fetch(
@@ -133,5 +163,7 @@ def fetch(
 
     Reintenta hasta `attempts` intentos con espera creciente (backoff, 2 x
     backoff, ...). Si el último falla, lanza su excepción sin devolver datos.
+    El 404 del ZIP lanza `SourceNotPublished` en el primer intento, sin espera;
+    los fallos de red y los 5xx sí se reintentan.
     """
     return _retry(lambda: _attempt(url), attempts, backoff, sleep)

@@ -9,7 +9,7 @@ para escribirlo y leerlo.
 - `dq.Finding`: dataclass validada, con los enumerados `Severity`, `Stage` y
   `Status`.
 - `dq.emit_findings(findings, root)`: escribe los hallazgos como Parquet en
-  una raíz local o `gs://`, y deja una línea de log por hallazgo.
+  una raíz local o `gs://`, y deja una línea de log JSON por hallazgo.
 - `dq.reader.current_findings(root)`: estado actual por `finding_id`
   (extra `reader`).
 

@@ -1,5 +1,6 @@
 """Emisión de hallazgos: fila persistida en Parquet más línea de log (§9.4 del TRD-L1)."""
 
+import json
 import logging
 import uuid
 from collections import defaultdict
@@ -37,21 +38,36 @@ def _detected_date(finding: Finding) -> str:
     )
 
 
-def _log(finding: Finding) -> None:
-    logger.log(
-        _LOG_LEVELS[finding.severity],
-        "check_type=%s status=%s stage=%s provider=%s market=%s asset=%s "
-        "year=%d month=%d finding_id=%s",
-        finding.check_type,
-        finding.status,
-        finding.stage,
-        finding.provider,
-        finding.market,
-        finding.asset,
-        finding.year,
-        finding.month,
-        finding.finding_id,
+def log_line(finding: Finding) -> str:
+    """Línea de log JSON del hallazgo: una sola línea, parseable con `jq`.
+
+    Los campos son los del esquema que sirven para leerlo sin abrir el lago
+    (más `finding_id` para cruzarlo con la fila persistida).
+    """
+    return json.dumps(
+        {
+            "finding_id": finding.finding_id,
+            "layer": finding.layer,
+            "mode": finding.mode,
+            "check_type": finding.check_type,
+            "severity": finding.severity,
+            "stage": finding.stage,
+            "status": finding.status,
+            "provider": finding.provider,
+            "market": finding.market,
+            "asset": finding.asset,
+            "year": finding.year,
+            "month": finding.month,
+            "metric_value": finding.metric_value,
+            "details": finding.details,
+            "run_id": finding.run_id,
+        },
+        ensure_ascii=False,
     )
+
+
+def _log(finding: Finding) -> None:
+    logger.log(_LOG_LEVELS[finding.severity], "%s", log_line(finding))
 
 
 def _write(findings: list[Finding], fs: pafs.FileSystem, base: str) -> list[str]:
@@ -83,7 +99,7 @@ def _write(findings: list[Finding], fs: pafs.FileSystem, base: str) -> list[str]
 
 
 def emit_findings(findings: list[Finding], root: str | Path) -> list[str]:
-    """Persiste los hallazgos y deja una línea de log por cada uno.
+    """Persiste los hallazgos y deja una línea de log JSON por cada uno.
 
     `root` es una ruta local o `gs://<bucket>/<prefijo>`; la disposición es la
     misma en ambos. Escribe un Parquet (ZSTD-3) por fecha de detección bajo
