@@ -39,6 +39,7 @@ jobs:
     outputs:
       changes: ${{ steps.plan.outputs.changes }}
       plan_uri: ${{ steps.upload.outputs.uri }}
+      plan_sha256: ${{ steps.upload.outputs.sha256 }}
     env:
       STACK: ${{ inputs.stack }}
       ACTION: ${{ inputs.action }}
@@ -130,6 +131,9 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       # Un directorio por run e intento; el apply recibe la ruta exacta por output.
+      # También recibe el sha256 del archivo que produjo este job: el bucket lo
+      # pueden escribir otros workflows del repo con deploy-github, y el apply
+      # solo aplica el archivo cuyo hash coincide.
       - name: Guardar el plan en el bucket de estado
         id: upload
         if: steps.plan.outputs.changes == 'true'
@@ -137,6 +141,7 @@ jobs:
           uri="gs://${TFSTATE_BUCKET}/plans/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/${STACK}.tfplan"
           gcloud storage cp "$RUNNER_TEMP/tfplan" "$uri"
           echo "uri=${uri}" >> "$GITHUB_OUTPUT"
+          echo "sha256=$(sha256sum "$RUNNER_TEMP/tfplan" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
 
   apply:
     needs: plan
@@ -151,6 +156,7 @@ jobs:
       ACTION: ${{ inputs.action }}
       TFSTATE_BUCKET: ${{ vars.GCP_PROJECT_ID }}-tfstate
       PLAN_URI: ${{ needs.plan.outputs.plan_uri }}
+      PLAN_SHA256: ${{ needs.plan.outputs.plan_sha256 }}
     steps:
       # El mismo commit que planeó el job anterior: el plan guardado exige la
       # misma configuración y los mismos proveedores.
@@ -176,8 +182,12 @@ jobs:
           terraform -chdir="infra/stacks/batch/${STACK}" init -input=false \
             -backend-config="bucket=${TFSTATE_BUCKET}"
 
-      - name: Descargar el plan aprobado
-        run: gcloud storage cp "$PLAN_URI" "$RUNNER_TEMP/tfplan"
+      # Si el hash no coincide, alguien reemplazó el archivo entre el plan y la
+      # aprobación: no se aplica.
+      - name: Descargar el plan aprobado y verificar su hash
+        run: |
+          gcloud storage cp "$PLAN_URI" "$RUNNER_TEMP/tfplan"
+          echo "${PLAN_SHA256}  ${RUNNER_TEMP}/tfplan" | sha256sum --check --strict -
 
       # Lo que se va a aplicar, tal como lo guardó el job plan.
       - name: Mostrar el plan guardado

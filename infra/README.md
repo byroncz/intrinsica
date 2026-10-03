@@ -322,6 +322,11 @@ días los que quedaron (rechazados, cancelados o con apply fallido). La regla
 llega con el próximo apply de `data`; sin él el flujo funciona igual, solo que
 los planes huérfanos no se limpian solos.
 
+Otros workflows del repo con `deploy-github` también pueden escribir en ese
+bucket, así que el job `plan` publica el `sha256` del archivo que produjo y el
+`apply` lo verifica tras bajarlo: si no coincide, falla antes de `terraform apply`
+y no aplica nada.
+
 **Dos merges seguidos dejan dos runs esperando.** Aprueba el más reciente y
 rechaza el anterior: su plan ya no coincide con `main`. Si aprobaras el viejo
 después de aplicar el nuevo, Terraform lo rechaza con *Saved plan is stale*
