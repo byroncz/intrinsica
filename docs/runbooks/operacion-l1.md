@@ -116,8 +116,9 @@ hallazgos nuevos.
 **Puesta en marcha (solo el humano).**
 
 1. Aplica `data` desde Cloud Shell: habilita `monitoring.googleapis.com` y da a
-   `deploy-github` los roles `monitoring.alertPolicyEditor` y
-   `monitoring.notificationChannelEditor`.
+   `deploy-github` los roles `monitoring.alertPolicyEditor`,
+   `monitoring.notificationChannelEditor` y `logging.configWriter` (la política
+   log match crea por debajo una notification rule en Cloud Logging).
 2. Espera a que el run de CI en `main` publique las imágenes
    `l1_ingest:0.6.0` y `l2_dc_events:0.7.0`, y aplica `l1` y `l2` (*Actions →
    Terraform*) para que los jobs las usen. Sin la imagen nueva el log sigue

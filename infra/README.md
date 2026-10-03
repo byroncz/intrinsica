@@ -340,8 +340,10 @@ alertas. Qué dispara, a quién llega y cómo silenciarla:
   repo. El plan de los PR usa un correo de relleno y no lo imprime.
 - Antes del primer apply, el humano aplica `data` desde Cloud Shell: habilita
   `monitoring.googleapis.com` y da a `deploy-github` los roles
-  `monitoring.alertPolicyEditor` y `monitoring.notificationChannelEditor`. Sin
-  eso el apply falla con 403 o con la API deshabilitada.
+  `monitoring.alertPolicyEditor`, `monitoring.notificationChannelEditor` y
+  `logging.configWriter` (una política log match crea por debajo una
+  notification rule en Cloud Logging). Sin eso el apply falla con 403 o con la
+  API deshabilitada.
 - Actions → *Terraform* → `alerting` → `apply`. El plan debe mostrar solo el
   canal y la política.
 - Diferencia esperada en el plan de un PR: tras el primer apply, el plan del PR

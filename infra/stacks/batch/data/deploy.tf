@@ -146,6 +146,18 @@ resource "google_project_iam_member" "deploy_notification_channel_editor" {
   member  = local.deploy_member
 }
 
+# Una política con condición condition_matched_log no vive solo en Monitoring:
+# Monitoring crea por debajo una notification rule en Cloud Logging, y eso
+# exige logging.notificationRules.* sobre el proyecto. Los roles de Monitoring
+# no lo cubren (el primer apply de alerting falló con 403 en
+# logging.notificationRules.create, ITSC-297). configWriter incluye create,
+# update y delete: cada cambio de la política reemplaza la regla.
+resource "google_project_iam_member" "deploy_logging_config_writer" {
+  project = google_project.this.project_id
+  role    = "roles/logging.configWriter"
+  member  = local.deploy_member
+}
+
 # Leer los logs de la ejecución de un job.
 resource "google_project_iam_member" "deploy_logging_viewer" {
   project = google_project.this.project_id
