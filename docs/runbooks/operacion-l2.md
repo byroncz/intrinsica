@@ -190,7 +190,10 @@ Una corrida del mes da los mismos archivos: la entrada es la misma y nada de la
 salida depende de la ejecución. La evidencia es el `content_hash` del hallazgo
 `events_summary` (uno por θ y mes, de `events.parquet` y de
 `carry_over.parquet`). Relanza un mes intermedio con `force` y compáralo con el
-de la primera corrida:
+de la primera corrida. La misma comparación existe como script del repo,
+[`ops-scripts/hashes_events_summary.py`](ops-scripts/hashes_events_summary.py),
+para correr con el job `ops-script` ([runbook](operacion-ops.md)) en lugar de
+Cloud Shell; el snippet de abajo da lo mismo sin subir nada.
 
 | Input | Valor |
 | --- | --- |
@@ -274,7 +277,11 @@ Cada borde es `pass`, `sin_eventos` (M+1 no cerró ningún evento, por ejemplo u
 repetirlo) o `fail`. También marca un `fail` si falta un mes de la cadena. Los
 bordes se comparan contra el último evento de **cualquier** mes anterior, así
 que un mes sin eventos no oculta una costura rota. Desde Cloud Shell, con
-pyarrow instalado:
+pyarrow instalado. Con la landing completa son ~5.400 bordes y tarda ~13 min:
+una sesión de Cloud Shell no es fiable para eso. El mismo chequeo está en
+[`ops-scripts/seam_l2.py`](ops-scripts/seam_l2.py): súbelo y lánzalo con el job
+`ops-script` ([runbook](operacion-ops.md)), que sigue sin ti y deja la salida en
+el resumen del run. Así se ejecutó la primera vez.
 
 ```bash
 EVENTS_ROOT=gs://<proyecto>-dc-events/l2 python3 - <<'PY'
@@ -508,24 +515,97 @@ actualice con el dato medido.
 
 ## Resultados
 
-**Pendiente.** Los registra el humano después de ejecutar los pasos 1 a 3; la
-card queda bloqueada hasta que los reporte. La entrada consolidada de la Épica
-la escribe `task-close.sh` al cerrarla. Plantilla de lo que hay que anotar:
+Ejecutados por el humano el 2026-10-02 y 2026-10-03 (UTC). Stack `l2` con
+4 vCPU / 4 GiB e imagen `l2_dc_events:0.6.0` durante el backfill (hoy 0.7.1 por
+ITSC-296 y ITSC-298: solo cambia el formato del log). `thetas.yaml` con los 50 θ
+subido a `gs://intrinsica-dc-manifest/l2/` el 2026-10-02. El backfill no corrió
+limpio a la primera: apareció un defecto en L1 (ver "Hallazgos").
 
-| Paso | URL del run | Rango / mes | Tareas OK / fallidas | Reintentos | Ejecución Cloud Run | Inicio → fin |
-| --- | --- | --- | --- | --- | --- | --- |
-| Backfill | | 2017-08 a 2026-08 (109 meses) | | | | |
-| Reproducibilidad | | 2020-01, `force` | | | | |
+**Runs**
 
-- **Meses procesados** (líneas `sonda:`, de 109) y hallazgos de DQ distintos de
-  `info` (por `check_type`).
-- **Reproducibilidad:** salida del snippet del paso 2 (θ comparados, corridas,
-  veredicto).
-- **Seam-check:** línea final del snippet del paso 3 (θ, bordes, `pass`,
-  `sin_eventos`, `fail`) y el detalle de cada `fail`.
-- **Costo:** Σ de `wall_s`, pared de la tarea, GiB-s y vCPU-s contra el cupo,
-  costo de lista, lo facturado en Billing (bruto y neto) y el veredicto frente a
-  §10.3.
-- **Volumen:** `gcloud storage du` de `dc-events`, MiB por millón de ticks y el
-  veredicto frente a §7.1.
-- **Hallazgos de la corrida** y, para cada defecto, la card que lo cubre.
+| Paso | Ejecución | Rango / mes | Tareas OK / fallidas | Reintentos | Inicio → fin (UTC) |
+| --- | --- | --- | --- | --- | --- |
+| Backfill, 1.ª corrida | `l2-backfill-vszg7` | 2017-08 a 2017-11 OK; 2017-12 falló | 1 tarea fallida | 2 intentos en 2017-12 (37,6 s) | 2026-10-02 23:39 |
+| Backfill, 2.ª corrida (inputs vacíos) | `l2-backfill-gkdlr` | 2017-12 a 2026-08 (105 meses) | 1 tarea, 0 fallidas | 0 | 2026-10-03 14:15:58 → 15:37:41 (4.903 s) |
+| Reproducibilidad | `l2-backfill-h42bm` | 2020-01, `force` | OK | 0 | 2026-10-03 15:51:00 → 15:52:12 (71,5 s; `wall_s` del mes 46,7 s) |
+| Seam-check | `ops-script-qdfpv` | 2017-08 a 2026-08 | OK | 0 | 2026-10-03 20:46:17 → 20:59:24 (13 min) |
+
+No se reportaron las URLs de los runs de Actions; sí las ejecuciones de Cloud
+Run. **Meses procesados:** 109 (4 en `vszg7` y 105 en `gkdlr`). **Hallazgos de
+DQ distintos de `info`:** ninguno.
+
+La tarea de `gkdlr` usó 4.903 s de los 36.000 s de timeout (14 %): el backfill
+completo cabe holgado en una sola tarea.
+
+**Reproducibilidad.** El snippet del paso 2 dio, con código de salida 0:
+
+```text
+mes 2020-01: 50 θ, 2 corridas: 0338134c-…, 815330c9-…; hashes idénticos en los θ
+```
+
+Los `content_hash` de `events.parquet` y `carry_over.parquet` coinciden en los
+50 θ entre la corrida del backfill y el reproceso con `force`.
+
+**Seam-check.** Corrió como el primer script real del job `ops-script`
+(ITSC-298): `gs://intrinsica-dc-ops/scripts/seam_l2.py`, generation
+`1791060231642929`, SHA-256 `85ea3a41…e9ab`. Salida, con código 0:
+
+```text
+θ: 50; bordes: 5400 (ok: 5400; fallos: 0)
+```
+
+50 θ × 108 bordes = 5.400. Ninguna costura rota en todo el rango.
+
+**Costo**
+
+| Tramo | Pared | vCPU-s (×4) | GiB-s (×4) |
+| --- | --- | --- | --- |
+| `gkdlr`, pared facturable de la tarea | 4.903 s | 19.612 | 19.612 |
+| `vszg7`, 4 meses OK + 2 intentos fallidos (Σ de `wall_s`) | 116,1 s | 464 | 464 |
+| **Total** | **≈ 5.019 s (1,39 h)** | **≈ 20.100** | **≈ 20.100** |
+
+La Σ de `wall_s` de los meses es 4.878,4 s (105 meses de `gkdlr`) + 78,5 s +
+37,6 s ≈ 4.995 s; la tarea de `gkdlr` factura 24,6 s más que sus meses
+(arranque, frontera y listados).
+
+- **Contra el cupo gratis mensual** (360.000 GiB-s, 180.000 vCPU-s): 11 % de los
+  vCPU-s y 5,6 % de los GiB-s. A precio de lista, ≈ 0,40 USD; con cupo, 0,00.
+- **Contra [§10.3 del TRD-L2](../TRD/l2.md#103-costo-de-l2)** (techo de 80.268
+  vCPU-s y GiB-s): 25 % del techo. Los meses son mucho más livianos que 2023-03,
+  el que fijó el techo.
+- **Billing:** pendiente. Tarda hasta 24 h en reflejar el consumo; el humano lo
+  anota en un comentario de la card cuando lo lea.
+- **Costo fijo por mes.** Los meses de 2017 tardan 13 a 23 s con casi cero
+  cómputo: el costo fijo ronda 20 s por mes, ~44 % de la pared del backfill.
+  Está anotado en ITSC-293; no cambia el veredicto de costo.
+
+**Volumen** (`gcloud storage du`):
+
+| Medida | Valor |
+| --- | --- |
+| `dc-events/l2`, 50 θ | 21,14 GiB |
+| θ = 0.00010000 (el que domina) | 2,68 GiB (12,7 % del total) |
+| Σ ticks | 4.051.363.415 |
+| MiB por millón de ticks | 5,3 |
+
+Contra la estimación de §7.1 del TRD maestro (73 a 103 GiB, con 30 MiB por
+millón de ticks): el real es 3,5 a 5 veces menor. La estimación extrapoló
+2020-01 (ITSC-244), medido antes de que los Parquet se escribieran sin
+diccionario (ITSC-290); con el dato medido, la fila de §7.1 se corrige a 21 GiB
+y 5,3 MiB por millón de ticks.
+
+**Hallazgos de la corrida** y la card que cubre cada uno:
+
+| Hallazgo | Card |
+| --- | --- |
+| L1 conformaba tal cual las marcas de registros inválidos de Binance (`price=0`, `quantity=0`, trade ids `-1`) de los ZIP regenerados de 2017-12 y 2018-01; L2 falló con `prices[38419] no cumple 0 < price`. Se reprocesó L1 2017-12..2026-08 (`l1-backfill-m89q8`) antes de reanudar L2 | ITSC-294 (Hecha) |
+| L1 trataba el 404 de un mes aún no publicado como error | ITSC-295 (Hecha) |
+| Sin alerta para hallazgos con severidad ERROR | ITSC-296, ITSC-297 (Hechas) |
+| Verificaciones largas en Cloud Shell (sesión inestable, lectura lenta) | ITSC-298, job `ops-script` (Hecha) |
+| Costo fijo de ~20 s por mes | ITSC-293 |
+
+La reanudación tras el fallo de 2017-12 usó el mecanismo del runbook sin
+cambios: se relanzó `l2-backfill` con los inputs vacíos y la frontera de cada θ
+siguió en 2017-12.
+
+La entrada consolidada de la Épica la escribe `task-close.sh` al cerrarla.
