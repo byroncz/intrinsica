@@ -271,7 +271,7 @@ para un θ:
 2. su referencia es el extremo del último evento de M.
 
 El snippet lee el listado de `dc-events` una vez y, por θ, solo el primer y el
-último row group de cada `events.parquet` y el carry-over (no los 100 GiB).
+último row group de cada `events.parquet` y el carry-over (no los ~21 GiB).
 Cada borde es `pass`, `sin_eventos` (M+1 no cerró ningún evento, por ejemplo un
 θ grande en un mes calmo: el pendiente sigue abierto y el carry-over debe
 repetirlo) o `fail`. También marca un `fail` si falta un mes de la cadena. Los
@@ -503,15 +503,15 @@ gcloud storage du -s -h "gs://<proyecto>-dc-events/l2/provider=binance/market=sp
 ```
 
 (`gsutil du -s -h` da lo mismo.) El segundo comando mide el θ más pequeño, que
-domina el volumen. Compáralo con la estimación de la fila "L2 (eventos, 50 θ)"
-de [§7.1 del TRD maestro](../TRD/plataforma_directional_change.md): **73 a
-103 GiB**, extrapolada con 30 MiB por millón de ticks (2020-01, ITSC-244). Dos
-referencias para leer la diferencia: la partición de 2023-03 midió 735,47 MiB
-(~3,9 MiB por millón de ticks, ITSC-281), y desde ITSC-290 los Parquet se
-escriben sin diccionario y pesan ~40 % menos. Calcula MiB por millón de ticks
-con la Σ de `ticks` del punto 1 (volumen en MiB ÷ Σ ticks en millones) y di si
-el total real confirma la estimación, o la corrige, para que la fila de §7.1 se
-actualice con el dato medido.
+domina el volumen. Compáralo con la fila "L2 (eventos, 50 θ)" de
+[§7.1 del TRD maestro](../TRD/plataforma_directional_change.md), que hoy trae el
+valor medido en el primer backfill completo (**21,14 GiB**, ~5,3 MiB por millón
+de ticks). Como referencia histórica, la estimación previa era 73 a 103 GiB,
+extrapolada con 30 MiB por millón de ticks (2020-01, ITSC-244), antes de que
+los Parquet se escribieran sin diccionario (ITSC-290, ~40 % menos). Calcula MiB
+por millón de ticks con la Σ de `ticks` del punto 1 (volumen en MiB ÷ Σ ticks
+en millones) y di si el total real confirma el valor vigente o lo corrige, para
+que la fila de §7.1 se actualice con el dato nuevo.
 
 ## Resultados
 
@@ -523,15 +523,14 @@ limpio a la primera: apareció un defecto en L1 (ver "Hallazgos").
 
 **Runs**
 
-| Paso | Ejecución | Rango / mes | Tareas OK / fallidas | Reintentos | Inicio → fin (UTC) |
-| --- | --- | --- | --- | --- | --- |
-| Backfill, 1.ª corrida | `l2-backfill-vszg7` | 2017-08 a 2017-11 OK; 2017-12 falló | 1 tarea fallida | 2 intentos en 2017-12 (37,6 s) | 2026-10-02 23:39 |
-| Backfill, 2.ª corrida (inputs vacíos) | `l2-backfill-gkdlr` | 2017-12 a 2026-08 (105 meses) | 1 tarea, 0 fallidas | 0 | 2026-10-03 14:15:58 → 15:37:41 (4.903 s) |
-| Reproducibilidad | `l2-backfill-h42bm` | 2020-01, `force` | OK | 0 | 2026-10-03 15:51:00 → 15:52:12 (71,5 s; `wall_s` del mes 46,7 s) |
-| Seam-check | `ops-script-qdfpv` | 2017-08 a 2026-08 | OK | 0 | 2026-10-03 20:46:17 → 20:59:24 (13 min) |
+| Paso | Run de Actions | Ejecución de Cloud Run | Rango / mes | Tareas OK / fallidas | Reintentos | Inicio → fin (UTC) |
+| --- | --- | --- | --- | --- | --- | --- |
+| Backfill, 1.ª corrida | [37077717697](https://github.com/byroncz/intrinsica/actions/runs/37077717697) | `l2-backfill-vszg7` | 2017-08 a 2017-11 OK; 2017-12 falló | 1 tarea fallida | 2 intentos en 2017-12 (37,6 s) | 2026-10-02 23:39 → 23:41:58 (fin del run de Actions; la hora de fin de la ejecución no se registró) |
+| Backfill, 2.ª corrida (inputs vacíos) | [37128982492](https://github.com/byroncz/intrinsica/actions/runs/37128982492) | `l2-backfill-gkdlr` | 2017-12 a 2026-08 (105 meses) | 1 tarea, 0 fallidas | 0 | 2026-10-03 14:15:58 → 15:37:41 (4.903 s) |
+| Reproducibilidad | [37134653892](https://github.com/byroncz/intrinsica/actions/runs/37134653892) | `l2-backfill-h42bm` | 2020-01, `force` | OK | 0 | 2026-10-03 15:51:00 → 15:52:12 (71,5 s; `wall_s` del mes 46,7 s) |
+| Seam-check | [37152666652](https://github.com/byroncz/intrinsica/actions/runs/37152666652) | `ops-script-qdfpv` | 2017-08 a 2026-08 | OK | 0 | 2026-10-03 20:46:17 → 20:59:24 (13 min) |
 
-No se reportaron las URLs de los runs de Actions; sí las ejecuciones de Cloud
-Run. **Meses procesados:** 109 (4 en `vszg7` y 105 en `gkdlr`). **Hallazgos de
+**Meses procesados:** 109 (4 en `vszg7` y 105 en `gkdlr`). **Hallazgos de
 DQ distintos de `info`:** ninguno.
 
 La tarea de `gkdlr` usó 4.903 s de los 36.000 s de timeout (14 %): el backfill
@@ -540,7 +539,8 @@ completo cabe holgado en una sola tarea.
 **Reproducibilidad.** El snippet del paso 2 dio, con código de salida 0:
 
 ```text
-mes 2020-01: 50 θ, 2 corridas: 0338134c-…, 815330c9-…; hashes idénticos en los θ
+mes 2020-01: 50 θ, 2 corridas: 0338134c-…, 815330c9-…
+hashes idénticos en los θ
 ```
 
 Los `content_hash` de `events.parquet` y `carry_over.parquet` coinciden en los
@@ -561,12 +561,15 @@ Los `content_hash` de `events.parquet` y `carry_over.parquet` coinciden en los
 | Tramo | Pared | vCPU-s (×4) | GiB-s (×4) |
 | --- | --- | --- | --- |
 | `gkdlr`, pared facturable de la tarea | 4.903 s | 19.612 | 19.612 |
-| `vszg7`, 4 meses OK + 2 intentos fallidos (Σ de `wall_s`) | 116,1 s | 464 | 464 |
+| `vszg7`, 4 meses OK + 2 intentos fallidos (Σ de `wall_s`, cota inferior) | 116,1 s | 464 | 464 |
 | **Total** | **≈ 5.019 s (1,39 h)** | **≈ 20.100** | **≈ 20.100** |
 
 La Σ de `wall_s` de los meses es 4.878,4 s (105 meses de `gkdlr`) + 78,5 s +
 37,6 s ≈ 4.995 s; la tarea de `gkdlr` factura 24,6 s más que sus meses
-(arranque, frontera y listados).
+(arranque, frontera y listados). Para `vszg7` se sumó el `wall_s` de los meses,
+no la pared de la tarea de cada intento (el método del punto 3): es una cota
+inferior, porque falta el arranque de cada intento (~25 s, como en `gkdlr`). Con
+2 intentos son unos 50 s más, bajo el 1 % del total, y no cambia el veredicto.
 
 - **Contra el cupo gratis mensual** (360.000 GiB-s, 180.000 vCPU-s): 11 % de los
   vCPU-s y 5,6 % de los GiB-s. A precio de lista, ≈ 0,40 USD; con cupo, 0,00.
