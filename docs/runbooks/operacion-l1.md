@@ -65,6 +65,79 @@ cualquier capa: check, severidad, unidad, valor y detalle, con los `error`
 primero. Sale de las líneas de log JSON que deja `emit_findings`, filtradas
 por la ejecución; si no hubo hallazgos dice "sin hallazgos".
 
+## Alerta por correo (ITSC-296)
+
+Las corridas programadas (Scheduler → Workflow → Cloud Run Job) no pasan por
+Actions, así que nadie ve su resultado sin abrir la consola. Una política de
+Cloud Monitoring (`Hallazgo de calidad con severidad ERROR`, stack
+`alerting`) manda un correo cuando cualquier job de cualquier capa deja un
+hallazgo con severidad `error`.
+
+**Qué la dispara.** Una entrada de Cloud Logging que cumple a la vez
+`resource.type="cloud_run_job"`, `severity=ERROR` y `jsonPayload.finding_id`
+presente. `dq.configure_logging` (L1 y L2, dentro de Cloud Run) escribe cada
+hallazgo como JSON con sus campos en el primer nivel y la severidad del log
+en mayúscula; `finding_id` solo lo llevan los hallazgos, así que un traceback u
+otro log `ERROR` no dispara el correo (ese fallo se ve en la ejecución en rojo).
+Un hallazgo `warning` o `info` entra con otra severidad y no cumple el filtro.
+El filtro no mira texto libre.
+
+**A quién llega.** Al correo de la variable `ALERT_EMAIL` del environment `gcp`
+de Actions, que el stack `alerting` lee como `TF_VAR_alert_email`. No está en
+el repo. Para cambiar de destinatario, edita `ALERT_EMAIL` y vuelve a aplicar
+el stack.
+
+**Qué trae.** Job, capa, modo, check, unidad, detalle y `run_id`, más el enlace
+"View logs" a la línea completa en Logs Explorer (ahí está la ejecución y el
+`details` entero). Qué hacer según el check está en cada sección de este
+runbook (por ejemplo `source_delayed`, en "Archivo aún no publicado").
+
+**Cuánto repite.** Un correo como máximo cada 5 minutos por política
+(`notification_rate_limit`, el mínimo que admite Monitoring en alertas de log):
+el reintento de Cloud Run (`max_retries = 1`) repite el hallazgo y no manda un
+segundo correo. Contrapartida: si en esa ventana salen hallazgos distintos, solo
+uno llega por correo; el resto está en *Monitoring → Alerting* y en el resumen
+de Actions de esa ejecución. El incidente se cierra solo a los 7 días sin
+hallazgos nuevos.
+
+**Cómo silenciarla.**
+
+- Un rato (mantenimiento, backfill que sabes que deja errores): *Monitoring →
+  Alerting → Snooze → Create snooze*, elige la política, define las horas. No
+  toca Terraform ni deja deriva.
+- Un destinatario: borra o cambia `ALERT_EMAIL` y aplica `alerting`.
+- Todo: *Actions → Terraform → `alerting` → `destroy`*. El correo deja de llegar
+  hasta que se vuelva a aplicar.
+
+**Puesta en marcha (solo el humano).**
+
+1. Aplica `data` desde Cloud Shell: habilita `monitoring.googleapis.com` y da a
+   `deploy-github` los roles `monitoring.alertPolicyEditor` y
+   `monitoring.notificationChannelEditor`.
+2. Espera a que el run de CI en `main` publique las imágenes
+   `l1_ingest:0.6.0` y `l2_dc_events:0.7.0`, y aplica `l1` y `l2` (*Actions →
+   Terraform*) para que los jobs las usen. Sin la imagen nueva el log sigue
+   siendo texto y la alerta no ve nada.
+3. Crea `ALERT_EMAIL` como variable del environment `gcp` y aplica `alerting`.
+   El plan debe mostrar solo el canal y la política (2 recursos a crear).
+4. **Prueba extremo a extremo**, desde Cloud Shell. Para un `error` hace falta
+   un mes ya vencido que Binance no tenga y hoy no existe ninguno, así que se
+   fuerza apuntando la fuente a una ruta que da 404 (`L1_SOURCE_BASE_URL`, solo
+   para esa ejecución):
+
+   ```sh
+   gcloud run jobs execute l1-monthly-close --region <región> --tasks 1 \
+     --args=--mode,monthly-close,--from,2026-08 \
+     --update-env-vars=L1_SOURCE_BASE_URL=https://data.binance.vision/no-existe
+   ```
+
+   Es un `source_delayed` (`error`, salida 3) de 2026-08. Debe llegar un correo
+   en menos de 5 minutos con el job `l1-monthly-close`, el check y la unidad.
+   La fila queda en el lago de hallazgos: es de prueba, anótala. No escribe
+   datos. Para el caso que no debe alertar, lanza el comando sin
+   `--update-env-vars` y con `--from,2026-10` (`source_not_published`, `info`,
+   salida 0): no llega nada.
+
 ## Paso 1: backfill 2017-08 a 2026-07
 
 *Actions → Run job → Run workflow*, rama `main`:
@@ -92,7 +165,7 @@ cuántas. Para saber cuáles:
 ```bash
 gcloud logging read \
   'resource.type="cloud_run_job" AND resource.labels.job_name="l1-backfill" AND severity>=ERROR' \
-  --project <proyecto> --freshness=7d --format='value(timestamp,textPayload)'
+  --project <proyecto> --freshness=7d --format='value(timestamp,textPayload,jsonPayload.message)'
 ```
 
 Distingue la causa como en la [sonda](sonda-l1.md#qué-leer-y-qué-anotar):
@@ -400,9 +473,13 @@ pasar por la consola:
 gcloud logging read 'resource.type="cloud_run_job"
   AND resource.labels.job_name="l1-backfill"
   AND labels."run.googleapis.com/execution_name"="l1-backfill-zzpft"
-  AND textPayload:"sonda: unit="' \
-  --project intrinsica-dc --format='value(textPayload)'
+  AND (textPayload:"sonda: unit=" OR jsonPayload.message:"sonda: unit=")' \
+  --project intrinsica-dc --format='value(textPayload,jsonPayload.message)'
 ```
+
+Desde la imagen que trae `dq.configure_logging` (ITSC-296) el log de Cloud Run
+es JSON y el texto va en `jsonPayload.message`; antes iba en `textPayload`.
+Por eso los dos filtros miran ambos.
 
 y sumar cada `wall_s`. Filtrar por `execution_name` deja afuera el
 reproceso manual de 2021-12 y la sonda de ITSC-218, que usan el mismo job y

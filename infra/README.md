@@ -326,6 +326,29 @@ memoria no cambia. En `l2-backfill` también puede quitar `client` y
 eso es parte de cerrar la deriva. Cualquier otro cambio es una sorpresa y se
 revisa antes de aprobar el `apply`.
 
+## Stack alerting (alerta de hallazgos ERROR)
+
+Instancia del módulo `alerting`: un canal de correo y una política de log match
+de Cloud Monitoring que avisa cuando un Cloud Run Job de cualquier capa deja un
+hallazgo de calidad con `severity=ERROR` (ITSC-296). Va en su propio stack,
+con estado propio, para que aplicar o destruir `l1` o `l2` no toque las
+alertas. Qué dispara, a quién llega y cómo silenciarla:
+[runbook de operación](../docs/runbooks/operacion-l1.md#alerta-por-correo-itsc-296).
+
+- El correo es la variable sensible `alert_email`, que el workflow toma de
+  `ALERT_EMAIL` en el environment `gcp` (`TF_VAR_alert_email`); no está en el
+  repo. El plan de los PR usa un correo de relleno y no lo imprime.
+- Antes del primer apply, el humano aplica `data` desde Cloud Shell: habilita
+  `monitoring.googleapis.com` y da a `deploy-github` los roles
+  `monitoring.alertPolicyEditor` y `monitoring.notificationChannelEditor`. Sin
+  eso el apply falla con 403 o con la API deshabilitada.
+- Actions → *Terraform* → `alerting` → `apply`. El plan debe mostrar solo el
+  canal y la política.
+- Costo: 0 USD hoy. Google anunció 0,35 USD/mes por referencia de métrica "no
+  antes del 1 de septiembre de 2027"; una alerta log match cuenta como una. El
+  canal de correo no cobra y los logs caben en los 50 GiB/mes gratis
+  ([precios](https://cloud.google.com/products/observability/pricing)).
+
 ## Timeouts y reintentos de los jobs de l2
 
 Cada job fija `timeout` y `max_retries` de forma explícita (módulo `layer`; el

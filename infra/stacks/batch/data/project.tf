@@ -19,6 +19,7 @@ locals {
     "workflows.googleapis.com",
     "workflowexecutions.googleapis.com",
     "cloudscheduler.googleapis.com",
+    "monitoring.googleapis.com",
   ]
 }
 

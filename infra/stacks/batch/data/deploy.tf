@@ -131,6 +131,21 @@ resource "google_project_iam_member" "deploy_job_iam_manager" {
   member  = local.deploy_member
 }
 
+# Crear, actualizar y borrar la política de alerta y el canal de correo del
+# stack alerting. Son los roles más chicos que cubren las tres operaciones y
+# ninguno incluye setIamPolicy.
+resource "google_project_iam_member" "deploy_alert_policy_editor" {
+  project = google_project.this.project_id
+  role    = "roles/monitoring.alertPolicyEditor"
+  member  = local.deploy_member
+}
+
+resource "google_project_iam_member" "deploy_notification_channel_editor" {
+  project = google_project.this.project_id
+  role    = "roles/monitoring.notificationChannelEditor"
+  member  = local.deploy_member
+}
+
 # Leer los logs de la ejecución de un job.
 resource "google_project_iam_member" "deploy_logging_viewer" {
   project = google_project.this.project_id
