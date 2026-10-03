@@ -249,7 +249,11 @@ Orden, todo por el humano (detalle en
 [infra/README.md](../../infra/README.md#stack-ops-scripts-de-operación)):
 
 1. Aplicar `data` desde Cloud Shell: crea el bucket `<proyecto>-ops` y da a
-   `deploy-github` el permiso de IAM sobre él.
+   `deploy-github` el permiso de IAM sobre él. Hazlo con el checkout de la
+   rama del PR, antes de aprobar: hasta entonces el check `stack (ops)` está en
+   rojo (el plan no encuentra el bucket `ops` en el estado de `data`). Tras el
+   apply, re-ejecuta `stack (ops)`; su plan es la evidencia de lo que `ops`
+   crea.
 2. Esperar a que el run de CI en `main` publique `ops_tools:<versión>`.
 3. *Actions → Terraform* → `ops` → `apply`.
 4. Subir los scripts y lanzar la prueba de extremo a extremo.

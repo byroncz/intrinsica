@@ -357,7 +357,11 @@ Orden de apply, todo por el humano:
 1. `data` desde Cloud Shell (ver "Habilitar el despliegue desde GitHub
    Actions"): crea el bucket y da a `deploy-github` `bucketIamAdmin` sobre él.
    Sin este apply, el plan de `ops` falla: el output `buckets` de `data` aún
-   no trae `ops`.
+   no trae `ops`. Por eso el check `stack (ops)` del PR está en rojo hasta
+   entonces, y es esperado. Aplica `data` con el checkout de la rama del PR,
+   antes de aprobar (`main` aún no tiene el bucket `ops`); luego re-ejecuta
+   `stack (ops)`. Su plan (la service account, ocho bindings y el job) es la
+   evidencia de que `ops` crea solo eso.
 2. Esperar a que el run de CI en `main` publique `ops_tools:<versión>`, con la
    versión de `layers/ops_tools/VERSION`. Un apply anterior falla porque el tag
    aún no existe.
