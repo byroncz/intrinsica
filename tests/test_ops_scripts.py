@@ -234,3 +234,56 @@ def test_seam_l2_pendiente_perdido_cuando_el_mes_siguiente_no_tiene_eventos():
     # Sin pendiente al cierre no hay costura que comprobar.
     assert seam.check_border(month(None), month(None)) is None
     assert seam.check_border(None, month(None)) == "falta_carry_over"
+
+
+class FakeGcs:
+    """Un GCS de juguete con los permisos de ops-script (o con los que se le den)."""
+
+    def __init__(self, writable: set[str]):
+        self.writable = writable
+        self.objects: set[tuple[str, str]] = set()
+
+    def bucket(self, name):
+        gcs = self
+
+        class Blob:
+            def __init__(self, path):
+                self.path = path
+
+            def upload_from_string(self, data, if_generation_match=None):
+                from google.api_core import exceptions
+
+                if (name, self.path) in gcs.objects:
+                    raise exceptions.Forbidden("sin storage.objects.delete")
+                if not any(f"{name}/{self.path}".startswith(w) for w in gcs.writable):
+                    raise exceptions.Forbidden("sin storage.objects.create")
+                gcs.objects.add((name, self.path))
+
+        return type("Bucket", (), {"blob": lambda _, path: Blob(path)})()
+
+    def list_blobs(self, bucket, prefix, max_results):
+        return iter([])
+
+
+def test_permisos_pasa_con_los_permisos_de_ops_script(monkeypatch, capsys):
+    from google.cloud import storage
+
+    permisos = load("permisos")
+    fake = FakeGcs(writable={"proj-ops/results/"})
+    monkeypatch.setattr(storage, "Client", lambda: fake)
+    monkeypatch.setenv("OPS_RESULTS_URI", "gs://proj-ops/results/e1/")
+    assert permisos.main() == 0
+    assert last_line(capsys) == "permisos: 9 de 9 como se esperaba"
+
+
+def test_permisos_avisa_si_la_cuenta_puede_escribir_de_mas(monkeypatch, capsys):
+    from google.cloud import storage
+
+    permisos = load("permisos")
+    fake = FakeGcs(writable={"proj-ops/results/", "proj-landing/"})
+    monkeypatch.setattr(storage, "Client", lambda: fake)
+    monkeypatch.setenv("OPS_RESULTS_URI", "gs://proj-ops/results/e1/")
+    assert permisos.main() == 1
+    out = capsys.readouterr().out
+    assert "FALLO escribir en landing: esperado 403, obtenido ok" in out
+    assert out.strip().endswith("permisos: 8 de 9 como se esperaba")

@@ -326,6 +326,49 @@ memoria no cambia. En `l2-backfill` también puede quitar `client` y
 eso es parte de cerrar la deriva. Cualquier otro cambio es una sorpresa y se
 revisa antes de aprobar el `apply`.
 
+## Stack ops (scripts de operación)
+
+Instancia del módulo `layer` con un solo modo: el job `ops-script` (y la service
+account `ops-script`), que corre un script Python tomado de GCS (ITSC-298). No
+es una capa de datos: no escribe en el lago. Cómo se usa, qué ve el humano y los
+scripts de partida están en el
+[runbook de operación ad hoc](../docs/runbooks/operacion-ops.md).
+
+- **El bucket `<proyecto>-ops` lo crea `data`**, no `ops`: crear buckets exige
+  permisos de proyecto que `deploy-github` no tiene y que no conviene darle (un
+  rol de proyecto con `storage.buckets.setIamPolicy` alcanzaría a todos los
+  buckets del lago), y los buckets son datos, de `data` como todos. Tiene
+  versionado (cada subida de un script es una generation) y dos reglas de ciclo
+  de vida: las versiones no vigentes de `scripts/` se borran a los 90 días y
+  todo lo de `results/` a los 7.
+- **Acceso de la service account.** Lectura (`roles/storage.objectViewer`) de
+  `landing/l1/`, `dc-events/l2/`, `dq-findings/{l1,l2}/`, `manifest/{l1,l2}/` y
+  `ops/scripts/`, por el módulo `layer`; y escritura solo en `ops/results/`
+  (`roles/storage.objectCreator`, un binding propio del stack porque el módulo
+  da un solo rol por bucket). Sin roles de IAM ni `run.jobs.update`.
+- **Cómputo.** 4 vCPU, 8 GiB, timeout 3600 s, `max_retries = 0` (un script ad
+  hoc no se reintenta solo) y una sola tarea. La imagen es `ops_tools`
+  (`layers/ops_tools/`, versión en su `VERSION`).
+- `deploy-github` recibe `bucketIamAdmin` sobre el bucket `ops`, como sobre
+  los demás, para fijar el IAM por prefijo.
+
+Orden de apply, todo por el humano:
+
+1. `data` desde Cloud Shell (ver "Habilitar el despliegue desde GitHub
+   Actions"): crea el bucket y da a `deploy-github` `bucketIamAdmin` sobre él.
+   Sin este apply, el plan de `ops` falla: el output `buckets` de `data` aún
+   no trae `ops`.
+2. Esperar a que el run de CI en `main` publique `ops_tools:<versión>`, con la
+   versión de `layers/ops_tools/VERSION`. Un apply anterior falla porque el tag
+   aún no existe.
+3. Actions → *Terraform* → `ops` → `apply`. El plan debe mostrar solo la
+   service account, sus bindings (siete de lectura y uno de escritura) y el
+   job.
+4. Correr la prueba de permisos del runbook (`permisos.py`).
+
+Un cambio de código de `ops_tools` sube su `VERSION` y se despliega como
+cualquier capa (ver "Desplegar un cambio de capa").
+
 ## Stack alerting (alerta de hallazgos ERROR)
 
 Instancia del módulo `alerting`: un canal de correo y una política de log match
