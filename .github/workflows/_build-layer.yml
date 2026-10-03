@@ -23,7 +23,7 @@ jobs:
       # Publica solo en main (push o run manual) y si WIF ya está configurado (tras el primer apply).
       PUBLISH: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main' && vars.GCP_WIF_PROVIDER != '' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Leer versión y host del registro
         id: version
