@@ -290,6 +290,12 @@ el humano espera a que el run de CI en `main` termine de publicar
 anterior falla porque el tag aún no existe. El plan debe mostrar
 `image: ...:<versión anterior> -> ...:<versión nueva>`.
 
+Si el merge no disparó el CI de push, el rescate es lanzar *CI* a mano en
+`main` (Actions → *CI* → *Run workflow*, rama `main`): construye y publica las
+tres capas, aunque no hayan cambiado. Los tags que ya existían se sobrescriben
+con el mismo contenido. Un run manual sobre otra rama solo construye y corre la
+prueba de humo, sin publicar.
+
 ## Stack l2 (DC Events)
 
 Instancia del módulo `layer` con dos modos: `l2-backfill` y `l2-monthly`, cada
