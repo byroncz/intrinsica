@@ -105,9 +105,13 @@ hallazgos nuevos.
 - Un rato (mantenimiento, backfill que sabes que deja errores): *Monitoring →
   Alerting → Snooze → Create snooze*, elige la política, define las horas. No
   toca Terraform ni deja deriva.
-- Un destinatario: borra o cambia `ALERT_EMAIL` y aplica `alerting`.
+- Un destinatario: cambia `ALERT_EMAIL` y aplica `alerting`. No la borres: la
+  variable `alert_email` valida que sea un correo y un valor vacío hace fallar
+  el apply. Para no recibir más correos, usa el snooze o el `destroy`.
 - Todo: *Actions → Terraform → `alerting` → `destroy`*. El correo deja de llegar
-  hasta que se vuelva a aplicar.
+  hasta que se vuelva a aplicar. Terraform valida las variables también en
+  `destroy`, así que `ALERT_EMAIL` debe seguir definida (con un correo válido)
+  al lanzarlo.
 
 **Puesta en marcha (solo el humano).**
 
