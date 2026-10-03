@@ -24,28 +24,25 @@ locals {
   }
 }
 
-# Semilla del catálogo de θ (ITSC-291): Terraform lo crea solo si no existe y
-# nunca lo actualiza ni lo borra. El contenido vivo es del humano, que lo edita
-# en GCS (TRD-L2 §7.3), así que content, detect_md5hash y source se ignoran y
-# una edición no aparece como deriva en el plan. prevent_destroy protege el
-# objeto: un destroy del stack l2 falla en el plan mientras esté en el estado.
-resource "google_storage_bucket_object" "thetas_seed" {
-  bucket  = local.buckets["manifest"]
-  name    = "l2/thetas.yaml"
-  content = file("${path.module}/../../../../layers/l2_dc_events/src/l2_dc_events/config/thetas.yaml")
+# Semilla del catálogo de θ (ITSC-291): crea manifest/l2/thetas.yaml solo si no
+# existe. No es un google_storage_bucket_object: el objeto ya existe (subido a
+# mano el 2026-10-02), el proveedor no puede importarlo (el plan falla con
+# "resource google_storage_bucket_object doesn't support import") y declararlo
+# lo sobrescribiría con el contenido del repo. `gcloud storage cp --no-clobber`
+# no pisa un objeto existente, y el provisioner corre solo al crear el recurso:
+# sin triggers, una vez en el estado no se repite. El contenido vivo es del
+# humano, que lo edita en GCS (TRD-L2 §7.3), así que un cambio en el archivo del
+# repo ni se aplica ni aparece en el plan. Destruir el stack no borra el objeto.
+# gcloud llega ya autenticado al job apply de _terraform-stack.yml.
+resource "terraform_data" "thetas_seed" {
+  provisioner "local-exec" {
+    command = "gcloud storage cp --no-clobber \"$SEED_FILE\" \"$SEED_URI\""
 
-  lifecycle {
-    ignore_changes  = [content, detect_md5hash, source]
-    prevent_destroy = true
+    environment = {
+      SEED_FILE = abspath("${path.module}/../../../../layers/l2_dc_events/src/l2_dc_events/config/thetas.yaml")
+      SEED_URI  = "gs://${local.buckets["manifest"]}/l2/thetas.yaml"
+    }
   }
-}
-
-# El objeto ya existía (subido a mano el 2026-10-02): el primer apply lo
-# importa al estado en vez de recrearlo. Con el objeto ya en el estado, el
-# bloque no hace nada.
-import {
-  to = google_storage_bucket_object.thetas_seed
-  id = "${local.buckets["manifest"]}/l2/thetas.yaml"
 }
 
 provider "google" {
@@ -101,7 +98,7 @@ module "layer" {
     L2_SERIES_START = "2017-08"
     # Catálogo de θ (TRD-L2 §7.3): agregar un θ es editar este objeto y lanzar
     # l2-backfill sin from; no requiere PR ni apply. Lo siembra
-    # google_storage_bucket_object.thetas_seed si falta.
+    # terraform_data.thetas_seed si falta.
     L2_THETAS_URI = "gs://${local.buckets["manifest"]}/l2/thetas.yaml"
   }
 

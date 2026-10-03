@@ -344,10 +344,9 @@ no hay cambio de código que dispare el flujo anterior: cerrar la deriva de un
 `gcloud run jobs update` hecho a mano, reintentar tras corregir un permiso en
 `data`, o un `destroy`. Se divide igual: `plan` sin aprobación (`plan` o
 `plan -destroy`, visible en el log y el resumen) y `apply` con aprobación del
-plan guardado. Si el plan no tiene cambios, no hay nada que aprobar. Un stack con
-un recurso `prevent_destroy` (hoy `l2`, por el catálogo de θ) no admite
-`destroy`: el plan falla. Es el freno buscado; quítalo del estado a propósito con
-`terraform state rm` antes de destruir.
+plan guardado. Si el plan no tiene cambios, no hay nada que aprobar. Un `destroy` de
+`l2` no borra el catálogo de θ: la semilla es un `terraform_data` y el objeto no
+es de Terraform.
 
 Si el merge no disparó el CI de push, el rescate es lanzar *CI* a mano en
 `main` (Actions → *CI* → *Run workflow*, rama `main`): construye y publica las
@@ -375,22 +374,24 @@ a él, TRD-L2 §7.3): solo lectura, porque lo edita el humano (ver "Cómo agrega
 θ" en el [README de la capa](../layers/l2_dc_events/README.md)). No tiene
 scheduler propio: la encadena el workflow de L1 (ITSC-283).
 
-**Semilla del catálogo (ITSC-291).** El stack declara el objeto como
-`google_storage_bucket_object.thetas_seed`, con el contenido de
-`layers/l2_dc_events/src/l2_dc_events/config/thetas.yaml`, y
-`ignore_changes = [content, detect_md5hash, source]` más `prevent_destroy`:
-Terraform lo crea solo si no existe y nunca lo actualiza ni lo borra, así que
-editarlo en GCS no aparece como deriva en el plan. El objeto ya existía (subido a
-mano el 2026-10-02), por eso el stack trae un bloque `import`: el primer apply lo
-importa al estado y no lo recrea. El plan de ese primer apply debe decir
-`1 to import` para `thetas_seed` y ningún `add` para ese objeto; si dice
-`will be created`, no apruebes. Con el objeto ya en el estado, el bloque `import`
-no hace nada. Para sembrarlo de nuevo en un bucket de prueba basta borrar el
-objeto y aplicar.
+**Semilla del catálogo (ITSC-291).** El stack declara
+`terraform_data.thetas_seed`, que al crearse corre `gcloud storage cp
+--no-clobber` con el contenido de
+`layers/l2_dc_events/src/l2_dc_events/config/thetas.yaml`: sube el catálogo solo
+si el objeto no existe y nunca lo pisa. No es un `google_storage_bucket_object`
+porque el objeto ya existía (subido a mano el 2026-10-02), el proveedor no admite
+importarlo (el plan falla con `doesn't support import`) y declararlo lo
+sobrescribiría. El primer apply de `l2` muestra `terraform_data.thetas_seed will
+be created`: es esperado y no toca el catálogo vivo. Una vez en el estado, el
+recurso no se repite y editar el catálogo en GCS no aparece como deriva en el
+plan. Un `destroy` de `l2` tampoco borra el objeto. Para sembrarlo de nuevo en un
+bucket de prueba, borra el objeto y el recurso del estado (`terraform state rm
+terraform_data.thetas_seed`) y aplica.
 
-Para eso `deploy-github` necesita leer y crear ese único objeto
-(`roles/storage.objectUser` con condición sobre `l2/thetas.yaml`, en `data`).
-Terraform lo lee en cada plan: sin el permiso, el plan de `l2` falla con 403.
+Para eso `deploy-github` necesita leer y crear ese único objeto (acceso sobre
+`l2/thetas.yaml`, en `data`). Solo lo usa el job `apply`: el plan no toca el
+objeto, así que `data` se aplica antes de aprobar el primer deploy, no antes del
+merge. Sin el permiso, el apply de `l2` falla con 403.
 
 Orden de apply:
 
