@@ -201,14 +201,22 @@ resource "google_storage_bucket_iam_member" "deploy_bucket_iam" {
   member = local.deploy_member
 }
 
-# Sembrar el catálogo de θ (stack l2, ITSC-291): crear y leer SOLO el objeto
-# manifest/l2/thetas.yaml. Terraform lo lee en cada plan y lo crea si falta; la
-# edición del catálogo sigue siendo del humano. objectUser y no objectCreator
-# porque el plan necesita storage.objects.get; la condición lo acota a ese
-# único objeto, no al prefijo l2/.
+# Sembrar el catálogo de θ (stack l2, ITSC-291): leer y crear SOLO el objeto
+# manifest/l2/thetas.yaml. El apply de l2 corre `gcloud storage cp --no-clobber`,
+# que mira si el objeto existe (objects.get, objectViewer) y, si falta, lo crea
+# (objects.create, objectCreator). Ningún rol da update ni delete: el catálogo
+# vivo, que edita el humano, no se puede pisar ni borrar desde el deploy. Los dos
+# bindings llevan la misma condición, que los acota a ese único objeto y no al
+# prefijo l2/.
+locals {
+  thetas_seed_roles = toset(["roles/storage.objectViewer", "roles/storage.objectCreator"])
+}
+
 resource "google_storage_bucket_iam_member" "deploy_thetas_seed" {
+  for_each = local.thetas_seed_roles
+
   bucket = google_storage_bucket.manifest.name
-  role   = "roles/storage.objectUser"
+  role   = each.value
   member = local.deploy_member
 
   condition {

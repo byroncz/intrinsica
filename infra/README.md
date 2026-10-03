@@ -393,7 +393,8 @@ bucket de prueba, borra el objeto y el recurso del estado (`terraform state rm
 terraform_data.thetas_seed`) y aplica.
 
 Para eso `deploy-github` necesita leer y crear ese único objeto (acceso sobre
-`l2/thetas.yaml`, en `data`). Solo lo usa el job `apply`: el plan no toca el
+`l2/thetas.yaml`, en `data`: `objectViewer` y `objectCreator`, sin update ni
+delete). Solo lo usa el job `apply`: el plan no toca el
 objeto, así que `data` se aplica antes de aprobar el primer deploy, no antes del
 merge. Sin el permiso, el apply de `l2` falla con 403.
 
