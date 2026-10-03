@@ -89,7 +89,8 @@ def test_pipe_in_details_does_not_break_the_table():
 def test_errors_first_and_retries_are_not_duplicated():
     info = finding(finding_id="i", severity="info", check_type="checksum_fail")
     error = finding(finding_id="e")
-    rows = summary(json.dumps(info), json.dumps(error), json.dumps(error))
+    retry = finding(finding_id="e2", run_id="r2")
+    rows = summary(json.dumps(info), json.dumps(error), json.dumps(retry))
     table = [
         r for r in rows if r.startswith("| ") and "Check" not in r and "---" not in r
     ]
@@ -97,8 +98,17 @@ def test_errors_first_and_retries_are_not_duplicated():
     assert "2 hallazgos: 1 error, 0 warning, 1 info." in rows
 
 
+def test_rows_keep_log_order_within_a_severity():
+    lines = [
+        json.dumps(finding(finding_id=str(n), asset=f"A{n}USDT")) for n in (9, 1, 5)
+    ]
+    rows = summary(*lines)
+    units = [r.split(" | ")[2] for r in rows if r.startswith("| source_delayed")]
+    assert units == ["l1 A9USDT 2026-09", "l1 A1USDT 2026-09", "l1 A5USDT 2026-09"]
+
+
 def test_max_rows_truncates_with_a_note():
-    lines = [json.dumps(finding(finding_id=str(n))) for n in range(5)]
+    lines = [json.dumps(finding(finding_id=str(n), month=n + 1)) for n in range(5)]
     rows = summary(*lines, MAX_ROWS="2")
     assert len([r for r in rows if r.startswith("| source_delayed")]) == 2
     assert "Se muestran 2 de 5 filas." in rows

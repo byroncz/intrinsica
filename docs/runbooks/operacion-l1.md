@@ -198,6 +198,11 @@ no ejecuta el `next_job` (`l2-monthly`), que es lo correcto. El scheduler de
 `monthly-close` corre el día 8, así que en estado estacionario solo puede
 darse `source_delayed`.
 
+Una tarea con salida 3 se reintenta una vez (`max_retries = 1`): hace otra
+petición, recibe otro 404 y deja una segunda fila `source_delayed` en el lago.
+El resumen de Actions las junta por contenido (capa, modo, check, severidad,
+activo, mes y detalle), no por `finding_id`, que cambia en cada emisión.
+
 **Cómo se ve en el resumen de Actions:** una corrida con `source_not_published`
 termina en verde y la tabla de hallazgos trae la fila con su `info` o
 `warning`, la fecha esperada y la unidad. Un `source_delayed` deja la

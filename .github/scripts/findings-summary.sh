@@ -6,7 +6,10 @@
 #
 # Uso: gcloud logging read ... --format='value(textPayload,jsonPayload.message)' |
 #        findings-summary.sh >> "$GITHUB_STEP_SUMMARY"
-# Orden: error, warning, info; dentro de cada severidad, el del log. Muestra a
+# Orden: error, warning, info; dentro de cada severidad, el del log. Un
+# reintento de Cloud Run (`max_retries = 1`) repite la tarea y emite otra fila
+# con otro `finding_id` (uuid4 por emisión): se deduplica por contenido, sin
+# `finding_id` ni `run_id`, y se conserva la primera aparición. Muestra a
 # lo más MAX_ROWS filas (por defecto 500) para no pasar el límite de 1 MiB del
 # resumen de Actions.
 set -euo pipefail
@@ -18,14 +21,18 @@ jq -R -r -s --argjson max "$max_rows" '
   def short: if length > 200 then .[0:200] + "…" else . end;
   def unit: "\(.layer // "?") " + (.details.unit // "\(.asset) \(.year)-\(.month | tostring | if length < 2 then "0" + . else . end)");
   def rank: {"error": 0, "warning": 1, "info": 2}[.severity] // 3;
+  def content_key: [.layer, .mode, .check_type, .severity, .asset, .year, .month, .details] | tojson;
 
   [ split("\n")[]
     | select(contains("{"))
     | sub("^[^{]*"; "")
     | (try fromjson catch null)
     | select(type == "object" and has("check_type") and has("severity")) ]
-  | unique_by(.finding_id // .)  # los reintentos de Cloud Run no duplican filas
-  | sort_by(rank) as $rows
+  | reduce .[] as $f ({seen: {}, rows: []};
+      ($f | content_key) as $k
+      | if .seen[$k] then . else .seen[$k] = true | .rows += [$f] end)
+  | .rows
+  | sort_by(rank) as $rows  # estable: dentro de cada severidad queda el orden del log
   | "#### Hallazgos de calidad de datos",
     "",
     if ($rows | length) == 0 then "sin hallazgos" else
