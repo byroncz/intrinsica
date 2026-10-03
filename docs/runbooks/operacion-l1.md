@@ -127,16 +127,22 @@ hallazgos nuevos.
 
    ```sh
    gcloud run jobs execute l1-monthly-close --region <región> --tasks 1 \
-     --args=--mode,monthly-close,--from,2026-08 \
+     --args=--mode,monthly-close,--from,2026-08,--force \
      --update-env-vars=L1_SOURCE_BASE_URL=https://data.binance.vision/no-existe
    ```
 
-   Es un `source_delayed` (`error`, salida 3) de 2026-08. Debe llegar un correo
-   en menos de 5 minutos con el job `l1-monthly-close`, el check y la unidad.
-   La fila queda en el lago de hallazgos: es de prueba, anótala. No escribe
-   datos. Para el caso que no debe alertar, lanza el comando sin
-   `--update-env-vars` y con `--from,2026-10` (`source_not_published`, `info`,
-   salida 0): no llega nada.
+   `--force` es necesario: 2026-08 ya está cerrado y, sin él, `monthly-close`
+   ve `consolidated.parquet`, registra "mes ya cerrado" y sale con 0 sin
+   descargar, es decir, sin 404, sin hallazgo y sin correo. Con `--force` entra
+   a procesar la unidad, el `.CHECKSUM` de la URL falsa da 404 y es un
+   `source_delayed` (`error`, salida 3) de 2026-08. Debe llegar un correo en
+   menos de 5 minutos con el job `l1-monthly-close`, el check y la unidad. No
+   escribe datos, pero por `max_retries = 1` quedan dos filas de prueba en el
+   lago de hallazgos (la ejecución y su reintento): anótalas. Para el caso que
+   no debe alertar, lanza el comando sin `--update-env-vars` y con
+   `--from,<mes en curso>` (hoy `2026-10`; `source_not_published`, `info`,
+   salida 0): no llega nada. Un mes vencido ya no sirve para esto: pasa a
+   `warning` y luego a `error`.
 
 ## Paso 1: backfill 2017-08 a 2026-07
 
