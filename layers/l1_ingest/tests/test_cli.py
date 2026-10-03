@@ -155,7 +155,7 @@ def test_main_probe_line_after_final_line(tmp_path, publish_zip, caplog):
     # La costura diaria (aquí sin día previo) corre entre "fin unidad" y la
     # sonda: WARNING del log más el INFO que deja emit_findings al persistir
     # el hallazgo seam_skipped.
-    assert caplog.messages[-2].startswith("check_type=seam_skipped")
+    assert json.loads(caplog.messages[-2])["check_type"] == "seam_skipped"
     assert caplog.messages[-3].startswith("costura omitida")
     assert caplog.messages[-4].startswith("fin unidad=")
     unit, mode, rss, wall = PROBE.fullmatch(caplog.messages[-1]).groups()

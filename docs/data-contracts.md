@@ -355,6 +355,32 @@ documentan aquí, con su porqué:
   `status = pass`, `metric_value` = número de miembros sobrantes y
   `details.members` con esa lista. Si ningún miembro coincide con el nombre
   esperado, sigue abortando con `ValueError`, como antes de ITSC-231.
+- **`source_not_published`** (ITSC-295): Binance respondió 404 al ZIP de la
+  unidad y la fecha UTC de la corrida aún está dentro del calendario de
+  publicación (diario de D: el día D+1; mensual de M: el primer lunes de
+  M+1). No es un error del pipeline, es la naturaleza del proceso. La unidad
+  no escribe Parquet ni manifiesto y la CLI sale con 0: queda pendiente y la
+  frontera de L2 la ignora. `metric_value` = días que faltan para la
+  publicación (0 el propio día), `details.expected_publication`,
+  `details.unit`, `details.source_url` y `details.reason`. Antes de la
+  publicación: `severity = info`, `status = pass`. El día de publicación
+  (Binance no publica hora, así que el día completo cuenta como a tiempo):
+  `severity = warning`, `status = fail`.
+- **`source_delayed`** (ITSC-295): mismo 404, pero la fecha UTC de la corrida
+  es posterior al día de publicación: la fuente se retrasó sobre su
+  calendario. `severity = error`, `status = fail`, `metric_value` = días de
+  retraso (`details.reason` lo dice con palabras). La CLI sale con 3, la tarea
+  falla y la orquestación no ejecuta el `next_job` (`l2-monthly`). No escribe
+  Parquet ni manifiesto. Solo existe cuando ocurre.
+
+Ni `source_not_published` ni `source_delayed` se reintentan: un 404 no cambia
+por esperar. El backoff queda solo para fallos de red y 5xx.
+
+Cada hallazgo, además de la fila en el lago, deja una línea de log JSON
+(`dq.emit_findings`) con `finding_id`, `layer`, `mode`, `check_type`,
+`severity`, `stage`, `status`, `provider`, `market`, `asset`, `year`, `month`,
+`metric_value`, `details` y `run_id`. Es lo que lee el resumen de
+`run-job.yml`, sin acceder al bucket.
 
 `check_type` de L2 (`layer = l2`, `stage = canonical`, `mode` `backfill` o
 `monthly`; el θ viaja en `details.theta`, no en una columna). Son los de

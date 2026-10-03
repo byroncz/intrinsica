@@ -59,7 +59,11 @@ script devuelve una sola unidad y el workflow lanza `--tasks 1`. Regla: no
 lances a mano el mismo mes y modo que Scheduler esté ejecutando.
 
 Al final, el run vuelca los logs de la ejecución y un resumen (estado,
-tareas completadas y fallidas, inicio y fin) en el *Summary* del run.
+tareas completadas y fallidas, inicio y fin) en el *Summary* del run. Bajo
+esa tabla va la de **hallazgos de calidad de datos** de la ejecución, de
+cualquier capa: check, severidad, unidad, valor y detalle, con los `error`
+primero. Sale de las líneas de log JSON que deja `emit_findings`, filtradas
+por la ejecución; si no hubo hallazgos dice "sin hallazgos".
 
 ## Paso 1: backfill 2017-08 a 2026-07
 
@@ -171,6 +175,45 @@ cierre.
 3. **`daily_monthly_drift`** y **hallazgos canonical**: ver la sección
    siguiente. Debe haber un `daily_monthly_drift` de 2026-08 y hallazgos
    `stage = canonical` del mes que superan a los `provisional`.
+
+## Archivo aún no publicado
+
+Binance publica el diario de D el día **D+1** y el consolidado mensual de M
+el **primer lunes de M+1** (README de `binance-public-data`; TRD-L1 §1.1 y
+§8.4). Antes de eso el ZIP da 404, y eso no es una falla: L1 no lo reintenta
+y lo registra como hallazgo según la fecha **UTC** de la corrida. Ejemplo, mes
+2026-09: el primer lunes de octubre de 2026 es el 5.
+
+| Corrida (UTC) | Hallazgo | Severidad | Salida |
+| --- | --- | --- | --- |
+| Antes del primer lunes de M+1 (diario: antes de D+1) | `source_not_published`, "dentro del calendario de Binance; publicación esperada el YYYY-MM-DD" | info | 0 |
+| El primer lunes de M+1 (diario: el día D+1) | `source_not_published`, "día de publicación, aún sin archivo" | warning | 0 |
+| Después (diario: después de D+1) | `source_delayed`, "N días de retraso sobre el calendario publicado de Binance", `metric_value = N` | error | 3 |
+
+Binance no publica hora ni SLA, por eso el día de publicación completo cuenta
+como a tiempo y recién el día siguiente es retraso. Con salida 0 no se escribe
+`consolidated.parquet` ni manifiesto: la unidad queda pendiente y la frontera
+de L2 (fail-closed) la ignora. Con salida 3 la tarea falla y la orquestación
+no ejecuta el `next_job` (`l2-monthly`), que es lo correcto. El scheduler de
+`monthly-close` corre el día 8, así que en estado estacionario solo puede
+darse `source_delayed`.
+
+**Cómo se ve en el resumen de Actions:** una corrida con `source_not_published`
+termina en verde y la tabla de hallazgos trae la fila con su `info` o
+`warning`, la fecha esperada y la unidad. Un `source_delayed` deja la
+ejecución en rojo y la fila `error` sale primera en la tabla. El caso real de
+ITSC-295: `l1-backfill` de 2017-12 a 2026-09 lanzado el sábado 2026-10-03
+falló en 2026-09 tras cuatro descargas y sin hallazgo; con la regla termina en
+verde con `source_not_published` info.
+
+**Qué hacer:**
+
+- `info` o `warning`: nada, o relanzar `l1-backfill` con `from = to = <mes>`
+  desde el día de publicación en adelante y comprobar que el mes se ingiere.
+- `error`: Binance se retrasó. Confirma en
+  [data.binance.vision](https://data.binance.vision) que el archivo sigue sin
+  estar y relanza cuando aparezca. Si nunca aparece, escala: es un hueco de la
+  fuente.
 
 ## Marcas de Binance
 

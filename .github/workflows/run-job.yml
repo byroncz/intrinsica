@@ -154,3 +154,17 @@ jobs:
                 "| Inicio | \(.status.startTime // "-") |",
                 "| Fin | \(.status.completionTime // "-") |"
             ' >> "$GITHUB_STEP_SUMMARY"
+
+          # Hallazgos de DQ de cualquier capa (ITSC-295): dq.emit_findings deja
+          # cada uno como una línea de log JSON; se leen de Cloud Logging con el
+          # mismo filtro por execution_name que el paso anterior, sin tocar el
+          # bucket de hallazgos.
+          echo >> "$GITHUB_STEP_SUMMARY"
+          if ! lines="$(gcloud logging read \
+            "resource.type=\"cloud_run_job\" AND resource.labels.job_name=\"${JOB}\" AND labels.\"run.googleapis.com/execution_name\"=\"${EXECUTION}\" AND (textPayload:\"\\\"check_type\\\"\" OR jsonPayload.message:\"\\\"check_type\\\"\")" \
+            --project "$GCP_PROJECT_ID" --order=asc --freshness=7d \
+            --format='value(textPayload,jsonPayload.message)')"; then
+            echo "::warning::No se pudieron leer los hallazgos de Cloud Logging"
+            lines=""
+          fi
+          .github/scripts/findings-summary.sh <<< "$lines" >> "$GITHUB_STEP_SUMMARY"

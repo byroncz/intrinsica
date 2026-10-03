@@ -9,16 +9,21 @@ import resource
 import sys
 import time
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
+from dq import emit_findings
+
 from l1_ingest.close import run_monthly_close
-from l1_ingest.pipeline import RunContext, Unit, process_unit
+from l1_ingest.download import SourceNotPublished, source_url
+from l1_ingest.pipeline import RunContext, Unit, _finding, process_unit
+from l1_ingest.publication import DELAYED, missing_source_check
 from l1_ingest.seam import run_daily_seam, run_seam_check
 
 MODES = ("backfill", "daily", "monthly-close", "seam-check")
 EXIT_USAGE = 2
+EXIT_SOURCE_DELAYED = 3
 ROOT_VARS = ("L1_LANDING_ROOT", "L1_DQ_ROOT", "L1_MANIFEST_ROOT")
 
 logger = logging.getLogger(__name__)
@@ -143,9 +148,28 @@ def _seam_check(args: argparse.Namespace, env: Mapping[str, str]) -> int:
     return 0
 
 
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
+def _source_missing(unit: Unit, ctx: RunContext, today: date) -> int:
+    """Registra el 404 de la fuente como hallazgo y devuelve el código de salida.
+
+    Dentro del calendario de Binance es 0 y la unidad queda pendiente (no se
+    escribió nada); fuera de él es 3 y la tarea falla.
+    """
+    url = source_url(unit.asset, unit.year, unit.month, unit.day, ctx.source_base_url)
+    check = missing_source_check(unit, today, url)
+    emit_findings([_finding(check, unit, ctx)], ctx.dq_root)
+    return EXIT_SOURCE_DELAYED if check.check_type == DELAYED else 0
+
+
 def main(
-    argv: Sequence[str] | None = None, env: Mapping[str, str] | None = None
+    argv: Sequence[str] | None = None,
+    env: Mapping[str, str] | None = None,
+    clock: Callable[[], datetime] = _utc_now,
 ) -> int:
+    """`clock` devuelve la hora UTC; se inyecta para fijar la fecha en las pruebas."""
     started = time.monotonic()
     env = os.environ if env is None else env
     parser = argparse.ArgumentParser(prog="l1_ingest")
@@ -173,7 +197,7 @@ def main(
             )
             return EXIT_USAGE
         # El valor por defecto se resuelve aquí para que resolve_unit siga pura.
-        today = datetime.now(UTC).date()
+        today = clock().date()
         if args.mode == "daily":
             args.from_ = (today - timedelta(days=1)).isoformat()
         else:
@@ -196,6 +220,9 @@ def main(
             result = process_unit(unit, ctx)
             if args.mode == "daily" and not result.skipped:
                 run_daily_seam(unit, ctx)
+    except SourceNotPublished as exc:
+        logger.warning("unidad=%s sin archivo en la fuente: %s", unit, exc)
+        return _source_missing(unit, ctx, clock().date())
     finally:
         _log_probe(unit, args.mode, started)
     return 0
