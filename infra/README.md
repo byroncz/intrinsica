@@ -344,6 +344,11 @@ alertas. Qué dispara, a quién llega y cómo silenciarla:
   eso el apply falla con 403 o con la API deshabilitada.
 - Actions → *Terraform* → `alerting` → `apply`. El plan debe mostrar solo el
   canal y la política.
+- Diferencia esperada en el plan de un PR: tras el primer apply, el plan del PR
+  (que usa el correo de relleno `plan@example.invalid`) muestra
+  `~ update in place` en `google_monitoring_notification_channel.email`, en
+  `labels` (valor sensible). Es ruido: ese plan no se aplica, y el apply real
+  usa `ALERT_EMAIL`. Cualquier otro cambio en `alerting` sí es una sorpresa.
 - Costo: 0 USD hoy. Google anunció 0,35 USD/mes por referencia de métrica "no
   antes del 1 de septiembre de 2027"; una alerta log match cuenta como una. El
   canal de correo no cobra y los logs caben en los 50 GiB/mes gratis
