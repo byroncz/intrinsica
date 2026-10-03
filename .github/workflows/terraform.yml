@@ -19,6 +19,8 @@ on:
           - l2
           - l3
           - l4
+          - alerting
+          - ops
         required: true
       action:
         description: Acción de Terraform
@@ -78,6 +80,10 @@ jobs:
       STACK_DIR: infra/stacks/batch/${{ matrix.layer }}
       # Plan solo si WIF ya está configurado (tras aplicar deploy-github).
       PLAN: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT != '' }}
+      # Este job no usa el environment gcp y no ve su ALERT_EMAIL: el plan del
+      # stack alerting lleva un correo de relleno (la variable es sensible, no
+      # se imprime) y el valor real solo entra en el apply.
+      TF_VAR_alert_email: ${{ vars.ALERT_EMAIL || 'plan@example.invalid' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -139,6 +145,9 @@ jobs:
       STACK: ${{ inputs.stack }}
       ACTION: ${{ inputs.action }}
       TFSTATE_BUCKET: ${{ vars.GCP_PROJECT_ID }}-tfstate
+      # Correo de la alerta (stack alerting): variable del environment gcp, no
+      # del repo. Los demás stacks ignoran TF_VAR_alert_email.
+      TF_VAR_alert_email: ${{ vars.ALERT_EMAIL }}
     steps:
       - uses: actions/checkout@v4
 

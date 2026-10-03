@@ -131,6 +131,33 @@ resource "google_project_iam_member" "deploy_job_iam_manager" {
   member  = local.deploy_member
 }
 
+# Crear, actualizar y borrar la política de alerta y el canal de correo del
+# stack alerting. Son los roles más chicos que cubren las tres operaciones y
+# ninguno incluye setIamPolicy.
+resource "google_project_iam_member" "deploy_alert_policy_editor" {
+  project = google_project.this.project_id
+  role    = "roles/monitoring.alertPolicyEditor"
+  member  = local.deploy_member
+}
+
+resource "google_project_iam_member" "deploy_notification_channel_editor" {
+  project = google_project.this.project_id
+  role    = "roles/monitoring.notificationChannelEditor"
+  member  = local.deploy_member
+}
+
+# Una política con condición condition_matched_log no vive solo en Monitoring:
+# Monitoring crea por debajo una notification rule en Cloud Logging, y eso
+# exige logging.notificationRules.* sobre el proyecto. Los roles de Monitoring
+# no lo cubren (el primer apply de alerting falló con 403 en
+# logging.notificationRules.create, ITSC-297). configWriter incluye create,
+# update y delete: cada cambio de la política reemplaza la regla.
+resource "google_project_iam_member" "deploy_logging_config_writer" {
+  project = google_project.this.project_id
+  role    = "roles/logging.configWriter"
+  member  = local.deploy_member
+}
+
 # Leer los logs de la ejecución de un job.
 resource "google_project_iam_member" "deploy_logging_viewer" {
   project = google_project.this.project_id
@@ -159,13 +186,14 @@ resource "google_project_iam_custom_role" "bucket_iam_admin" {
   ]
 }
 
-# Solo sobre los buckets a los que las capas piden acceso.
+# Solo sobre los buckets a los que las capas y el job ops-script piden acceso.
 resource "google_storage_bucket_iam_member" "deploy_bucket_iam" {
   for_each = {
     landing     = google_storage_bucket.landing.name
     dc-events   = google_storage_bucket.dc_events.name
     dq-findings = google_storage_bucket.dq_findings.name
     manifest    = google_storage_bucket.manifest.name
+    ops         = google_storage_bucket.ops.name
   }
 
   bucket = each.value

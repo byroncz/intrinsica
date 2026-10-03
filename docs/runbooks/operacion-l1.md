@@ -59,7 +59,95 @@ script devuelve una sola unidad y el workflow lanza `--tasks 1`. Regla: no
 lances a mano el mismo mes y modo que Scheduler esté ejecutando.
 
 Al final, el run vuelca los logs de la ejecución y un resumen (estado,
-tareas completadas y fallidas, inicio y fin) en el *Summary* del run.
+tareas completadas y fallidas, inicio y fin) en el *Summary* del run. Bajo
+esa tabla va la de **hallazgos de calidad de datos** de la ejecución, de
+cualquier capa: check, severidad, unidad, valor y detalle, con los `error`
+primero. Sale de las líneas de log JSON que deja `emit_findings`, filtradas
+por la ejecución; si no hubo hallazgos dice "sin hallazgos".
+
+## Alerta por correo (ITSC-296)
+
+Las corridas programadas (Scheduler → Workflow → Cloud Run Job) no pasan por
+Actions, así que nadie ve su resultado sin abrir la consola. Una política de
+Cloud Monitoring (`Hallazgo de calidad con severidad ERROR`, stack
+`alerting`) manda un correo cuando cualquier job de cualquier capa deja un
+hallazgo con severidad `error`.
+
+**Qué la dispara.** Una entrada de Cloud Logging que cumple a la vez
+`resource.type="cloud_run_job"`, `severity=ERROR` y `jsonPayload.finding_id`
+presente. `dq.configure_logging` (L1 y L2, dentro de Cloud Run) escribe cada
+hallazgo como JSON con sus campos en el primer nivel y la severidad del log
+en mayúscula; `finding_id` solo lo llevan los hallazgos, así que un traceback u
+otro log `ERROR` no dispara el correo (ese fallo se ve en la ejecución en rojo).
+Un hallazgo `warning` o `info` entra con otra severidad y no cumple el filtro.
+El filtro no mira texto libre.
+
+**A quién llega.** Al correo de la variable `ALERT_EMAIL` del environment `gcp`
+de Actions, que el stack `alerting` lee como `TF_VAR_alert_email`. No está en
+el repo. Para cambiar de destinatario, edita `ALERT_EMAIL` y vuelve a aplicar
+el stack.
+
+**Qué trae.** Job, capa, modo, check, unidad, detalle y `run_id`, más el enlace
+"View logs" a la línea completa en Logs Explorer (ahí está la ejecución y el
+`details` entero). Qué hacer según el check está en cada sección de este
+runbook (por ejemplo `source_delayed`, en "Archivo aún no publicado").
+
+**Cuánto repite.** Un correo como máximo cada 5 minutos por política
+(`notification_rate_limit`, el mínimo que admite Monitoring en alertas de log):
+el reintento de Cloud Run (`max_retries = 1`) repite el hallazgo y no manda un
+segundo correo. Contrapartida: si en esa ventana salen hallazgos distintos, solo
+uno llega por correo; el resto está en *Monitoring → Alerting* y en el resumen
+de Actions de esa ejecución. El incidente se cierra solo a los 7 días sin
+hallazgos nuevos.
+
+**Cómo silenciarla.**
+
+- Un rato (mantenimiento, backfill que sabes que deja errores): *Monitoring →
+  Alerting → Snooze → Create snooze*, elige la política, define las horas. No
+  toca Terraform ni deja deriva.
+- Un destinatario: cambia `ALERT_EMAIL` y aplica `alerting`. No la borres: la
+  variable `alert_email` valida que sea un correo y un valor vacío hace fallar
+  el apply. Para no recibir más correos, usa el snooze o el `destroy`.
+- Todo: *Actions → Terraform → `alerting` → `destroy`*. El correo deja de llegar
+  hasta que se vuelva a aplicar. Terraform valida las variables también en
+  `destroy`, así que `ALERT_EMAIL` debe seguir definida (con un correo válido)
+  al lanzarlo.
+
+**Puesta en marcha (solo el humano).**
+
+1. Aplica `data` desde Cloud Shell: habilita `monitoring.googleapis.com` y da a
+   `deploy-github` los roles `monitoring.alertPolicyEditor`,
+   `monitoring.notificationChannelEditor` y `logging.configWriter` (la política
+   log match crea por debajo una notification rule en Cloud Logging).
+2. Espera a que el run de CI en `main` publique las imágenes
+   `l1_ingest:0.6.0` y `l2_dc_events:0.7.0`, y aplica `l1` y `l2` (*Actions →
+   Terraform*) para que los jobs las usen. Sin la imagen nueva el log sigue
+   siendo texto y la alerta no ve nada.
+3. Crea `ALERT_EMAIL` como variable del environment `gcp` y aplica `alerting`.
+   El plan debe mostrar solo el canal y la política (2 recursos a crear).
+4. **Prueba extremo a extremo**, desde Cloud Shell. Para un `error` hace falta
+   un mes ya vencido que Binance no tenga y hoy no existe ninguno, así que se
+   fuerza apuntando la fuente a una ruta que da 404 (`L1_SOURCE_BASE_URL`, solo
+   para esa ejecución):
+
+   ```sh
+   gcloud run jobs execute l1-monthly-close --region <región> --tasks 1 \
+     --args=--mode,monthly-close,--from,2026-08,--force \
+     --update-env-vars=L1_SOURCE_BASE_URL=https://data.binance.vision/no-existe
+   ```
+
+   `--force` es necesario: 2026-08 ya está cerrado y, sin él, `monthly-close`
+   ve `consolidated.parquet`, registra "mes ya cerrado" y sale con 0 sin
+   descargar, es decir, sin 404, sin hallazgo y sin correo. Con `--force` entra
+   a procesar la unidad, el `.CHECKSUM` de la URL falsa da 404 y es un
+   `source_delayed` (`error`, salida 3) de 2026-08. Debe llegar un correo en
+   menos de 5 minutos con el job `l1-monthly-close`, el check y la unidad. No
+   escribe datos, pero por `max_retries = 1` quedan dos filas de prueba en el
+   lago de hallazgos (la ejecución y su reintento): anótalas. Para el caso que
+   no debe alertar, lanza el comando sin `--update-env-vars` y con
+   `--from,<mes en curso>` (hoy `2026-10`; `source_not_published`, `info`,
+   salida 0): no llega nada. Un mes vencido ya no sirve para esto: pasa a
+   `warning` y luego a `error`.
 
 ## Paso 1: backfill 2017-08 a 2026-07
 
@@ -88,7 +176,7 @@ cuántas. Para saber cuáles:
 ```bash
 gcloud logging read \
   'resource.type="cloud_run_job" AND resource.labels.job_name="l1-backfill" AND severity>=ERROR' \
-  --project <proyecto> --freshness=7d --format='value(timestamp,textPayload)'
+  --project <proyecto> --freshness=7d --format='value(timestamp,textPayload,jsonPayload.message)'
 ```
 
 Distingue la causa como en la [sonda](sonda-l1.md#qué-leer-y-qué-anotar):
@@ -171,6 +259,89 @@ cierre.
 3. **`daily_monthly_drift`** y **hallazgos canonical**: ver la sección
    siguiente. Debe haber un `daily_monthly_drift` de 2026-08 y hallazgos
    `stage = canonical` del mes que superan a los `provisional`.
+
+## Archivo aún no publicado
+
+Binance publica el diario de D el día **D+1** y el consolidado mensual de M
+el **primer lunes de M+1** (README de `binance-public-data`; TRD-L1 §1.1 y
+§8.4). Antes de eso el ZIP da 404, y eso no es una falla: L1 no lo reintenta
+y lo registra como hallazgo según la fecha **UTC** de la corrida. Ejemplo, mes
+2026-09: el primer lunes de octubre de 2026 es el 5.
+
+| Corrida (UTC) | Hallazgo | Severidad | Salida |
+| --- | --- | --- | --- |
+| Antes del primer lunes de M+1 (diario: antes de D+1) | `source_not_published`, "dentro del calendario de Binance; publicación esperada el YYYY-MM-DD" | info | 0 |
+| El primer lunes de M+1 (diario: el día D+1) | `source_not_published`, "día de publicación, aún sin archivo" | warning | 0 |
+| Después (diario: después de D+1) | `source_delayed`, "N días de retraso sobre el calendario publicado de Binance", `metric_value = N` | error | 3 |
+
+Binance no publica hora ni SLA, por eso el día de publicación completo cuenta
+como a tiempo y recién el día siguiente es retraso. Con salida 0 no se escribe
+`consolidated.parquet` ni manifiesto: la unidad queda pendiente y la frontera
+de L2 (fail-closed) la ignora. Con salida 3 la tarea falla y la orquestación
+no ejecuta el `next_job` (`l2-monthly`), que es lo correcto. El scheduler de
+`monthly-close` corre el día 8, así que en estado estacionario solo puede
+darse `source_delayed`. El diario corre a las 03:00 UTC del día D+1, así que
+su caso esperable es `warning` ese mismo día: el día queda pendiente hasta que
+se relance `l1-daily` o llegue `monthly-close`.
+
+Una tarea con salida 3 se reintenta una vez (`max_retries = 1`): hace otra
+petición, recibe otro 404 y deja una segunda fila `source_delayed` en el lago.
+El resumen de Actions las junta por contenido: compara el hallazgo completo
+menos `finding_id`, `run_id` y `detected_at`, que cambian en cada emisión. Dos
+hallazgos que difieren en cualquier otro campo (por ejemplo `metric_value` de
+dos días distintos de `l1-daily`) salen como filas separadas.
+
+**Cómo se ve en el resumen de Actions:** una corrida con `source_not_published`
+termina en verde y la tabla de hallazgos trae la fila con su `info` o
+`warning`, la fecha esperada y la unidad. Un `source_delayed` deja la
+ejecución en rojo y la fila `error` sale primera en la tabla. El caso real de
+ITSC-295: `l1-backfill` de 2017-12 a 2026-09 lanzado el sábado 2026-10-03
+falló en 2026-09 tras cuatro descargas y sin hallazgo; con la regla termina en
+verde con `source_not_published` info.
+
+**Qué hacer:**
+
+- `info` o `warning`: nada, o relanzar `l1-backfill` con `from = to = <mes>`
+  desde el día de publicación en adelante y comprobar que el mes se ingiere.
+- `error`: Binance se retrasó. Confirma en
+  [data.binance.vision](https://data.binance.vision) que el archivo sigue sin
+  estar y relanza cuando aparezca. Si nunca aparece, escala: es un hueco de la
+  fuente.
+
+## Marcas de Binance
+
+En abril de 2022 Binance auditó su histórico Spot, recuperó agg trades
+faltantes y marcó como inválidos los duplicados, con `p = 0`, `q = 0`,
+`f = -1`, `l = -1`, conservando su `agg_trade_id` y `transact_time` para no
+romper la secuencia ([changelog de la API Spot, entrada 2022-04-12](https://github.com/binance/binance-spot-api-docs/blob/master/CHANGELOG_CN.md)).
+No son transacciones.
+
+**Regla de L1** (ITSC-294):
+
+- Una fila es marca si y solo si cumple las cuatro igualdades: `price = 0`,
+  `quantity = 0`, `first_trade_id = -1` y `last_trade_id = -1`.
+- L1 la descarta antes de escribir `consolidated.parquet` y emite
+  `provider_invalid_marker` con el conteo y hasta 10 `agg_trade_id`.
+- Cualquier otra fila con `price <= 0`, `quantity <= 0`, `first_trade_id < 0`
+  o `last_trade_id < first_trade_id` es dato corrupto: `price_out_of_range`
+  (`error`) y la unidad falla sin escribir.
+- `aggid_gap` y `aggid_duplicate` se calculan sobre los ids crudos, antes del
+  descarte, así que las marcas no aparecen como huecos. Una marca nunca es la
+  primera ni la última fila del mes, por eso la costura entre meses no cambia.
+
+**Meses afectados en BTCUSDT:** 2017-12 y 2018-01. Son los únicos dos de los
+360 ZIP mensuales regenerados que incluyen BTCUSDT en la
+[lista oficial de archivos regenerados](https://github.com/binance/binance-public-data) (`updates/2022-04-21_aggregate_trade_updates.zip`).
+Un escaneo de los 109 meses de L1 (mínimo de `price` por row group) confirma
+que solo esos dos tenían precio 0.
+
+**Si L1 ya había escrito esos meses sin la regla** (imagen anterior a 0.5.14),
+reprocésalos: `l1-backfill` con `from = 2017-12`, `to = 2018-01` y `force`
+marcado. Después, `l2-backfill` con todos los campos vacíos: la frontera
+reanuda en 2017-12 (2017-11 no cambió, su carry-over sigue válido). Los
+SHA-256 esperados de los ZIP corregidos son `2017-12`
+`45261b647c70862edd60e788ce20f32d3b78d0753f9841ba3ca0e50afdbfbefe` y `2018-01`
+`645f8f581a6e4828df12f16b73f9f7451f12bef2ab24d4fc4b0466805e793e7d`.
 
 ## Consultar los hallazgos
 
@@ -313,9 +484,13 @@ pasar por la consola:
 gcloud logging read 'resource.type="cloud_run_job"
   AND resource.labels.job_name="l1-backfill"
   AND labels."run.googleapis.com/execution_name"="l1-backfill-zzpft"
-  AND textPayload:"sonda: unit="' \
-  --project intrinsica-dc --format='value(textPayload)'
+  AND (textPayload:"sonda: unit=" OR jsonPayload.message:"sonda: unit=")' \
+  --project intrinsica-dc --format='value(textPayload,jsonPayload.message)'
 ```
+
+Desde la imagen que trae `dq.configure_logging` (ITSC-296) el log de Cloud Run
+es JSON y el texto va en `jsonPayload.message`; antes iba en `textPayload`.
+Por eso los dos filtros miran ambos.
 
 y sumar cada `wall_s`. Filtrar por `execution_name` deja afuera el
 reproceso manual de 2021-12 y la sonda de ITSC-218, que usan el mismo job y

@@ -119,7 +119,7 @@ Tres ejecuciones `run-job.yml` con `job` = `l1-daily`, `from` = un día por
 | 2025 | 2025-01-01 |
 
 El chequeo `header_detected` se emite siempre, con o sin header, y el log solo
-muestra `check_type=header_detected`: eso confirma que corrió, no responde la
+muestra `"check_type": "header_detected"`: eso confirma que corrió, no responde la
 pregunta. La respuesta está en `metric_value` de la fila del Parquet de
 hallazgos: `1.0` = con header, `0.0` = sin header (`details.first_line` trae la
 primera línea). No bloquea la sonda: el diseño detecta el header por archivo y

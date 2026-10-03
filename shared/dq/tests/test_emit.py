@@ -1,3 +1,4 @@
+import json
 import logging
 from datetime import UTC, datetime
 from pathlib import Path
@@ -86,15 +87,30 @@ def test_log_line_per_finding(tmp_path, caplog, severity, level):
     assert record.name == "dq"
     assert record.levelno == level
     message = record.getMessage()
-    for expected in (
-        "check_type=gap",
-        "status=fail",
-        "stage=provisional",
-        "provider=binance",
-        "market=spot",
-        "asset=BTCUSDT",
-        "year=2026",
-        "month=9",
-        f"finding_id={finding.finding_id}",
-    ):
-        assert expected in message
+    assert "\n" not in message
+    assert json.loads(message) == {
+        "finding_id": finding.finding_id,
+        "layer": "l1",
+        "mode": "batch",
+        "check_type": "gap",
+        "severity": severity,
+        "stage": "provisional",
+        "status": "fail",
+        "provider": "binance",
+        "market": "spot",
+        "asset": "BTCUSDT",
+        "year": 2026,
+        "month": 9,
+        "metric_value": None,
+        "details": {"missing": 3},
+        "run_id": "run-1",
+    }
+
+
+def test_log_line_keeps_accents_and_metric(tmp_path, caplog):
+    finding = make(metric_value=3.0, details={"reason": "3 días de retraso"})
+    with caplog.at_level(logging.DEBUG, logger="dq"):
+        emit_findings([finding], tmp_path)
+    message = caplog.records[0].getMessage()
+    assert "3 días de retraso" in message
+    assert json.loads(message)["metric_value"] == 3.0

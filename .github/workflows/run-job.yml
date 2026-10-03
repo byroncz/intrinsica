@@ -11,6 +11,12 @@
 # quedó; l2-monthly procesa un mes. Por eso run-job-tasks.sh devuelve una sola
 # unidad para los jobs l2 y el workflow lanza --tasks 1.
 #
+# ops-script (ITSC-298) no es una capa de datos: corre un script Python de
+# gs://<proyecto>-ops/scripts/ (input script, con args libres en args) y deja
+# en el resumen su URI, generation, hash, contenido y las últimas líneas de su
+# salida. Una sola tarea; no admite from, to, force ni series_start. Los demás
+# jobs ignoran script y args.
+#
 # Regla: no lanzar a mano el mismo mes y modo que Scheduler esté ejecutando.
 name: Run job
 
@@ -27,6 +33,7 @@ on:
           - l1-seam-check
           - l2-backfill
           - l2-monthly
+          - ops-script
         required: true
       from:
         description: "Inicio: YYYY-MM (backfill, monthly, monthly-close) o YYYY-MM-DD (l1-daily). Solo l2-backfill admite vacío: la frontera de cada θ decide desde dónde avanza"
@@ -44,6 +51,14 @@ on:
         description: "Solo L2: primer mes de la serie, YYYY-MM (vacío: la CLI usa L2_SERIES_START del stack)"
         type: string
         required: false
+      script:
+        description: "Solo ops-script (obligatorio ahí): URI del script, gs://<proyecto>-ops/scripts/<nombre>.py"
+        type: string
+        required: false
+      args:
+        description: "Solo ops-script: argumentos del script, como en un shell (comillas para los que llevan espacios)"
+        type: string
+        required: false
 
 jobs:
   run:
@@ -58,6 +73,8 @@ jobs:
       TO: ${{ inputs.to }}
       FORCE: ${{ inputs.force }}
       SERIES_START: ${{ inputs.series_start }}
+      SCRIPT: ${{ inputs.script }}
+      SCRIPT_ARGS: ${{ inputs.args }}
       GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
       GCP_REGION: ${{ vars.GCP_REGION }}
     steps:
@@ -72,11 +89,17 @@ jobs:
             echo "::error::series_start solo aplica a los jobs l2-*, no a $JOB"
             exit 1
           fi
+          # ops-script no tiene rango ni reproceso: aceptar estos inputs
+          # escondería un error de quien lanza.
+          if [[ "$JOB" == ops-script && ( -n "$SERIES_START" || "$FORCE" == "true" ) ]]; then
+            echo "::error::series_start y force no aplican a ops-script"
+            exit 1
+          fi
           if [[ "$FORCE" == "true" && -z "$FROM" ]]; then
             echo "::error::force exige from: sin él reprocesaría toda la serie"
             exit 1
           fi
-          units="$(.github/scripts/run-job-tasks.sh "$JOB" "$FROM" ${TO:+"$TO"})" || {
+          units="$(.github/scripts/run-job-tasks.sh "$JOB" "$FROM" "$TO" "$SCRIPT")" || {
             echo "::error::Rango inválido, ver el mensaje anterior"
             exit 1
           }
@@ -102,7 +125,9 @@ jobs:
           # to = from; la de l2-monthly rechaza --to). En l2-backfill siempre
           # se pasa: to vacío = hasta el último mes cerrado de L1; to = from =
           # un solo mes.
-          args="$(.github/scripts/run-job-args.sh "$JOB" "$FROM" "$TO" "$FORCE" "$SERIES_START")"
+          # Para ops-script devuelve --script y --script-args con el separador
+          # ;; de gcloud, porque el texto libre puede llevar comas.
+          args="$(.github/scripts/run-job-args.sh "$JOB" "$FROM" "$TO" "$FORCE" "$SERIES_START" "$SCRIPT" "$SCRIPT_ARGS")"
           # --args reemplaza los argumentos del contenedor, no el ENTRYPOINT.
           # Con --format, gcloud imprime el nombre de la ejecución al terminar.
           inicio="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -154,3 +179,35 @@ jobs:
                 "| Inicio | \(.status.startTime // "-") |",
                 "| Fin | \(.status.completionTime // "-") |"
             ' >> "$GITHUB_STEP_SUMMARY"
+
+          # Hallazgos de DQ de cualquier capa (ITSC-295): dq.emit_findings deja
+          # cada uno como una línea de log JSON; se leen de Cloud Logging con el
+          # mismo filtro por execution_name que el paso anterior, sin tocar el
+          # bucket de hallazgos.
+          echo >> "$GITHUB_STEP_SUMMARY"
+          if ! lines="$(gcloud logging read \
+            "resource.type=\"cloud_run_job\" AND resource.labels.job_name=\"${JOB}\" AND labels.\"run.googleapis.com/execution_name\"=\"${EXECUTION}\" AND (textPayload:\"\\\"check_type\\\"\" OR jsonPayload.message:\"\\\"check_type\\\"\")" \
+            --project "$GCP_PROJECT_ID" --order=asc --freshness=7d \
+            --format='value(textPayload,jsonPayload.message)')"; then
+            echo "::warning::No se pudieron leer los hallazgos de Cloud Logging"
+            lines=""
+          fi
+          .github/scripts/findings-summary.sh <<< "$lines" >> "$GITHUB_STEP_SUMMARY"
+
+          # ops-script (ITSC-298): identidad del script, su contenido y las
+          # últimas líneas de su salida, de las líneas de log que imprime el
+          # entrypoint. Cloud Logging puede tardar unos segundos tras el fin de
+          # la ejecución: se reintenta hasta ver el código de salida del script.
+          if [[ "$JOB" == ops-script ]]; then
+            echo >> "$GITHUB_STEP_SUMMARY"
+            lines=""
+            for attempt in 1 2 3 4; do
+              lines="$(gcloud logging read \
+                "resource.type=\"cloud_run_job\" AND resource.labels.job_name=\"${JOB}\" AND labels.\"run.googleapis.com/execution_name\"=\"${EXECUTION}\"" \
+                --project "$GCP_PROJECT_ID" --order=asc --freshness=7d \
+                --format='value(textPayload,jsonPayload.message)')" || lines=""
+              grep -q '^OPS_SCRIPT_EXIT ' <<< "$lines" && break
+              sleep 10
+            done
+            .github/scripts/ops-summary.sh <<< "$lines" >> "$GITHUB_STEP_SUMMARY"
+          fi

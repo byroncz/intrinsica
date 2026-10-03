@@ -290,6 +290,12 @@ el humano espera a que el run de CI en `main` termine de publicar
 anterior falla porque el tag aún no existe. El plan debe mostrar
 `image: ...:<versión anterior> -> ...:<versión nueva>`.
 
+Si el merge no disparó el CI de push, el rescate es lanzar *CI* a mano en
+`main` (Actions → *CI* → *Run workflow*, rama `main`): construye y publica las
+tres capas, aunque no hayan cambiado. Los tags que ya existían se sobrescriben
+con el mismo contenido. Un run manual sobre otra rama solo construye y corre la
+prueba de humo, sin publicar.
+
 ## Stack l2 (DC Events)
 
 Instancia del módulo `layer` con dos modos: `l2-backfill` y `l2-monthly`, cada
@@ -325,6 +331,83 @@ memoria no cambia. En `l2-backfill` también puede quitar `client` y
 `client_version`, que `gcloud run jobs update` deja puestos y el módulo no fija;
 eso es parte de cerrar la deriva. Cualquier otro cambio es una sorpresa y se
 revisa antes de aprobar el `apply`.
+
+## Stack ops (scripts de operación)
+
+Instancia del módulo `layer` con un solo modo: el job `ops-script` (y la service
+account `ops-script`), que corre un script Python tomado de GCS (ITSC-298). No
+es una capa de datos: no escribe en el lago. Cómo se usa, qué ve el humano y los
+scripts de partida están en el
+[runbook de operación ad hoc](../docs/runbooks/operacion-ops.md).
+
+- **El bucket `<proyecto>-ops` lo crea `data`**, no `ops`: crear buckets exige
+  permisos de proyecto que `deploy-github` no tiene y que no conviene darle (un
+  rol de proyecto con `storage.buckets.setIamPolicy` alcanzaría a todos los
+  buckets del lago), y los buckets son datos, de `data` como todos. Tiene
+  versionado (cada subida de un script es una generation) y dos reglas de ciclo
+  de vida: las versiones no vigentes de `scripts/` se borran a los 90 días y
+  todo lo de `results/` a los 7.
+- **Acceso de la service account.** Lectura (`roles/storage.objectViewer`) de
+  `landing/l1/`, `dc-events/l2/`, `dq-findings/{l1,l2}/`, `manifest/{l1,l2}/` y
+  `ops/scripts/`, por el módulo `layer`; y escritura solo en `ops/results/`
+  (`roles/storage.objectCreator`, un binding propio del stack porque el módulo
+  da un solo rol por bucket). Sin roles de IAM ni `run.jobs.update`.
+- **Cómputo.** 4 vCPU, 8 GiB, timeout 3600 s, `max_retries = 0` (un script ad
+  hoc no se reintenta solo) y una sola tarea. La imagen es `ops_tools`
+  (`layers/ops_tools/`, versión en su `VERSION`).
+- `deploy-github` recibe `bucketIamAdmin` sobre el bucket `ops`, como sobre
+  los demás, para fijar el IAM por prefijo.
+
+Orden de apply, todo por el humano:
+
+1. `data` desde Cloud Shell (ver "Habilitar el despliegue desde GitHub
+   Actions"): crea el bucket y da a `deploy-github` `bucketIamAdmin` sobre él.
+   Sin este apply, el plan de `ops` falla: el output `buckets` de `data` aún
+   no trae `ops`. Por eso el check `stack (ops)` del PR está en rojo hasta
+   entonces, y es esperado. Aplica `data` con el checkout de la rama del PR,
+   antes de aprobar (`main` aún no tiene el bucket `ops`); luego re-ejecuta
+   `stack (ops)`. Su plan (la service account, ocho bindings y el job) es la
+   evidencia de que `ops` crea solo eso.
+2. Esperar a que el run de CI en `main` publique `ops_tools:<versión>`, con la
+   versión de `layers/ops_tools/VERSION`. Un apply anterior falla porque el tag
+   aún no existe.
+3. Actions → *Terraform* → `ops` → `apply`. El plan debe mostrar solo la
+   service account, sus bindings (siete de lectura y uno de escritura) y el
+   job.
+4. Correr la prueba de permisos del runbook (`permisos.py`).
+
+Un cambio de código de `ops_tools` sube su `VERSION` y se despliega como
+cualquier capa (ver "Desplegar un cambio de capa").
+
+## Stack alerting (alerta de hallazgos ERROR)
+
+Instancia del módulo `alerting`: un canal de correo y una política de log match
+de Cloud Monitoring que avisa cuando un Cloud Run Job de cualquier capa deja un
+hallazgo de calidad con `severity=ERROR` (ITSC-296). Va en su propio stack,
+con estado propio, para que aplicar o destruir `l1` o `l2` no toque las
+alertas. Qué dispara, a quién llega y cómo silenciarla:
+[runbook de operación](../docs/runbooks/operacion-l1.md#alerta-por-correo-itsc-296).
+
+- El correo es la variable sensible `alert_email`, que el workflow toma de
+  `ALERT_EMAIL` en el environment `gcp` (`TF_VAR_alert_email`); no está en el
+  repo. El plan de los PR usa un correo de relleno y no lo imprime.
+- Antes del primer apply, el humano aplica `data` desde Cloud Shell: habilita
+  `monitoring.googleapis.com` y da a `deploy-github` los roles
+  `monitoring.alertPolicyEditor`, `monitoring.notificationChannelEditor` y
+  `logging.configWriter` (una política log match crea por debajo una
+  notification rule en Cloud Logging). Sin eso el apply falla con 403 o con la
+  API deshabilitada.
+- Actions → *Terraform* → `alerting` → `apply`. El plan debe mostrar solo el
+  canal y la política.
+- Diferencia esperada en el plan de un PR: tras el primer apply, el plan del PR
+  (que usa el correo de relleno `plan@example.invalid`) muestra
+  `~ update in place` en `google_monitoring_notification_channel.email`, en
+  `labels` (valor sensible). Es ruido: ese plan no se aplica, y el apply real
+  usa `ALERT_EMAIL`. Cualquier otro cambio en `alerting` sí es una sorpresa.
+- Costo: 0 USD hoy. Google anunció 0,35 USD/mes por referencia de métrica "no
+  antes del 1 de septiembre de 2027"; una alerta log match cuenta como una. El
+  canal de correo no cobra y los logs caben en los 50 GiB/mes gratis
+  ([precios](https://cloud.google.com/products/observability/pricing)).
 
 ## Timeouts y reintentos de los jobs de l2
 

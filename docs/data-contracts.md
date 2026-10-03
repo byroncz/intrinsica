@@ -30,6 +30,22 @@ tabla se desvía del código.
 | `is_buyer_maker` | bool | no | Si el comprador fue el maker |
 | `is_best_match` | bool | no | Si el precio fue el mejor del libro; se conserva del proveedor |
 
+### Invariante de valores
+
+Toda fila del Parquet cumple `price > 0`, `quantity > 0`,
+`first_trade_id >= 0` y `last_trade_id >= first_trade_id`. Binance marcó como
+inválidos los agg trades duplicados que detectó al auditar su histórico Spot
+en abril de 2022, con `price = 0`, `quantity = 0`, `first_trade_id = -1` y
+`last_trade_id = -1`, y conservó su `agg_trade_id` y `transact_time`
+([changelog de la API Spot, entrada 2022-04-12](https://github.com/binance/binance-spot-api-docs/blob/master/CHANGELOG_CN.md)). No son
+transacciones: L1 las descarta antes de escribir y emite
+`provider_invalid_marker`. Cualquier otra fila con `price <= 0`,
+`quantity <= 0`, `first_trade_id < 0` o `last_trade_id < first_trade_id` hace
+fallar la unidad (`price_out_of_range`). Por eso el
+Parquet puede tener huecos de `agg_trade_id` solo donde el proveedor los
+tenga, nunca por las marcas. Detalle en el runbook
+[Marcas de Binance](runbooks/operacion-l1.md#marcas-de-binance).
+
 ### Disposición física
 
 - **Raíz**: una ruta local o `gs://<bucket landing>/l1`. El stack `l1` solo
@@ -297,6 +313,20 @@ En GCS usa Application Default Credentials; no hay credenciales en código.
 `daily_monthly_drift`. Los que se agregan después de un bug real se
 documentan aquí, con su porqué:
 
+- **`provider_invalid_marker`** (ITSC-294): filas que Binance marcó como
+  inválidas (`price = 0`, `quantity = 0`, `first_trade_id = -1`,
+  `last_trade_id = -1`) y L1 descartó antes de escribir. `metric_value` =
+  número de filas descartadas y `details.ids` = hasta 10 `agg_trade_id`. Sin
+  marcas: `severity = info`, `status = pass`, `metric_value = 0`. Con marcas:
+  `severity = warning`, `status = corrected`. Se emite siempre, en cada
+  unidad.
+- **`price_out_of_range`** (ITSC-294): fila con `price <= 0`, `quantity <= 0`,
+  `first_trade_id < 0` o `last_trade_id < first_trade_id` que no es marca
+  completa, es decir, dato corrupto. El nombre quedó por el caso original
+  (precio) pero cubre también los trade ids. `severity = error`,
+  `status = fail`, `metric_value` = filas corruptas y `details.ids` = hasta 10
+  `agg_trade_id`. La unidad falla y no escribe Parquet ni manifiesto. Solo
+  existe cuando falla.
 - **`seam_skipped`** (ITSC-233): `daily` evalúa la costura del día recién
   escrito contra su día previo apenas termina de procesar la unidad. Cloud
   Run corre varias tareas del mismo Job en paralelo y no garantiza el orden:
@@ -325,6 +355,36 @@ documentan aquí, con su porqué:
   `status = pass`, `metric_value` = número de miembros sobrantes y
   `details.members` con esa lista. Si ningún miembro coincide con el nombre
   esperado, sigue abortando con `ValueError`, como antes de ITSC-231.
+- **`source_not_published`** (ITSC-295): Binance respondió 404 al ZIP de la
+  unidad y la fecha UTC de la corrida aún está dentro del calendario de
+  publicación (diario de D: el día D+1; mensual de M: el primer lunes de
+  M+1). No es un error del pipeline, es la naturaleza del proceso. La unidad
+  no escribe Parquet ni manifiesto y la CLI sale con 0: queda pendiente y la
+  frontera de L2 la ignora. `metric_value` = días que faltan para la
+  publicación (0 el propio día), `details.expected_publication`,
+  `details.unit`, `details.source_url` y `details.reason`. Antes de la
+  publicación: `severity = info`, `status = pass`. El día de publicación
+  (Binance no publica hora, así que el día completo cuenta como a tiempo):
+  `severity = warning`, `status = fail`.
+- **`source_delayed`** (ITSC-295): mismo 404, pero la fecha UTC de la corrida
+  es posterior al día de publicación: la fuente se retrasó sobre su
+  calendario. `severity = error`, `status = fail`, `metric_value` = días de
+  retraso (`details.reason` lo dice con palabras). La CLI sale con 3, la tarea
+  falla y la orquestación no ejecuta el `next_job` (`l2-monthly`). No escribe
+  Parquet ni manifiesto. Solo existe cuando ocurre. Los jobs de L1 tienen
+  `max_retries = 1`: Cloud Run reintenta la tarea con salida 3, que repite el
+  404 y deja una segunda fila `source_delayed` (otro `finding_id`) en el lago.
+  Se acepta: el resumen de `run-job.yml` las junta por contenido (el
+  hallazgo completo menos `finding_id`, `run_id` y `detected_at`).
+
+Ni `source_not_published` ni `source_delayed` se reintentan: un 404 no cambia
+por esperar. El backoff queda solo para fallos de red y 5xx.
+
+Cada hallazgo, además de la fila en el lago, deja una línea de log JSON
+(`dq.emit_findings`) con `finding_id`, `layer`, `mode`, `check_type`,
+`severity`, `stage`, `status`, `provider`, `market`, `asset`, `year`, `month`,
+`metric_value`, `details` y `run_id`. Es lo que lee el resumen de
+`run-job.yml`, sin acceder al bucket.
 
 `check_type` de L2 (`layer = l2`, `stage = canonical`, `mode` `backfill` o
 `monthly`; el θ viaja en `details.theta`, no en una columna). Son los de
