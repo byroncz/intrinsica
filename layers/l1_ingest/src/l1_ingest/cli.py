@@ -13,7 +13,7 @@ from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
-from dq import emit_findings
+from dq import configure_logging, emit_findings
 
 from l1_ingest.close import run_monthly_close
 from l1_ingest.download import SourceNotPublished, source_url
@@ -187,7 +187,7 @@ def main(
     except SystemExit as exc:  # argparse ya imprimió el motivo
         return int(exc.code or 0)
 
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
+    configure_logging(env)
     if args.from_ is None:
         if args.mode not in ("daily", "monthly-close") or args.to is not None:
             print(

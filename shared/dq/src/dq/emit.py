@@ -11,6 +11,7 @@ import pyarrow.fs as pafs
 import pyarrow.parquet as pq
 
 from dq.finding import Finding, Severity, to_table
+from dq.logs import FINDING_ATTR
 
 logger = logging.getLogger("dq")
 
@@ -38,36 +39,44 @@ def _detected_date(finding: Finding) -> str:
     )
 
 
+def _log_fields(finding: Finding) -> dict[str, object]:
+    return {
+        "finding_id": finding.finding_id,
+        "layer": finding.layer,
+        "mode": finding.mode,
+        "check_type": finding.check_type,
+        "severity": finding.severity,
+        "stage": finding.stage,
+        "status": finding.status,
+        "provider": finding.provider,
+        "market": finding.market,
+        "asset": finding.asset,
+        "year": finding.year,
+        "month": finding.month,
+        "metric_value": finding.metric_value,
+        "details": finding.details,
+        "run_id": finding.run_id,
+    }
+
+
 def log_line(finding: Finding) -> str:
     """Línea de log JSON del hallazgo: una sola línea, parseable con `jq`.
 
     Los campos son los del esquema que sirven para leerlo sin abrir el lago
     (más `finding_id` para cruzarlo con la fila persistida).
     """
-    return json.dumps(
-        {
-            "finding_id": finding.finding_id,
-            "layer": finding.layer,
-            "mode": finding.mode,
-            "check_type": finding.check_type,
-            "severity": finding.severity,
-            "stage": finding.stage,
-            "status": finding.status,
-            "provider": finding.provider,
-            "market": finding.market,
-            "asset": finding.asset,
-            "year": finding.year,
-            "month": finding.month,
-            "metric_value": finding.metric_value,
-            "details": finding.details,
-            "run_id": finding.run_id,
-        },
-        ensure_ascii=False,
-    )
+    return json.dumps(_log_fields(finding), ensure_ascii=False)
 
 
 def _log(finding: Finding) -> None:
-    logger.log(_LOG_LEVELS[finding.severity], "%s", log_line(finding))
+    fields = _log_fields(finding)
+    logger.log(
+        _LOG_LEVELS[finding.severity],
+        "%s",
+        json.dumps(fields, ensure_ascii=False),
+        # Para `CloudRunFormatter`: los campos van también en el primer nivel.
+        extra={FINDING_ATTR: fields},
+    )
 
 
 def _write(findings: list[Finding], fs: pafs.FileSystem, base: str) -> list[str]:

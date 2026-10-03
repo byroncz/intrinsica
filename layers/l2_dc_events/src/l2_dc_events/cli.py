@@ -14,6 +14,8 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
+from dq import configure_logging
+
 from l2_dc_events import findings
 from l2_dc_events.carry import CarryOverError
 from l2_dc_events.frontier import frontiers, label, list_carry_overs, ordinal
@@ -406,7 +408,7 @@ def main(
     except SystemExit as exc:  # argparse ya imprimió el motivo
         return int(exc.code or 0)
 
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
+    configure_logging(env)
     try:
         _require_single_task(env)
         declared = args.series_start or env.get("L2_SERIES_START")
