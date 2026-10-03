@@ -355,13 +355,17 @@ con el mismo contenido. Un run manual sobre otra rama solo construye y corre la
 prueba de humo, sin publicar. Ese run manual no dispara el deploy (solo lo hace
 un push): lánzalo después con el manual de Terraform.
 
-### Variable `ALERT_EMAIL`
+### Secret `ALERT_EMAIL`
 
-El job `plan` no usa el environment `gcp`, así que no ve sus variables.
-`ALERT_EMAIL` (el correo del stack `alerting`) debe ser **variable de
-repositorio** (*Settings → Secrets and variables → Actions → Variables*). Sin
-ella el job `plan` de `alerting` falla de entrada con el motivo, en vez de
-planear con un correo de relleno que luego se aplicaría.
+El job `plan` no usa el environment `gcp`, así que no ve sus secrets.
+`ALERT_EMAIL` (el correo del stack `alerting`) debe ser **secret de
+repositorio** (*Settings → Secrets and variables → Actions → Secrets → Repository
+secrets*). Es secret y no variable porque GitHub no enmascara una variable: la
+imprime en claro en el encabezado `env:` de cada paso, y los logs de este repo
+público los lee cualquiera. Un secret sale como `***`, y el workflow solo lo
+exporta cuando el stack es `alerting`. Sin él el job `plan` de `alerting` falla de
+entrada con el motivo, en vez de planear con un correo de relleno que luego se
+aplicaría.
 
 ## Stack l2 (DC Events)
 
@@ -474,12 +478,12 @@ con estado propio, para que aplicar o destruir `l1` o `l2` no toque las
 alertas. Qué dispara, a quién llega y cómo silenciarla:
 [runbook de operación](../docs/runbooks/operacion-l1.md#alerta-por-correo-itsc-296).
 
-- El correo es la variable sensible `alert_email`, que el workflow toma de
-  `ALERT_EMAIL` (`TF_VAR_alert_email`); no está en el repo. Debe ser variable de
-  **repositorio**, no del environment `gcp` (ver "Variable `ALERT_EMAIL`"): el
-  humano la crea ahí antes del próximo deploy de `alerting`. Mientras no exista,
-  el plan de los PR usa un correo de relleno y no lo imprime, y el job `plan` de
-  merge y manual falla con el motivo.
+- El correo es la variable sensible `alert_email`, que el workflow toma del
+  secret `ALERT_EMAIL` (`TF_VAR_alert_email`); no está en el repo. Debe ser
+  **secret de repositorio**, no del environment `gcp` (ver "Secret `ALERT_EMAIL`"):
+  el humano lo crea ahí antes del próximo deploy de `alerting`. Mientras no
+  exista, el job `plan` de merge y manual falla con el motivo. El plan de los PR
+  usa siempre un correo de relleno y no lo imprime.
 - Antes del primer apply, el humano aplica `data` desde Cloud Shell: habilita
   `monitoring.googleapis.com` y da a `deploy-github` los roles
   `monitoring.alertPolicyEditor`, `monitoring.notificationChannelEditor` y
@@ -489,10 +493,10 @@ alertas. Qué dispara, a quién llega y cómo silenciarla:
 - El `apply` de `alerting` llega por el flujo de merge o por el manual (ver
   "Desplegar un cambio de capa"). El plan debe mostrar solo el canal y la
   política.
-- Con `ALERT_EMAIL` solo en el environment `gcp` (antes de ITSC-291), el plan de
-  un PR usaba el correo de relleno `plan@example.invalid` y mostraba
+- El plan de un PR usa el correo de relleno `plan@example.invalid` y muestra
   `~ update in place` en `google_monitoring_notification_channel.email`, en
-  `labels` (valor sensible). Con la variable de repositorio ese ruido desaparece:
+  `labels` (valor sensible): es ruido esperado, porque el PR no ve el secret. El
+  plan del job `plan` tras un merge o el manual sí usa el correo real: ahí
   cualquier cambio en `alerting` es una sorpresa.
 - Costo: 0 USD hoy. Google anunció 0,35 USD/mes por referencia de métrica "no
   antes del 1 de septiembre de 2027"; una alerta log match cuenta como una. El

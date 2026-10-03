@@ -115,10 +115,10 @@ jobs:
       STACK_DIR: infra/stacks/batch/${{ matrix.layer }}
       # Plan solo si WIF ya está configurado (tras aplicar deploy-github).
       PLAN: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT != '' }}
-      # Este job no usa el environment gcp y no ve su ALERT_EMAIL: el plan del
-      # stack alerting lleva un correo de relleno (la variable es sensible, no
-      # se imprime) y el valor real solo entra en el apply.
-      TF_VAR_alert_email: ${{ vars.ALERT_EMAIL || 'plan@example.invalid' }}
+      # El plan de un PR nunca usa el correo real: el stack alerting lleva un
+      # relleno (la variable es sensible, no se imprime) y el valor real, el
+      # secret ALERT_EMAIL, solo entra en el job plan que sigue a un merge.
+      TF_VAR_alert_email: plan@example.invalid
     steps:
       - uses: actions/checkout@v4
 
@@ -186,6 +186,7 @@ jobs:
       stack: ${{ matrix.layer }}
       action: apply
       ref: ${{ github.event.workflow_run.head_sha }}
+    secrets: inherit # ALERT_EMAIL, para el plan del stack alerting
 
   # Camino manual: reaplicar sin cambio de código (cerrar deriva) o destroy. `data`
   # no está entre las opciones y lo aplica el humano.
@@ -199,3 +200,4 @@ jobs:
       stack: ${{ inputs.stack }}
       action: ${{ inputs.action }}
       ref: ${{ github.sha }}
+    secrets: inherit # ALERT_EMAIL, para el plan del stack alerting
