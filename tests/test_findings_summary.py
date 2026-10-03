@@ -98,6 +98,25 @@ def test_errors_first_and_retries_are_not_duplicated():
     assert "2 hallazgos: 1 error, 0 warning, 1 info." in rows
 
 
+def test_findings_that_differ_only_in_metric_value_are_not_merged():
+    # l1-daily con varios días: mismo activo y mes, sin día en `details`.
+    lines = [
+        json.dumps(
+            finding(
+                finding_id=str(n),
+                check_type="reorder_applied",
+                severity="warning",
+                metric_value=value,
+                details={},
+            )
+        )
+        for n, value in enumerate((4.0, 7.0))
+    ]
+    rows = summary(*lines)
+    assert len([r for r in rows if r.startswith("| reorder_applied")]) == 2
+    assert "2 hallazgos: 0 error, 2 warning, 0 info." in rows
+
+
 def test_rows_keep_log_order_within_a_severity():
     lines = [
         json.dumps(finding(finding_id=str(n), asset=f"A{n}USDT")) for n in (9, 1, 5)

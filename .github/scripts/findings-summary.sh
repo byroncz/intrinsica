@@ -8,10 +8,11 @@
 #        findings-summary.sh >> "$GITHUB_STEP_SUMMARY"
 # Orden: error, warning, info; dentro de cada severidad, el del log. Un
 # reintento de Cloud Run (`max_retries = 1`) repite la tarea y emite otra fila
-# con otro `finding_id` (uuid4 por emisión): se deduplica por contenido, sin
-# `finding_id` ni `run_id`, y se conserva la primera aparición. Muestra a
-# lo más MAX_ROWS filas (por defecto 500) para no pasar el límite de 1 MiB del
-# resumen de Actions.
+# con otro `finding_id` (uuid4 por emisión): se deduplica por contenido, con el
+# hallazgo completo menos los campos de emisión (`finding_id`, `run_id`,
+# `detected_at`), y se conserva la primera aparición. Dos filas solo se juntan
+# si son indistinguibles también en el lago. Muestra a lo más MAX_ROWS filas
+# (por defecto 500) para no pasar el límite de 1 MiB del resumen de Actions.
 set -euo pipefail
 
 max_rows=${MAX_ROWS:-500}
@@ -21,7 +22,7 @@ jq -R -r -s --argjson max "$max_rows" '
   def short: if length > 200 then .[0:200] + "…" else . end;
   def unit: "\(.layer // "?") " + (.details.unit // "\(.asset) \(.year)-\(.month | tostring | if length < 2 then "0" + . else . end)");
   def rank: {"error": 0, "warning": 1, "info": 2}[.severity] // 3;
-  def content_key: [.layer, .mode, .check_type, .severity, .asset, .year, .month, .details] | tojson;
+  def content_key: del(.finding_id, .run_id, .detected_at) | tojson;
 
   [ split("\n")[]
     | select(contains("{"))

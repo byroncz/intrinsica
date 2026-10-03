@@ -202,8 +202,10 @@ se relance `l1-daily` o llegue `monthly-close`.
 
 Una tarea con salida 3 se reintenta una vez (`max_retries = 1`): hace otra
 petición, recibe otro 404 y deja una segunda fila `source_delayed` en el lago.
-El resumen de Actions las junta por contenido (capa, modo, check, severidad,
-activo, mes y detalle), no por `finding_id`, que cambia en cada emisión.
+El resumen de Actions las junta por contenido: compara el hallazgo completo
+menos `finding_id`, `run_id` y `detected_at`, que cambian en cada emisión. Dos
+hallazgos que difieren en cualquier otro campo (por ejemplo `metric_value` de
+dos días distintos de `l1-daily`) salen como filas separadas.
 
 **Cómo se ve en el resumen de Actions:** una corrida con `source_not_published`
 termina en verde y la tabla de hallazgos trae la fila con su `info` o

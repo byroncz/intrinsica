@@ -374,7 +374,8 @@ documentan aquí, con su porqué:
   Parquet ni manifiesto. Solo existe cuando ocurre. Los jobs de L1 tienen
   `max_retries = 1`: Cloud Run reintenta la tarea con salida 3, que repite el
   404 y deja una segunda fila `source_delayed` (otro `finding_id`) en el lago.
-  Se acepta: el resumen de `run-job.yml` las junta por contenido.
+  Se acepta: el resumen de `run-job.yml` las junta por contenido (el
+  hallazgo completo menos `finding_id`, `run_id` y `detected_at`).
 
 Ni `source_not_published` ni `source_delayed` se reintentan: un 404 no cambia
 por esperar. El backoff queda solo para fallos de red y 5xx.
