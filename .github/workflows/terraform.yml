@@ -20,6 +20,7 @@ on:
           - l3
           - l4
           - alerting
+          - ops
         required: true
       action:
         description: Acción de Terraform
