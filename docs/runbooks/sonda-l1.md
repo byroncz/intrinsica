@@ -225,7 +225,8 @@ Los llenó la card ITSC-213.
 **Bajar a 2 vCPU y 8 GiB (ITSC-220): descartado**
 
 Con el mes de mayor RSS de los backfills completos. Se midió con 4 vCPU y
-16 GiB (no se desplegó 2/8: el pico ya lo descarta).
+16 GiB (no se desplegó 2/8: el pico ya lo descarta, suponiendo que el RSS no
+baje un 35 % con la mitad de vCPU; no se midió a 2/8).
 
 | Backfill | Imagen | Meses | Mes de mayor RSS | RSS pico (MiB) | Pared (s) | Mediana de RSS (MiB) |
 | --- | --- | --- | --- | --- | --- | --- |
