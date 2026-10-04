@@ -248,8 +248,10 @@ Cinco mayores RSS de `l1-backfill-m89q8` (4 vCPU, 16 GiB):
 - **4 vCPU y 16 GiB sigue cumpliendo:** 9.390 MiB es 57 % de 16 GiB, bajo el
   umbral de 12.288 MiB. El stack se queda como está;
   `infra/stacks/batch/l1/main.tf` no cambia.
-- **Intermedio descartado (4 vCPU y 12 GiB):** 9.390 MiB es 76,4 % de 12 GiB,
-  sobre el 75 %. El margen que deja el mes pesado es demasiado escaso.
+- **Intermedio 4 vCPU y 12 GiB no cumple la regla:** 9.390 MiB es 76,4 % de
+  12 GiB, sobre el 75 %. 13 GiB sí la cumpliría (9.390 / 13.312 = 70,5 %), pero
+  se descarta por costo: ahorra ≈ 3 GiB × 577 s × 0,0000025 USD ≈ 0,004 USD por
+  mes, que no justifica el cambio.
 - **El pico de RAM no sigue a la pared ni al tamaño del ZIP:** en
   `l1-backfill-m89q8`, 2026-02 es el mes de mayor memoria con 253 s de pared,
   frente a los 596 s de 2023-03 (mes del ZIP más grande). El pico real
