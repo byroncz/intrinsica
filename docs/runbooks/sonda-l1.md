@@ -53,9 +53,10 @@ consulta.
 
 El tamaño del ZIP no predice la memoria. En los dos backfills completos el
 mayor RSS pico fue 2026-02 (9.194 y 9.390 MiB), no 2023-03 (5.712 MiB en el
-último, con 596 s de pared frente a 253 s de 2026-02). Por eso, una vez hecho un backfill completo, el "mes más
-pesado" para dimensionar es el de mayor `rss_peak_mib` de sus líneas `sonda:`,
-no el del ZIP más grande (ver "Resultados").
+último, con 596 s de pared frente a 253 s de 2026-02). Por eso, una vez hecho
+un backfill completo, el "mes más pesado" para dimensionar es el de mayor
+`rss_peak_mib` de sus líneas `sonda:`, no el del ZIP más grande (ver
+"Resultados").
 
 Ejecuta *Actions → Run job → Run workflow* con estos inputs exactos:
 
