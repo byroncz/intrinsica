@@ -123,10 +123,15 @@ para 8 GiB) y quédate con la más barata que cumpla las tres condiciones:
 2. RSS pico ≤ 75 % de su memoria (para 8 GiB, 6.144 MiB).
 3. Pared ≤ 1,5 × la de la configuración validada.
 
-Mide con el mes de mayor `rss_peak_mib`, no con el del ZIP más grande: un
-backfill completo ya trae las líneas `sonda:` de todos los meses, y esa
-corrida sirve de sonda sin repetirla. Si no cumple, el stack se queda como
-está y el resultado se anota en "Resultados" (ITSC-220 es el ejemplo).
+Mide con el mes de mayor `rss_peak_mib`, no con el del ZIP más grande. Un
+backfill completo hecho con la configuración validada ya trae las líneas
+`sonda:` de todos los meses y sirve solo para descartar la inferior: si su pico
+supera el 75 % de la memoria inferior, esa configuración no cumple y no hay que
+repetir la sonda. Si no lo supera, no basta para adoptarla: la condición 3
+exige medir con menos vCPU, y el RSS también puede cambiar con menos hilos.
+Despliega la configuración inferior y corre la sonda con el mes de mayor
+`rss_peak_mib` antes de fijarla. Si no cumple, el stack se queda como está y el
+resultado se anota en "Resultados" (ITSC-220 es el ejemplo).
 
 ## Caracterización de header (§14.2)
 
