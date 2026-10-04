@@ -21,9 +21,11 @@ cómo obtenerlas.
 
 ## Mes más pesado
 
-El mes más pesado es el ZIP mensual más grande de
-`data/spot/monthly/aggTrades/BTCUSDT/` en `data.binance.vision`. El tamaño del
-ZIP es el proxy del número de filas.
+Sin un backfill completo previo, el mes más pesado es el ZIP mensual más grande
+de `data/spot/monthly/aggTrades/BTCUSDT/` en `data.binance.vision`. El tamaño
+del ZIP es el proxy del número de filas. Si ya existe un backfill completo, el
+mes más pesado es el de mayor `rss_peak_mib` de sus líneas `sonda:` (hoy
+2026-02), como explica el párrafo siguiente a la tabla.
 
 Cómo determinarlo, desde una máquina con acceso a `data.binance.vision`:
 
@@ -49,12 +51,19 @@ Fecha de consulta: 2026-09-25 (HEAD a los 109 meses, de 2017-08 a 2026-08).
 Mes elegido: **2023-03**. Si un mes posterior supera esos bytes, repite la
 consulta.
 
+El tamaño del ZIP no predice la memoria. En los dos backfills completos el
+mayor RSS pico fue 2026-02 (9.194 y 9.390 MiB), no 2023-03 (5.712 MiB en el
+último, con 596 s de pared frente a 253 s de 2026-02). Por eso, una vez hecho
+un backfill completo, el "mes más pesado" para dimensionar es el de mayor
+`rss_peak_mib` de sus líneas `sonda:`, no el del ZIP más grande (ver
+"Resultados").
+
 Ejecuta *Actions → Run job → Run workflow* con estos inputs exactos:
 
 | Input | Valor |
 | --- | --- |
 | `job` | `l1-backfill` |
-| `from` | `2023-03` |
+| `from` | `2026-02` (mes de mayor `rss_peak_mib`; sin backfill previo, el del ZIP más grande, `2023-03`) |
 | `to` | (vacío) |
 
 Para una sola unidad basta con `from`: `to` por defecto es igual a `from`.
@@ -106,6 +115,26 @@ Una ejecución Fallida no siempre es un OOM. Los jobs de l1 fijan `timeout`
 - Timeout (no OOM): no cambies la memoria. Sube el `timeout` del modo en
   `infra/stacks/batch/l1/main.tf` (§14.1 exige "dentro del timeout"), por una
   card y un PR, y repite.
+
+**Bajar y volver a medir.** La regla solo valida que la configuración alcanza;
+no busca la más barata. Por la decisión de [eficiencia de memoria ante
+todo](https://app.notion.com/p/3e727957d23d811887eaf14c886b9a0c), tras validar
+una configuración prueba la inmediata inferior (Cloud Run exige al menos 2 vCPU
+para 8 GiB) y quédate con la más barata que cumpla las tres condiciones:
+
+1. Sin OOM.
+2. RSS pico ≤ 75 % de su memoria (para 8 GiB, 6.144 MiB).
+3. Pared ≤ 1,5 × la de la configuración validada.
+
+Mide con el mes de mayor `rss_peak_mib`, no con el del ZIP más grande. Un
+backfill completo hecho con la configuración validada ya trae las líneas
+`sonda:` de todos los meses y sirve solo para descartar la inferior: si su pico
+supera el 75 % de la memoria inferior, esa configuración no cumple y no hay que
+repetir la sonda. Si no lo supera, no basta para adoptarla: la condición 3
+exige medir con menos vCPU, y el RSS también puede cambiar con menos hilos.
+Despliega la configuración inferior y corre la sonda con el mes de mayor
+`rss_peak_mib` antes de fijarla. Si no cumple, el stack se queda como está y el
+resultado se anota en "Resultados" (ITSC-220 es el ejemplo).
 
 ## Caracterización de header (§14.2)
 
@@ -193,6 +222,47 @@ Los llenó la card ITSC-213.
 - **Margen de timeout:** 577 s de pared contra los 600 s por defecto de
   Cloud Run Jobs dejaban 23 s. Era riesgo de timeout, no de memoria: ITSC-219
   fijó 3600 s por tarea en backfill (margen 6x).
+
+**Bajar a 2 vCPU y 8 GiB (ITSC-220): descartado**
+
+Con el mes de mayor RSS de los backfills completos. Se midió con 4 vCPU y
+16 GiB (no se desplegó 2/8: el pico ya lo descarta, suponiendo que el RSS no
+baje un 35 % con la mitad de vCPU; no se midió a 2/8).
+
+| Backfill | Imagen | Meses | Mes de mayor RSS | RSS pico (MiB) | Pared (s) | Mediana de RSS (MiB) |
+| --- | --- | --- | --- | --- | --- | --- |
+| [36283117940](https://github.com/byroncz/intrinsica/actions/runs/36283117940) (`l1-backfill-zzpft`) | anterior a 0.5.14 | 106 | 2026-02 | 9.194 | 537 | 2.568 |
+| [37096045973](https://github.com/byroncz/intrinsica/actions/runs/37096045973) (`l1-backfill-m89q8`, ITSC-294) | 0.5.14 | 106 (105 exitosas; 2026-09 falla por 404 esperado) | 2026-02 | 9.390 | 253,1 | n/d |
+
+Cinco mayores RSS de `l1-backfill-m89q8` (4 vCPU, 16 GiB):
+
+| Mes | RSS pico (MiB) | Pared (s) |
+| --- | --- | --- |
+| 2026-02 | 9.390 | 253,1 |
+| 2023-03 | 5.712 | 595,6 |
+| 2023-02 | 5.614 | 510,1 |
+| 2022-11 | 5.473 | 474,6 |
+| 2023-01 | 5.304 | 476,9 |
+
+- **2 vCPU y 8 GiB no cumple:** 9.390 MiB supera los 8.192 MiB (OOM) y el
+  umbral de 6.144 MiB. Ambos backfills coinciden en el mes y el orden de
+  magnitud (9.194 y 9.390 MiB), así que no es un valor suelto.
+- **4 vCPU y 16 GiB sigue cumpliendo:** 9.390 MiB es 57 % de 16 GiB, bajo el
+  umbral de 12.288 MiB. El stack se queda como está;
+  `infra/stacks/batch/l1/main.tf` no cambia.
+- **Intermedio 4 vCPU y 12 GiB no cumple la regla:** 9.390 MiB es 76,4 % de
+  12 GiB, sobre el 75 %. 13 GiB sí la cumpliría (9.390 / 13.312 = 70,5 %), pero
+  se descarta por costo: ahorra ≈ 3 GiB × 577 s × 0,0000025 USD ≈ 0,004 USD por
+  mes, que no justifica el cambio.
+- **El pico de RAM no sigue a la pared ni al tamaño del ZIP:** en
+  `l1-backfill-m89q8`, 2026-02 es el mes de mayor memoria con 253 s de pared,
+  frente a los 596 s de 2023-03 (mes del ZIP más grande). El pico real
+  (9.390 MiB) es 1,67 veces el que midió la sonda de ITSC-213 en 2023-03
+  (5.622 MiB). Cualquier cambio de memoria se valida contra 2026-02, no contra
+  2023-03.
+- **Costo por mes procesado** (us-east1, pared de 2023-03, 577 s): 4 vCPU y
+  16 GiB ≈ 0,08 USD; 2 vCPU y 8 GiB ≈ 0,04 USD. El ahorro de ~0,04 USD por
+  mes no justifica OOM en 2026-02.
 
 **Header**
 
