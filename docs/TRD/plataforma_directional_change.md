@@ -331,7 +331,7 @@ Se introduce un **lago de hallazgos de calidad de datos (Data Quality findings)*
 | L2 (eventos, 50 θ) | 21,14 GiB (medido) | Medido con el backfill completo de ITSC-284 (2026-10-03, `gcloud storage du`): 21,14 GiB para 109 meses y 4.051 M de ticks, unos 5,3 MiB por millón de ticks; el θ más pequeño pesa 2,68 GiB (12,7 %). La estimación original era ~73–103 GiB (3,5 a 5 veces más). Estimación original: 12,15 M de eventos y 421 MiB por mes en 2020-01 (14,05 M de ticks; ITSC-244), unos 30 MiB por millón de ticks. Extrapolado a 2,5–3,5 mil millones de ticks. La sonda de ITSC-281 corrió el mes más pesado (2023-03, 190.227.841 ticks, 446 MiB de RSS, 292 s con 2 vCPU) y no midió los bytes; el tamaño real de la partición en `dc-events` (50 θ, `events.parquet` + `carry_over.parquet`) es 735,47 MiB (`gcloud storage du -s`, 2026-09-30), unos 3,9 MiB por millón de ticks. Es ~8 veces menos que los 30 MiB de 2020-01, y la diferencia no está explicada; el backfill completo (ITSC-284) midió luego el total real y reemplazó la extrapolación de 2020-01 |
 | L3 (resúmenes por evento y θ) | ~del orden de L2 | Una fila por evento y θ, con más columnas que L2 pero sin ticks. Supuesto: se mide con la sonda de L3 |
 | L4 (indicadores) | ~pequeño frente a L2 | Una columna con clave (θ, evento) por indicador. Supuesto: crece con el catálogo de indicadores |
-| Medallion completo (4 capas) | ~0,1 TB | L1 38,4 GiB (medido) + L2 21,14 GiB (medido) + L3 del orden de L2 + L4. Reemplaza los 45–75 GB de v2.1, que suponían las capas 2–4 "muy livianas". Antes de ITSC-284 sumaba L2 ~73–103 GiB y daba ~0,2–0,25 TB; las notas de almacenamiento de abajo (§7.1 y el Always Free de Cloud Storage) conservan esa cifra hasta que se recalculen (ITSC-300) |
+| Medallion completo (4 capas) | ~0,1 TB | L1 38,4 GiB (medido) + L2 21,14 GiB (medido) + L3 del orden de L2 + L4. Reemplaza los 45–75 GB de v2.1, que suponían las capas 2–4 "muy livianas". Antes de ITSC-284 (estimación histórica) sumaba L2 ~73–103 GiB y daba ~0,2–0,25 TB; el costo de §7.3 y el Always Free de Cloud Storage ya usan el volumen medido (ITSC-300) |
 | Ventana mensual reciente | ~30–40 M filas / ~2,5–5 GB CSV | ~0,5–0,6 GB precio+ts en memoria |
  
 > **Nota — tramas con ticks por θ.** Materializar los ticks de cada evento (la definición de L3 hasta v2.1) equivale a copiar L1 una vez por θ, porque los eventos de un θ cubren el mes sin huecos ni solapes: 50 copias de 38,4 GiB (50 × 38,4 GiB ≈ 1,9 TiB) y hasta 50 veces más lectura en cada indicador que mire todos los θ, frente a una lectura de L1 con fan-out. Queda **fuera del diseño**, salvo para un puñado de θ de investigación interactiva, nunca los 50. Una pasada histórica con fan-out cuesta una lectura de 38 GiB y, de cómputo, minutos-core si solo corre el detector (2,8 M ticks/s por core con 50 θ, ITSC-241) o unas 14 horas-core con la unidad completa de L2 (~58 k ticks/s por core sobre ~3 000 M de ticks, ITSC-244; el resto es Python serial, ver el README de `l2_dc_events`). Porqué completo: [Decisión: L3 guarda resúmenes por evento](https://app.notion.com/p/3eb27957d23d81d69ccac074bef2f8b3).
@@ -354,15 +354,15 @@ La estructura de costos se mantiene, con un matiz: el cómputo de **L1 migra de 
 | Concepto | Conservador | Intensivo |
 |---|---|---|
 | Cómputo (Cloud Run Jobs L1–L2 + Spot/Batch L3–L4) | ≈ 0,50–1,00 USD | ≈ 3–13 USD |
-| Almacenamiento (GCS, medallion) | ≈ 4–5 USD | ≈ 4–5 USD |
+| Almacenamiento (GCS, medallion) | ≈ 2 USD | ≈ 2 USD |
 | Operaciones GCS (Clase A/B) | ≈ 0,20 USD | ≈ 4,00 USD |
 | Disco / Artifact Registry / otros | ≈ 0,40 USD | ≈ 1,85 USD |
 | Egress (intra-región) | ≈ 0,00 USD | ≈ 0,00 USD |
-| **TOTAL ESTIMADO** | **≈ 5–7 USD/mes** | **≈ 21–26 USD/mes** |
+| **TOTAL ESTIMADO** | **≈ 3–4 USD/mes** | **≈ 11–21 USD/mes** |
  
-> **Holgura presupuestal.** Incluso el escenario intensivo (~21–26 USD/mes) deja > 70 % de margen frente a los 100 USD/mes. El backfill inicial (pico único, ~5–15 USD) lo absorbe el crédito de prueba de 300 USD válido por 90 días.
+> **Holgura presupuestal.** Incluso el escenario intensivo (~11–21 USD/mes) deja > 75 % de margen frente a los 100 USD/mes. El backfill inicial (pico único, ~5–15 USD) lo absorbe el crédito de prueba de 300 USD válido por 90 días.
 
-> **Nota — almacenamiento con el volumen de v2.2.** La fila de almacenamiento se dimensionó sobre 45–75 GB (0,75–1,50 USD en el conservador, 1,50 USD en el intensivo). Con el medallion recalculado en §7.1 (~0,2–0,25 TB) sube a ≈ 4–5 USD/mes en Standard (≈ 0,02 USD/GB-mes) en ambos escenarios: el total conservador pasa de ≈ 2–4 a ≈ 5–7 USD/mes y el intensivo de ≈ 18–22 a ≈ 21–26 USD/mes. El objetivo de diseño < 5 USD/mes (RNF-01, principio rector, criterio 3 de §11.1) queda en el límite o algo por encima en el conservador; el tope de 100 USD/mes no se acerca.
+> **Nota — almacenamiento con el volumen de v2.2.** La fila de almacenamiento se dimensionó sobre 45–75 GB (0,75–1,50 USD en el conservador, 1,50 USD en el intensivo). Con el medallion medido en §7.1 (~0,1 TB) sube a ≈ 2 USD/mes en Standard (≈ 0,02 USD/GB-mes) en ambos escenarios. La estimación previa (histórica) partía de ~0,2–0,25 TB y daba ≈ 4–5 USD/mes. Los totales son la suma de las filas de la tabla: conservador ≈ 3–4 USD/mes (0,50–1,00 + 2 + 0,20 + 0,40) e intensivo ≈ 11–21 USD/mes (3–13 + 2 + 4 + 1,85); el intensivo anterior (≈ 21–26) no coincidía con la suma de sus propias filas. RNF-01, el principio rector y el criterio 3 de §11.1 (< 5 USD/mes) quedan **holgados** en el conservador, con 1–2 USD de margen; el intensivo supera ese objetivo por diseño (más cómputo y operaciones), pero no el tope de 100 USD/mes. El margen del conservador depende de L3 y L4, que aún no se miden: aunque L3 + L4 duplicaran el volumen (~0,2 TB, ≈ 4 USD/mes), el total conservador sería ≈ 5–6 USD/mes y volvería al límite.
  
 > **Nota — modelo de free tier.** No existe una única bolsa *always-free* compartida entre servicios: **cada servicio tiene su propio cupo perpetuo** (Cloud Run, Compute Engine, GCS, BigQuery, …), contabilizado **por billing account** (compartido entre projects del mismo billing account, **no** multiplicado por project). La **única bolsa compartida** entre servicios es el **crédito de prueba de 300 USD** (90 días). **Cloud Batch no cobra por el servicio de orquestación**: solo se pagan los recursos de Compute Engine que provisiona.
  
@@ -468,7 +468,7 @@ dc-platform/                      # raíz del monorepo
 | Orquestación | Cloud Workflows + Scheduler | ≈ 0 USD |
 | Motor de datos | DuckDB + Polars + Arrow (embebidos) | Solo cómputo |
  
-> **Principio rector.** El único costo real del sistema es el pipeline de cómputo (Cloud Run Jobs / Cloud Batch + Cloud Storage), con objetivo < 5 USD/mes (≈ 5–7 USD/mes con el almacenamiento de v2.2, §7.3). Todo el plano de operaciones se mantiene en ~0 USD/mes mediante free tiers nativos.
+> **Principio rector.** El único costo real del sistema es el pipeline de cómputo (Cloud Run Jobs / Cloud Batch + Cloud Storage), con objetivo < 5 USD/mes (≈ 3–4 USD/mes con el almacenamiento medido, §7.3). Todo el plano de operaciones se mantiene en ~0 USD/mes mediante free tiers nativos.
  
 ---
  
@@ -486,7 +486,7 @@ dc-platform/                      # raíz del monorepo
   | Billing Account | (parte de facturación de la Account) | Frontera de facturación; agrega varios projects |
   En GCP el **project** es la frontera de aislamiento e IAM (equivalente a una *Account* de AWS), mientras que el **billing account** es la frontera de facturación que puede agregar varios projects.
 - **Cuota de vCPU por defecto:** 8 vCPU/región en proyectos nuevos. Relevante para Cloud Batch en L3–L4 (no para Cloud Run Jobs de L1 ni L2); requiere solicitar aumento (autoaprobado en incrementos modestos).
-- **Always Free de Cloud Storage:** solo 5 GB-mes Standard en us-east1/us-west1/us-central1. El medallion (~0,2–0,25 TB, §7.1) lo excede; el costo aun así es de ~4–5 USD/mes en Standard.
+- **Always Free de Cloud Storage:** solo 5 GB-mes Standard en us-east1/us-west1/us-central1. El medallion (~0,1 TB, §7.1) lo excede; el costo aun así es de ≈ 2 USD/mes en Standard.
 - **Free trial:** 300 USD por 90 días; prohíbe minería de cripto (el análisis ML/DC sobre datos de cripto SÍ está permitido), GPUs y VMs Windows durante el trial.
 - **Región única:** us-east1 para todo (cómputo, buckets, Artifact Registry) → egress intra-región nulo.
 - **Límite de paralelismo de Batch (referencia L3–L4):** máx. 1.000 tareas en paralelo por job; hasta ~100.000 tareas por task group.
