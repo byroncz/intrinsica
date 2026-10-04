@@ -576,8 +576,31 @@ inferior, porque falta el arranque de cada intento (~25 s, como en `gkdlr`). Con
 - **Contra [§10.3 del TRD-L2](../TRD/l2.md#103-costo-de-l2)** (techo de 80.268
   vCPU-s y GiB-s): 25 % del techo. Los meses son mucho más livianos que 2023-03,
   el que fijó el techo.
-- **Billing:** pendiente. Tarda hasta 24 h en reflejar el consumo; el humano lo
-  anota en un comentario de la card cuando lo lea.
+- **Billing**, leído el 2026-10-04 en *Facturación → Informes* (proyecto
+  `intrinsica-dc`, servicio Cloud Run, 2026-10-02 a 2026-10-03, por SKU). La
+  cuenta de facturación está en COP: la columna "List cost" viene en pesos
+  colombianos, no en USD (90.044 vCPU-s × 0,000018 USD = 1,62 USD ≈ 5.412 COP,
+  consistente).
+
+  | SKU | Uso | Costo de lista | Otros ahorros (cupo gratis) | Subtotal |
+  | --- | --- | --- | --- | --- |
+  | Jobs CPU in us-east1 | 90.044,18 vCPU-s | 5.412 COP (≈ 1,62 USD) | −5.412 COP | 0 |
+  | Jobs Memory in us-east1 | 261.358,85 GiB-s | 1.745 COP (≈ 0,52 USD) | −1.745 COP | 0 |
+  | **Total Cloud Run** | | **7.157 COP (≈ 2,14 USD)** | **−7.157 COP** | **0,00** |
+
+  Neto facturado: 0. Todo el consumo cayó dentro del cupo gratis mensual
+  (180.000 vCPU-s y 360.000 GiB-s): 50 % de los vCPU-s y 73 % de los GiB-s del
+  cupo de octubre.
+
+  **Alcance de la ventana:** Billing no separa por job, así que esta cifra no es
+  el costo del backfill. Además del backfill de L2 (`gkdlr` ≈ 19.600 vCPU-s y
+  19.600 GiB-s, más `vszg7` y `h42bm`), los dos días incluyen el reproceso
+  completo de L1 por ITSC-294 (`l1-backfill-m89q8`, 105 tareas a 4 vCPU /
+  16 GiB, que explica la mayor parte de los GiB-s), las sondas de L2 del 2 de
+  octubre a 2 vCPU, la corrida accidental de 42 meses de ITSC-292 y el
+  seam-check en `ops-script` (≈ 3.100 vCPU-s). El costo de lista atribuible solo
+  al backfill de L2 es el de arriba: ≈ 0,40 USD (0,39 solo con `gkdlr`), 0,00
+  con cupo.
 - **Costo fijo por mes.** Los meses de 2017 tardan 13 a 23 s con casi cero
   cómputo: el costo fijo ronda 20 s por mes, ~44 % de la pared del backfill.
   Está anotado en ITSC-293; no cambia el veredicto de costo.
