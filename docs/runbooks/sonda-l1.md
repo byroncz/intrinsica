@@ -21,9 +21,11 @@ cómo obtenerlas.
 
 ## Mes más pesado
 
-El mes más pesado es el ZIP mensual más grande de
-`data/spot/monthly/aggTrades/BTCUSDT/` en `data.binance.vision`. El tamaño del
-ZIP es el proxy del número de filas.
+Sin un backfill completo previo, el mes más pesado es el ZIP mensual más grande
+de `data/spot/monthly/aggTrades/BTCUSDT/` en `data.binance.vision`. El tamaño
+del ZIP es el proxy del número de filas. Si ya existe un backfill completo, el
+mes más pesado es el de mayor `rss_peak_mib` de sus líneas `sonda:` (hoy
+2026-02), como explica el párrafo siguiente a la tabla.
 
 Cómo determinarlo, desde una máquina con acceso a `data.binance.vision`:
 
@@ -60,7 +62,7 @@ Ejecuta *Actions → Run job → Run workflow* con estos inputs exactos:
 | Input | Valor |
 | --- | --- |
 | `job` | `l1-backfill` |
-| `from` | `2023-03` |
+| `from` | `2026-02` (mes de mayor `rss_peak_mib`; sin backfill previo, el del ZIP más grande, `2023-03`) |
 | `to` | (vacío) |
 
 Para una sola unidad basta con `from`: `to` por defecto es igual a `from`.
