@@ -118,8 +118,8 @@ viz hereda y no contradice:
 |ID       |Nombre                         |Descripción                                                                                                                                  |Prio.|
 |---------|--------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------|-----|
 |RF-VZ-01 |Tile de precio M4               |Por día y nivel de zoom, los cuatro puntos M4 (primero, mínimo, máximo, último) de cada columna, independientes de θ (§7.3).                     |M    |
-|RF-VZ-02 |Tile de volumen                 |Por día y nivel, la suma de `quantity` de cada columna (§7.4).                                                                                   |M    |
-|RF-VZ-03 |Tile de dirección por θ         |Por día, nivel y θ, un byte por columna con cuatro estados (confirmación alza, overshoot alza, confirmación baja, overshoot baja) y 0 sin evento (§7.5).|M    |
+|RF-VZ-02 |Tile de volumen                 |Por día y nivel, la suma de `quantity` de cada columna (§7.3).                                                                                   |M    |
+|RF-VZ-03 |Tile de dirección por θ         |Por día, nivel y θ, un byte por columna con cuatro estados (confirmación alza, overshoot alza, confirmación baja, overshoot baja) y 0 sin evento (§7.4, §7.5).|M    |
 |RF-VZ-04 |Índice y marca de commit        |`index.json` por día, escrito al final: su presencia significa que el día está completo (§7.2, §7.8).                                            |M    |
 |RF-VZ-05 |Puntero al último día           |`tiles/latest.json` apunta al último día con tiles completos (§7.7).                                                                             |M    |
 |RF-VZ-06 |Cola provisional explícita      |Un día cuyo último evento aún no se cierra se escribe igual, con la cola marcada como provisional, y se corrige cuando L2 cierra el evento (§7.6).|M    |
@@ -240,7 +240,7 @@ viz hereda y no contradice:
 |**Decisión**|El ancho `w` de un nivel es el **número de columnas en que se divide el día UTC completo**. Los niveles son `w ∈ {128, 256, 512, 1024, 2048, 4096}`: potencias de 2, de la columna más gruesa (675 s) a la más fina (21,09 s). Detalle y presupuesto en §7.3.|
 |**Por qué potencias de 2**|Dos razones. (1) Todo `w ≤ 8192` divide el día (86 400 000 000 µs) en columnas de duración **entera** en µs, así que la columna de un tick se calcula con enteros, sin redondeo. (2) M4 es **componible**: el primero de una columna gruesa es el primero de su primera columna fina, el último es el último de la segunda, y el mínimo y el máximo son el mínimo de mínimos y el máximo de máximos. Basta recorrer los ticks una vez, a `w = 4096`, y derivar los demás niveles de ese, sin releer ni guardar ticks (§8.1).|
 |**Por qué 4 096 como techo**|El ancho útil del gráfico en un monitor de escritorio es del orden de 1 500 px: `w = 2048` cubre el día completo con una columna por píxel o menos, y `w = 4096` deja ~2,7 veces de zoom antes de que una columna pase de un píxel. Los niveles de 128 a 1 024 sirven al primer trazo (4,7 KB) y a pantallas angostas. El techo lo fija el almacenamiento: cada duplicación del nivel más fino suma ~0,70 MB por día y duplica el total (tabla de §10.1).|
-|**Consecuencia asumida**|La resolución máxima es una columna de 21,09 s. Un evento DC de θ muy pequeño que dure menos que eso no se distingue en pantalla: la vista de un día sirve para juzgar el detector y el pipeline, no para auditar un tick. Si esa resolución no alcanza, la salida es un nivel más fino (con su costo) o un tile por rango horario; ambas se evalúan antes de agregar paneles (§14).|
+|**Consecuencia asumida**|La resolución máxima es una columna de 21,09 s. Un evento DC de θ muy pequeño que dure menos que eso no se distingue en pantalla: la vista de un día sirve para juzgar el detector y el pipeline, no para auditar un tick. Si esa resolución no alcanza, la salida es un nivel más fino (con su costo) o un tile por rango horario; ambas se evalúan antes de agregar paneles (§14 ítem 8).|
 
 ### 6.9 ADR-VZ-09 — Estado de una columna: el del último tick de la cubeta
 
@@ -287,7 +287,7 @@ tiles/provider=<p>/market=<m>/asset=<a>/day=YYYY-MM-DD/
 tiles/latest.json                  # último día con index.json
 ```
 
-Un día completo son **313 objetos** (6 + 6 + 300 + 1) y **≈ 0,70 MB**. `<theta>` usa el mismo texto de ancho fijo que la partición de L2 (`dir-2048-0.00010000.u8`); los θ son los del catálogo que L2 tenía en ese mes (§7.5).
+Un día completo son **313 objetos** (6 + 6 + 300 + 1) y **≈ 0,70 MB**. `<theta>` usa el mismo texto de ancho fijo que la partición de L2 (`dir-2048-0.00010000.u8`); los θ son los del catálogo que L2 tenía en ese mes ([TRD-L2 §7.3](l2.md#73-el-catálogo-de-θ)).
 
 Todos los binarios se escriben con `Content-Type: application/octet-stream` y `Cache-Control: private, max-age=31536000, immutable`; `index.json` y `latest.json`, con `application/json` y `Cache-Control: no-cache`. El tablero pide cada tile con `?h=<primeros 12 hex del input_hash>` tomado del índice: GCS ignora el parámetro y un día regenerado cambia de URL, así que la caché del navegador nunca sirve un tile viejo (los tiles que vuelve a abrir el mismo usuario cuestan 0 bytes).
 
@@ -648,13 +648,13 @@ No hay card de logging: es esta sección y el criterio 8 de §13 ("emite hallazg
 |------|------|-------|----------|
 |RVZ-01|Un lector ve un día a medias (tiles de dos corridas, o sin todos sus archivos).|Alto|`index.json` al final como marca de commit; se borra antes de rehacer; tiles inmutables con `?h=` del hash (§7.2, ADR-VZ-10).|
 |RVZ-02|La cola provisional se toma por definitiva y el humano juzga mal el detector.|Alto|`provisional_from_s` en el índice, marcador visible con texto en la vista (principios 2 y 6) y regeneración cuando L2 cierra el evento, aunque tarde varios meses (§7.6).|
-|RVZ-03|Una frontera de fase dentro de una columna se atribuye entera al último tick, y la resolución de 21,09 s no distingue eventos más cortos de θ pequeños.|Medio|Declarado como consecuencia de ADR-VZ-08 y ADR-VZ-09. Palanca: un nivel más fino o tiles por rango horario, evaluados con su costo (§10.1, §14).|
+|RVZ-03|Una frontera de fase dentro de una columna se atribuye entera al último tick, y la resolución de 21,09 s no distingue eventos más cortos de θ pequeños.|Medio|Declarado como consecuencia de ADR-VZ-08 y ADR-VZ-09. Palanca: un nivel más fino o tiles por rango horario, evaluados con su costo (§10.1, §14 ítem 8).|
 |RVZ-04|El backfill rompe el presupuesto `intrinsica-mensual` por las operaciones Clase A y el cómputo.|Medio|Repartirlo en meses calendario o acotar el rango; el humano lo lanza (§10.3, §14 ítem 2). Los tiles se escriben sin temporal más renombre.|
 |RVZ-05|La exportación no abre desde disco porque `fetch` sobre `file://` está bloqueado.|Alto|Tiles incrustados en un `<script>` y un cargador con dos implementaciones (§7.9); lo verifica el criterio 3 de la Épica.|
 |RVZ-06|`storage.cloud.google.com` no sirve el HTML o sus tiles como el diseño supone (tipo de contenido, descarga en vez de render).|Alto|El criterio 1 de la Épica lo verifica en la hija 4 antes de construir sobre él; si falla, se abre la opción B (§6.5) con una card.|
 |RVZ-07|Los tiles quedan desfasados de L2 tras relanzar L2 o resolverse un evento pendiente.|Medio|`input_hash` sobre los archivos de entrada (incluye la cadena de carry-over y el `events.parquet` de `M+k` en los días con cola); revisión de los días provisionales de todos los meses con cola (§7.6, §7.8).|
 |RVZ-08|`float32` pierde precisión.|Bajo|Resolución de 0,0078 USDT hasta 131 072 USDT y 7,8 ms al final del día (§7.3), sobre columnas de 21 s; el tooltip muestra el valor de la cubeta, no un tick exacto.|
-|RVZ-09|Agregar un θ en L2 regenera todos los días del mes.|Bajo|Conocido; el costo es el de repetir el backfill de ese rango (§7.8, §10.3). Si molesta, se compara por archivo antes de reescribir (§14).|
+|RVZ-09|Agregar un θ en L2 regenera todos los días del mes.|Bajo|Conocido; el costo es el de repetir el backfill de ese rango (§7.8, §10.3). Si molesta, se compara por archivo antes de reescribir (§14 ítem 9).|
 |RVZ-10|Los paneles se acumulan hasta que nadie mira ninguno.|Medio|Evaluación ergonómica obligatoria en todo PR que cambie la vista; `pr-review` rechaza si falta o si una métrica empeora sin justificación (§6.7).|
 |RVZ-11|Aparece un usuario sin acceso IAM al proyecto.|Bajo|El zip exportable cubre al asesor; la opción B se abre como card (§6.5).|
 
@@ -688,6 +688,8 @@ No hay card de logging: es esta sección y el criterio 8 de §13 ("emite hallazg
 |5 |**Servicio del HTML desde `storage.cloud.google.com`** con sesión de Google (RVZ-06).|**Abierto**, hasta el primer despliegue.|Hija 4.|
 |6 |**Multi-activo**: `latest.json` está en la raíz de `tiles/` (§7.7).|Diferido hasta que haya un segundo activo.|Futuro.|
 |7 |**Hueco de una columna vacía en uPlot** (§7.3): que la copia de `p` con `null` en Y y `t` finito corte la línea y deje estable el cursor compartido.|**Abierto.** Se asume por la documentación de uPlot; sin verificar.|Hija 4, antes de congelar `tiles_version` 1.0.0.|
+|8 |**Resolución más fina que 21,09 s** (ADR-VZ-08, RVZ-03): un nivel más fino (cada duplicación suma ~0,70 MB por día, §10.1) o un tile por rango horario.|Diferido. Solo se abre si la vista de un día no alcanza para juzgar un θ pequeño.|El humano, con la evidencia de uso de la hija 7.|
+|9 |**Comparar por archivo antes de reescribir** tras agregar un θ en L2 (RVZ-09): evita regenerar precio y volumen, que no cambian (§7.8).|Diferido. Hoy se acepta repetir el backfill del rango (~5 USD de operaciones, §10.3).|Futuro, si el costo molesta.|
 
 -----
 
