@@ -107,6 +107,8 @@ def write_day(
     los bytes de los arreglos y no depende de `generated_at`.
     """
     fs, base = resolve_fs(root)
+    # Antes de escribir nada: un día de otra serie no se deja a medias en la raíz.
+    _read_latest(fs, base, {"provider": provider, "market": market, "asset": asset})
     directory = day_dir(root, provider, market, asset, day)
     fs.create_dir(directory)
     index_path = f"{directory}/{INDEX_FILE}"
@@ -184,18 +186,35 @@ def write_day(
     return index
 
 
+def _read_latest(fs: pafs.FileSystem, base: str, series: dict) -> dict | None:
+    """El `latest.json` de la raíz, o `None` si no existe.
+
+    La raíz es mono-activo (TRD-viz §7.7): si apunta a otra serie, lanza
+    `ValueError` en vez de pisarla o dejarla retroceder.
+    """
+    path = f"{base}/{LATEST_FILE}"
+    if not _exists(fs, path):
+        return None
+    with fs.open_input_stream(path) as src:
+        current = json.loads(src.read())
+    if any(current.get(k) != v for k, v in series.items()):
+        other = {k: current.get(k) for k in series}
+        raise ValueError(
+            f"{LATEST_FILE} es de otra serie {other}: la raíz de tiles es "
+            f"mono-activo y no admite {series}"
+        )
+    return current
+
+
 def _advance_latest(fs: pafs.FileSystem, base: str, index: dict) -> None:
     """Escribe `latest.json` si el día es posterior al que apunta (o no existe)."""
-    path = f"{base}/{LATEST_FILE}"
-    if _exists(fs, path):
-        with fs.open_input_stream(path) as src:
-            current = json.loads(src.read())
-        same_series = all(
-            current.get(k) == index[k] for k in ("provider", "market", "asset")
-        )
-        if same_series and current["day"] > index["day"]:
-            return
-    _put_json(fs, path, {name: index[name] for name in LATEST_FIELDS})
+    series = {k: index[k] for k in ("provider", "market", "asset")}
+    current = _read_latest(fs, base, series)
+    if current is not None and current["day"] > index["day"]:
+        return
+    _put_json(
+        fs, f"{base}/{LATEST_FILE}", {name: index[name] for name in LATEST_FIELDS}
+    )
 
 
 def read_index(

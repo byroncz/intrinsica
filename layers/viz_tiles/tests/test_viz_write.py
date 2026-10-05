@@ -158,6 +158,25 @@ def test_latest_points_to_the_newest_day_and_never_goes_back(tmp_path):
     assert json.loads(latest.read_text())["day"] == "2026-09-01"
 
 
+def test_latest_of_another_series_is_not_overwritten(tmp_path):
+    """La raíz es mono-activo: otra serie falla sin escribir nada ni mover `latest.json`."""
+    write(tmp_path)
+    before = (tmp_path / "latest.json").read_text()
+    reduction = reduce_day([ticks_batch(DAY, ROWS)], DAY, SCALE)
+    with pytest.raises(ValueError, match="mono-activo"):
+        write_day(
+            tmp_path,
+            **{**KEY, "asset": "ETHUSDT"},
+            day=date(2026, 9, 2),
+            reduction=reduction,
+            thetas=[],
+            input_hash="ab" * 32,
+            image_version="0.1.0+test",
+        )
+    assert (tmp_path / "latest.json").read_text() == before
+    assert not (tmp_path / "provider=binance/market=spot/asset=ETHUSDT").exists()
+
+
 def test_index_is_replaced_not_appended_on_rewrite(tmp_path):
     write(tmp_path)
     write(tmp_path, input_hash="cd" * 32)
