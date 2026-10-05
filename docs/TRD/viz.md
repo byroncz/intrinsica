@@ -584,7 +584,7 @@ Todo cae en el nivel gratuito permanente de Google Cloud, distinto del crédito 
 
 |Recurso|Gratis cada mes|Estimación viz|Base|
 |---|---|---|---|
-|Almacenamiento GCS (región US)|5 GB|2 a 3 GB para 9 años|~0,7 MB por día: precio M4 en 6 niveles, 50 tiles de dirección de 1 byte por columna, volumen por cubeta. **Aritmética de §7.3: 2,31 GB.**|
+|Almacenamiento GCS (región US)|5 GB|2 a 3 GB para 9 años|~0,7 MB por día: precio M4 en 6 niveles, dirección de los 50 θ empaquetada en un archivo por nivel (1 byte por columna y θ), volumen por cubeta. **Aritmética de §7.3: 2,31 GB.**|
 |Lecturas GCS (clase B)|50 000|< 500|Un día abierto descarga unos 11 objetos (índices y tres niveles de tres tiles)|
 |Egreso de red|100 GB|< 1 GB|Un usuario, pocos días por semana|
 |Job `viz-tiles`|180 000 vCPU-s y 360 000 GiB-s (compartido con L1 y L2)|~60 vCPU-s por día nuevo|Comparable al costo fijo medido en L2 (~20 s por mes)|
