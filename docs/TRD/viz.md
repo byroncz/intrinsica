@@ -300,30 +300,36 @@ Todos los binarios se escriben con `Content-Type: application/octet-stream` y `C
   "tiles_version": "1.0.0",
   "provider": "binance", "market": "spot", "asset": "BTCUSDT",
   "day": "2026-08-31",
-  "day_start_us": 1788134400000000,
+  "t0": 1788134400000000,
   "price_scale": 100,
-  "input_hash": "9f2c…(sha256 en hex)",
-  "generated_at": "2026-10-05T17:00:00Z",
-  "image_version": "0.1.0+3a9b2c1",
   "ticks": 1234567,
   "levels": [128, 256, 512, 1024, 2048, 4096],
+  "price": {"128": "price-128.i32", "…": "…", "4096": "price-4096.i32"},
+  "volume": {"128": "volume-128.f32", "…": "…", "4096": "volume-4096.f32"},
+  "dir": {"128": "dir-128.u8", "…": "…", "4096": "dir-4096.u8"},
   "thetas": [
     {"theta": "0.00010000", "events": 11873, "provisional_from_s": null},
     {"theta": "0.05000000", "events": 4, "provisional_from_s": 41234.5}
   ],
-  "missing_thetas": []
+  "missing_thetas": [],
+  "input_hash": "9f2c…(sha256 en hex)",
+  "content_hash": "b71e…(sha256 en hex)",
+  "generated_at": "2026-10-05T17:00:00Z",
+  "image_version": "0.1.0+3a9b2c1"
 }
 ```
 
 |Campo|Significado|
 |---|---|
 |`tiles_version`|semver del **formato** de los tiles (no la de la imagen). Cambia con cualquier modificación de §7.3 a §7.5; el tablero rechaza (modo degradado) una versión mayor que no conoce.|
-|`day_start_us`|Inicio del día UTC en µs desde la época: el origen del tiempo relativo de los tiles.|
+|`t0`|Inicio del día UTC en µs desde la época: el origen del tiempo relativo de los tiles.|
 |`price_scale`|Unidades de precio del tile por unidad de la cotización: el precio en USDT es `p / price_scale`. **Fijo por activo**, igual al tick de la cotización: 100 para BTCUSDT (tick de 0,01). Nunca se elige por día (§7.3).|
 |`input_hash`|Huella de los archivos de entrada (§7.8).|
+|`content_hash`|SHA-256 de los arreglos: por cada archivo en orden de nombre, el nombre, un byte nulo y sus bytes. No depende de `generated_at`: dos corridas con las mismas entradas lo repiten.|
 |`generated_at`|Momento de generación (UTC). Alimenta "última actualización" de la franja de estado (principio 3). Es lo único del índice que cambia entre dos corridas idénticas.|
 |`ticks`|Ticks del día en L1.|
 |`levels`|Los `w` presentes. El tablero no asume la lista: lee esta.|
+|`price`, `volume`, `dir`|Nombre del archivo de cada tipo por nivel: `{"128": "price-128.i32", …}`.|
 |`thetas`|Los θ con bloque en `dir-<w>.u8`, en el orden de los bloques: el θ en la posición `k` ocupa los bytes `k·w` a `(k+1)·w − 1` (§7.4). `theta` es el mismo texto de ancho fijo que la partición de L2 (`"0." + 8 decimales`), ordenado de menor a mayor.|
 |`thetas[].events`|Filas de eventos que tocan el día, incluida la cola pendiente si la hay.|
 |`thetas[].provisional_from_s`|Segundos desde el inicio del día a partir de los cuales el estado de ese θ es provisional hasta el final del día; `null` si todo el día es definitivo (§7.6).|
@@ -331,13 +337,13 @@ Todos los binarios se escriben con `Content-Type: application/octet-stream` y `C
 
 ### 7.3 Tiles de precio y volumen; niveles de zoom y presupuesto
 
-**Columna de un tick.** Con `rel_us = transact_time − day_start_us` y `col = floor(rel_us × w / 86 400 000 000)`, en enteros. Un tick cae en una sola columna de cada nivel.
+**Columna de un tick.** Con `rel_us = transact_time − t0` y `col = floor(rel_us × w / 86 400 000 000)`, en enteros. Un tick cae en una sola columna de cada nivel.
 
 **`price-<w>.i32`**: binario sin cabecera, enteros little-endian, **dos bloques consecutivos** de `4w` valores:
 
 |Bloque|Offset (bytes)|Contenido|
 |---|---|---|
-|Tiempo|`0`|`t[i]`: milisegundos desde `day_start_us`, `uint32`: `floor(rel_us / 1000)`.|
+|Tiempo|`0`|`t[i]`: milisegundos desde `t0`, `uint32`: `floor(rel_us / 1000)`.|
 |Precio|`16w`|`p[i]`: precio en unidades de `1 / price_scale` USDT, `int32`: `price_int / (10⁸ / price_scale)` redondeado al entero más cercano, mitad al par (exacto si el precio cae en el tick).|
 
 Los puntos `i = 4·col + k` (`k = 0..3`) son los cuatro puntos M4 de la columna `col`, **en orden de tiempo**: el primer tick, el mínimo, el máximo y el último, con el mínimo y el máximo ordenados por su posición en la serie. Si dos puntos coinciden (p. ej. el primero es el mínimo), se repiten: el paso es fijo, 4 puntos por columna. Ante empates de precio dentro de la columna se toma el tick con menor `agg_trade_id`. Una columna **sin ticks** lleva en sus cuatro `t` el **inicio de la columna** (`floor(col × 86 400 000 / w)` ms, en enteros) y el sentinela **`INT32_MIN`** (−2 147 483 648) solo en sus cuatro `p`: así `t` es no decreciente en todo el tile (el `floor` conserva el orden: ningún tick de la columna es anterior a su inicio), que es lo que exige un eje X de uPlot y su búsqueda binaria del cursor.
