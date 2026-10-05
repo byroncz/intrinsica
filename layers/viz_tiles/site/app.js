@@ -150,15 +150,20 @@
 
   var cache = {}; // w -> nivel decodificado
 
+  // cache[w] === false marca un nivel que no se pudo decodificar: se salta como uno ausente.
   function hasLevel(w) {
-    return cache[w] !== undefined || files[index.price[w]] !== undefined;
+    if (cache[w] !== undefined) return cache[w] !== false;
+    return files[index.price[w]] !== undefined;
   }
 
   function loadLevel(w) {
-    if (cache[w]) return cache[w];
+    if (cache[w] !== undefined) return cache[w] || null;
     var t0 = performance.now();
     var price = decodePrice(index.price[w], w);
-    if (!price) return null;
+    if (!price) {
+      cache[w] = false;
+      return null;
+    }
     var vol = decodeVolume(index.volume[w], w);
     var dir = thetas.length ? decodeDir(index.dir[w], w) : null;
     var colStart = new Float64Array(w);
@@ -482,9 +487,12 @@
     var span = x.max - x.min;
     if (!(span > 0)) return;
     var w = pickLevel(span);
-    if (w === null || w === cur.w) return;
-    var level = loadLevel(w);
-    if (!level) return;
+    var level = null;
+    while (w !== null && w !== cur.w && level === null) {
+      level = loadLevel(w);
+      if (level === null) w = pickLevel(span); // el nivel quedó inutilizable: el siguiente
+    }
+    if (level === null) return;
     // Al hacer zoom: el nivel más fino que cubre el rango visible, ya en memoria.
     cur = level;
     price.setData(level.priceData, false);
@@ -647,7 +655,11 @@
   /* ---------- Arranque ---------- */
 
   var first = pickLevel(DAY_S);
-  cur = first === null ? null : loadLevel(first);
+  cur = null;
+  while (first !== null && cur === null) {
+    cur = loadLevel(first);
+    if (cur === null) first = pickLevel(DAY_S); // el nivel quedó inutilizable: el siguiente
+  }
   if (!cur) {
     setReason("tiles", "no hay ningún nivel de precio utilizable");
     renderStatus();

@@ -1,8 +1,9 @@
 // Corre la página de un día en Node con un DOM de mentira y el uPlot real, y
 // escribe en stdout un resumen JSON de lo que la vista hizo. No dibuja nada: sirve
 // para atrapar errores de la lógica (decodificación, niveles, θ, zoom, hooks) sin
-// un navegador. Uso: node harness.cjs <index.html> [--drop <tile>] [--pick-last]
+// un navegador. Uso: node harness.cjs <index.html> [--drop <tile>] [--corrupt <tile>] [--pick-last]
 //   --drop <tile>: quita ese arreglo de window.VIZ_DATA antes de arrancar la vista.
+//   --corrupt <tile>: lo deja con 6 bytes (8 caracteres de base64): presente, de tamaño inesperado.
 //   --pick-last: elige la última opción del selector de θ (un θ sin datos).
 "use strict";
 const fs = require("fs");
@@ -158,6 +159,10 @@ vm.runInContext(
 );
 run(dataJs, "viz-data");
 if (flag("--drop") >= 0) vm.runInContext("delete window.VIZ_DATA.files[" + JSON.stringify(args[flag("--drop") + 1]) + "]", sandbox);
+if (flag("--corrupt") >= 0) {
+  const name = JSON.stringify(args[flag("--corrupt") + 1]);
+  vm.runInContext("window.VIZ_DATA.files[" + name + "] = window.VIZ_DATA.files[" + name + "].slice(0, 8)", sandbox);
+}
 const started = Date.now();
 run(appJs, "app");
 

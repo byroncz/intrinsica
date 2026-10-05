@@ -177,6 +177,16 @@ def test_a_missing_tile_degrades_the_day_and_falls_back(day_dir):
     assert start["level"].startswith("nivel 4096")  # el nivel siguiente que sí hay
 
 
+def test_a_corrupt_price_tile_falls_back_like_a_missing_one(day_dir):
+    result = view(day_dir, "--corrupt", "price-2048.i32")
+    assert result["errors"] == []
+    start = step(result, "inicio")
+    assert start["mode"] == "⚠ DEGRADADO"
+    assert "price-2048.i32: tamaño inesperado" in start["reasons"]
+    assert start["level"].startswith("nivel 4096")  # el día se dibuja con el siguiente
+    assert start["priceLen"] == 4 * 4096
+
+
 def test_a_missing_direction_tile_is_said_not_filled_with_zeros(day_dir):
     result = view(day_dir, "--drop", "dir-2048.u8")
     assert result["errors"] == []
