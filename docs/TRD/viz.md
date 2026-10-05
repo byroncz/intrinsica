@@ -398,7 +398,7 @@ Los tonos son una indicación; el color y la forma los fija la vista bajo el pri
 
 El estado de una columna es el de su **último tick** (ADR-VZ-09). El estado de un tick con id `x` sale de los eventos del θ:
 
-1. Si existe un evento `e` con `e.reference_agg_trade_id < x ≤ e.extreme_agg_trade_id`, el tick está en `e`. Es **confirmación** si `x ≤ e.confirm_agg_trade_id` y **overshoot** si `x > e.confirm_agg_trade_id`. Se usa el último id del grupo de empate, así que todo tick del instante de confirmación es de la fase DC ([ADR-L2-03](l2.md)). El valor es 1 o 2 si `e.direction = 1` y 3 o 4 si `e.direction = −1`.
+1. Si existe un evento `e` con `e.reference_agg_trade_id < x ≤ e.extreme_agg_trade_id`, el tick está en `e`. Es **confirmación** si `x ≤ e.confirm_agg_trade_id` y **overshoot** si `x > e.confirm_agg_trade_id`. Se usa el último id del grupo de empate, así que todo tick del instante de confirmación es de la fase DC ([ADR-L2-03](l2.md#63-adr-l2-03--regla-conservadora-de-empates-y-validación-un-dc-tiene-al-menos-un-tick-porta-kernelpy-de-la-v0)). El valor es 1 o 2 si `e.direction = 1` y 3 o 4 si `e.direction = −1`.
 2. Si no existe tal evento y el tick cae en la cola del mes (§7.6), el estado lo da la cola.
 3. En cualquier otro caso, 0.
 
@@ -406,13 +406,13 @@ Los eventos de un θ se encadenan sin huecos —la referencia de uno es el extre
 
 ### 7.6 De dónde salen los eventos de un día
 
-Un evento DC se escribe en la partición del mes que confirma el evento **siguiente** ([ADR-L2-06](l2.md)), así que los eventos que tocan un día `D` del mes `M` están en tres lugares:
+Un evento DC se escribe en la partición del mes que confirma el evento **siguiente** ([ADR-L2-06](l2.md#66-adr-l2-06--partición-provider--market--asset--theta--year--month-la-confirmación-del-evento-siguiente-decide-el-mes)), así que los eventos que tocan un día `D` del mes `M` están en tres lugares:
 
 |Fuente|Qué aporta para `D`|
 |---|---|
 |`events.parquet` de `M`|Los eventos **cerrados dentro de `M`**. Incluye el que cruza la medianoche de `D`: su extremo se resolvió en `M`.|
 |`carry_over.parquet` de `M`|El evento **pendiente** al cierre de `M` (`has_pending_event`): su referencia y su confirmación son conocidas, su extremo no. Da la **cola provisional**.|
-|`carry_over.parquet` de `M+1`, `M+2`, …, **solo si hay pendiente al cierre de `M`**|Dicen si el evento sigue pendiente (mismo `pending_confirm_agg_trade_id`) o ya se cerró. Un evento puede quedar pendiente varios meses (θ grande, [ADR-L2-06](l2.md)): se leen en cadena, un mes tras otro, hasta el primero cuyo carry-over ya no trae ese pendiente o hasta el último mes existente.|
+|`carry_over.parquet` de `M+1`, `M+2`, …, **solo si hay pendiente al cierre de `M`**|Dicen si el evento sigue pendiente (mismo `pending_confirm_agg_trade_id`) o ya se cerró. Un evento puede quedar pendiente varios meses (θ grande, [ADR-L2-06](l2.md#66-adr-l2-06--partición-provider--market--asset--theta--year--month-la-confirmación-del-evento-siguiente-decide-el-mes)): se leen en cadena, un mes tras otro, hasta el primero cuyo carry-over ya no trae ese pendiente o hasta el último mes existente.|
 |`events.parquet` de `M+k`, el **primer** mes de la cadena cuyo carry-over ya no trae el pendiente (`k ≥ 1`)|El evento que era pendiente al cierre de `M`, ya cerrado: está en la partición de `M+k` y trae su `extreme_agg_trade_id` definitivo. Reemplaza la cola provisional. Si el carry-over de `M+k` aún no existe (L2 escribe primero los eventos y luego el carry-over), la cadena se considera abierta.|
 
 **Cola provisional.** Tras la confirmación del evento pendiente `p`, el extremo vigente al cierre de `M` (`ext_high_*` si `direction = 1`, `ext_low_*` si `direction = −1`) es un **candidato**: nunca retrocede, pero un tick de un mes posterior puede superarlo. Si la cadena ya tiene carry-overs de meses posteriores (abajo), el candidato es el del **último carry-over existente**, no el de `M`: es el extremo más reciente que se conoce. Entonces, para los ticks de `M` posteriores a `p.confirm_agg_trade_id`:
@@ -508,7 +508,7 @@ La imagen es una sola, `viz_tiles` (capa `layers/viz_tiles`, con su `VERSION`), 
 
 ### 9.1 Política: continuar con hallazgo y hueco visible
 
-Los tiles no son fuente de verdad y se regeneran. Por eso, a diferencia de L2 (cuyo estado encadenado exige fail-closed, [ADR-L2-08](l2.md)), viz **continúa y deja hallazgo**: si falta un θ en L2, el día se escribe con los demás y el θ ausente va a `missing_thetas` (se ve en pantalla, principio 6). Cuando el archivo aparece, el `input_hash` cambia y el día se rehace solo. Si falta el mes de L1, el día no se escribe. En ambos casos la unidad termina con código 1, para que la alerta del job lo vea.
+Los tiles no son fuente de verdad y se regeneran. Por eso, a diferencia de L2 (cuyo estado encadenado exige fail-closed, [ADR-L2-08](l2.md#68-adr-l2-08--carry-over-faltante-o-de-otra-versión-fail-closed-no-log-and-continue)), viz **continúa y deja hallazgo**: si falta un θ en L2, el día se escribe con los demás y el θ ausente va a `missing_thetas` (se ve en pantalla, principio 6). Cuando el archivo aparece, el `input_hash` cambia y el día se rehace solo. Si falta el mes de L1, el día no se escribe. En ambos casos la unidad termina con código 1, para que la alerta del job lo vea.
 
 ### 9.2 Chequeos
 
