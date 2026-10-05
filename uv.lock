@@ -827,7 +827,6 @@ version = "0.1.0"
 source = { editable = "layers/viz_tiles" }
 dependencies = [
     { name = "dq" },
-    { name = "google-cloud-storage" },
     { name = "numpy" },
     { name = "pyarrow" },
     { name = "pyutils" },
@@ -836,7 +835,6 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "dq", editable = "shared/dq" },
-    { name = "google-cloud-storage", specifier = ">=3.0.0" },
     { name = "numpy", specifier = ">=2.0" },
     { name = "pyarrow", specifier = ">=25.0.1" },
     { name = "pyutils", editable = "shared/pyutils" },
