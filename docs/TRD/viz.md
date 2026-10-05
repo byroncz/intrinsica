@@ -270,7 +270,7 @@ viz **solo lee** archivos de L1 y L2 que ya son inmutables o están completos:
 |---|---|---|
 |L1|`consolidated.parquet` del mes ([TRD-L1 §7.2](l1.md#72-salida--parquet-conformado-de-l1-contrato-hacia-l2))|`agg_trade_id`, `transact_time` (µs UTC), `price` (`DECIMAL(18,8)`), `quantity` (`DECIMAL(18,8)`). Nunca provisionales: L2 tampoco los consume ([ADR-L2-09](l2.md#69-adr-l2-09--l2-solo-consume-consolidatedparquet-nunca-los-provisionales-diarios-de-l1)) y un día sin eventos no tiene regiones que dibujar.|
 |L2|`events.parquet` por θ y mes ([TRD-L2 §7.2](l2.md#72-salida--eventsparquet-contrato-hacia-l3))|Por evento: `reference_agg_trade_id`, `confirm_agg_trade_id`, `extreme_agg_trade_id` y `direction`.|
-|L2|`carry_over.parquet` por θ y mes ([TRD-L2 §7.4](l2.md#74-carry-over--contrato-y-disposición-física))|Solo para la cola provisional: `has_pending_event`, `pending_reference_agg_trade_id`, `pending_confirm_agg_trade_id`, `direction` y el extremo vigente (`ext_high_*` o `ext_low_*`).|
+|L2|`carry_over.parquet` por θ y mes ([TRD-L2 §7.4](l2.md#74-carry-over--contrato-y-disposición-física))|Para la cola provisional y para seguir la cadena de un pendiente de varios meses (§7.6): `has_pending_event`, `pending_reference_agg_trade_id`, `pending_confirm_agg_trade_id`, `direction` y el extremo vigente (`ext_high_*` o `ext_low_*`).|
 
 El **último día disponible** es el último día del último mes consolidado en L1 y cerrado por L2. Los tiles se generan por día, pero el disparo es mensual, tras `l2-monthly`. El día es UTC, como los archivos de Binance.
 
@@ -412,18 +412,19 @@ Un evento DC se escribe en la partición del mes que confirma el evento **siguie
 |---|---|
 |`events.parquet` de `M`|Los eventos **cerrados dentro de `M`**. Incluye el que cruza la medianoche de `D`: su extremo se resolvió en `M`.|
 |`carry_over.parquet` de `M`|El evento **pendiente** al cierre de `M` (`has_pending_event`): su referencia y su confirmación son conocidas, su extremo no. Da la **cola provisional**.|
-|`events.parquet` de `M+1`, **si existe**|El evento que era pendiente al cierre de `M`, ya cerrado: trae su `extreme_agg_trade_id` definitivo. Reemplaza la cola provisional.|
+|`carry_over.parquet` de `M+1`, `M+2`, …, **solo si hay pendiente al cierre de `M`**|Dicen si el evento sigue pendiente (mismo `pending_confirm_agg_trade_id`) o ya se cerró. Un evento puede quedar pendiente varios meses (θ grande, [ADR-L2-06](l2.md)): se leen en cadena, un mes tras otro, hasta el primero cuyo carry-over ya no trae ese pendiente o hasta el último mes existente.|
+|`events.parquet` de `M+k`, el **primer** mes de la cadena cuyo carry-over ya no trae el pendiente (`k ≥ 1`)|El evento que era pendiente al cierre de `M`, ya cerrado: está en la partición de `M+k` y trae su `extreme_agg_trade_id` definitivo. Reemplaza la cola provisional. Si el carry-over de `M+k` aún no existe (L2 escribe primero los eventos y luego el carry-over), la cadena se considera abierta.|
 
-**Cola provisional.** Tras la confirmación del evento pendiente `p`, el extremo vigente al cierre de `M` (`ext_high_*` si `direction = 1`, `ext_low_*` si `direction = −1`) es un **candidato**: nunca retrocede, pero un tick de `M+1` puede superarlo. Entonces, para los ticks de `M` posteriores a `p.confirm_agg_trade_id`:
+**Cola provisional.** Tras la confirmación del evento pendiente `p`, el extremo vigente al cierre de `M` (`ext_high_*` si `direction = 1`, `ext_low_*` si `direction = −1`) es un **candidato**: nunca retrocede, pero un tick de un mes posterior puede superarlo. Entonces, para los ticks de `M` posteriores a `p.confirm_agg_trade_id`:
 
 - hasta el id del candidato: **overshoot** de `p` (certero: el extremo final es igual o posterior);
 - después del candidato: **confirmación del sentido contrario** (provisional: es la fase DC del evento siguiente si el candidato no se mueve).
 
-`provisional_from_s` de ese θ es el tiempo del candidato relativo al día, acotado a 0 si cae en un día anterior; es `null` en los días anteriores al candidato. Con el evento resuelto en `M+1`, las mismas reglas usan el `extreme_agg_trade_id` definitivo y la cola deja de ser provisional (`provisional_from_s = null`): los ticks posteriores al extremo y anteriores al fin de `M` son la confirmación del evento siguiente, que confirma en `M+1`.
+`provisional_from_s` de ese θ es el tiempo del candidato relativo al día, acotado a 0 si cae en un día anterior; es `null` en los días anteriores al candidato. Con el evento resuelto en `M+k`, las mismas reglas usan el `extreme_agg_trade_id` definitivo y la cola deja de ser provisional (`provisional_from_s = null`): los ticks posteriores al extremo y anteriores al fin de `M` son la confirmación del evento siguiente, que confirma en `M+k`.
 
-Si `M+1` existe pero el evento sigue pendiente en su carry-over (un overshoot de más de un mes), la cola de `M` **sigue provisional**. El último día disponible casi siempre trae cola provisional, porque su evento abierto no cierra hasta el mes siguiente.
+Mientras la cadena sigue abierta (el último carry-over existente aún trae el mismo pendiente: un overshoot de más de un mes), la cola de `M` **sigue provisional**, con el candidato del carry-over de `M`. El último día disponible casi siempre trae cola provisional, porque su evento abierto no cierra hasta que L2 procese el mes que lo confirma.
 
-**Regla para mantener los tiles al día.** Cuando `viz-tiles` procesa un mes, revisa además los días del mes anterior cuyo `index.json` trae algún `provisional_from_s` distinto de `null`: parte del último día de ese mes y retrocede mientras encuentre días provisionales, y los regenera (su `input_hash` cambió porque ahora entran los eventos del mes nuevo). Una cola de más de un mes sin resolver se corrige con un `--from` y `--to` del humano.
+**Regla para mantener los tiles al día.** Un evento pendiente deja cola provisional en **cada** mes que atraviesa, así que los meses con cola son contiguos hasta el mes anterior al que lo cierra. Por eso, cuando `viz-tiles` procesa un mes `N`, revisa hacia atrás **todos** los meses anteriores con cola provisional, no solo el previo: desde `N−1`, mira el `index.json` del último día del mes; si trae algún `provisional_from_s` distinto de `null`, retrocede por los días de ese mes mientras los encuentre provisionales y pasa al mes anterior; se detiene en el primer mes cuyo último día es definitivo para todos los θ. A cada día así hallado le aplica el protocolo de §7.8: el `input_hash` cambia solo si la cadena avanzó o se cerró, y el resto se salta. No hace falta un `--from` y `--to` del humano para corregir una cola larga.
 
 ### 7.7 `tiles/latest.json`
 
@@ -439,7 +440,7 @@ Apunta al **último día con `index.json` escrito**. Se escribe después del `in
 
 - el `consolidated.parquet` de `M` en L1;
 - el `events.parquet` y el `carry_over.parquet` de `M` de cada θ del catálogo;
-- el `events.parquet` de `M+1` de cada θ **con evento pendiente al cierre de `M`**, cuando existe y el día `D` toca ese evento. La condición sale del contenido del carry-over, que ya es entrada.
+- por cada θ **con evento pendiente al cierre de `M`**, y **solo en los días `D` con cola provisional** (del día del candidato en adelante: el mismo criterio de `provisional_from_s`, que sale del carry-over de `M`, ya entrada): los `carry_over.parquet` de la cadena de §7.6 (`M+1`, `M+2`, … hasta donde la cadena existe) y, si la cadena cerró, el `events.parquet` de `M+k`. Los días anteriores al candidato no los llevan: resolverse el evento no cambia sus estados, porque sus ticks son overshoot del pendiente con el extremo provisional y con el definitivo. Mientras la cadena sigue abierta, cada mes nuevo cambia el hash de esos días y los rehace con tiles idénticos: es inocuo y acotado a los días de la cola.
 
 *Por qué CRC32C y no un hash del contenido lógico:* L2 no publica un manifiesto de sus `content_hash` (solo van en los hallazgos `events_summary`), y descargar los archivos para hashearlos cuesta más que regenerar. El CRC32C es lo que GCS ya calcula. Que L2 reescriba un archivo con los mismos datos y distintos bytes provoca, a lo sumo, una regeneración que produce los mismos tiles: es inocuo.
 
@@ -481,7 +482,7 @@ El pico de una unidad es **O(lote)**: un row group de L1, o uno de eventos, más
 
 |Argumento|Efecto|
 |---|---|
-|(ninguno)|El **mes anterior** al actual (UTC), día por día, más la revisión de la cola provisional del mes previo (§7.6). Es lo que lanza el encadenamiento tras `l2-monthly`.|
+|(ninguno)|El **mes anterior** al actual (UTC), día por día, más la revisión de los meses anteriores con cola provisional (§7.6). Es lo que lanza el encadenamiento tras `l2-monthly`.|
 |`--day YYYY-MM-DD`|Un solo día.|
 |`--from YYYY-MM` y `--to YYYY-MM`|Todos los días de cada mes del rango, en orden. `--to` por defecto es `--from`. Es la forma del backfill.|
 |`--force`|Ignora el `input_hash` del paso 1 y regenera lo seleccionado.|
@@ -644,12 +645,12 @@ No hay card de logging: es esta sección y el criterio 8 de §13 ("emite hallazg
 |ID    |Riesgo|Impacto|Mitigación|
 |------|------|-------|----------|
 |RVZ-01|Un lector ve un día a medias (tiles de dos corridas, o sin todos sus archivos).|Alto|`index.json` al final como marca de commit; se borra antes de rehacer; tiles inmutables con `?h=` del hash (§7.2, ADR-VZ-10).|
-|RVZ-02|La cola provisional se toma por definitiva y el humano juzga mal el detector.|Alto|`provisional_from_s` en el índice, marcador visible con texto en la vista (principios 2 y 6) y regeneración al llegar el mes siguiente (§7.6).|
+|RVZ-02|La cola provisional se toma por definitiva y el humano juzga mal el detector.|Alto|`provisional_from_s` en el índice, marcador visible con texto en la vista (principios 2 y 6) y regeneración cuando L2 cierra el evento, aunque tarde varios meses (§7.6).|
 |RVZ-03|Una frontera de fase dentro de una columna se atribuye entera al último tick, y la resolución de 21,09 s no distingue eventos más cortos de θ pequeños.|Medio|Declarado como consecuencia de ADR-VZ-08 y ADR-VZ-09. Palanca: un nivel más fino o tiles por rango horario, evaluados con su costo (§10.1, §14).|
 |RVZ-04|El backfill rompe el presupuesto `intrinsica-mensual` por las operaciones Clase A y el cómputo.|Medio|Repartirlo en meses calendario o acotar el rango; el humano lo lanza (§10.3, §14 ítem 2). Los tiles se escriben sin temporal más renombre.|
 |RVZ-05|La exportación no abre desde disco porque `fetch` sobre `file://` está bloqueado.|Alto|Tiles incrustados en un `<script>` y un cargador con dos implementaciones (§7.9); lo verifica el criterio 3 de la Épica.|
 |RVZ-06|`storage.cloud.google.com` no sirve el HTML o sus tiles como el diseño supone (tipo de contenido, descarga en vez de render).|Alto|El criterio 1 de la Épica lo verifica en la hija 4 antes de construir sobre él; si falla, se abre la opción B (§6.5) con una card.|
-|RVZ-07|Los tiles quedan desfasados de L2 tras relanzar L2 o resolverse un evento pendiente.|Medio|`input_hash` sobre los archivos de entrada (incluye `M+1` donde aplica); revisión de los días provisionales del mes previo (§7.6, §7.8).|
+|RVZ-07|Los tiles quedan desfasados de L2 tras relanzar L2 o resolverse un evento pendiente.|Medio|`input_hash` sobre los archivos de entrada (incluye la cadena de carry-over y el `events.parquet` de `M+k` en los días con cola); revisión de los días provisionales de todos los meses con cola (§7.6, §7.8).|
 |RVZ-08|`float32` pierde precisión.|Bajo|Resolución de 0,0078 USDT hasta 131 072 USDT y 7,8 ms al final del día (§7.3), sobre columnas de 21 s; el tooltip muestra el valor de la cubeta, no un tick exacto.|
 |RVZ-09|Agregar un θ en L2 regenera todos los días del mes.|Bajo|Conocido; el costo es el de repetir el backfill de ese rango (§7.8, §10.3). Si molesta, se compara por archivo antes de reescribir (§14).|
 |RVZ-10|Los paneles se acumulan hasta que nadie mira ninguno.|Medio|Evaluación ergonómica obligatoria en todo PR que cambie la vista; `pr-review` rechaza si falta o si una métrica empeora sin justificación (§6.7).|
@@ -662,7 +663,7 @@ No hay card de logging: es esta sección y el criterio 8 de §13 ("emite hallazg
 1. Un día de tiles es **un conjunto de 313 objetos** con la disposición de §7.2, y su `index.json` es el último escrito. Matar el job entre dos tiles deja el día sin índice y la corrida siguiente lo completa.
 2. `price-<w>.f32` cumple M4: sobre un día sintético y uno real, cada columna conserva el primero, el último, el mínimo y el máximo de sus ticks, en orden de tiempo, con NaN en columnas vacías. Los niveles gruesos coinciden **exactamente** con M4 calculado directo sobre los ticks.
 3. `volume-<w>.f32` suma `quantity` por columna y la suma de las columnas de un nivel es igual en los seis niveles.
-4. `dir-<w>-<theta>.u8` sigue §7.5: sobre un día sintético con eventos conocidos, cada columna toma el estado del último tick; la cola de un mes con evento pendiente sale provisional y, al aparecer `M+1`, definitiva.
+4. `dir-<w>-<theta>.u8` sigue §7.5: sobre un día sintético con eventos conocidos, cada columna toma el estado del último tick; la cola de un mes con evento pendiente sale provisional; al cerrarse el evento en `M+1` queda definitiva; y si el evento sigue pendiente más de un mes (cadena de carry-over de dos o más meses), la cola sigue provisional hasta `M+k` y entonces la corrida sin argumentos la corrige sin intervención del humano.
 5. Re-ejecutar un día con la misma entrada **salta** sin escribir; con un archivo de entrada distinto, lo regenera; `--force` regenera siempre. Los archivos de tile salen **idénticos byte a byte** entre dos corridas con la misma entrada.
 6. Abrir el día más reciente transfiere **menos de 1 MB** (incluida la página), el primer trazo sale en **menos de 500 ms** en red doméstica y **cambiar θ** responde en **menos de 100 ms** y solo descarga tiles de dirección (cifras medidas y escritas en el runbook por la hija 7).
 7. Con un mes de L1 sin `consolidated.parquet`, o un θ sin entrada en L2, `viz-tiles` emite `input_missing` con `details.day` y sale con código 1; el día del θ ausente aparece en `missing_thetas`.
@@ -698,7 +699,7 @@ No hay card de logging: es esta sección y el criterio 8 de §13 ("emite hallazg
 |Nivel de zoom (`w`)|Número de columnas en que se divide el día UTC completo. Los niveles son 128, 256, 512, 1 024, 2 048 y 4 096.|
 |Columna|Una cubeta de tiempo de un nivel: `86 400 / w` segundos. Es la unidad del tile.|
 |Marca de commit|El `index.json` de un día: se escribe al final, y su presencia dice que todos los tiles que lista ya están.|
-|Cola provisional|Tramo final de un mes cuyo evento aún no se cierra en L2; sus estados se dibujan con el extremo candidato y se corrigen cuando llega el mes siguiente (§7.6).|
+|Cola provisional|Tramo final de un mes cuyo evento aún no se cierra en L2; sus estados se dibujan con el extremo candidato y se corrigen cuando L2 cierra el evento (§7.6).|
 |Modo degradado|Estado de la vista cuando falta un tile o un día: el hueco se muestra con marcador y texto (principio 6).|
 |Evaluación ergonómica|Sección obligatoria del PR de toda card que cambie la vista (§6.7).|
 
