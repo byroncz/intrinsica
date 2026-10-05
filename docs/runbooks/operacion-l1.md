@@ -282,7 +282,7 @@ Binance no publica hora ni SLA, por eso el día de publicación completo cuenta
 como a tiempo y recién el día siguiente es retraso. Con salida 0 no se escribe
 `consolidated.parquet` ni manifiesto: la unidad queda pendiente y la frontera
 de L2 (fail-closed) la ignora. Con salida 3 la tarea falla y la orquestación
-no ejecuta el `next_job` (`l2-monthly`), que es lo correcto. El scheduler de
+no ejecuta los `next_jobs` (`l2-monthly` y `viz-tiles`), que es lo correcto. El scheduler de
 `monthly-close` corre el día 8, así que en estado estacionario solo puede
 darse `source_delayed`. El diario corre a las 03:00 UTC del día D+1, así que
 su caso esperable es `warning` ese mismo día: el día queda pendiente hasta que
