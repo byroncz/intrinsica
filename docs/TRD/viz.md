@@ -385,10 +385,10 @@ Los puntos `i = 4·col + k` (`k = 0..3`) son los cuatro puntos M4 de la columna 
 |---|---|---|
 |Arreglos del día (6 niveles, 50 θ)|693 504 B|tabla de arriba|
 |En base64 (+ 33 %)|≈ 0,92 MB|aritmética|
-|Plantilla, `app.js`, CSS y uPlot 1.6.32|77 928 B|medido|
+|Plantilla, `app.js`, CSS y uPlot 1.6.32|78 035 B|medido|
 |**HTML sin comprimir, 50 θ**|**≈ 1,0 MB**|suma|
-|HTML en gzip, día del humo (5 θ, 4 735 ticks)|191 764 B (520 470 B sin comprimir)|medido, nivel 9|
-|Dirección en gzip, por θ|≈ 2,5 KB|medido: 12 761 B de diferencia entre 5 θ y ninguno|
+|HTML en gzip, día del humo (5 θ, 4 735 ticks)|191 811 B (520 577 B sin comprimir)|medido, nivel 9|
+|Dirección en gzip, por θ|≈ 2,5 KB|medido: 12 762 B de diferencia entre 5 θ y ninguno|
 |**HTML en gzip, 50 θ**|**≈ 0,3 a 0,4 MB**|estimación: 179 KB del día del humo sin dirección más 50 × 2,5 KB; el precio de un día real tiene más ticks y comprime algo menos|
 |Cambiar θ|0 B, 0 peticiones|el bloque ya está en memoria|
 
