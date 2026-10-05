@@ -5,6 +5,8 @@ description = "Capa viz de intrinsica: reduce un día de ticks y eventos DC a ti
 requires-python = ">=3.14"
 dependencies = [
     "dq",
+    "google-cloud-storage>=3.0.0",
+    "google-crc32c>=1.5.0",
     "numpy>=2.0",
     "pyarrow>=25.0.1",
     "pyutils",
