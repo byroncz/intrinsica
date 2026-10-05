@@ -1,0 +1,20 @@
+[project]
+name = "viz_tiles"
+version = "0.1.0"
+description = "Capa viz de intrinsica: reduce un día de ticks y eventos DC a tiles M4 por nivel de zoom."
+requires-python = ">=3.14"
+dependencies = [
+    "dq",
+    "google-cloud-storage>=3.0.0",
+    "numpy>=2.0",
+    "pyarrow>=25.0.1",
+    "pyutils",
+]
+
+[build-system]
+requires = ["uv_build"]
+build-backend = "uv_build"
+
+[tool.uv.sources]
+dq = { workspace = true }
+pyutils = { workspace = true }
