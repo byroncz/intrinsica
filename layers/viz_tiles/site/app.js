@@ -170,7 +170,8 @@
       vol: vol,
       dir: dir,
       priceData: [price.x, price.y],
-      volData: [colStart, vol || new Float32Array(w)],
+      // Sin tile de volumen no hay barras: nulls, nunca ceros (principio 6).
+      volData: [colStart, vol || new Array(w).fill(null)],
     };
     cache[w] = level;
     var ms = performance.now() - t0;
@@ -380,13 +381,20 @@
   }
 
   function drawMessages(u) {
-    var b = u.bbox;
-    var dpr = window.devicePixelRatio || 1;
-    var ctx = u.ctx;
     var msg = null;
     if (sel.kind === "m") msg = "⚠ θ " + sel.theta + ": sin datos en L2 (hueco, no se rellena)";
     else if (sel.kind === "t" && !cur.dir) msg = "⚠ falta el tile de dirección de este nivel";
-    if (!msg) return;
+    if (msg) drawNote(u, msg);
+  }
+
+  function drawVolumeMessage(u) {
+    if (!cur.vol) drawNote(u, "⚠ falta el tile de volumen de este nivel");
+  }
+
+  function drawNote(u, msg) {
+    var b = u.bbox;
+    var dpr = window.devicePixelRatio || 1;
+    var ctx = u.ctx;
     ctx.save();
     ctx.font = "bold " + 14 * dpr + "px " + MONO;
     ctx.textAlign = "center";
@@ -423,10 +431,12 @@
         if (y[k] > hi) hi = y[k];
       }
       lines.push("mín " + fixed(lo) + "   máx " + fixed(hi));
-      if (level.vol) lines.push("vol " + level.vol[c].toFixed(4));
+      lines.push(level.vol ? "vol " + level.vol[c].toFixed(4) : "vol: ⚠ falta el tile");
     }
-    if (sel.kind === "t") {
-      var code = level.dir ? level.dir[sel.k * level.w + c] : 0;
+    if (sel.kind === "t" && !level.dir) {
+      lines.push("θ " + sel.theta + ": ⚠ falta el tile de dirección");
+    } else if (sel.kind === "t") {
+      var code = level.dir[sel.k * level.w + c];
       lines.push("θ " + sel.theta + ": " + (STATES[code] ? STATES[code].text : "reservado (" + code + ")"));
     } else if (sel.kind === "m") {
       lines.push("θ " + sel.theta + ": sin datos");
@@ -615,7 +625,7 @@
             paths: uPlot.paths.bars({ size: [0.9, Infinity, 1], align: 1 }),
           },
         ],
-        hooks: { setCursor: [onCursor], setScale: [onScale] },
+        hooks: { draw: [drawVolumeMessage], setCursor: [onCursor], setScale: [onScale] },
       }),
       cur.volData,
       $("volume")

@@ -177,6 +177,31 @@ def test_a_missing_tile_degrades_the_day_and_falls_back(day_dir):
     assert start["level"].startswith("nivel 4096")  # el nivel siguiente que sí hay
 
 
+def test_a_missing_direction_tile_is_said_not_filled_with_zeros(day_dir):
+    result = view(day_dir, "--drop", "dir-2048.u8")
+    assert result["errors"] == []
+    start = step(result, "inicio")
+    assert start["mode"] == "⚠ DEGRADADO" and "falta dir-2048.u8" in start["reasons"]
+    assert start["level"].startswith("nivel 2048")  # el precio sigue ahí
+    assert "⚠ falta el tile de dirección de este nivel" in result["firstMessages"]
+    assert "θ 0.00250000: ⚠ falta el tile de dirección" in result["tooltip"]
+    assert "sin evento" not in result["tooltip"]
+
+
+def test_a_missing_volume_tile_draws_no_bars_and_says_so(day_dir):
+    result = view(day_dir, "--drop", "volume-2048.f32")
+    assert result["errors"] == []
+    start = step(result, "inicio")
+    assert (
+        start["mode"] == "⚠ DEGRADADO" and "falta volume-2048.f32" in start["reasons"]
+    )
+    assert start["volLen"] == 2048
+    assert start["data"]["volSum"] == 0  # nulls, no barras en cero
+    assert "⚠ falta el tile de volumen de este nivel" in result["firstMessages"]
+    assert "vol: ⚠ falta el tile" in result["tooltip"]
+    assert "vol 0.0000" not in result["tooltip"]
+
+
 def test_unknown_major_version_is_rejected(day_dir, tmp_path):
     result = view(page_with(day_dir, tmp_path, tiles_version="2.0.0"))
     assert result["errors"] == []

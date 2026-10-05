@@ -203,6 +203,8 @@ function snapshot(label) {
   out.updated = byId["s-updated"].textContent;
   out.options = byId.theta.options.map((o) => o.textContent);
   out.steps.push(snapshot("inicio"));
+  // Los textos del primer trazo de los dos paneles, antes de que algo limpie el registro.
+  out.firstMessages = drawLog.filter((c) => c[0] === "fillText").map((c) => c[1]);
   out.panelHeights = plots().price ? [plots().price.height, plots().vol.height] : null;
 
   if (plots().price) {
