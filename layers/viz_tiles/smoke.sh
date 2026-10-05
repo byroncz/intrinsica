@@ -190,7 +190,7 @@ grep -q 'sonda: unit=2017-08-18 ticks=4735 ' "$data/run.log" \
 grep -q '"check_type": "tiles_summary"' "$data/run.log" \
   || { echo "::error::falta el hallazgo tiles_summary en el log"; exit 1; }
 
-# El índice, los 19 objetos con su tamaño y el Parquet de hallazgos.
+# El índice, los 20 objetos con su tamaño y el Parquet de hallazgos.
 docker run --rm -v "$data:/data" --entrypoint python "$image" - <<'PY'
 import base64
 import gzip

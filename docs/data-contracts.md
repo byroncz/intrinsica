@@ -550,7 +550,7 @@ con la serie reducida a M4, más un índice JSON. Fuente de diseño:
 [TRD-viz §7](TRD/viz.md#7-contrato-de-datos). Fuente en código:
 [`contract.py`](../layers/viz_tiles/src/viz_tiles/contract.py) (constantes),
 [`reduce.py`](../layers/viz_tiles/src/viz_tiles/reduce.py) (precio y volumen),
-[`direction.py`](../layers/viz_tiles/src/viz_tiles/direction.py) (dirección por θ)
+[`direction.py`](../layers/viz_tiles/src/viz_tiles/direction.py) (dirección por θ),
 [`write.py`](../layers/viz_tiles/src/viz_tiles/write.py) (escritura) y
 [`render.py`](../layers/viz_tiles/src/viz_tiles/render.py) (la página del día). Una
 prueba (`layers/viz_tiles/tests/test_tiles_contract_doc.py`) rompe el CI si
