@@ -13,9 +13,47 @@ from datetime import UTC, date, datetime
 import numpy as np
 import pyarrow as pa
 
-from viz_tiles.contract import DAY_S, DAY_US, FINEST, LEVELS, PRICE_SCALE
+from viz_tiles.contract import (
+    DAY_MS,
+    DAY_US,
+    EMPTY_PRICE,
+    FINEST,
+    INT32_MAX,
+    L1_SCALE,
+    LEVELS,
+)
 
 _EMPTY = -1
+
+
+class PriceUnrepresentable(ValueError):
+    """El precio máximo del día no cabe en `int32` con el `price_scale` del activo.
+
+    Guarda teórica (TRD-viz §9.3): con 100 el máximo es 21 474 836,47 USDT.
+    Quien llama no escribe el día y emite el hallazgo `price_unrepresentable`.
+    """
+
+    def __init__(self, price_scale: int, max_price_int: int) -> None:
+        super().__init__(
+            f"precio máximo {max_price_int} (×10⁻⁸) no cabe en int32 "
+            f"con price_scale {price_scale}"
+        )
+        self.price_scale = price_scale
+        self.max_price_int = max_price_int
+
+
+def _factor(price_scale: int) -> int:
+    """Enteros de L1 (×10⁸) por unidad de precio del tile."""
+    if price_scale < 1 or L1_SCALE % price_scale:
+        raise ValueError(f"price_scale debe dividir 10⁸, llegó {price_scale}")
+    return L1_SCALE // price_scale
+
+
+def _round_to_tick(price_int: np.ndarray, factor: int) -> np.ndarray:
+    """`price_int / factor` redondeado al entero más cercano, mitad al par."""
+    quotient, rest = np.divmod(price_int, factor)
+    up = (2 * rest > factor) | ((2 * rest == factor) & (quotient % 2 == 1))
+    return quotient + up
 
 
 def day_start_us(day: date) -> int:
@@ -112,9 +150,15 @@ class M4Accumulator:
     así que se pueden pasar los row groups completos de un mes.
     """
 
-    def __init__(self, day: date) -> None:
+    def __init__(self, day: date, price_scale: int) -> None:
         self.day_start_us = day_start_us(day)
+        self.price_scale = price_scale
+        self._factor = _factor(price_scale)
         self.ticks = 0
+        # Ticks cuyo precio no cae en el tick, y la mayor distancia al tick más
+        # cercano entre ellos (en enteros de L1, ×10⁻⁸): el hallazgo `price_rounded`.
+        self.rounded = 0
+        self.max_abs_delta_int = 0
         self._level = _Level.empty(FINEST)
         self._last_time = -(2**63)
 
@@ -136,6 +180,12 @@ class M4Accumulator:
         ids = batch.column("agg_trade_id").to_numpy(zero_copy_only=True)[keep]
         self._add(rel[keep], price, quantity, ids)
         self.ticks += len(price)
+        rest = price % self._factor
+        off = rest != 0
+        if off.any():
+            self.rounded += int(off.sum())
+            delta = np.minimum(rest, self._factor - rest)[off]
+            self.max_abs_delta_int = max(self.max_abs_delta_int, int(delta.max()))
 
     def _add(self, rel, price, quantity, ids) -> None:
         col = rel * FINEST // DAY_US
@@ -176,9 +226,18 @@ class M4Accumulator:
             levels[w] = level
             if w != LEVELS[0]:
                 level = level.coarsen()
+        finest = levels[FINEST]
+        if finest.present.any():
+            max_price_int = int(finest.max_p[finest.present].max())
+            rounded_max = int(_round_to_tick(np.int64(max_price_int), self._factor))
+            if rounded_max > INT32_MAX:
+                raise PriceUnrepresentable(self.price_scale, max_price_int)
         return DayReduction(
             ticks=self.ticks,
-            price={w: _price_tile(lv) for w, lv in levels.items()},
+            price_scale=self.price_scale,
+            rounded=self.rounded,
+            max_abs_delta_int=self.max_abs_delta_int,
+            price={w: _price_tile(lv, self._factor) for w, lv in levels.items()},
             volume={w: _volume_tile(lv) for w, lv in levels.items()},
             last_ids={w: lv.last_id for w, lv in levels.items()},
         )
@@ -188,28 +247,44 @@ class M4Accumulator:
 class DayReduction:
     """Tiles de precio y volumen de un día, por nivel.
 
-    `price[w]` es el arreglo de `8w` float32 del archivo (bloque de tiempos y
-    bloque de precios); `volume[w]`, de `w` float32. `last_ids[w]` es el
+    `price[w]` es el arreglo de `8w` int32 del archivo (bloque de tiempos en ms
+    y bloque de precios en unidades de `1/price_scale`, `EMPTY_PRICE` en una
+    columna vacía); `volume[w]`, de `w` float32. `last_ids[w]` es el
     `agg_trade_id` del último tick de cada columna (-1 si está vacía): con él
     se resuelve el estado de dirección (`direction.direction_tile`).
+    `rounded` y `max_abs_delta_int` alimentan el hallazgo `price_rounded`
+    (ticks fuera del tick y su mayor distancia al tick más cercano, ×10⁻⁸).
     """
 
     ticks: int
+    price_scale: int
+    rounded: int
+    max_abs_delta_int: int
     price: dict[int, np.ndarray]
     volume: dict[int, np.ndarray]
     last_ids: dict[int, np.ndarray]
 
 
-def reduce_day(batches: Iterable[pa.RecordBatch], day: date) -> DayReduction:
-    """Reduce los lotes de ticks del día `day` a los tiles de precio y volumen."""
-    acc = M4Accumulator(day)
+def reduce_day(
+    batches: Iterable[pa.RecordBatch], day: date, price_scale: int
+) -> DayReduction:
+    """Reduce los lotes de ticks del día `day` a los tiles de precio y volumen.
+
+    `price_scale` es el del activo (`contract.price_scale`). Lanza
+    `PriceUnrepresentable` si el precio máximo no cabe en `int32`.
+    """
+    acc = M4Accumulator(day, price_scale)
     for batch in batches:
         acc.update(batch)
     return acc.finish()
 
 
-def _price_tile(level: _Level) -> np.ndarray:
-    """Arma el arreglo `[t0..t(4w-1), p0..p(4w-1)]` de los puntos M4 en orden de tiempo."""
+def _price_tile(level: _Level, factor: int) -> np.ndarray:
+    """Arma el arreglo `[t0..t(4w-1), p0..p(4w-1)]` de los puntos M4 en orden de tiempo.
+
+    Los acumuladores traen el precio crudo (×10⁸); aquí se redondea una sola
+    vez al tick, mitad al par.
+    """
     w = len(level)
     min_first = level.min_t <= level.max_t
     points_t = np.stack(
@@ -231,14 +306,14 @@ def _price_tile(level: _Level) -> np.ndarray:
         axis=1,
     )
     empty = ~level.present
-    # Columna vacía: t es el inicio de la columna (finito y creciente, lo que
-    # exige el eje X de uPlot) y p es NaN.
-    starts = np.arange(w, dtype=np.float64) * (DAY_S / w)
-    seconds = np.where(empty[:, None], starts[:, None], points_t / 1e6)
-    prices = np.where(empty[:, None], np.nan, points_p / PRICE_SCALE)
-    return np.concatenate([seconds.ravel(), prices.ravel()]).astype("<f4")
+    # Columna vacía: t es el inicio de la columna (no decreciente, lo que exige
+    # el eje X de uPlot) y p es el centinela.
+    starts = np.arange(w, dtype=np.int64) * DAY_MS // w
+    millis = np.where(empty[:, None], starts[:, None], points_t // 1000)
+    prices = np.where(empty[:, None], EMPTY_PRICE, _round_to_tick(points_p, factor))
+    return np.concatenate([millis.ravel(), prices.ravel()]).astype("<i4")
 
 
 def _volume_tile(level: _Level) -> np.ndarray:
     """Suma de `quantity` por columna: se suma en enteros y se convierte al final."""
-    return (level.volume / PRICE_SCALE).astype("<f4")
+    return (level.volume / L1_SCALE).astype("<f4")

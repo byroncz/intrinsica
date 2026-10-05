@@ -36,7 +36,7 @@ class ThetaTiles:
     theta: str
     events: int
     provisional_from_s: float | None
-    direction: Mapping[int, np.ndarray]
+    direction: Mapping[int, np.ndarray]  # un bloque de `w` bytes por nivel
 
 
 def day_dir(root: str | Path, provider: str, market: str, asset: str, day: date) -> str:
@@ -48,10 +48,13 @@ def day_dir(root: str | Path, provider: str, market: str, asset: str, day: date)
     )
 
 
-def _tile_bytes(kind: str, w: int, array: np.ndarray) -> bytes:
-    """Bytes del archivo: el arreglo con el tipo y el largo que fija el contrato."""
+def _tile_bytes(kind: str, w: int, array: np.ndarray, blocks: int = 1) -> bytes:
+    """Bytes del archivo: el arreglo con el tipo y el largo que fija el contrato.
+
+    `blocks` es el número de θ de un archivo `dir` (un bloque de `w` por θ).
+    """
     spec = FILE_BY_KIND[kind]
-    expected = spec.per_column * w
+    expected = spec.per_column * w * blocks
     if array.shape != (expected,):
         raise ValueError(
             f"{kind}-{w}: se esperaban {expected} valores, hay {array.shape}"
@@ -107,31 +110,46 @@ def write_day(
     if _exists(fs, index_path):
         fs.delete_file(index_path)
 
-    # Nombre de archivo -> (tipo, nivel, arreglo). Son vistas de lo que ya está
-    # en RAM: los bytes de cada archivo se generan de uno en uno al escribir.
-    arrays: dict[str, tuple[str, int, np.ndarray]] = {}
-    price = {str(w): tile_name("price", w) for w in LEVELS}
-    volume = {str(w): tile_name("volume", w) for w in LEVELS}
-    for w in LEVELS:
-        arrays[price[str(w)]] = ("price", w, reduction.price[w])
-        arrays[volume[str(w)]] = ("volume", w, reduction.volume[w])
-    theta_docs = []
-    for theta in thetas:
-        names = {str(w): tile_name("dir", w, theta.theta) for w in LEVELS}
+    # Nombre de archivo -> (tipo, nivel, arreglo). Precio y volumen son vistas de
+    # lo que ya está en RAM; la dirección de un nivel se arma al escribirlo, un
+    # nivel a la vez: los bytes de cada archivo se generan de uno en uno.
+    names = {
+        kind: {str(w): tile_name(kind, w) for w in LEVELS}
+        for kind in ("price", "volume", "dir")
+    }
+    files: dict[str, tuple[str, int]] = {}
+    for kind, by_level in names.items():
         for w in LEVELS:
-            arrays[names[str(w)]] = ("dir", w, theta.direction[w])
-        theta_docs.append(
-            {
-                "theta": theta.theta,
-                "events": theta.events,
-                "provisional_from_s": theta.provisional_from_s,
-                "dir": names,
-            }
-        )
+            files[by_level[str(w)]] = (kind, w)
+
+    def array_of(kind: str, w: int) -> np.ndarray:
+        if kind == "dir":
+            # n bloques de w bytes, en el orden de `thetas` del índice.
+            blocks = [t.direction[w] for t in thetas]
+            for theta, block in zip(thetas, blocks, strict=True):
+                if block.shape != (w,):
+                    raise ValueError(
+                        f"dir-{w} de {theta.theta}: se esperaban {w} valores, "
+                        f"hay {block.shape}"
+                    )
+            return np.concatenate(blocks) if blocks else np.empty(0, "u1")
+        return getattr(reduction, kind)[w]
+
+    theta_docs = [
+        {
+            "theta": theta.theta,
+            "events": theta.events,
+            "provisional_from_s": theta.provisional_from_s,
+        }
+        for theta in thetas
+    ]
     # El resumen de contenido recorre los archivos en orden de nombre.
     digest = hashlib.sha256()
-    for name in sorted(arrays):
-        data = _tile_bytes(*arrays[name])
+    for name in sorted(files):
+        kind, w = files[name]
+        data = _tile_bytes(
+            kind, w, array_of(kind, w), len(thetas) if kind == "dir" else 1
+        )
         digest.update(name.encode() + b"\0" + data)
         _put(fs, f"{directory}/{name}", data)
 
@@ -143,10 +161,12 @@ def write_day(
         "asset": asset,
         "day": day.isoformat(),
         "t0": day_start_us(day),
+        "price_scale": reduction.price_scale,
         "ticks": reduction.ticks,
         "levels": list(LEVELS),
-        "price": price,
-        "volume": volume,
+        "price": names["price"],
+        "volume": names["volume"],
+        "dir": names["dir"],
         "thetas": theta_docs,
         "missing_thetas": list(missing_thetas),
         "input_hash": input_hash,

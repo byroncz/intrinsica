@@ -8,6 +8,7 @@ from viz_tiles.contract import (
     INDEX_FIELDS,
     LATEST_FIELDS,
     LEVELS,
+    PRICE_SCALE_BY_ASSET,
     STATES,
     TILE_FILES,
     tile_name,
@@ -83,4 +84,14 @@ def test_file_names_in_the_doc_tree_match_code():
         "latest.json",
     ):
         assert name in tree
-    assert "dir-<w>-<theta>.u8" in tree
+    assert "dir-<w>-<theta>" not in tree
+
+
+def test_dir_file_is_one_per_level_in_the_doc_tree():
+    tree = _section().split("### Disposición")[1].split("### Archivos")[0]
+    assert tile_name("dir", 0).replace("0", "<w>") in tree
+
+
+def test_price_scale_doc_matches_code():
+    expected = [(asset, str(scale)) for asset, scale in PRICE_SCALE_BY_ASSET.items()]
+    assert _table("Escala de precio", r"^\| `(\w+)` \| (\d+) \|") == expected

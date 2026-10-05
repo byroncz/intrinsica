@@ -13,13 +13,14 @@ posterior. Por eso `viz_tiles` aún no está en `LAYERS` de `ci.yml`.
 ## Uso
 
 ```python
+from viz_tiles.contract import price_scale
 from viz_tiles.direction import PendingEvent, direction_tiles
 from viz_tiles.reduce import reduce_day
 from viz_tiles.write import ThetaTiles, write_day
 
 # `batches`: RecordBatch de L1 (agg_trade_id, price, quantity, transact_time),
 # ordenados por transact_time; se consumen uno a uno.
-reduction = reduce_day(batches, day)
+reduction = reduce_day(batches, day, price_scale("BTCUSDT"))
 
 # `events`: filas del θ con el esquema de events.parquet que tocan el día;
 # `pending`: PendingEvent.from_carry_over(fila) o None.

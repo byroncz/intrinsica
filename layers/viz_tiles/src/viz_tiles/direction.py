@@ -1,4 +1,4 @@
-"""Estado de dirección por θ de cada columna: tile `dir-<w>-<theta>.u8`.
+"""Estado de dirección por θ de cada columna: un bloque de `dir-<w>.u8`.
 
 TRD-viz §7.5 y ADR-VZ-09. El estado de una columna es el de su último tick, y el
 de un tick sale de comparar su `agg_trade_id` con los intervalos de los eventos

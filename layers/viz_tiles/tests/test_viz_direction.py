@@ -3,7 +3,7 @@ from datetime import date
 import numpy as np
 import pytest
 from viz_helpers import DOWN, UP, events, ticks_batch
-from viz_tiles.contract import LEVELS
+from viz_tiles.contract import LEVELS, price_scale
 from viz_tiles.direction import PendingEvent, direction_tile, direction_tiles
 from viz_tiles.reduce import reduce_day
 
@@ -106,7 +106,7 @@ def test_coarse_level_takes_the_state_of_the_last_non_empty_fine_column():
         (21, 30, 102, 1),
         (31, 70, 103, 1),
     ]
-    out = reduce_day([ticks_batch(day, rows)], day)
+    out = reduce_day([ticks_batch(day, rows)], day, price_scale("BTCUSDT"))
     tiles = direction_tiles(out.last_ids, events(UP, DOWN))
     # Nivel fino: ids 12, 21 y 31 en las columnas 0, 1 y 3; la 2 está vacía.
     assert tiles[4096][:4].tolist() == [1, 2, 0, 3]

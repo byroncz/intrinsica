@@ -5,12 +5,19 @@ from pathlib import Path
 import numpy as np
 import pytest
 from viz_helpers import DOWN, UP, events, ticks_batch
-from viz_tiles.contract import INDEX_FIELDS, LATEST_FIELDS, LEVELS, TILES_VERSION
+from viz_tiles.contract import (
+    INDEX_FIELDS,
+    LATEST_FIELDS,
+    LEVELS,
+    TILES_VERSION,
+    price_scale,
+)
 from viz_tiles.direction import direction_tiles
 from viz_tiles.reduce import day_start_us, reduce_day
 from viz_tiles.write import ThetaTiles, day_dir, read_index, write_day
 
 DAY = date(2026, 8, 31)
+SCALE = price_scale("BTCUSDT")
 KEY = {"provider": "binance", "market": "spot", "asset": "BTCUSDT"}
 ROWS = [(11, 1, 100, 1), (21, 30, 102, "0.5"), (31, 70, 103, 1), (56, 80, 104, 1)]
 WHEN = datetime(2026, 10, 5, 17, 0, tzinfo=UTC)
@@ -26,7 +33,7 @@ def theta(name: str, reduction, pending=None) -> ThetaTiles:
 
 
 def write(root, day=DAY, rows=ROWS, **kwargs):
-    reduction = reduce_day([ticks_batch(day, rows)], day)
+    reduction = reduce_day([ticks_batch(day, rows)], day, SCALE)
     args = {
         **KEY,
         "day": day,
@@ -51,16 +58,35 @@ def test_round_trip_returns_identical_arrays(tmp_path):
     )
     on_disk = read_index(tmp_path, **KEY, day=DAY)
     assert on_disk == index
+    block = direction_tiles(reduction.last_ids, events(UP, DOWN))
     for w in LEVELS:
-        price = np.fromfile(f"{directory}/{index['price'][str(w)]}", dtype="<f4")
+        price = np.fromfile(f"{directory}/{index['price'][str(w)]}", dtype="<i4")
         volume = np.fromfile(f"{directory}/{index['volume'][str(w)]}", dtype="<f4")
+        dirs = np.fromfile(f"{directory}/{index['dir'][str(w)]}", dtype="u1")
         np.testing.assert_array_equal(price, reduction.price[w])
         np.testing.assert_array_equal(volume, reduction.volume[w])
-        for entry in index["thetas"]:
-            dirs = np.fromfile(f"{directory}/{entry['dir'][str(w)]}", dtype="u1")
-            np.testing.assert_array_equal(
-                dirs, direction_tiles(reduction.last_ids, events(UP, DOWN))[w]
-            )
+        # Un bloque de w bytes por θ, en el orden de `thetas` del índice.
+        assert len(dirs) == len(index["thetas"]) * w
+        for k in range(len(index["thetas"])):
+            np.testing.assert_array_equal(dirs[k * w : (k + 1) * w], block[w])
+
+
+def test_price_file_is_two_integer_blocks(tmp_path):
+    """`price-<w>.i32`: tiempos uint32 (ms) y precios int32 (1/price_scale)."""
+    _, index = write(tmp_path)
+    directory = day_dir(tmp_path, **KEY, day=DAY)
+    w = 128
+    raw = np.fromfile(f"{directory}/{index['price'][str(w)]}", dtype="u1")
+    assert len(raw) == 32 * w
+    t = np.frombuffer(raw[: 16 * w].tobytes(), dtype="<u4")
+    p = np.frombuffer(raw[16 * w :].tobytes(), dtype="<i4")
+    assert index["price_scale"] == SCALE
+    # Columna 0 de w = 128 (675 s): primero, mínimo, máximo y último de ROWS.
+    assert t[:4].tolist() == [1000, 1000, 80_000, 80_000]
+    assert p[:4].tolist() == [10_000, 10_000, 10_400, 10_400]
+    # Columna 1: vacía; el inicio de la columna y el centinela.
+    assert t[4:8].tolist() == [675_000] * 4
+    assert (p[4:8] == -(2**31)).all()
 
 
 def test_index_has_every_contract_field_in_order(tmp_path):
@@ -76,16 +102,35 @@ def test_index_has_every_contract_field_in_order(tmp_path):
     assert index["input_hash"] == "ab" * 32
     assert index["generated_at"] == "2026-10-05T17:00:00Z"
     assert [t["theta"] for t in index["thetas"]] == ["0.00010000", "0.05000000"]
-    assert index["thetas"][0]["dir"]["2048"] == "dir-2048-0.00010000.u8"
+    assert index["price_scale"] == SCALE
+    assert index["price"]["128"] == "price-128.i32"
+    assert index["dir"]["2048"] == "dir-2048.u8"
+    assert set(index["thetas"][0]) == {"theta", "events", "provisional_from_s"}
 
 
-def test_a_day_has_one_file_per_level_kind_and_theta(tmp_path):
+def test_a_day_has_one_file_per_level_and_kind(tmp_path):
     write(tmp_path)
     directory = day_dir(tmp_path, **KEY, day=DAY)
     names = sorted(p.name for p in Path(directory).iterdir())
-    assert len(names) == 6 + 6 + 2 * 6 + 1
+    # 19 objetos por día, con cualquier número de θ.
+    assert len(names) == 6 + 6 + 6 + 1
     assert "index.json" in names and "index.json.tmp" not in names
-    assert "dir-128-0.05000000.u8" in names
+    assert "dir-128.u8" in names and "dir-128-0.05000000.u8" not in names
+
+
+def test_dir_file_with_no_thetas_is_empty_but_present(tmp_path):
+    reduction = reduce_day([], DAY, SCALE)
+    index = write_day(
+        tmp_path,
+        **KEY,
+        day=DAY,
+        reduction=reduction,
+        thetas=[],
+        input_hash="x",
+        image_version="v",
+    )
+    directory = day_dir(tmp_path, **KEY, day=DAY)
+    assert (Path(directory) / index["dir"]["128"]).stat().st_size == 0
 
 
 def test_content_hash_is_stable_and_follows_the_arrays(tmp_path):
@@ -140,7 +185,7 @@ def test_index_is_written_last(tmp_path, monkeypatch):
 
 
 def test_wrong_tile_length_is_rejected(tmp_path):
-    reduction = reduce_day([], DAY)
+    reduction = reduce_day([], DAY, SCALE)
     bad = ThetaTiles("0.00010000", 0, None, {w: np.zeros(3, "u1") for w in LEVELS})
     with pytest.raises(ValueError, match="se esperaban"):
         write_day(
