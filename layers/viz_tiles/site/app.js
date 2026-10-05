@@ -341,6 +341,7 @@
         ctx.fillStyle = "rgb(" + rgb + ")";
         ctx.fillRect(x0, st.sign > 0 ? b.top : b.top + b.height - band, wpx, band);
         if (wpx > 16 * dpr) {
+          ctx.fillStyle = C.text; // el glifo va en el color del texto (≥ 7:1); el tono lo da el relleno
           ctx.textAlign = "left";
           ctx.fillText(
             st.sign > 0 ? "▲" : "▼",
