@@ -11,7 +11,6 @@ from viz_tiles.contract import (
     PRICE_SCALE_BY_ASSET,
     STATES,
     TILE_FILES,
-    tile_name,
 )
 
 DOC = Path(__file__).parents[3] / "docs" / "data-contracts.md"
@@ -43,14 +42,18 @@ def test_levels_doc_matches_code():
     def duration(w: int) -> str:
         return format(Decimal(DAY_S) / w, "f").replace(".", ",")
 
-    sizes = {f.kind: f for f in TILE_FILES}
+    files = {f.kind: f for f in TILE_FILES}
+
+    def size(kind: str, w: int) -> str:
+        return str(files[kind].per_column * np.dtype(files[kind].dtype).itemsize * w)
+
     expected = [
         (
             str(w),
             duration(w),
-            str(sizes["price"].per_column * 4 * w),
-            str(sizes["volume"].per_column * 4 * w),
-            str(sizes["dir"].per_column * w),
+            size("price", w),
+            size("volume", w),
+            size("dir", w),
         )
         for w in LEVELS
     ]
@@ -77,19 +80,10 @@ def test_latest_fields_are_listed_in_the_doc():
 
 def test_file_names_in_the_doc_tree_match_code():
     tree = _section().split("### Disposición")[1].split("### Archivos")[0]
-    for name in (
-        tile_name("price", 0).replace("0", "<w>"),
-        tile_name("volume", 0).replace("0", "<w>"),
-        "index.json",
-        "latest.json",
-    ):
-        assert name in tree
-    assert "dir-<w>-<theta>" not in tree
-
-
-def test_dir_file_is_one_per_level_in_the_doc_tree():
-    tree = _section().split("### Disposición")[1].split("### Archivos")[0]
-    assert tile_name("dir", 0).replace("0", "<w>") in tree
+    for f in TILE_FILES:
+        assert f.template.replace("{w}", "<w>") in tree
+    assert "index.json" in tree
+    assert "latest.json" in tree
 
 
 def test_price_scale_doc_matches_code():
