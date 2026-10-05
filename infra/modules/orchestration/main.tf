@@ -46,10 +46,11 @@ resource "google_cloud_run_v2_job_iam_member" "workflow_viewer" {
 }
 
 # Lo mismo para cada eslabón que el workflow espera (el último de la cadena no:
-# nadie lee su ejecución). Un eslabón que ya es el job de un modo de esta capa
-# tiene su viewer arriba; setsubtract evita el binding duplicado.
+# nadie lee su ejecución). Un eslabón que ya es el job de un modo encadenado de
+# esta capa tiene su viewer arriba; setsubtract evita el binding duplicado. El
+# job de un modo sin cadena no lo tiene, así que ese sí se declara aquí.
 resource "google_cloud_run_v2_job_iam_member" "workflow_chain_viewer" {
-  for_each = setsubtract(local.waited_links, values(local.job_names))
+  for_each = setsubtract(local.waited_links, [for m in keys(local.next_jobs) : local.job_names[m]])
 
   project  = var.project_id
   location = var.region
