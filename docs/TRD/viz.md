@@ -335,9 +335,9 @@ Todos los binarios se escriben con `Content-Type: application/octet-stream` y `C
 |Tiempo|`0`|`t[i]`: segundos desde `day_start_us`, `float32`.|
 |Precio|`16w`|`p[i]`: precio en la unidad de la cotización (USDT), `float32`.|
 
-Los puntos `i = 4·col + k` (`k = 0..3`) son los cuatro puntos M4 de la columna `col`, **en orden de tiempo**: el primer tick, el mínimo, el máximo y el último, con el mínimo y el máximo ordenados por su posición en la serie. Si dos puntos coinciden (p. ej. el primero es el mínimo), se repiten: el paso es fijo, 4 puntos por columna. Ante empates de precio dentro de la columna se toma el tick con menor `agg_trade_id`. Una columna **sin ticks** lleva `NaN` en sus cuatro `t` y sus cuatro `p`.
+Los puntos `i = 4·col + k` (`k = 0..3`) son los cuatro puntos M4 de la columna `col`, **en orden de tiempo**: el primer tick, el mínimo, el máximo y el último, con el mínimo y el máximo ordenados por su posición en la serie. Si dos puntos coinciden (p. ej. el primero es el mínimo), se repiten: el paso es fijo, 4 puntos por columna. Ante empates de precio dentro de la columna se toma el tick con menor `agg_trade_id`. Una columna **sin ticks** lleva en sus cuatro `t` el **inicio de la columna** (`col × 86 400 / w` segundos, exacto en `float32` para todo `w ≤ 4096`) y `NaN` solo en sus cuatro `p`: así `t` es finito y no decreciente en todo el tile, que es lo que exige un eje X de uPlot y su búsqueda binaria del cursor.
 
-*Por qué dos bloques y no pares intercalados:* el tiempo y el precio de cada punto quedan alineados por índice (`t[i]`, `p[i]`) y el navegador los usa tal cual con `new Float32Array(buffer, 0, 4w)` y `new Float32Array(buffer, 16w, 4w)`, sin recorrer los datos para separarlos (prioridad 1).
+*Por qué dos bloques y no pares intercalados:* el tiempo y el precio de cada punto quedan alineados por índice (`t[i]`, `p[i]`) y el navegador mapea cada bloque con `new Float32Array(buffer, 0, 4w)` y `new Float32Array(buffer, 16w, 4w)`, sin recorrer los datos para separarlos (prioridad 1). El hueco de una columna vacía lo dibuja la vista: uPlot marca los huecos con `null` en Y y no con `NaN` (canvas ignora `lineTo(NaN)` y uniría los puntos vecinos), así que al cargar la vista copia `p` a un arreglo de Y y pone `null` donde `p[i]` es `NaN`. Es una pasada sobre `4w` ≤ 16 384 valores, microsegundos frente a los 100 ms del principio 8; `t` se usa sin tocar.
 
 *Precisión:* el precio se convierte una sola vez, al escribir, del entero exacto de L1 (`price_int / 10⁸`, vía `f64`) a `float32` con redondeo al más cercano. Hasta 131 072 USDT la resolución es 0,0078 USDT. El tiempo relativo llega a 86 400 s: la resolución es 7,8 ms al final del día (error máximo 3,9 ms), suficiente para columnas de 21 s o más.
 
@@ -661,7 +661,7 @@ No hay card de logging: es esta sección y el criterio 8 de §13 ("emite hallazg
 ## 13. Criterios de aceptación
 
 1. Un día de tiles es **un conjunto de 313 objetos** con la disposición de §7.2, y su `index.json` es el último escrito. Matar el job entre dos tiles deja el día sin índice y la corrida siguiente lo completa.
-2. `price-<w>.f32` cumple M4: sobre un día sintético y uno real, cada columna conserva el primero, el último, el mínimo y el máximo de sus ticks, en orden de tiempo, con NaN en columnas vacías. Los niveles gruesos coinciden **exactamente** con M4 calculado directo sobre los ticks.
+2. `price-<w>.f32` cumple M4: sobre un día sintético y uno real, cada columna conserva el primero, el último, el mínimo y el máximo de sus ticks, en orden de tiempo, con `NaN` en `p` y el inicio de la columna en `t` en las columnas vacías. Los niveles gruesos coinciden **exactamente** con M4 calculado directo sobre los ticks.
 3. `volume-<w>.f32` suma `quantity` por columna y la suma de las columnas de un nivel es igual en los seis niveles.
 4. `dir-<w>-<theta>.u8` sigue §7.5: sobre un día sintético con eventos conocidos, cada columna toma el estado del último tick; la cola de un mes con evento pendiente sale provisional; al cerrarse el evento en `M+1` queda definitiva; y si el evento sigue pendiente más de un mes (cadena de carry-over de dos o más meses), la cola sigue provisional hasta `M+k` y entonces la corrida sin argumentos la corrige sin intervención del humano.
 5. Re-ejecutar un día con la misma entrada **salta** sin escribir; con un archivo de entrada distinto, lo regenera; `--force` regenera siempre. Los archivos de tile salen **idénticos byte a byte** entre dos corridas con la misma entrada.
@@ -685,6 +685,7 @@ No hay card de logging: es esta sección y el criterio 8 de §13 ("emite hallazg
 |4 |**`Content-Encoding: gzip`** para los tiles.|**No hace falta** para entrar en el cupo ni en 1 MB (§7.3). Queda como palanca si el volumen real supera la aritmética.|Hija 5, con el volumen real.|
 |5 |**Servicio del HTML desde `storage.cloud.google.com`** con sesión de Google (RVZ-06).|**Abierto**, hasta el primer despliegue.|Hija 4.|
 |6 |**Multi-activo**: `latest.json` está en la raíz de `tiles/` (§7.7).|Diferido hasta que haya un segundo activo.|Futuro.|
+|7 |**Hueco de una columna vacía en uPlot** (§7.3): que la copia de `p` con `null` en Y y `t` finito corte la línea y deje estable el cursor compartido.|**Abierto.** Se asume por la documentación de uPlot; sin verificar.|Hija 4, antes de congelar `tiles_version` 1.0.0.|
 
 -----
 
