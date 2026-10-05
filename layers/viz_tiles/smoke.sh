@@ -2,7 +2,8 @@
 # Prueba de humo de la imagen: arma un lago local con el día real 2017-08-18
 # (4 735 ticks de shared/dc_core/tests/fixtures/ticks.csv y sus eventos de
 # events_v0.csv para cinco θ), corre --mode tiles sobre ese día y verifica el
-# índice, los arreglos y el Parquet de hallazgos. Uso: smoke.sh <imagen>
+# índice, los arreglos, la página index.html y el Parquet de hallazgos; luego
+# corre --mode render, que no lee L1 ni L2. Uso: smoke.sh <imagen>
 #
 # La entrada no viene de L1 ni de L2: los CSV se convierten con el pyarrow de la
 # propia imagen (el mismo que corre en producción), sin red ni otra imagen.
@@ -191,7 +192,11 @@ grep -q '"check_type": "tiles_summary"' "$data/run.log" \
 
 # El índice, los 19 objetos con su tamaño y el Parquet de hallazgos.
 docker run --rm -v "$data:/data" --entrypoint python "$image" - <<'PY'
+import base64
+import gzip
+import hashlib
 import json
+import re
 from pathlib import Path
 
 import pyarrow.parquet as pq
@@ -199,17 +204,35 @@ import pyarrow.parquet as pq
 day = Path("/data/tiles/provider=binance/market=spot/asset=BTCUSDT/day=2017-08-18")
 index = json.loads((day / "index.json").read_text())
 assert index["ticks"] == 4735, index["ticks"]
-assert index["tiles_version"] == "1.0.0", index["tiles_version"]
+assert index["tiles_version"] == "1.1.0", index["tiles_version"]
+assert index["page"] == "index.html", index["page"]
 assert len(index["thetas"]) == 5 and index["missing_thetas"] == [], index["thetas"]
 assert all(t["provisional_from_s"] is not None for t in index["thetas"]), "cola provisional"
 files = sorted(p.name for p in day.iterdir())
-assert len(files) == 19, files
+assert len(files) == 20, files  # 18 arreglos, index.json e index.html
 for w in index["levels"]:
     assert (day / f"price-{w}.i32").stat().st_size == 32 * w
     assert (day / f"volume-{w}.f32").stat().st_size == 4 * w
     assert (day / f"dir-{w}.u8").stat().st_size == 5 * w
 latest = json.loads(Path("/data/tiles/latest.json").read_text())
 assert latest["day"] == "2017-08-18", latest
+
+# La página: un solo documento con los 18 arreglos dentro, que reproducen el
+# content_hash del índice, y su copia latest.html.
+html = (day / "index.html").read_text()
+assert (Path("/data/tiles/latest.html")).read_text() == html
+assert "@@" not in html and 'name="viz-render"' in html
+match = re.search(r"window\.VIZ_DATA=(\{.*\});\n</script>", html, re.S)
+data = json.loads(match.group(1))
+assert data["index"] == index and data["tiles_version"] == index["tiles_version"]
+assert len(data["files"]) == 18, len(data["files"])
+digest = hashlib.sha256()
+for name in sorted(data["files"]):
+    raw = base64.b64decode(data["files"][name])
+    assert raw == (day / name).read_bytes(), name
+    digest.update(name.encode() + b"\0" + raw)
+assert digest.hexdigest() == index["content_hash"], "content_hash de la página"
+print("página OK:", len(html), "B sin comprimir,", len(gzip.compress(html.encode())), "B en gzip")
 
 rows = [
     row
@@ -232,4 +255,19 @@ grep -q 'al día' "$data/second.log" || { echo "::error::la segunda corrida deb�
 run_tiles --force | tee "$data/forced.log"
 [ "$(grep -o -m1 '"content_hash": "[0-9a-f]*"' "$data/forced.log")" = "$first" ] \
   || { echo "::error::--force cambió el content_hash"; exit 1; }
+
+# Modo render: regenera la página desde los tiles, sin L1 ni L2. Con las mismas
+# entradas la página sale idéntica; sin --force, el día está al día y se salta.
+run_render() {
+  docker run --rm -v "$data:/data" \
+    -e VIZ_TILES_ROOT=/data/tiles \
+    -e VIZ_DQ_ROOT=/data/dq \
+    "$image" --mode render --day 2017-08-18 "$@" 2>&1
+}
+page="$data/tiles/provider=binance/market=spot/asset=BTCUSDT/day=2017-08-18/index.html"
+before="$(sha256sum "$page")"
+run_render | tee "$data/render.log"
+grep -q 'al día' "$data/render.log" || { echo "::error::render debía saltar la página al día"; exit 1; }
+run_render --force | tee "$data/render-forced.log"
+[ "$(sha256sum "$page")" = "$before" ] || { echo "::error::render --force cambió la página"; exit 1; }
 echo "humo OK: $first"

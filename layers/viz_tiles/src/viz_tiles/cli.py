@@ -1,4 +1,4 @@
-"""Punto de entrada de la imagen: `python -m viz_tiles --mode tiles ...` (TRD-viz §8.2)."""
+"""Punto de entrada de la imagen: `python -m viz_tiles --mode tiles|render ...` (TRD-viz §8)."""
 
 import argparse
 import logging
@@ -16,12 +16,17 @@ from viz_tiles.context import RunContext
 from viz_tiles.contract import price_scale
 from viz_tiles.lake import EventsIndex, Month, month_of, ordinal
 from viz_tiles.memory import tune_allocators
+from viz_tiles.pages import render_month
 from viz_tiles.pipeline import days_of_month, process_month
 from viz_tiles.write import SeriesMismatch, find_index
 
-MODES = ("tiles",)
+MODES = ("tiles", "render")
 EXIT_USAGE = 2
-ROOT_VARS = ("VIZ_LANDING_ROOT", "VIZ_EVENTS_ROOT", "VIZ_TILES_ROOT", "VIZ_DQ_ROOT")
+# Las raíces que necesita cada modo: `render` no lee L1 ni L2 (TRD-viz §11).
+ROOT_VARS = {
+    "tiles": ("VIZ_LANDING_ROOT", "VIZ_EVENTS_ROOT", "VIZ_TILES_ROOT", "VIZ_DQ_ROOT"),
+    "render": ("VIZ_TILES_ROOT", "VIZ_DQ_ROOT"),
+}
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +86,7 @@ def _image_version(env: Mapping[str, str]) -> str:
 
 
 def _context(args: argparse.Namespace, env: Mapping[str, str]) -> RunContext:
-    missing = [name for name in ROOT_VARS if not env.get(name)]
+    missing = [name for name in ROOT_VARS[args.mode] if not env.get(name)]
     if missing:
         raise UsageError(f"falta la variable de entorno {', '.join(missing)}")
     try:
@@ -91,10 +96,11 @@ def _context(args: argparse.Namespace, env: Mapping[str, str]) -> RunContext:
     return RunContext(
         run_id=str(uuid.uuid4()),
         image_version=_image_version(env),
-        landing_root=env["VIZ_LANDING_ROOT"],
-        events_root=env["VIZ_EVENTS_ROOT"],
+        landing_root=env.get("VIZ_LANDING_ROOT") if args.mode == "tiles" else None,
+        events_root=env.get("VIZ_EVENTS_ROOT") if args.mode == "tiles" else None,
         tiles_root=env["VIZ_TILES_ROOT"],
         dq_root=env["VIZ_DQ_ROOT"],
+        mode=args.mode,
         asset=args.asset,
         force=args.force,
     )
@@ -133,7 +139,13 @@ def review_months(ctx: RunContext, month: Month) -> list[tuple[Month, list[date]
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="viz_tiles")
-    parser.add_argument("--mode", required=True, choices=MODES)
+    parser.add_argument(
+        "--mode",
+        required=True,
+        choices=MODES,
+        help="tiles: reduce L1 y L2 a tiles y escribe la página; render: vuelve a "
+        "armar la página desde los tiles ya escritos, sin leer L1 ni L2",
+    )
     parser.add_argument(
         "--day",
         metavar="YYYY-MM-DD",
@@ -144,8 +156,8 @@ def build_parser() -> argparse.ArgumentParser:
         dest="from_",
         metavar="DESDE",
         help="primer mes (YYYY-MM): todos los días de cada mes del rango. Sin "
-        "--day ni --from, el mes anterior al actual (UTC) más la revisión de los "
-        "meses con cola provisional",
+        "--day ni --from, el mes anterior al actual (UTC); en modo tiles, además, "
+        "la revisión de los meses con cola provisional",
     )
     parser.add_argument(
         "--to", metavar="HASTA", help="último mes del rango; por defecto, --from"
@@ -153,7 +165,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--force",
         action="store_true",
-        help="ignora el input_hash y regenera lo seleccionado",
+        help="regenera lo seleccionado aunque el input_hash (tiles) o la huella "
+        "de la plantilla (render) no haya cambiado",
     )
     parser.add_argument("--asset", default="BTCUSDT")
     return parser
@@ -173,6 +186,8 @@ def _plan(
     if args.from_ is not None:
         return [(m, None) for m in resolve_range(args.from_, args.to)]
     month = previous_month(_today())
+    if ctx.mode == "render":  # sin cola provisional que revisar: solo las páginas
+        return [(month, None)]
     return [*review_months(ctx, month), (month, None)]
 
 
@@ -194,6 +209,10 @@ def main(
         return EXIT_USAGE
 
     tune_allocators()
+    if ctx.mode == "render":
+        # Un rango sigue con el mes siguiente aunque uno falle.
+        results = [render_month(ctx, month, days) for month, days in plan]
+        return 0 if all(results) else 1
     lake = EventsIndex.list(ctx.events_root, ctx.provider, ctx.market, ctx.asset)
     ok = True
     for month, days in plan:

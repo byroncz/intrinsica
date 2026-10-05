@@ -8,8 +8,11 @@ de los archivos, en [`docs/data-contracts.md`](../../docs/data-contracts.md)
 
 La imagen corre `python -m viz_tiles --mode tiles`: lee un mes de L1 y los
 eventos de L2 (en disco o en `gs://`), construye los tiles de cada día pedido y
-los escribe. La página HTML por día se agrega sobre este modo en una card
-posterior.
+los escribe junto a una página `index.html` autocontenida del día: la plantilla de
+[`site/`](site/), uPlot y los 18 arreglos en base64 dentro de un solo documento,
+sin peticiones de red (el porqué, en [TRD-viz §6.5](../../docs/TRD/viz.md#65-adr-vz-05--entrega-solo-bucket-sin-servidor)).
+`--mode render` vuelve a armar esas páginas desde los tiles ya escritos, sin leer
+L1 ni L2, cuando cambia la plantilla.
 
 ## Uso en local
 
@@ -24,18 +27,22 @@ uv run python -m viz_tiles --mode tiles --from 2017-08        # un mes
 uv run python -m viz_tiles --mode tiles --from 2017-01 --to 2017-08
 uv run python -m viz_tiles --mode tiles                       # mes anterior
 uv run python -m viz_tiles --mode tiles --day 2017-08-18 --force
+
+uv run python -m viz_tiles --mode render --day 2017-08-18     # solo la página
+uv run python -m viz_tiles --mode render --from 2017-01 --to 2017-08
 ```
 
-Las cuatro variables son obligatorias (raíz local o `gs://`); si falta una, o un
-argumento es inválido, el proceso sale con código 2. `--mode` solo acepta
-`tiles`.
+En modo `tiles` las cuatro variables son obligatorias (raíz local o `gs://`); en
+modo `render` bastan `VIZ_TILES_ROOT` y `VIZ_DQ_ROOT`. Si falta una, o un
+argumento es inválido, el proceso sale con código 2. `--mode` acepta `tiles` y
+`render`.
 
 | Argumento | Efecto |
 |---|---|
 | `--day YYYY-MM-DD` | Un solo día. No se combina con `--from` ni `--to`. |
 | `--from YYYY-MM` / `--to YYYY-MM` | Todos los días de cada mes del rango; `--to` es `--from` por defecto. |
 | (ninguno) | El mes anterior al actual (UTC) y la revisión hacia atrás de los meses con cola provisional (abajo). |
-| `--force` | Regenera lo seleccionado aunque el `input_hash` no haya cambiado. |
+| `--force` | Regenera lo seleccionado aunque el `input_hash` (tiles) o la huella de la plantilla (render) no haya cambiado. |
 | `--asset` | Activo; por defecto `BTCUSDT`. Debe tener `price_scale` en `contract.py`. |
 
 Un mes completo pide los días que L1 cubre, del primer al último tick del
@@ -78,9 +85,53 @@ los meses previos: desde `N−1`, si el `index.json` del último día trae algú
 provisionales y se pasa al mes anterior. Se detiene en el primer mes cuyo último día
 es definitivo para todos los θ. La idempotencia salta lo que no cambió.
 
+## La página del día
+
+Un día trae `index.html` junto a sus tiles, y el último día se copia también a
+`latest.html` en la raíz (`tiles/latest.html`). Es un solo documento: la plantilla
+(`site/index.html`, `app.js`, `style.css`), uPlot y los arreglos del día, en
+base64 bajo su nombre, en `window.VIZ_DATA`. Se abre igual desde disco (`file://`),
+desde `python -m http.server` o desde `storage.cloud.google.com`; no hace
+peticiones de red después de cargar. El día se descodifica en el navegador sin
+más cálculo que `t / 1000` y `p / price_scale`; las métricas (bytes
+decodificados, primer trazo, cambio de θ) van a la consola.
+
+- **En un bucket** la página se guarda comprimida (`Content-Encoding: gzip`,
+  `Content-Type: text/html; charset=utf-8`, `Cache-Control: no-cache`). **En disco
+  local** va sin comprimir, para que abra por `file://`.
+- El `index.json` la lista en `page`, y se escribe después de ella: un índice
+  implica su página.
+- Los demás objetos llevan sus metadatos al escribirse: binarios
+  `application/octet-stream` con `Cache-Control: private, max-age=31536000,
+  immutable`; `index.json` y `latest.json`, `application/json` con `no-cache`.
+- La página guarda en un `<meta name="viz-render">` la `tiles_version` y el
+  SHA-256 de la plantilla. `--mode render` salta los días cuya página ya los trae
+  iguales y regenera el resto desde los arreglos del directorio; si no coinciden
+  con el `content_hash` del índice, no escribe nada y deja `input_missing`.
+
+La plantilla va en la imagen (`VIZ_TEMPLATE_DIR=/app/site`); en el repo se lee
+de `layers/viz_tiles/site/`.
+
+### uPlot
+
+`site/vendor/uPlot.iife.min.js` y `uPlot.min.css` son uPlot 1.6.32, de
+`github.com/leeoniya/uPlot` (`dist/` de la etiqueta `1.6.32`), con licencia MIT
+(© Leon Sorokin; el texto está en `site/vendor/LICENSE`). Son archivos de texto.
+Para subir la versión se reemplazan los dos archivos y su `LICENSE`, se corrige
+esta sección y la prueba `test_uplot_is_pinned_and_licensed`, y se sube `VERSION`:
+la huella de la plantilla cambia sola y `--mode render` rehace las páginas.
+
+### Vista
+
+Panel de precio (serie M4) con las regiones de los eventos DC del θ activo, panel
+de volumen en barras con eje X y cursor compartidos, franja de estado fija (día,
+θ, última actualización, modo normal o degradado) y tooltip por cubeta. Los
+principios y la Evaluación ergonómica que cada cambio de vista debe traer están en
+[TRD-viz §6.7](../../docs/TRD/viz.md#67-adr-vz-07--nueve-principios-de-ergonomía-y-evaluación-ergonómica-obligatoria).
+
 ## Hallazgos
 
-Con `layer = viz`, `mode = tiles`, `stage = canonical` y el día en `details.day`
+Con `layer = viz`, `mode = tiles` o `render`, `stage = canonical` y el día en `details.day`
 ([TRD-viz §9.3](../../docs/TRD/viz.md#93-tipos-de-chequeo-check_type)). Se emiten
 en una llamada por mes procesado: una línea JSON por hallazgo en el log (la que
 resume `run-job.yml`) y las filas en `VIZ_DQ_ROOT`.
@@ -88,9 +139,10 @@ resume `run-job.yml`) y las filas en `VIZ_DQ_ROOT`.
 | `check_type` | `severity` | Cuándo |
 |---|---|---|
 | `tiles_summary` | info | Uno por día, construido o saltado: `skipped`, `bytes`, `objects`, `levels`, `input_hash`, `content_hash`, `thetas`, `provisional_thetas`, `provisional_tail` y `missing_thetas`. |
-| `input_missing` | error | Sin `consolidated.parquet` (`what = l1`), sin `events.parquet` en el mes (`events`), un θ sin `events.parquet` o `carry_over.parquet` o con la cadena rota (`events`, `carry_over`, con `theta`), o un día sin ticks (`ticks`). Los de mes llevan el primer día pedido en `details.day` y `days`. |
+| `input_missing` | error | Sin `consolidated.parquet` (`what = l1`), sin `events.parquet` en el mes (`events`), un θ sin `events.parquet` o `carry_over.parquet` o con la cadena rota (`events`, `carry_over`, con `theta`), o un día sin ticks (`ticks`). En modo `render`, un día sin `index.json` o con arreglos que faltan o no coinciden con su `content_hash` (`what = tiles`). Los de mes llevan el primer día pedido en `details.day` y `days`. |
 | `price_rounded` | warning | Ticks fuera del tick del activo: se redondean y el día se escribe. |
 | `price_unrepresentable` | error | El precio máximo no cabe en `int32`: el día no se escribe. |
+| `render_summary` | info | Modo `render`: uno por día, regenerado o al día. `skipped`, `tiles_version`, `template_hash`, `content_hash` y `page_bytes`. |
 
 Cada día termina con una línea sonda: `sonda: unit=<día> ticks=… wall_s=…
 rss_mib=…`.
@@ -110,7 +162,7 @@ docker build -f layers/viz_tiles/Dockerfile -t viz_tiles .
 layers/viz_tiles/smoke.sh viz_tiles     # el día real 2017-08-18 de los fixtures de dc_core
 ```
 
-Sin Rust: `viz_tiles` no importa `dc_pyo3` ni las capas L1 y L2; lee sus Parquet por
+La imagen trae la plantilla en `/app/site`. Sin Rust: `viz_tiles` no importa `dc_pyo3` ni las capas L1 y L2; lee sus Parquet por
 nombre de columna.
 
 ## API del paquete
@@ -146,8 +198,10 @@ write_day(
   no O(ticks). Los niveles gruesos se derivan del más fino (M4 es componible).
 - `direction_tile` resuelve el estado con `searchsorted` sobre los ids de los
   eventos, sin recorrer ticks. Compara por `agg_trade_id` (TRD-viz §7.5).
-- `write_day` escribe los arreglos y, al final, `index.json` (marca de
-  commit); `latest.json` solo avanza. Se lee con `numpy.fromfile`.
+- `write_day` escribe los arreglos, la página y, al final, `index.json` (marca de
+  commit); `latest.json` y `latest.html` solo avanzan. Se lee con `numpy.fromfile`.
+- `render_day(index, arrays)` arma el `index.html` de un día: `arrays` entrega
+  `(nombre, bytes)` en orden de nombre y cada uno se codifica y se suelta.
 
 ## Pruebas
 

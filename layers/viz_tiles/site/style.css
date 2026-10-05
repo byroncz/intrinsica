@@ -1,0 +1,91 @@
+/* Cabina oscura (principio 1): fondo de bajo brillo; solo lo anómalo usa ámbar.
+   Contraste del texto sobre el fondo ≥ 7:1 y tamaño mínimo 12 px (principio 7). */
+:root {
+  --bg: #0b0f14;
+  --panel: #10161d;
+  --text: #d7dee6;
+  --muted: #9aa7b4;
+  --line: #2b3641;
+  --amber: #e3b341;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  height: 100%;
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 13px/1.4 var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+
+body {
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  overflow: hidden;
+}
+
+/* Franja de estado fija (principio 3): siempre visible, nunca se desplaza. */
+#status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 20px;
+  padding: 6px 12px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+}
+#status .label { color: var(--muted); }
+#status b { font-weight: 600; }
+#status select {
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  font: inherit;
+  padding: 1px 4px;
+  max-width: 18em;
+}
+#status select:focus-visible { outline: 2px solid var(--text); outline-offset: 1px; }
+#s-mode-box.degraded b { color: var(--amber); }
+#s-reasons { color: var(--amber); }
+
+#panels {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+}
+#price, #volume { min-width: 0; }
+/* uPlot es inline-block: sin esto queda un hueco bajo cada panel. */
+#price .uplot, #volume .uplot { display: block; }
+
+#hint {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 20px;
+  padding: 4px 12px;
+  color: var(--muted);
+  background: var(--panel);
+  border-top: 1px solid var(--line);
+}
+
+#tip {
+  position: fixed;
+  z-index: 10;
+  pointer-events: none;
+  padding: 6px 8px;
+  background: var(--panel);
+  border: 1px solid var(--muted);
+  border-radius: 3px;
+  white-space: pre;
+}
+#tip[hidden] { display: none; }
+
+.nojs { padding: 12px; color: var(--amber); }
+
+/* uPlot trae su propio tema; aquí se fija el color del texto de sus ejes. */
+.uplot { font-family: var(--mono); }
+.u-select { background: rgba(215, 222, 230, 0.12); }

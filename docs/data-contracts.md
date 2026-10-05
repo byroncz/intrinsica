@@ -257,7 +257,7 @@ desvía del código.
 | `finding_id` | string (UUID) | no | Identidad del hallazgo; se repite en todos los eventos del mismo hallazgo |
 | `detected_at` | int64 | no | Marca del evento, en microsegundos desde la época (UTC) |
 | `layer` | string | no | Capa que emite el hallazgo, p. ej. `l1` |
-| `mode` | string | no | Modo de ejecución: `backfill`, `daily`, `monthly-close`, `seam-check` o `monthly` (L2, [TRD-L2 §8.3](TRD/l2.md#83-modo-monthly-incremental)); `tiles` o `export` (viz, [TRD-viz §8](TRD/viz.md#8-pipeline-interno-y-modos-de-ejecución)) |
+| `mode` | string | no | Modo de ejecución: `backfill`, `daily`, `monthly-close`, `seam-check` o `monthly` (L2, [TRD-L2 §8.3](TRD/l2.md#83-modo-monthly-incremental)); `tiles` o `render` (viz, [TRD-viz §8](TRD/viz.md#8-pipeline-interno-y-modos-de-ejecución)) |
 | `check_type` | string | no | Chequeo que lo generó (ver TRD-L1 §9) |
 | `severity` | string | no | `info`, `warning` o `error` |
 | `stage` | string | no | `provisional` o `canonical` |
@@ -551,7 +551,8 @@ con la serie reducida a M4, más un índice JSON. Fuente de diseño:
 [`contract.py`](../layers/viz_tiles/src/viz_tiles/contract.py) (constantes),
 [`reduce.py`](../layers/viz_tiles/src/viz_tiles/reduce.py) (precio y volumen),
 [`direction.py`](../layers/viz_tiles/src/viz_tiles/direction.py) (dirección por θ)
-y [`write.py`](../layers/viz_tiles/src/viz_tiles/write.py) (escritura). Una
+[`write.py`](../layers/viz_tiles/src/viz_tiles/write.py) (escritura) y
+[`render.py`](../layers/viz_tiles/src/viz_tiles/render.py) (la página del día). Una
 prueba (`layers/viz_tiles/tests/test_tiles_contract_doc.py`) rompe el CI si
 las tablas de esta sección se desvían de esas constantes.
 
@@ -565,14 +566,33 @@ binarios son sin cabecera y little-endian.
 ├── price-<w>.i32
 ├── volume-<w>.f32
 ├── dir-<w>.u8              # uno por nivel: un bloque de w bytes por θ
+├── index.html              # la página del día: plantilla, uPlot y los 18 arreglos
 └── index.json              # se escribe al final: marca de commit
 <raíz>/latest.json          # último día con index.json
+<raíz>/latest.html          # copia de la página de ese día
 ```
 
-Un día son 19 objetos (6 + 6 + 6 + 1), con cualquier número de θ. El día es
-UTC. `write_day` borra el `index.json` previo, escribe los arreglos y deja el
-índice al final: un día sin `index.json` no existe para el lector.
-`latest.json` solo avanza; un día anterior regenerado no lo retrocede.
+Un día son 20 objetos (6 + 6 + 6 + 2), con cualquier número de θ. El día es
+UTC. `write_day` borra el `index.json` previo, escribe los arreglos y la página y
+deja el índice al final: un día sin `index.json` no existe para el lector.
+`latest.json` y `latest.html` solo avanzan; un día anterior regenerado no los
+retrocede.
+
+Metadatos de los objetos: los binarios, `application/octet-stream` con
+`Cache-Control: private, max-age=31536000, immutable`; `index.json` y
+`latest.json`, `application/json` con `no-cache`; las páginas, `text/html;
+charset=utf-8` con `no-cache` y, en un bucket, `Content-Encoding: gzip` (en
+disco local van sin comprimir, para abrir por `file://`).
+
+### Página del día
+
+`index.html` es un solo documento sin peticiones de red: lleva dentro la
+plantilla (`layers/viz_tiles/site/`), uPlot y los 18 arreglos en base64 bajo su
+nombre, en `window.VIZ_DATA = {tiles_version, generated_at, files, index}`.
+`files` mapea el nombre de cada arreglo a su base64; `index` es el `index.json`
+del día. Un `<meta name="viz-render" content="tiles_version=…;template=…">` al
+principio guarda la versión de los tiles y el SHA-256 de la plantilla con que
+se armó: el modo `render` lo lee para saltar lo que ya está al día.
 
 ### Archivos
 
@@ -672,6 +692,7 @@ prueba del contrato compara esta tabla con `INDEX_FIELDS`.
 | `price` | object | Nombre del archivo `price` por nivel: `{"128": "price-128.i32", …}` |
 | `volume` | object | Nombre del archivo `volume` por nivel |
 | `dir` | object | Nombre del archivo `dir` por nivel: `{"128": "dir-128.u8", …}` |
+| `page` | string | Nombre de la página autocontenida del día, `index.html` |
 | `thetas` | array | Un objeto por θ con bloque en `dir-<w>.u8`, en el orden de los bloques: `theta` (texto de ancho fijo de la partición de L2, `0.00010000`, de menor a mayor), `events` (filas de eventos que tocan el día, con la cola) y `provisional_from_s` (segundos desde `t0` desde los que el estado es provisional, o `null`) |
 | `missing_thetas` | array | θ del catálogo sin eventos completos: no tienen bloque en `dir-<w>.u8` |
 | `input_hash` | string | Huella de los archivos de entrada; la calcula quien llama a `write_day` |
