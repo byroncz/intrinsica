@@ -698,6 +698,7 @@ No hay card de logging: es esta sección y el criterio 8 de §13 ("emite hallazg
 |7 |**Hueco de una columna vacía en uPlot** (§7.3): que el arreglo de Y con `null` (armado en la misma pasada de carga que convierte X a segundos y suelta el buffer) corte la línea y deje estable el cursor compartido.|**Abierto.** Se asume por la documentación de uPlot; sin verificar.|Hija 4, antes de congelar `tiles_version` 1.0.0.|
 |8 |**Resolución más fina que 21,09 s** (ADR-VZ-08, RVZ-03): un nivel más fino (cada duplicación suma ~0,70 MB por día, §10.1) o un tile por rango horario.|Diferido. Solo se abre si la vista de un día no alcanza para juzgar un θ pequeño.|El humano, con la evidencia de uso de la hija 7.|
 |9 |**Comparar por archivo antes de reescribir** tras agregar un θ en L2 (RVZ-09): evita regenerar precio y volumen, que no cambian (§7.8).|Diferido. Hoy se acepta repetir el backfill del rango (~0,3 USD de operaciones más su cómputo, §10.3).|Futuro, si el costo molesta.|
+|10|**Días que `int32` no representa** (§7.3, `price_unrepresentable`): un solo trade fuera del tick en un día de precio alto basta para perder el día entero. Por ejemplo, un trade de BTCUSDT con 5 decimales en un día por encima de 21 474 USDT fuerza `price_scale = 10⁵` y desborda `int32`.|**Abierto.** Sin medir. Se mide sobre L1 cuántos días necesitan `price_scale > 100` y cuántos saldrían `price_unrepresentable`. Si sale alguno, se evalúa una salida (p. ej. un tile de precio `int64` para ese día) antes de congelar `tiles_version` 1.0.0.|Hija 2 o hija 5 (medición sobre L1).|
 
 -----
 
