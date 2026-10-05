@@ -24,6 +24,7 @@ output "buckets" {
     "dq-findings" = google_storage_bucket.dq_findings.name
     "manifest"    = google_storage_bucket.manifest.name
     "ops"         = google_storage_bucket.ops.name
+    "viz"         = google_storage_bucket.viz.name
   }
 }
 
