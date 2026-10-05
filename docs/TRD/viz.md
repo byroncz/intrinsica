@@ -192,7 +192,7 @@ viz hereda y no contradice:
 
 |Campo|Contenido|
 |---|---|
-|**Decisión**|El HTML, uPlot y los tiles viven en un bucket privado declarado en el stack `data`; el stack `viz` declara solo el job. Se abre por `storage.cloud.google.com/<bucket>/site/index.html`: Google pide iniciar sesión y sirve el archivo si la cuenta tiene `objectViewer`. Costo fijo cero y ninguna superficie de autenticación propia.|
+|**Decisión**|El HTML, uPlot y los tiles viven en un bucket privado declarado en el stack `data`; el stack `viz` declara los jobs, los objetos de `site/` y el acceso del visor (dónde vive cada recurso, en §11). Se abre por `storage.cloud.google.com/<bucket>/site/index.html`: Google pide iniciar sesión y sirve el archivo si la cuenta tiene `objectViewer`. Costo fijo cero y ninguna superficie de autenticación propia.|
 |**Justificación**|La prioridad 1 es eficiencia, y la pieza más eficiente es la que no se construye. Un servicio de Cloud Run con validación de Google Sign-In agrega imagen, stack, autenticación propia y logs para un problema que no existe con un solo usuario.|
 |**Opción B**|Cloud Run service con validación de Google Sign-In. Se abre como card solo cuando aparezca un usuario sin acceso IAM al proyecto; mientras tanto, el zip exportable cubre al asesor.|
 |**Alternativas descartadas**|**Cloud Run service para servir el tablero (hoy)**: ver la justificación. **Looker Studio**: conecta a BigQuery, no a Parquet en bucket; obligaría a una copia del dato y rompe la prioridad 1. **Grafana**: servidor siempre encendido, base propia y pluginería para Parquet; uPlot es su motor sin el resto. **Streamlit, Dash, Panel**: cada interacción vuelve al servidor Python, con latencia de cientos de ms y cómputo en caliente, contrario a la prioridad 1 y al principio 8. **Plotly**: dibuja en SVG/WebGL con un bundle de más de 3 MB; con cientos de miles de puntos el navegador se arrastra. **Stack del legacy (HoloViews, Bokeh, Datashader, Panel)**: resolvía el volumen con rasterización en servidor; aquí el volumen se resuelve una vez, en el job de tiles, y el servidor desaparece.|
@@ -613,7 +613,7 @@ El backfill de tiles, tal como lo estima la servilleta, **no cabe en el presupue
 
   Falta una variable que el modo necesita → error de uso, código 2.
 
-- **Bucket:** `intrinsica-dc-viz`, privado, declarado en el **stack `data`** (que aplica solo el humano) con los prefijos `tiles/`, `site/` y `exports/`; `exports/` con *lifecycle* de 7 días. El stack `viz` declara solo los jobs.
+- **Bucket:** `intrinsica-dc-viz`, privado, declarado en el **stack `data`** (que aplica solo el humano) con los prefijos `tiles/`, `site/` y `exports/`; `exports/` con *lifecycle* de 7 días. El stack `data` también agrega el bucket viz a `deploy_bucket_iam` (`infra/stacks/batch/data/deploy.tf`), sin lo cual el apply de Actions no puede fijar los bindings del módulo `layer` sobre él, y da a la cuenta de despliegue `objectUser` **solo bajo `site/`** (binding con condición de prefijo, como `deploy_thetas_seed`), para publicar y reemplazar la página. El stack `viz` declara los jobs (módulo `layer`), los `google_storage_bucket_object` de `site/` y el binding del visor.
 - **IAM** (mínimo privilegio, una service account por modo, por prefijo como en el módulo `layer`):
 
 |Service account|Lee|Escribe|
@@ -623,8 +623,8 @@ El backfill de tiles, tal como lo estima la servilleta, **no cabe en el presupue
 
   **Cambio al módulo `layer` (lo hace la hija 3).** `viz-export` necesita dos roles en el mismo bucket viz: `objectViewer` en `tiles/` y `site/`, y `objectUser` en `exports/`. Hoy `access` del módulo es un mapa de bucket a **un solo** `{role, prefixes}` (`infra/modules/layer/variables.tf`) y no admite dos concesiones al mismo bucket en un modo. Se elige cambiar `access` a una **lista** de concesiones `{bucket, role, prefixes}`, y no dar `objectUser` en los tres prefijos: lo segundo dejaría a `viz-export` sobrescribir o borrar tiles y sitio, contra el mínimo privilegio (§2), solo para evitar un cambio de módulo que se hace una vez. La clave de cada binding (`modo/bucket/prefijo`) no cambia, así que los bindings de L1 y L2 conservan su dirección en el estado y el `plan` de sus stacks debe salir sin cambios; sus `access` pasan de mapa a lista en el mismo PR.
 
-  Ninguna toca `manifest`. El visor humano recibe `objectViewer` sobre el bucket viz: su correo va como *secret* de repositorio `VIZ_VIEWER` (como `ALERT_EMAIL` tras la revisión de ITSC-291), no en `.tfvars` del repo público, porque saldría en el plan.
-- **Sitio:** `index.html` y uPlot, con versión fija en el repo y sin CDN ni llamadas a terceros, se publican a `site/` con `google_storage_bucket_object` desde el repo; apply del humano.
+  Ninguna toca `manifest`. El visor humano recibe `objectViewer` sobre el bucket viz: su correo va como *secret* de repositorio `VIZ_VIEWER` (como `ALERT_EMAIL` tras la revisión de ITSC-291), no en `.tfvars` del repo público, porque saldría en el plan. Ese binding lo declara el **stack `viz`**, no `data`: el stack `data` se aplica desde Cloud Shell, adonde un secret de GitHub no llega. La hija 3 agrega la variable `viewer_email` al stack y hace que `_terraform-stack.yml` la pase por `TF_VAR_viewer_email` solo para el stack `viz`, igual que `ALERT_EMAIL` para `alerting` (con su `secrets: inherit` en `terraform.yml`).
+- **Sitio:** `index.html` y uPlot, con versión fija en el repo y sin CDN ni llamadas a terceros, se publican a `site/` con `google_storage_bucket_object` desde el repo, en el stack `viz` (el que aplica Actions con aprobación del humano en el environment `gcp`).
 - **Acceso:** `storage.cloud.google.com/<bucket>/site/index.html`; Google pide iniciar sesión.
 
 ### 11.1 Observabilidad
