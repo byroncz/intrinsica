@@ -1,0 +1,235 @@
+#!/usr/bin/env bash
+# Prueba de humo de la imagen: arma un lago local con el día real 2017-08-18
+# (4 735 ticks de shared/dc_core/tests/fixtures/ticks.csv y sus eventos de
+# events_v0.csv para cinco θ), corre --mode tiles sobre ese día y verifica el
+# índice, los arreglos y el Parquet de hallazgos. Uso: smoke.sh <imagen>
+#
+# La entrada no viene de L1 ni de L2: los CSV se convierten con el pyarrow de la
+# propia imagen (el mismo que corre en producción), sin red ni otra imagen.
+# Cada θ trae el pendiente de su último evento en carry_over.parquet, con el
+# tick de mayor precio (o menor) desde su confirmación como extremo vigente.
+set -euo pipefail
+
+image="${1:?uso: smoke.sh <imagen>}"
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+fixtures="$root/shared/dc_core/tests/fixtures"
+data="$(mktemp -d)"
+trap 'docker run --rm -v "$data:/data" --entrypoint rm "$image" -rf /data/landing /data/events /data/tiles /data/dq; rm -rf "$data"' EXIT
+
+# El contenedor corre como root: crear las rutas desde ahí evita que el trap
+# tenga que borrar archivos ajenos.
+docker run --rm -i -v "$data:/data" -v "$fixtures:/fixtures:ro" \
+  --entrypoint python "$image" - <<'PY'
+import csv
+from decimal import Decimal
+from pathlib import Path
+
+import pyarrow as pa
+import pyarrow.parquet as pq
+
+dec = pa.decimal128(18, 8)
+theta_type = pa.decimal128(9, 8)
+series = "provider=binance/market=spot/asset=BTCUSDT"
+
+with open("/fixtures/ticks.csv") as f:
+    ticks = [
+        (int(r["agg_trade_id"]), Decimal(r["price"]), int(r["transact_time"]))
+        for r in csv.DictReader(f)
+    ]
+n = len(ticks)
+ids = pa.array([t[0] for t in ticks], pa.int64())
+# Esquema de OUTPUT_SCHEMA de L1 (layers/l1_ingest/src/l1_ingest/schema.py).
+l1 = pa.schema(
+    [
+        pa.field("agg_trade_id", pa.int64(), nullable=False),
+        pa.field("price", dec, nullable=False),
+        pa.field("quantity", dec, nullable=False),
+        pa.field("first_trade_id", pa.int64(), nullable=False),
+        pa.field("last_trade_id", pa.int64(), nullable=False),
+        pa.field("transact_time", pa.int64(), nullable=False),
+        pa.field("is_buyer_maker", pa.bool_(), nullable=False),
+        pa.field("is_best_match", pa.bool_(), nullable=False),
+    ]
+)
+table = pa.table(
+    {
+        "agg_trade_id": ids,
+        "price": pa.array([t[1] for t in ticks], dec),
+        "quantity": pa.array([Decimal(1)] * n, dec),
+        "first_trade_id": ids,
+        "last_trade_id": ids,
+        "transact_time": pa.array([t[2] for t in ticks], pa.int64()),
+        "is_buyer_maker": pa.array([False] * n),
+        "is_best_match": pa.array([True] * n),
+    },
+    schema=l1,
+)
+landing = Path(f"/data/landing/{series}/year=2017/month=08/consolidated.parquet")
+landing.parent.mkdir(parents=True)
+pq.write_table(table, landing, row_group_size=1000)
+print(f"consolidated.parquet: {n} ticks")
+
+
+def point(name, nullable=False):
+    return [
+        pa.field(f"{name}_price", dec, nullable=nullable),
+        pa.field(f"{name}_time", pa.int64(), nullable=nullable),
+        pa.field(f"{name}_agg_trade_id", pa.int64(), nullable=nullable),
+    ]
+
+
+# Esquemas de EVENTS_SCHEMA y CARRY_OVER_SCHEMA de L2 (l2_dc_events/schema.py).
+events_schema = pa.schema(
+    [
+        *point("reference"),
+        *point("confirm"),
+        *point("extreme"),
+        pa.field("direction", pa.int8(), nullable=False),
+        pa.field("theta", theta_type, nullable=False),
+    ]
+)
+carry_schema = pa.schema(
+    [
+        pa.field("provider", pa.string(), nullable=False),
+        pa.field("market", pa.string(), nullable=False),
+        pa.field("asset", pa.string(), nullable=False),
+        pa.field("theta", theta_type, nullable=False),
+        pa.field("year", pa.int32(), nullable=False),
+        pa.field("month", pa.int32(), nullable=False),
+        pa.field("state_version", pa.string(), nullable=False),
+        pa.field("direction", pa.int8(), nullable=False),
+        *point("ext_high"),
+        *point("ext_low"),
+        pa.field("has_pending_event", pa.bool_(), nullable=False),
+        *point("pending_reference", nullable=True),
+        *point("pending_confirm", nullable=True),
+    ]
+)
+
+by_theta = {}
+with open("/fixtures/events_v0.csv") as f:
+    for row in csv.DictReader(f):
+        by_theta.setdefault(int(row["theta"]), []).append(row)
+
+for theta, rows in by_theta.items():
+    *closed, pending = rows
+    assert pending["extreme_agg_trade_id"] == "", "el último evento debe ser el pendiente"
+    folder = Path(f"/data/events/{series}/theta=0.{theta:08d}/year=2017/month=08")
+    folder.mkdir(parents=True)
+    cols = {}
+    for name in ("reference", "confirm", "extreme"):
+        cols[f"{name}_price"] = pa.array([Decimal(r[f"{name}_price"]) for r in closed], dec)
+        cols[f"{name}_time"] = pa.array([int(r[f"{name}_time"]) for r in closed], pa.int64())
+        cols[f"{name}_agg_trade_id"] = pa.array(
+            [int(r[f"{name}_agg_trade_id"]) for r in closed], pa.int64()
+        )
+    cols["direction"] = pa.array([int(r["direction"]) for r in closed], pa.int8())
+    cols["theta"] = pa.array([Decimal(theta).scaleb(-8)] * len(closed), theta_type)
+    pq.write_table(
+        pa.table(cols, schema=events_schema), folder / "events.parquet", row_group_size=64
+    )
+
+    direction = int(pending["direction"])
+    confirm_id = int(pending["confirm_agg_trade_id"])
+    after = [t for t in ticks if t[0] >= confirm_id]
+    best = (max if direction == 1 else min)(t[1] for t in after)
+    top = next(t for t in after if t[1] == best)
+    ext = {"price": top[1], "time": top[2], "id": top[0]}
+
+    def carry_point(name, p):
+        return {
+            f"{name}_price": p["price"],
+            f"{name}_time": p["time"],
+            f"{name}_agg_trade_id": p["id"],
+        }
+
+    def from_row(prefix):
+        return {
+            "price": Decimal(pending[f"{prefix}_price"]),
+            "time": int(pending[f"{prefix}_time"]),
+            "id": int(pending[f"{prefix}_agg_trade_id"]),
+        }
+
+    ref, conf = from_row("reference"), from_row("confirm")
+    other = ref  # el otro extremo de la tendencia: basta con que exista
+    high, low = (ext, other) if direction == 1 else (other, ext)
+    carry = {
+        "provider": "binance",
+        "market": "spot",
+        "asset": "BTCUSDT",
+        "theta": Decimal(theta).scaleb(-8),
+        "year": 2017,
+        "month": 8,
+        "state_version": "smoke",
+        "direction": direction,
+        **carry_point("ext_high", high),
+        **carry_point("ext_low", low),
+        "has_pending_event": True,
+        **carry_point("pending_reference", ref),
+        **carry_point("pending_confirm", conf),
+    }
+    pq.write_table(
+        pa.Table.from_pylist([carry], schema=carry_schema), folder / "carry_over.parquet"
+    )
+print(f"events.parquet y carry_over.parquet: {len(by_theta)} θ")
+PY
+
+run_tiles() {
+  docker run --rm -v "$data:/data" \
+    -e VIZ_LANDING_ROOT=/data/landing \
+    -e VIZ_EVENTS_ROOT=/data/events \
+    -e VIZ_TILES_ROOT=/data/tiles \
+    -e VIZ_DQ_ROOT=/data/dq \
+    "$image" --mode tiles --day 2017-08-18 "$@" 2>&1
+}
+
+run_tiles | tee "$data/run.log"
+grep -q 'sonda: unit=2017-08-18 ticks=4735 ' "$data/run.log" \
+  || { echo "::error::falta la línea sonda del día"; exit 1; }
+grep -q '"check_type": "tiles_summary"' "$data/run.log" \
+  || { echo "::error::falta el hallazgo tiles_summary en el log"; exit 1; }
+
+# El índice, los 19 objetos con su tamaño y el Parquet de hallazgos.
+docker run --rm -v "$data:/data" --entrypoint python "$image" - <<'PY'
+import json
+from pathlib import Path
+
+import pyarrow.parquet as pq
+
+day = Path("/data/tiles/provider=binance/market=spot/asset=BTCUSDT/day=2017-08-18")
+index = json.loads((day / "index.json").read_text())
+assert index["ticks"] == 4735, index["ticks"]
+assert index["tiles_version"] == "1.0.0", index["tiles_version"]
+assert len(index["thetas"]) == 5 and index["missing_thetas"] == [], index["thetas"]
+assert all(t["provisional_from_s"] is not None for t in index["thetas"]), "cola provisional"
+files = sorted(p.name for p in day.iterdir())
+assert len(files) == 19, files
+for w in index["levels"]:
+    assert (day / f"price-{w}.i32").stat().st_size == 32 * w
+    assert (day / f"volume-{w}.f32").stat().st_size == 4 * w
+    assert (day / f"dir-{w}.u8").stat().st_size == 5 * w
+latest = json.loads(Path("/data/tiles/latest.json").read_text())
+assert latest["day"] == "2017-08-18", latest
+
+rows = [
+    row
+    for path in Path("/data/dq").rglob("*.parquet")
+    for row in pq.read_table(path).to_pylist()
+]
+(summary,) = [r for r in rows if r["check_type"] == "tiles_summary"]
+assert (summary["layer"], summary["mode"], summary["stage"]) == ("viz", "tiles", "canonical")
+details = json.loads(summary["details"])
+assert details["day"] == "2017-08-18" and details["skipped"] is False, details
+assert details["content_hash"] == index["content_hash"]
+print("índice y arreglos OK, content_hash", index["content_hash"][:16])
+PY
+
+# Segunda corrida: el día está al día y no se reescribe. Con --force se rehace
+# con el mismo contenido.
+first="$(grep -o -m1 '"content_hash": "[0-9a-f]*"' "$data/run.log")"
+run_tiles | tee "$data/second.log"
+grep -q 'al día' "$data/second.log" || { echo "::error::la segunda corrida debía saltar el día"; exit 1; }
+run_tiles --force | tee "$data/forced.log"
+[ "$(grep -o -m1 '"content_hash": "[0-9a-f]*"' "$data/forced.log")" = "$first" ] \
+  || { echo "::error::--force cambió el content_hash"; exit 1; }
+echo "humo OK: $first"

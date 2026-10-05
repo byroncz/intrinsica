@@ -29,6 +29,10 @@ from viz_tiles.contract import (
 from viz_tiles.reduce import DayReduction, day_start_us
 
 
+class SeriesMismatch(ValueError):
+    """La raíz de tiles es de otra serie (activo, proveedor o mercado)."""
+
+
 @dataclass(frozen=True)
 class ThetaTiles:
     """Tiles de dirección de un θ: `direction[w]` es el arreglo uint8 del nivel `w`."""
@@ -199,7 +203,7 @@ def _read_latest(fs: pafs.FileSystem, base: str, series: dict) -> dict | None:
         current = json.loads(src.read())
     if any(current.get(k) != v for k, v in series.items()):
         other = {k: current.get(k) for k in series}
-        raise ValueError(
+        raise SeriesMismatch(
             f"{LATEST_FILE} es de otra serie {other}: la raíz de tiles es "
             f"mono-activo y no admite {series}"
         )
@@ -223,3 +227,27 @@ def read_index(
     """El `index.json` de un día (local)."""
     path = Path(day_dir(root, provider, market, asset, day)) / INDEX_FILE
     return json.loads(path.read_text())
+
+
+def find_index(
+    root: str | Path, provider: str, market: str, asset: str, day: date
+) -> dict | None:
+    """El `index.json` del día en `root` (local o `gs://`), o `None` si no existe."""
+    fs, _ = resolve_fs(root)
+    path = f"{day_dir(root, provider, market, asset, day)}/{INDEX_FILE}"
+    if not _exists(fs, path):
+        return None
+    with fs.open_input_stream(path) as src:
+        return json.loads(src.read())
+
+
+def day_objects(
+    root: str | Path, provider: str, market: str, asset: str, day: date
+) -> tuple[int, int]:
+    """`(objetos, bytes)` que el día ocupa bajo `root` (un solo listado)."""
+    fs, _ = resolve_fs(root)
+    selector = pafs.FileSelector(
+        day_dir(root, provider, market, asset, day), allow_not_found=True
+    )
+    files = [i for i in fs.get_file_info(selector) if i.type == pafs.FileType.File]
+    return len(files), sum(i.size or 0 for i in files)

@@ -40,7 +40,7 @@ jobs:
       # añade su nombre aquí (por ejemplo '["l1_ingest","l2_dc_events"]') y
       # crea layers/<capa>/Dockerfile y layers/<capa>/VERSION. El filtro y la
       # matriz se derivan de esta lista; no hay nada más que editar.
-      LAYERS: '["l1_ingest","l2_dc_events","ops_tools"]'
+      LAYERS: '["l1_ingest","l2_dc_events","ops_tools","viz_tiles"]'
     steps:
       - uses: actions/checkout@v7
         with:
