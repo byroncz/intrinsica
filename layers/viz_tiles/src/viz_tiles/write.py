@@ -1,0 +1,225 @@
+"""Escritura de un día de tiles: arreglos planos, `index.json` y `latest.json`.
+
+TRD-viz §7.2, §7.7 y ADR-VZ-10. El `index.json` se escribe al final y es la
+marca de commit: un día sin él no existe para el tablero. Si el job muere a
+medias, el día queda sin índice y la siguiente corrida lo rehace.
+"""
+
+import hashlib
+import json
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from datetime import UTC, date, datetime
+from pathlib import Path
+
+import numpy as np
+import pyarrow.fs as pafs
+from pyutils.fs import resolve_fs
+
+from viz_tiles.contract import (
+    FILE_BY_KIND,
+    INDEX_FIELDS,
+    INDEX_FILE,
+    LATEST_FIELDS,
+    LATEST_FILE,
+    LEVELS,
+    TILES_VERSION,
+    tile_name,
+)
+from viz_tiles.reduce import DayReduction, day_start_us
+
+
+@dataclass(frozen=True)
+class ThetaTiles:
+    """Tiles de dirección de un θ: `direction[w]` es el arreglo uint8 del nivel `w`."""
+
+    theta: str
+    events: int
+    provisional_from_s: float | None
+    direction: Mapping[int, np.ndarray]  # un bloque de `w` bytes por nivel
+
+
+def day_dir(root: str | Path, provider: str, market: str, asset: str, day: date) -> str:
+    """Directorio del día bajo `root`: `provider=…/market=…/asset=…/day=YYYY-MM-DD`."""
+    base = resolve_fs(root)[1]
+    return (
+        f"{base}/provider={provider}/market={market}/asset={asset}"
+        f"/day={day.isoformat()}"
+    )
+
+
+def _tile_view(kind: str, w: int, array: np.ndarray, blocks: int = 1) -> memoryview:
+    """Vista de los bytes del archivo: el arreglo con el tipo y el largo del contrato.
+
+    No copia: con el `dtype` del contrato `astype(copy=False)` devuelve el mismo
+    arreglo y `memoryview` lo expone sin duplicarlo.
+
+    `blocks` es el número de θ de un archivo `dir` (un bloque de `w` por θ).
+    """
+    spec = FILE_BY_KIND[kind]
+    expected = spec.per_column * w * blocks
+    if array.shape != (expected,):
+        raise ValueError(
+            f"{kind}-{w}: se esperaban {expected} valores, hay {array.shape}"
+        )
+    return memoryview(np.ascontiguousarray(array.astype(spec.dtype, copy=False)))
+
+
+def _put(fs: pafs.FileSystem, path: str, data: bytes | memoryview) -> None:
+    with fs.open_output_stream(path) as out:
+        out.write(data)
+
+
+def _put_json(fs: pafs.FileSystem, path: str, doc: dict) -> None:
+    """Escribe un JSON; en disco local, entero o nada (temporal y renombre)."""
+    data = (json.dumps(doc, indent=2, ensure_ascii=False) + "\n").encode()
+    if isinstance(fs, pafs.LocalFileSystem):
+        tmp = f"{path}.tmp"
+        _put(fs, tmp, data)
+        fs.move(tmp, path)
+    else:
+        _put(fs, path, data)
+
+
+def _exists(fs: pafs.FileSystem, path: str) -> bool:
+    return fs.get_file_info(path).type == pafs.FileType.File
+
+
+def write_day(
+    root: str | Path,
+    *,
+    provider: str,
+    market: str,
+    asset: str,
+    day: date,
+    reduction: DayReduction,
+    thetas: Sequence[ThetaTiles],
+    missing_thetas: Sequence[str] = (),
+    input_hash: str,
+    image_version: str,
+    generated_at: datetime | None = None,
+) -> dict:
+    """Escribe los tiles del día y devuelve el `index.json` que dejó.
+
+    Orden: se borra el índice previo, se escriben los arreglos y al final el
+    índice (marca de commit); después `latest.json`, que solo avanza. El
+    `input_hash` lo calcula quien llama (TRD-viz §7.8); `content_hash` sale de
+    los bytes de los arreglos y no depende de `generated_at`.
+    """
+    fs, base = resolve_fs(root)
+    # Antes de escribir nada: un día de otra serie no se deja a medias en la raíz.
+    _read_latest(fs, base, {"provider": provider, "market": market, "asset": asset})
+    directory = day_dir(root, provider, market, asset, day)
+    fs.create_dir(directory)
+    index_path = f"{directory}/{INDEX_FILE}"
+    if _exists(fs, index_path):
+        fs.delete_file(index_path)
+
+    # Nombre de archivo -> (tipo, nivel). Precio y volumen se hashean y se
+    # escriben desde una vista del arreglo que ya está en RAM; la dirección de
+    # un nivel se arma al escribirlo, un nivel a la vez.
+    names = {
+        kind: {str(w): tile_name(kind, w) for w in LEVELS}
+        for kind in ("price", "volume", "dir")
+    }
+    files: dict[str, tuple[str, int]] = {}
+    for kind, by_level in names.items():
+        for w in LEVELS:
+            files[by_level[str(w)]] = (kind, w)
+
+    def array_of(kind: str, w: int) -> np.ndarray:
+        if kind == "dir":
+            # n bloques de w bytes, en el orden de `thetas` del índice.
+            blocks = [t.direction[w] for t in thetas]
+            for theta, block in zip(thetas, blocks, strict=True):
+                if block.shape != (w,):
+                    raise ValueError(
+                        f"dir-{w} de {theta.theta}: se esperaban {w} valores, "
+                        f"hay {block.shape}"
+                    )
+            return np.concatenate(blocks) if blocks else np.empty(0, "u1")
+        return getattr(reduction, kind)[w]
+
+    theta_docs = [
+        {
+            "theta": theta.theta,
+            "events": theta.events,
+            "provisional_from_s": theta.provisional_from_s,
+        }
+        for theta in thetas
+    ]
+    # El resumen de contenido recorre los archivos en orden de nombre.
+    digest = hashlib.sha256()
+    for name in sorted(files):
+        kind, w = files[name]
+        view = _tile_view(
+            kind, w, array_of(kind, w), len(thetas) if kind == "dir" else 1
+        )
+        digest.update(name.encode() + b"\0")
+        digest.update(view)
+        _put(fs, f"{directory}/{name}", view)
+
+    when = generated_at or datetime.now(UTC)
+    values = {
+        "tiles_version": TILES_VERSION,
+        "provider": provider,
+        "market": market,
+        "asset": asset,
+        "day": day.isoformat(),
+        "t0": day_start_us(day),
+        "price_scale": reduction.price_scale,
+        "ticks": reduction.ticks,
+        "levels": list(LEVELS),
+        "price": names["price"],
+        "volume": names["volume"],
+        "dir": names["dir"],
+        "thetas": theta_docs,
+        "missing_thetas": list(missing_thetas),
+        "input_hash": input_hash,
+        "content_hash": digest.hexdigest(),
+        "generated_at": when.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "image_version": image_version,
+    }
+    index = {name: values[name] for name, _ in INDEX_FIELDS}
+    _put_json(fs, index_path, index)
+    _advance_latest(fs, base, index)
+    return index
+
+
+def _read_latest(fs: pafs.FileSystem, base: str, series: dict) -> dict | None:
+    """El `latest.json` de la raíz, o `None` si no existe.
+
+    La raíz es mono-activo (TRD-viz §7.7): si apunta a otra serie, lanza
+    `ValueError` en vez de pisarla o dejarla retroceder.
+    """
+    path = f"{base}/{LATEST_FILE}"
+    if not _exists(fs, path):
+        return None
+    with fs.open_input_stream(path) as src:
+        current = json.loads(src.read())
+    if any(current.get(k) != v for k, v in series.items()):
+        other = {k: current.get(k) for k in series}
+        raise ValueError(
+            f"{LATEST_FILE} es de otra serie {other}: la raíz de tiles es "
+            f"mono-activo y no admite {series}"
+        )
+    return current
+
+
+def _advance_latest(fs: pafs.FileSystem, base: str, index: dict) -> None:
+    """Escribe `latest.json` si el día es posterior al que apunta (o no existe)."""
+    series = {k: index[k] for k in ("provider", "market", "asset")}
+    current = _read_latest(fs, base, series)
+    if current is not None and current["day"] > index["day"]:
+        return
+    _put_json(
+        fs, f"{base}/{LATEST_FILE}", {name: index[name] for name in LATEST_FIELDS}
+    )
+
+
+def read_index(
+    root: str | Path, provider: str, market: str, asset: str, day: date
+) -> dict:
+    """El `index.json` de un día (local)."""
+    path = Path(day_dir(root, provider, market, asset, day)) / INDEX_FILE
+    return json.loads(path.read_text())

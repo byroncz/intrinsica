@@ -257,7 +257,7 @@ desvía del código.
 | `finding_id` | string (UUID) | no | Identidad del hallazgo; se repite en todos los eventos del mismo hallazgo |
 | `detected_at` | int64 | no | Marca del evento, en microsegundos desde la época (UTC) |
 | `layer` | string | no | Capa que emite el hallazgo, p. ej. `l1` |
-| `mode` | string | no | Modo de ejecución: `backfill`, `daily`, `monthly-close`, `seam-check` o `monthly` (L2, [TRD-L2 §8.3](TRD/l2.md#83-modo-monthly-incremental)) |
+| `mode` | string | no | Modo de ejecución: `backfill`, `daily`, `monthly-close`, `seam-check` o `monthly` (L2, [TRD-L2 §8.3](TRD/l2.md#83-modo-monthly-incremental)); `tiles` o `export` (viz, [TRD-viz §8](TRD/viz.md#8-pipeline-interno-y-modos-de-ejecución)) |
 | `check_type` | string | no | Chequeo que lo generó (ver TRD-L1 §9) |
 | `severity` | string | no | `info`, `warning` o `error` |
 | `stage` | string | no | `provisional` o `canonical` |
@@ -542,3 +542,142 @@ write_manifest([entry], "gs://<bucket>/<prefijo>", run_id)
 ```
 
 En GCS usa Application Default Credentials; no hay credenciales en código.
+
+## Tiles de viz
+
+Contrato hacia el tablero: por día y nivel de zoom, arreglos binarios planos
+con la serie reducida a M4, más un índice JSON. Fuente de diseño:
+[TRD-viz §7](TRD/viz.md#7-contrato-de-datos). Fuente en código:
+[`contract.py`](../layers/viz_tiles/src/viz_tiles/contract.py) (constantes),
+[`reduce.py`](../layers/viz_tiles/src/viz_tiles/reduce.py) (precio y volumen),
+[`direction.py`](../layers/viz_tiles/src/viz_tiles/direction.py) (dirección por θ)
+y [`write.py`](../layers/viz_tiles/src/viz_tiles/write.py) (escritura). Una
+prueba (`layers/viz_tiles/tests/test_tiles_contract_doc.py`) rompe el CI si
+las tablas de esta sección se desvían de esas constantes.
+
+Un tile no es fuente de verdad: se regenera desde L1 y L2. Todos los
+binarios son sin cabecera y little-endian.
+
+### Disposición
+
+```
+<raíz>/provider=<p>/market=<m>/asset=<a>/day=YYYY-MM-DD/
+├── price-<w>.i32
+├── volume-<w>.f32
+├── dir-<w>.u8              # uno por nivel: un bloque de w bytes por θ
+└── index.json              # se escribe al final: marca de commit
+<raíz>/latest.json          # último día con index.json
+```
+
+Un día son 19 objetos (6 + 6 + 6 + 1), con cualquier número de θ. El día es
+UTC. `write_day` borra el `index.json` previo, escribe los arreglos y deja el
+índice al final: un día sin `index.json` no existe para el lector.
+`latest.json` solo avanza; un día anterior regenerado no lo retrocede.
+
+### Archivos
+
+`w` es el nivel: el número de columnas en que se divide el día UTC completo. La
+columna de un tick es `floor((transact_time − t0) × w / 86 400 000 000)`, en
+enteros.
+
+| Archivo | Tipo | Valores por columna | Contenido |
+|---|---|---|---|
+| `price-<w>.i32` | int32 | 8 | Dos bloques de `4w` enteros: los tiempos `t[i]` (`uint32`, milisegundos desde `t0`, `⌊µs / 1000⌋`) y los precios `p[i]` (`int32`, unidades de `1 / price_scale`). Los puntos `i = 4·col + k` son los cuatro M4 de la columna, en orden de tiempo: primero, mínimo, máximo y último, con mínimo y máximo ordenados por su posición. Si dos coinciden se repiten. Empates de precio: gana el tick más antiguo. Una columna sin ticks lleva su inicio (`⌊col · 86 400 000 / w⌋` ms) en los cuatro `t` y `INT32_MIN` (−2 147 483 648) en los cuatro `p` |
+| `volume-<w>.f32` | float32 | 1 | Suma de `quantity` de los ticks de la columna, sumada en enteros de escala 10⁸; 0 si no hay ticks |
+| `dir-<w>.u8` | uint8 | 1 | Por θ, el estado de dirección en la columna (ver Estados). El archivo trae `n` bloques de `w` bytes, uno por θ, en el orden de `thetas` del índice: el θ en la posición `k` ocupa los bytes `k·w` a `(k+1)·w − 1`. Con los 50 θ del catálogo, `50·w` bytes |
+
+El tiempo cabe en `uint32` con holgura (máximo 86 400 000) y, al ser menor que
+2³¹, `uint32` e `int32` dan los mismos bytes. Un lector entero lee el mismo
+archivo con `Uint32Array` para `t` e `Int32Array` para `p`.
+
+### Escala de precio
+
+`price_scale` es **fijo por activo** e igual al tick de la cotización; nunca se
+elige por día. Se declara en el código (`PRICE_SCALE_BY_ASSET`) y se escribe en
+`index.json`. El precio en la cotización es `p / price_scale`; con 100, el
+máximo representable es 21 474 836,47.
+
+| Activo | `price_scale` |
+|---|---|
+| `BTCUSDT` | 100 |
+
+El precio sale del `DECIMAL(18, 8)` de L1 como entero exacto (×10⁸). Los
+acumuladores M4 se calculan sobre ese entero crudo y el resultado se redondea
+**una sola vez**, al escribir, al tick más cercano (mitad al par). Un día
+siempre se escribe: los ticks fuera del tick solo dejan el hallazgo
+`price_rounded` (`warning`/`pass`; `details`: `day`, `count`, `max_abs_delta_int`),
+donde `count` son los ticks del día fuera del tick y `max_abs_delta_int` la
+mayor distancia de uno de ellos a su tick más cercano, en enteros de L1
+(×10⁻⁸). `price_unrepresentable` (`error`/`fail`) queda como guarda para un
+precio mayor que `INT32_MAX / price_scale`: `reduce_day` lanza
+`PriceUnrepresentable` y el día no se escribe. Detalle en
+[TRD-viz §7.3](TRD/viz.md#73-tiles-de-precio-y-volumen-niveles-de-zoom-y-presupuesto)
+y [§9.3](TRD/viz.md#93-tipos-de-chequeo-check_type).
+
+### Niveles
+
+Potencias de 2: la columna de un tick se calcula con enteros y M4 es
+componible, así que los niveles gruesos se derivan del más fino sin releer
+ticks. Bytes de cada archivo del nivel (`dir` es el bloque de un θ: el archivo
+tiene uno por θ):
+
+| `w` | Duración de columna (s) | `price` (B) | `volume` (B) | `dir` (B por θ) |
+|---|---|---|---|---|
+| 128 | 675 | 4096 | 512 | 128 |
+| 256 | 337,5 | 8192 | 1024 | 256 |
+| 512 | 168,75 | 16384 | 2048 | 512 |
+| 1024 | 84,375 | 32768 | 4096 | 1024 |
+| 2048 | 42,1875 | 65536 | 8192 | 2048 |
+| 4096 | 21,09375 | 131072 | 16384 | 4096 |
+
+### Estados
+
+El estado de una columna es el de su último tick. El de un tick con
+`agg_trade_id = x` sale de los eventos del θ (filas con el esquema de
+[`events.parquet`](#esquema-de-eventsparquet)): está en el evento `e` si
+`e.reference_agg_trade_id < x ≤ e.extreme_agg_trade_id`; es confirmación si
+`x ≤ e.confirm_agg_trade_id` y overshoot si no. Se compara por id y no por
+tiempo porque varios ticks comparten `transact_time` y `agg_trade_id` es
+estrictamente creciente. La cola pendiente del `carry_over.parquet` aporta el
+evento sin extremo: hasta el extremo vigente, overshoot; después, confirmación
+del sentido contrario (provisional). Un tick fuera de todo evento, o una
+columna sin ticks, vale 0.
+
+| Valor | Estado | Descripción |
+|---|---|---|
+| `0` | sin evento | Antes del primer evento del θ, después del último, o columna sin ticks |
+| `1` | confirmación alza | De la referencia a la confirmación de un alza |
+| `2` | overshoot alza | De la confirmación al extremo de un alza |
+| `3` | confirmación baja | De la referencia a la confirmación de una baja |
+| `4` | overshoot baja | De la confirmación al extremo de una baja |
+
+Los valores 5 a 255 están reservados.
+
+### Campos de `index.json`
+
+Todos son obligatorios y van en este orden. `write_day` los escribe y la
+prueba del contrato compara esta tabla con `INDEX_FIELDS`.
+
+| Campo | Tipo | Descripción |
+|---|---|---|
+| `tiles_version` | string | semver del formato de los tiles (no la de la imagen); cambia con cualquier modificación de esta sección |
+| `provider` | string | Proveedor de los ticks |
+| `market` | string | Mercado |
+| `asset` | string | Activo |
+| `day` | string | Día UTC, `YYYY-MM-DD` |
+| `t0` | integer | Inicio del día UTC en µs desde la época: el origen del tiempo relativo de los tiles |
+| `price_scale` | integer | Unidades de precio del tile por unidad de la cotización (ver Escala de precio); el precio es `p / price_scale` |
+| `ticks` | integer | Ticks del día que entraron a los tiles |
+| `levels` | array | Los `w` presentes; el lector lee esta lista y no la supone |
+| `price` | object | Nombre del archivo `price` por nivel: `{"128": "price-128.i32", …}` |
+| `volume` | object | Nombre del archivo `volume` por nivel |
+| `dir` | object | Nombre del archivo `dir` por nivel: `{"128": "dir-128.u8", …}` |
+| `thetas` | array | Un objeto por θ con bloque en `dir-<w>.u8`, en el orden de los bloques: `theta` (texto de ancho fijo de la partición de L2, `0.00010000`, de menor a mayor), `events` (filas de eventos que tocan el día, con la cola) y `provisional_from_s` (segundos desde `t0` desde los que el estado es provisional, o `null`) |
+| `missing_thetas` | array | θ del catálogo sin eventos completos: no tienen bloque en `dir-<w>.u8` |
+| `input_hash` | string | Huella de los archivos de entrada; la calcula quien llama a `write_day` |
+| `content_hash` | string | SHA-256 de los arreglos: por cada archivo en orden de nombre, el nombre, un byte nulo y sus bytes. No depende de `generated_at` |
+| `generated_at` | string | Momento de la escritura, UTC, `YYYY-MM-DDTHH:MM:SSZ`; lo único del índice que cambia entre dos corridas idénticas |
+| `image_version` | string | Versión de la imagen que escribió el día |
+
+`latest.json` lleva `tiles_version`, `provider`, `market`, `asset` y `day`: es
+mono-activo porque vive en la raíz.

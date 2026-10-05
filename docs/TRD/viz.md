@@ -7,7 +7,7 @@
 |Campo        |Valor                                                                           |
 |-------------|--------------------------------------------------------------------------------|
 |Documento    |TRD-viz — Capa transversal de visualización                                     |
-|Versión      |**1.0**                                                                         |
+|Versión      |**1.1**                                                                         |
 |Estado       |Línea base. Fija el contrato de tiles por día que implementan las hijas 2 a 7 de la Épica E6 (ITSC-303). |
 |Fecha        |Octubre de 2026                                                                 |
 |Documento padre|TRD maestro v2.5                                                              |
@@ -20,6 +20,7 @@
 |Versión|Fecha|Descripción|
 |---|---|---|
 |1.0|Oct 2026|Línea base (ITSC-304). Recoge la decisión [Decisión: principios de diseño de la capa de visualización](https://app.notion.com/p/3f027957d23d81b8b12ad2217ffa96fb) (2026-10-05) y fija el contrato de tiles por día: disposición en el bucket, formato binario (tiempo y precio en enteros exactos, dirección de los 50 θ empaquetada por nivel), niveles de zoom con su presupuesto de bytes, regla de estado por columna, procedencia de los eventos de un día e idempotencia. Fija también modos, variables, hallazgos de DQ, costos y observabilidad. Es la fuente única para las hijas 2 a 7: ninguna reabre lo que aquí se fija. |
+|1.1|Oct 2026|Corrección de arquitectura (ITSC-305), antes de implementar el contrato. El `price_scale` ya no se elige por día (la mayor potencia de 10 que deja exactos todos los `price_int`): con una escala fina, un solo trade con cinco decimales hacía que el precio no cupiera en `int32` y borraba el día entero de BTCUSDT, lo que contradecía la política de §9.1 (continuar con hallazgo y hueco visible). Ahora es **fijo por activo**, igual al tick de la cotización (100 para BTCUSDT) y declarado en el código; un `price_int` fuera del tick se redondea al tick más cercano (mitad al par) al escribir, sobre acumuladores M4 calculados con el `price_int` crudo, y deja el hallazgo `price_rounded`. El día siempre se escribe; `price_unrepresentable` queda solo como guarda para un precio mayor que `INT32_MAX / price_scale`. Cambian §7.2, §7.3, §8.1, §9.1 a §9.3, RVZ-08, la prueba 2 de §13 y el ítem 10 de §14. |
 
 -----
 
@@ -117,7 +118,7 @@ viz hereda y no contradice:
 
 |ID       |Nombre                         |Descripción                                                                                                                                  |Prio.|
 |---------|--------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------|-----|
-|RF-VZ-01 |Tile de precio M4               |Por día y nivel de zoom, los cuatro puntos M4 (primero, mínimo, máximo, último) de cada columna, independientes de θ, con tiempo y precio en **enteros exactos** (§7.3).|M    |
+|RF-VZ-01 |Tile de precio M4               |Por día y nivel de zoom, los cuatro puntos M4 (primero, mínimo, máximo, último) de cada columna, independientes de θ, con tiempo y precio en **enteros** (el precio en unidades del tick, §7.3).|M    |
 |RF-VZ-02 |Tile de volumen                 |Por día y nivel, la suma de `quantity` de cada columna (§7.3).                                                                                   |M    |
 |RF-VZ-03 |Tile de dirección por nivel     |Por día y nivel, un archivo con un bloque por θ y un byte por columna con cuatro estados (confirmación alza, overshoot alza, confirmación baja, overshoot baja) y 0 sin evento (§7.4, §7.5).|M    |
 |RF-VZ-04 |Índice y marca de commit        |`index.json` por día, escrito al final: su presencia significa que el día está completo (§7.2, §7.8).                                            |M    |
@@ -299,30 +300,36 @@ Todos los binarios se escriben con `Content-Type: application/octet-stream` y `C
   "tiles_version": "1.0.0",
   "provider": "binance", "market": "spot", "asset": "BTCUSDT",
   "day": "2026-08-31",
-  "day_start_us": 1788134400000000,
+  "t0": 1788134400000000,
   "price_scale": 100,
-  "input_hash": "9f2c…(sha256 en hex)",
-  "generated_at": "2026-10-05T17:00:00Z",
-  "image_version": "0.1.0+3a9b2c1",
   "ticks": 1234567,
   "levels": [128, 256, 512, 1024, 2048, 4096],
+  "price": {"128": "price-128.i32", "…": "…", "4096": "price-4096.i32"},
+  "volume": {"128": "volume-128.f32", "…": "…", "4096": "volume-4096.f32"},
+  "dir": {"128": "dir-128.u8", "…": "…", "4096": "dir-4096.u8"},
   "thetas": [
     {"theta": "0.00010000", "events": 11873, "provisional_from_s": null},
     {"theta": "0.05000000", "events": 4, "provisional_from_s": 41234.5}
   ],
-  "missing_thetas": []
+  "missing_thetas": [],
+  "input_hash": "9f2c…(sha256 en hex)",
+  "content_hash": "b71e…(sha256 en hex)",
+  "generated_at": "2026-10-05T17:00:00Z",
+  "image_version": "0.1.0+3a9b2c1"
 }
 ```
 
 |Campo|Significado|
 |---|---|
 |`tiles_version`|semver del **formato** de los tiles (no la de la imagen). Cambia con cualquier modificación de §7.3 a §7.5; el tablero rechaza (modo degradado) una versión mayor que no conoce.|
-|`day_start_us`|Inicio del día UTC en µs desde la época: el origen del tiempo relativo de los tiles.|
-|`price_scale`|Unidades de precio del tile por unidad de la cotización: el precio en USDT es `p / price_scale`. Potencia de 10, entre `10²` y `10⁸`; 100 (el tick de 0,01 de BTCUSDT) salvo que un precio del día no caiga en el tick (§7.3).|
+|`t0`|Inicio del día UTC en µs desde la época: el origen del tiempo relativo de los tiles.|
+|`price_scale`|Unidades de precio del tile por unidad de la cotización: el precio en USDT es `p / price_scale`. **Fijo por activo**, igual al tick de la cotización: 100 para BTCUSDT (tick de 0,01). Nunca se elige por día (§7.3).|
 |`input_hash`|Huella de los archivos de entrada (§7.8).|
+|`content_hash`|SHA-256 de los arreglos: por cada archivo en orden de nombre, el nombre, un byte nulo y sus bytes. No depende de `generated_at`: dos corridas con las mismas entradas lo repiten.|
 |`generated_at`|Momento de generación (UTC). Alimenta "última actualización" de la franja de estado (principio 3). Es lo único del índice que cambia entre dos corridas idénticas.|
 |`ticks`|Ticks del día en L1.|
 |`levels`|Los `w` presentes. El tablero no asume la lista: lee esta.|
+|`price`, `volume`, `dir`|Nombre del archivo de cada tipo por nivel: `{"128": "price-128.i32", …}`.|
 |`thetas`|Los θ con bloque en `dir-<w>.u8`, en el orden de los bloques: el θ en la posición `k` ocupa los bytes `k·w` a `(k+1)·w − 1` (§7.4). `theta` es el mismo texto de ancho fijo que la partición de L2 (`"0." + 8 decimales`), ordenado de menor a mayor.|
 |`thetas[].events`|Filas de eventos que tocan el día, incluida la cola pendiente si la hay.|
 |`thetas[].provisional_from_s`|Segundos desde el inicio del día a partir de los cuales el estado de ese θ es provisional hasta el final del día; `null` si todo el día es definitivo (§7.6).|
@@ -330,20 +337,22 @@ Todos los binarios se escriben con `Content-Type: application/octet-stream` y `C
 
 ### 7.3 Tiles de precio y volumen; niveles de zoom y presupuesto
 
-**Columna de un tick.** Con `rel_us = transact_time − day_start_us` y `col = floor(rel_us × w / 86 400 000 000)`, en enteros. Un tick cae en una sola columna de cada nivel.
+**Columna de un tick.** Con `rel_us = transact_time − t0` y `col = floor(rel_us × w / 86 400 000 000)`, en enteros. Un tick cae en una sola columna de cada nivel.
 
 **`price-<w>.i32`**: binario sin cabecera, enteros little-endian, **dos bloques consecutivos** de `4w` valores:
 
 |Bloque|Offset (bytes)|Contenido|
 |---|---|---|
-|Tiempo|`0`|`t[i]`: milisegundos desde `day_start_us`, `uint32`: `floor(rel_us / 1000)`.|
-|Precio|`16w`|`p[i]`: precio en unidades de `1 / price_scale` USDT, `int32`: `price_int / (10⁸ / price_scale)`, división exacta.|
+|Tiempo|`0`|`t[i]`: milisegundos desde `t0`, `uint32`: `floor(rel_us / 1000)`.|
+|Precio|`16w`|`p[i]`: precio en unidades de `1 / price_scale` USDT, `int32`: `price_int / (10⁸ / price_scale)` redondeado al entero más cercano, mitad al par (exacto si el precio cae en el tick).|
 
 Los puntos `i = 4·col + k` (`k = 0..3`) son los cuatro puntos M4 de la columna `col`, **en orden de tiempo**: el primer tick, el mínimo, el máximo y el último, con el mínimo y el máximo ordenados por su posición en la serie. Si dos puntos coinciden (p. ej. el primero es el mínimo), se repiten: el paso es fijo, 4 puntos por columna. Ante empates de precio dentro de la columna se toma el tick con menor `agg_trade_id`. Una columna **sin ticks** lleva en sus cuatro `t` el **inicio de la columna** (`floor(col × 86 400 000 / w)` ms, en enteros) y el sentinela **`INT32_MIN`** (−2 147 483 648) solo en sus cuatro `p`: así `t` es no decreciente en todo el tile (el `floor` conserva el orden: ningún tick de la columna es anterior a su inicio), que es lo que exige un eje X de uPlot y su búsqueda binaria del cursor.
 
-*Por qué enteros y no `float32` (decisión):* el tablero existe para juzgar al detector, y el principio 7 pide numerales exactos. Con `float32` la resolución del precio es 0,0078 USDT hasta 131 072 USDT y 0,0156 por encima, más gruesa que el tick de 0,01 de BTCUSDT: el tooltip mostraría mínimos y máximos que nunca se negociaron. Con `int32` en unidades de `1 / price_scale` el precio es el de L1 sin redondeo, hasta 21 474 836,47 USDT con `price_scale = 100`. El tiempo en `uint32` ms llega a 86 400 000 (cabe con holgura) y es exacto para los datos de Binance anteriores a 2025, que vienen en ms; desde 2025-01-01 vienen en µs ([ADR-L1-02](l1.md#62-adr-l1-02--normalización-temporal-a-microsegundos-por-magnitud)) y se truncan al ms (error < 1 ms), frente a los 3,9 ms de error de `float32` al final del día. Los bytes son los mismos: 4 por valor.
+*Por qué enteros y no `float32` (decisión):* el tablero existe para juzgar al detector, y el principio 7 pide numerales exactos. Con `float32` la resolución del precio es 0,0078 USDT hasta 131 072 USDT y 0,0156 por encima, más gruesa que el tick de 0,01 de BTCUSDT: el tooltip mostraría mínimos y máximos que nunca se negociaron. Con `int32` en unidades de `1 / price_scale` el precio es el de L1 en el tick, sin la pérdida del `float32`, hasta 21 474 836,47 USDT con `price_scale = 100`. El tiempo en `uint32` ms llega a 86 400 000 (cabe con holgura) y es exacto para los datos de Binance anteriores a 2025, que vienen en ms; desde 2025-01-01 vienen en µs ([ADR-L1-02](l1.md#62-adr-l1-02--normalización-temporal-a-microsegundos-por-magnitud)) y se truncan al ms (error < 1 ms), frente a los 3,9 ms de error de `float32` al final del día. Los bytes son los mismos: 4 por valor.
 
-*Cómo se elige `price_scale`:* el tick de BTCUSDT es 0,01, pero el tickSize no acota los trades históricos ([ADR-L1-03](l1.md#63-adr-l1-03--precio-y-cantidad-como-decimal-exacto)), así que una escala fija podría redondear en silencio. En la pasada 1 (§8.1) el job lleva, con memoria fija, la mayor potencia `10^d` (`d ≤ 6`) que divide **todos** los `price_int` del día, y fija `price_scale = 10^(8 − d)`: 100 en un día normal de BTCUSDT y una escala más fina solo si algún precio no cae en el tick. Si el precio máximo del día no cabe en `int32` con esa escala, el día no se escribe y queda el hallazgo `price_unrepresentable` (§9.3). Así el entero del tile es siempre exacto o no existe.
+*Cómo se fija `price_scale` (decisión, v1.1):* es **fijo por activo**, igual al tick de la cotización (100 para BTCUSDT), declarado en el código (`PRICE_SCALE_BY_ASSET`) y escrito en `index.json`. Nunca se elige por día. La v1.0 lo elegía por día como la mayor potencia de 10 que dejaba exactos todos los `price_int`, y no escribía el día si el precio no cabía en `int32` con esa escala. Eso era frágil: el tickSize no acota los trades históricos ([ADR-L1-03](l1.md#63-adr-l1-03--precio-y-cantidad-como-decimal-exacto)), y con escala 10⁵ el máximo representable es 21 474 USDT, así que un solo trade con cinco decimales borraba la visualización de un día entero de BTCUSDT, en contra de §9.1. Con la escala fija el máximo es 21 474 836,47 USDT y el día siempre se escribe.
+
+*Qué pasa con un precio fuera del tick:* los acumuladores M4 (primero, mínimo, máximo, último) se calculan sobre el `price_int` **crudo** (×10⁸), y el resultado se redondea **una sola vez**, al escribir, al tick más cercano (mitad al par). Redondear antes de acumular podría cambiar qué tick es el mínimo o el máximo; al final, el redondeo es monótono y conserva el orden `mínimo ≤ primero, último ≤ máximo`. El job cuenta, con memoria fija, los ticks del día fuera del tick y la mayor distancia de uno a su tick más cercano, y emite el hallazgo `price_rounded` (§9.3): el tooltip puede mostrar un precio que no se negoció al céntimo, pero el hallazgo lo hace visible y medible, y nunca ocurre en silencio. `price_unrepresentable` queda solo como guarda: un precio mayor que `INT32_MAX / price_scale` (§9.3).
 
 *Por qué dos bloques y no pares intercalados:* el tiempo y el precio de cada punto quedan alineados por índice (`t[i]`, `p[i]`) y el navegador lee cada bloque con `new Uint32Array(buffer, 0, 4w)` y `new Int32Array(buffer, 16w, 4w)`, sin copiarlos para separarlos. Al cargar, la vista hace **una sola pasada** sobre los `4w` ≤ 16 384 puntos, microsegundos frente a los 100 ms del principio 8, y en ella hace las dos conversiones que uPlot necesita: arma X (`t[i] / 1000`, segundos exactos al ms) y Y (`p[i] / price_scale`, o `null` donde `p[i]` es el sentinela: uPlot marca los huecos con `null` y canvas uniría los puntos vecinos de un valor no finito). Luego suelta el `ArrayBuffer` descargado. Tras la carga cada dato vive una sola vez (en X y en Y), como exige la invariante de §2; solo durante la pasada conviven el buffer y sus dos derivados, un pico de `4w` valores y no de día. El tooltip formatea el precio con `log10(price_scale)` decimales: el numeral que muestra es exactamente el negociado.
 
@@ -477,8 +486,8 @@ Si el job muere entre 2 y 4, el día queda sin índice (el tablero lo muestra co
 El orden del núcleo respeta la eficiencia de memoria: el día nunca está entero en RAM.
 
 1. **Hash y decisión** (§7.8, paso 1). Si se salta, no se lee ningún tick.
-2. **Pasada 1 sobre los ticks**: abrir `consolidated.parquet` de `M` y leer **solo los row groups cuyo rango de `transact_time` toca el día** (estadísticas de columna; el archivo viene ordenado), row group por row group. Por tick: calcular la columna en `w = 4096` y actualizar, por columna, los acumuladores M4 (primero, mínimo, máximo, último, con su `t` y su `price_int` enteros), la suma entera de `quantity` y el `agg_trade_id` del último tick; y, para todo el día, la mayor potencia de 10 que divide a los `price_int` (§7.3, `price_scale`). Liberar el row group antes del siguiente. La memoria de esta pasada es **fija**: un row group más 4 096 columnas × unos 100 B, ~0,4 MB.
-3. **Derivar** los niveles 2 048 a 128 a partir del nivel 4 096 (M4 es componible, ADR-VZ-08), fijar `price_scale`, escribir `price-<w>.i32` y `volume-<w>.f32` y liberar los acumuladores de precio y volumen.
+2. **Pasada 1 sobre los ticks**: abrir `consolidated.parquet` de `M` y leer **solo los row groups cuyo rango de `transact_time` toca el día** (estadísticas de columna; el archivo viene ordenado), row group por row group. Por tick: calcular la columna en `w = 4096` y actualizar, por columna, los acumuladores M4 (primero, mínimo, máximo, último, con su `t` y su `price_int` enteros), la suma entera de `quantity` y el `agg_trade_id` del último tick; y, para todo el día, el conteo de ticks fuera del tick y su mayor distancia al tick más cercano (§7.3, `price_rounded`). Liberar el row group antes del siguiente. La memoria de esta pasada es **fija**: un row group más 4 096 columnas × unos 100 B, ~0,4 MB.
+3. **Derivar** los niveles 2 048 a 128 a partir del nivel 4 096 (M4 es componible, ADR-VZ-08), redondear el precio al tick del activo (`price_scale`), escribir `price-<w>.i32` y `volume-<w>.f32` y liberar los acumuladores de precio y volumen.
 4. **Pasada 2 por θ** (un θ a la vez, en el orden de `thetas`): leer del `events.parquet` de `M` los row groups que tocan el día (estadísticas de `reference_agg_trade_id` y `extreme_agg_trade_id`), más la cola de §7.6, y recorrer **a la vez** esos eventos y los 4 096 ids de último tick en una sola barrida (ambos ordenados por `agg_trade_id`): sale el estado de cada columna del nivel 4 096. Derivar los niveles gruesos (§7.5) y copiar cada nivel en el bloque del θ dentro de los seis buffers de salida (`n·w` bytes cada uno, §7.4). Liberar los eventos antes del θ siguiente. Tras el último θ, escribir los seis `dir-<w>.u8` y liberar los buffers. La memoria de esta pasada es **un row group de eventos** (hasta 32 768 filas) más los buffers de salida, de tamaño fijo: 50 × 8 064 B ≈ 0,4 MB.
 5. **Escribir** `index.json` y `latest.json` (§7.8, pasos 4 y 5) y **emitir** `tiles_summary`.
 
@@ -514,7 +523,7 @@ La imagen es una sola, `viz_tiles` (capa `layers/viz_tiles`, con su `VERSION`), 
 
 ### 9.1 Política: continuar con hallazgo y hueco visible
 
-Los tiles no son fuente de verdad y se regeneran. Por eso, a diferencia de L2 (cuyo estado encadenado exige fail-closed, [ADR-L2-08](l2.md#68-adr-l2-08--carry-over-faltante-o-de-otra-versión-fail-closed-no-log-and-continue)), viz **continúa y deja hallazgo**: si falta un θ en L2, el día se escribe con los demás y el θ ausente va a `missing_thetas` (se ve en pantalla, principio 6). Cuando el archivo aparece, el `input_hash` cambia y el día se rehace solo. Si falta el mes de L1, o el precio del día no cabe exacto en el tile (`price_unrepresentable`), el día no se escribe. En todos estos casos la unidad termina con código 1, para que la alerta del job lo vea.
+Los tiles no son fuente de verdad y se regeneran. Por eso, a diferencia de L2 (cuyo estado encadenado exige fail-closed, [ADR-L2-08](l2.md#68-adr-l2-08--carry-over-faltante-o-de-otra-versión-fail-closed-no-log-and-continue)), viz **continúa y deja hallazgo**: si falta un θ en L2, el día se escribe con los demás y el θ ausente va a `missing_thetas` (se ve en pantalla, principio 6). Cuando el archivo aparece, el `input_hash` cambia y el día se rehace solo. Si falta el mes de L1, el día no se escribe, y tampoco si el precio máximo no cabe en `int32` (`price_unrepresentable`, solo una guarda teórica: §7.3). Un precio fuera del tick **no** impide escribir el día: se redondea al tick y deja `price_rounded` (`warning`). La unidad termina con código 1 cuando deja un hallazgo `error`, para que la alerta del job lo vea; un `warning` no cambia el código.
 
 ### 9.2 Chequeos
 
@@ -522,7 +531,8 @@ Los tiles no son fuente de verdad y se regeneran. Por eso, a diferencia de L2 (c
 |---|---|
 |Entrada completa|Existe el `consolidated.parquet` del mes y los `events.parquet` y `carry_over.parquet` de cada θ del catálogo.|
 |Día con ticks|El día tiene al menos un tick en L1.|
-|Precio representable|Con el `price_scale` del día, el precio máximo cabe en `int32` (§7.3).|
+|Precio representable|Con el `price_scale` del activo, el precio máximo cabe en `int32` (§7.3).|
+|Precio en el tick|Todo `price_int` del día cae en el tick del activo; si no, se redondea y se avisa (`price_rounded`, §7.3).|
 |Tiles de entrada (export)|El día tiene `index.json` en `tiles/`.|
 
 ### 9.3 Tipos de chequeo (`check_type`)
@@ -533,7 +543,8 @@ Todos llevan `layer = "viz"`, `mode ∈ {tiles, export}`, `stage = "canonical"`,
 |-------------------|----------|--------|------|
 |`tiles_summary`    |`info`    |`pass`  |Uno por día al cerrarlo (escrito o saltado). `metric_value` = ticks del día. `details`: `day`, `input_hash`, `tiles_version`, `skipped`, `objects`, `bytes`, `thetas`, `provisional_thetas` (θ con cola provisional) y `missing_thetas`.|
 |`input_missing`    |`error`   |`fail`  |Falta una entrada. `details`: `day` y `what` ∈ {`l1`, `events`, `carry_over`, `ticks`, `tiles`}; con `events` o `carry_over` lleva también `theta`; lleva `path` cuando aplica. Un día sin ticks es `what = "ticks"`. `tiles` solo lo emite `export`.|
-|`price_unrepresentable`|`error`|`fail`  |Ningún `price_scale` deja exactos y dentro de `int32` todos los precios del día (§7.3). El día no se escribe. `details`: `day`, `price_scale` y `max_price_int`.|
+|`price_rounded`    |`warning` |`pass`  |El día tiene ticks cuyo `price_int` no cae en el tick del activo; el tile los redondeó al tick más cercano, mitad al par (§7.3). El día **se escribe**. Uno por día afectado. `metric_value` = `count`. `details`: `day`, `count` (ticks del día fuera del tick) y `max_abs_delta_int` (la mayor distancia de uno de ellos a su tick más cercano, en enteros de L1, ×10⁻⁸).|
+|`price_unrepresentable`|`error`|`fail`  |Guarda: el precio máximo del día es mayor que `INT32_MAX / price_scale` (21 474 836,47 con 100). No se espera verla. El día no se escribe. `details`: `day`, `price_scale` y `max_price_int`.|
 |`export_summary`   |`info`    |`pass`  |Uno por exportación. `metric_value` = bytes del zip. `details`: `day`, `object` (ruta del zip), `files`, `tiles_version`.|
 
 Los `mode` nuevos (`tiles`, `export`) entran al catálogo de modos de `docs/data-contracts.md` y a la validación de `shared/dq`, si la hay; lo hace la hija 2 junto al código.
@@ -661,7 +672,7 @@ No hay card de logging: es esta sección y el criterio 8 de §13 ("emite hallazg
 |RVZ-05|La exportación no abre desde disco porque `fetch` sobre `file://` está bloqueado.|Alto|Tiles incrustados en un `<script>` y un cargador con dos implementaciones (§7.9); lo verifica el criterio 3 de la Épica.|
 |RVZ-06|`storage.cloud.google.com` no sirve el HTML o sus tiles como el diseño supone (tipo de contenido, descarga en vez de render).|Alto|El criterio 1 de la Épica lo verifica en la hija 4 antes de construir sobre él; si falla, se abre la opción B (§6.5) con una card.|
 |RVZ-07|Los tiles quedan desfasados de L2 tras relanzar L2 o resolverse un evento pendiente.|Medio|`input_hash` sobre los archivos de entrada (incluye la cadena de carry-over y el `events.parquet` de `M+k` en los días con cola); revisión de los días provisionales de todos los meses con cola (§7.6, §7.8).|
-|RVZ-08|El tile muestra un precio que nunca se negoció (redondeo del formato).|Alto|Precio en `int32` con `price_scale` elegido por día para que la división sea exacta, y tiempo en `uint32` ms (§7.3). Si ninguna escala cabe, el día no se escribe y queda `price_unrepresentable` (§9.3): nunca se redondea en silencio.|
+|RVZ-08|El tile muestra un precio que nunca se negoció (redondeo del formato).|Alto|Precio en `int32` con `price_scale` fijo por activo igual al tick, y tiempo en `uint32` ms (§7.3). Un precio fuera del tick se redondea al tick más cercano y deja `price_rounded` (§9.3): el redondeo existe pero nunca es en silencio, y el día no se pierde. `price_unrepresentable` es solo la guarda para un precio mayor que `INT32_MAX / price_scale`.|
 |RVZ-09|Agregar un θ en L2 regenera todos los días del mes.|Bajo|Conocido; el costo es el de repetir el backfill de ese rango (§7.8, §10.3). Si molesta, se compara por archivo antes de reescribir (§14 ítem 9).|
 |RVZ-10|Los paneles se acumulan hasta que nadie mira ninguno.|Medio|Evaluación ergonómica obligatoria en todo PR que cambie la vista; `pr-review` rechaza si falta o si una métrica empeora sin justificación (§6.7).|
 |RVZ-11|Aparece un usuario sin acceso IAM al proyecto.|Bajo|El zip exportable cubre al asesor; la opción B se abre como card (§6.5).|
@@ -671,7 +682,7 @@ No hay card de logging: es esta sección y el criterio 8 de §13 ("emite hallazg
 ## 13. Criterios de aceptación
 
 1. Un día de tiles es **un conjunto de 19 objetos** con la disposición de §7.2, y su `index.json` es el último escrito. Matar el job entre dos tiles deja el día sin índice y la corrida siguiente lo completa.
-2. `price-<w>.i32` cumple M4: sobre un día sintético y uno real, cada columna conserva el primero, el último, el mínimo y el máximo de sus ticks, en orden de tiempo, con `INT32_MIN` en `p` y el inicio de la columna en `t` en las columnas vacías. Cada `p / price_scale` es **igual** al `price` de L1 del tick, sin redondeo; un día sintético con un precio fuera del tick sale con un `price_scale` más fino, y uno cuyo precio no cabe en `int32` deja `price_unrepresentable`. Los niveles gruesos coinciden **exactamente** con M4 calculado directo sobre los ticks.
+2. `price-<w>.i32` cumple M4: sobre un día sintético y uno real, cada columna conserva el primero, el último, el mínimo y el máximo de sus ticks, en orden de tiempo, con `INT32_MIN` en `p` y el inicio de la columna en `t` en las columnas vacías. Cada `p / price_scale` es **igual** al `price` de L1 del tick cuando este cae en el tick; un día sintético con un precio fuera del tick se escribe igual, con ese precio redondeado al tick más cercano (mitad al par), M4 calculado sobre el precio crudo y el hallazgo `price_rounded` con su `count` y `max_abs_delta_int`; y uno cuyo precio es mayor que `INT32_MAX / price_scale` lanza `price_unrepresentable` y no se escribe. Los niveles gruesos coinciden **exactamente** con M4 calculado directo sobre los ticks.
 3. `volume-<w>.f32` suma `quantity` por columna y la suma de las columnas de un nivel es igual en los seis niveles.
 4. `dir-<w>.u8` trae un bloque de `w` bytes por θ en el orden de `thetas` del índice y cada bloque sigue §7.5: sobre un día sintético con eventos conocidos, cada columna toma el estado del último tick; la cola de un mes con evento pendiente sale provisional; al cerrarse el evento en `M+1` queda definitiva; y si el evento sigue pendiente más de un mes (cadena de carry-over de dos o más meses), la cola sigue provisional hasta `M+k` y entonces la corrida sin argumentos la corrige sin intervención del humano.
 5. Re-ejecutar un día con la misma entrada **salta** sin escribir; con un archivo de entrada distinto, lo regenera; `--force` regenera siempre. Los archivos de tile salen **idénticos byte a byte** entre dos corridas con la misma entrada.
@@ -698,7 +709,7 @@ No hay card de logging: es esta sección y el criterio 8 de §13 ("emite hallazg
 |7 |**Hueco de una columna vacía en uPlot** (§7.3): que el arreglo de Y con `null` (armado en la misma pasada de carga que convierte X a segundos y suelta el buffer) corte la línea y deje estable el cursor compartido.|**Abierto.** Se asume por la documentación de uPlot; sin verificar.|Hija 4, antes de congelar `tiles_version` 1.0.0.|
 |8 |**Resolución más fina que 21,09 s** (ADR-VZ-08, RVZ-03): un nivel más fino (cada duplicación suma ~0,70 MB por día, §10.1) o un tile por rango horario.|Diferido. Solo se abre si la vista de un día no alcanza para juzgar un θ pequeño.|El humano, con la evidencia de uso de la hija 7.|
 |9 |**Comparar por archivo antes de reescribir** tras agregar un θ en L2 (RVZ-09): evita regenerar precio y volumen, que no cambian (§7.8).|Diferido. Hoy se acepta repetir el backfill del rango (~0,3 USD de operaciones más su cómputo, §10.3).|Futuro, si el costo molesta.|
-|10|**Días que `int32` no representa** (§7.3, `price_unrepresentable`): un solo trade fuera del tick en un día de precio alto basta para perder el día entero. Por ejemplo, un trade de BTCUSDT con 5 decimales en un día por encima de 21 474 USDT fuerza `price_scale = 10⁵` y desborda `int32`.|**Abierto.** Sin medir. Se mide sobre L1 cuántos días necesitan `price_scale > 100` y cuántos saldrían `price_unrepresentable`. Si sale alguno, se evalúa una salida (p. ej. un tile de precio `int64` para ese día) antes de congelar `tiles_version` 1.0.0.|Hija 2 o hija 5 (medición sobre L1).|
+|10|**Precios fuera del tick** (§7.3, `price_rounded`): el tickSize no acota los trades históricos, así que algunos ticks del backfill pueden redondearse al tick. Con el `price_scale` fijo el día nunca se pierde, pero el tooltip muestra el precio redondeado.|**Cerrado en 1.1** como contrato: `price_scale` fijo por activo, redondeo al tick y hallazgo `price_rounded`. **Abierto** solo el dato: cuántos ticks y días del histórico emiten `price_rounded` y con qué `max_abs_delta_int`. Si fueran muchos, se evalúa un `price_scale` más fino para ese activo antes de congelar `tiles_version` 1.0.0.|Hija 2 o hija 5 (medición sobre L1).|
 
 -----
 
@@ -730,4 +741,4 @@ No hay card de logging: es esta sección y el criterio 8 de §13 ("emite hallazg
 
 -----
 
-> **Nota de cierre.** TRD-viz v1.0 fija, para la capa de visualización, el diseño de una capa de consumo sin servidor: tiles M4 por día en seis niveles (de 128 a 4 096 columnas), con precio y volumen independientes de θ en enteros exactos y un tile de dirección por nivel que empaqueta los 50 θ; la regla de estado por columna y de procedencia de los eventos de un día, con su cola provisional; la idempotencia por hash de entrada con el índice como marca de commit; los modos `tiles` y `export`; las variables `VIZ_*`; los hallazgos de DQ con `layer = "viz"`; y la regla de proceso que exige una Evaluación ergonómica en todo cambio de la vista. Las hijas 2 a 7 de la Épica E6 lo implementan; ninguna reabre estas decisiones. Lo que falta por medir (dimensionamiento, costo real del backfill y las tres métricas de eficiencia) está en §14.
+> **Nota de cierre.** TRD-viz v1.1 fija, para la capa de visualización, el diseño de una capa de consumo sin servidor: tiles M4 por día en seis niveles (de 128 a 4 096 columnas), con precio y volumen independientes de θ en enteros (el precio en unidades del tick del activo) y un tile de dirección por nivel que empaqueta los 50 θ; la regla de estado por columna y de procedencia de los eventos de un día, con su cola provisional; la idempotencia por hash de entrada con el índice como marca de commit; los modos `tiles` y `export`; las variables `VIZ_*`; los hallazgos de DQ con `layer = "viz"`; y la regla de proceso que exige una Evaluación ergonómica en todo cambio de la vista. Las hijas 2 a 7 de la Épica E6 lo implementan; ninguna reabre estas decisiones. Lo que falta por medir (dimensionamiento, costo real del backfill y las tres métricas de eficiencia) está en §14.
