@@ -219,27 +219,32 @@ class M4Accumulator:
         acc.present[cols] = True
 
     def finish(self) -> DayReduction:
-        """Los tiles de todos los niveles. Suelta los acumuladores."""
+        """Los tiles de todos los niveles. Suelta los acumuladores.
+
+        Un nivel a la vez, del fino al grueso: se arman sus tiles y se suelta
+        antes de derivar el siguiente; de cada uno sobrevive solo su `last_id`.
+        """
         level, self._level = self._level, _Level.empty(FINEST)
-        levels = {}
-        for w in reversed(LEVELS):
-            levels[w] = level
-            if w != LEVELS[0]:
-                level = level.coarsen()
-        finest = levels[FINEST]
-        if finest.present.any():
-            max_price_int = int(finest.max_p[finest.present].max())
+        if level.present.any():
+            max_price_int = int(level.max_p[level.present].max())
             rounded_max = int(_round_to_tick(np.int64(max_price_int), self._factor))
             if rounded_max > INT32_MAX:
                 raise PriceUnrepresentable(self.price_scale, max_price_int)
+        price, volume, last_ids = {}, {}, {}
+        for w in reversed(LEVELS):
+            price[w] = _price_tile(level, self._factor)
+            volume[w] = _volume_tile(level)
+            last_ids[w] = level.last_id
+            if w != LEVELS[0]:
+                level = level.coarsen()
         return DayReduction(
             ticks=self.ticks,
             price_scale=self.price_scale,
             rounded=self.rounded,
             max_abs_delta_int=self.max_abs_delta_int,
-            price={w: _price_tile(lv, self._factor) for w, lv in levels.items()},
-            volume={w: _volume_tile(lv) for w, lv in levels.items()},
-            last_ids={w: lv.last_id for w, lv in levels.items()},
+            price={w: price[w] for w in LEVELS},
+            volume={w: volume[w] for w in LEVELS},
+            last_ids={w: last_ids[w] for w in LEVELS},
         )
 
 

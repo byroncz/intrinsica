@@ -48,8 +48,11 @@ def day_dir(root: str | Path, provider: str, market: str, asset: str, day: date)
     )
 
 
-def _tile_bytes(kind: str, w: int, array: np.ndarray, blocks: int = 1) -> bytes:
-    """Bytes del archivo: el arreglo con el tipo y el largo que fija el contrato.
+def _tile_view(kind: str, w: int, array: np.ndarray, blocks: int = 1) -> memoryview:
+    """Vista de los bytes del archivo: el arreglo con el tipo y el largo del contrato.
+
+    No copia: con el `dtype` del contrato `astype(copy=False)` devuelve el mismo
+    arreglo y `memoryview` lo expone sin duplicarlo.
 
     `blocks` es el número de θ de un archivo `dir` (un bloque de `w` por θ).
     """
@@ -59,10 +62,10 @@ def _tile_bytes(kind: str, w: int, array: np.ndarray, blocks: int = 1) -> bytes:
         raise ValueError(
             f"{kind}-{w}: se esperaban {expected} valores, hay {array.shape}"
         )
-    return array.astype(spec.dtype, copy=False).tobytes()
+    return memoryview(np.ascontiguousarray(array.astype(spec.dtype, copy=False)))
 
 
-def _put(fs: pafs.FileSystem, path: str, data: bytes) -> None:
+def _put(fs: pafs.FileSystem, path: str, data: bytes | memoryview) -> None:
     with fs.open_output_stream(path) as out:
         out.write(data)
 
@@ -110,9 +113,9 @@ def write_day(
     if _exists(fs, index_path):
         fs.delete_file(index_path)
 
-    # Nombre de archivo -> (tipo, nivel, arreglo). Precio y volumen son vistas de
-    # lo que ya está en RAM; la dirección de un nivel se arma al escribirlo, un
-    # nivel a la vez: los bytes de cada archivo se generan de uno en uno.
+    # Nombre de archivo -> (tipo, nivel). Precio y volumen se hashean y se
+    # escriben desde una vista del arreglo que ya está en RAM; la dirección de
+    # un nivel se arma al escribirlo, un nivel a la vez.
     names = {
         kind: {str(w): tile_name(kind, w) for w in LEVELS}
         for kind in ("price", "volume", "dir")
@@ -147,11 +150,12 @@ def write_day(
     digest = hashlib.sha256()
     for name in sorted(files):
         kind, w = files[name]
-        data = _tile_bytes(
+        view = _tile_view(
             kind, w, array_of(kind, w), len(thetas) if kind == "dir" else 1
         )
-        digest.update(name.encode() + b"\0" + data)
-        _put(fs, f"{directory}/{name}", data)
+        digest.update(name.encode() + b"\0")
+        digest.update(view)
+        _put(fs, f"{directory}/{name}", view)
 
     when = generated_at or datetime.now(UTC)
     values = {
