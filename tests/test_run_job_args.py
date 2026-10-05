@@ -94,3 +94,45 @@ def test_los_demas_jobs_ignoran_script_y_args():
         args("l2-monthly", "2023-03", "2023-03", "", "", SCRIPT_URI, "x")
         == "--mode,monthly,--from=2023-03"
     )
+
+
+def test_viz_tiles_sin_rango_solo_pasa_el_modo():
+    # Vacío, la CLI toma el mes anterior.
+    assert args("viz-tiles") == "--mode,tiles"
+
+
+def test_viz_tiles_un_mes_omite_to_igual_a_from():
+    assert args("viz-tiles", "2023-03", "2023-03") == "--mode,tiles,--from=2023-03"
+
+
+def test_viz_tiles_rango_pasa_to():
+    assert (
+        args("viz-tiles", "2023-03", "2023-05")
+        == "--mode,tiles,--from=2023-03,--to=2023-05"
+    )
+
+
+def test_viz_tiles_force_va_al_final():
+    assert (
+        args("viz-tiles", "2023-03", "2023-05", "true")
+        == "--mode,tiles,--from=2023-03,--to=2023-05,--force"
+    )
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        ("2023-03",),  # series_start
+        ("", SCRIPT_URI),  # script
+        ("", "", "--a 1"),  # args
+    ],
+)
+def test_viz_tiles_rechaza_series_start_script_y_args(extra):
+    out = subprocess.run(
+        [SCRIPT, "viz-tiles", "2023-03", "", "", *extra],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert out.returncode == 2
+    assert "viz-tiles no usa" in out.stderr

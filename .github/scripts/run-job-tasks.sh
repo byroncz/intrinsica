@@ -15,8 +15,11 @@
 #   l2-monthly:                    una sola unidad ("1"); to vacío o igual a from
 #   ops-script:                    una sola unidad ("1"); exige script (URI
 #                                  gs://<bucket>/<objeto>) y no admite from ni to
-# to por defecto es from. En los demás jobs from es obligatorio. script solo
-# lo mira ops-script; los demás jobs lo ignoran. Entrada inválida: mensaje en
+#   viz-tiles:                     una sola unidad ("1") para todo el rango; from y to
+#                                  son meses YYYY-MM y ambos pueden ir vacíos (la CLI
+#                                  toma el mes anterior); to sin from se rechaza
+# to por defecto es from. En los demás jobs from es obligatorio. script lo
+# exige ops-script y lo rechaza viz-tiles; los demás jobs lo ignoran. Entrada inválida: mensaje en
 # stderr y salida 2.
 set -euo pipefail
 
@@ -102,7 +105,18 @@ case "$job" in
       || fail "script inválido '$script': se espera gs://<bucket>/<objeto>, sin espacios"
     echo 1
     ;;
+  viz-tiles)
+    # Una sola tarea que recorre el rango en orden: la idempotencia por
+    # input_hash salta lo hecho. Los vacíos los resuelve la CLI (mes anterior).
+    [[ -z "$script" ]] || fail "viz-tiles no usa script"
+    if [[ -z "$from" ]]; then
+      [[ -z "${3:-}" ]] || fail "to exige from: sin from la CLI toma el mes anterior"
+    else
+      check_month_range
+    fi
+    echo 1
+    ;;
   *)
-    fail "job inválido '$job': l1-backfill, l1-daily, l1-monthly-close, l1-seam-check, l2-backfill, l2-monthly u ops-script"
+    fail "job inválido '$job': l1-backfill, l1-daily, l1-monthly-close, l1-seam-check, l2-backfill, l2-monthly, ops-script o viz-tiles"
     ;;
 esac

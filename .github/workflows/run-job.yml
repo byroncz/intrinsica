@@ -17,6 +17,11 @@
 # salida. Una sola tarea; no admite from, to, force ni series_start. Los demás
 # jobs ignoran script y args.
 #
+# viz-tiles (ITSC-307) tampoco usa task array: una sola tarea recorre los meses
+# del rango en orden, y la idempotencia por input_hash salta los días hechos. from
+# y to son meses YYYY-MM; vacíos, la CLI toma el mes anterior y revisa hacia atrás
+# los que tienen cola provisional. No admite series_start, script ni args.
+#
 # Regla: no lanzar a mano el mismo mes y modo que Scheduler esté ejecutando.
 name: Run job
 
@@ -34,9 +39,10 @@ on:
           - l2-backfill
           - l2-monthly
           - ops-script
+          - viz-tiles
         required: true
       from:
-        description: "Inicio: YYYY-MM (backfill, monthly, monthly-close) o YYYY-MM-DD (l1-daily). Solo l2-backfill admite vacío: la frontera de cada θ decide desde dónde avanza"
+        description: "Inicio: YYYY-MM (backfill, monthly, monthly-close) o YYYY-MM-DD (l1-daily). Solo l2-backfill admite vacío: la frontera de cada θ decide desde dónde avanza. viz-tiles: YYYY-MM; vacío = el mes anterior (lo decide la CLI)"
         type: string
         required: false
       to:
@@ -44,7 +50,7 @@ on:
         type: string
         required: false
       force:
-        description: "Reprocesar aunque ya esté hecho. L1: el .CHECKSUM coincide con el manifiesto (úsalo si cambió el código). L2 (backfill): arrancar en from aunque los meses ya tengan carry-over; exige from"
+        description: "Reprocesar aunque ya esté hecho. L1: el .CHECKSUM coincide con el manifiesto (úsalo si cambió el código). L2 (backfill): arrancar en from aunque los meses ya tengan carry-over; exige from. viz-tiles: regenerar los tiles aunque su input_hash no haya cambiado; exige from"
         type: boolean
         default: false
       series_start:
@@ -93,6 +99,12 @@ jobs:
           # escondería un error de quien lanza.
           if [[ "$JOB" == ops-script && ( -n "$SERIES_START" || "$FORCE" == "true" ) ]]; then
             echo "::error::series_start y force no aplican a ops-script"
+            exit 1
+          fi
+          # viz-tiles: la CLI no tiene series-start, script ni args; rechazarlos
+          # aquí evita gastar una ejecución que argparse cortaría con 2.
+          if [[ "$JOB" == viz-tiles && ( -n "$SCRIPT" || -n "$SCRIPT_ARGS" ) ]]; then
+            echo "::error::script y args solo aplican a ops-script, no a viz-tiles"
             exit 1
           fi
           if [[ "$FORCE" == "true" && -z "$FROM" ]]; then

@@ -26,6 +26,9 @@ on:
       ALERT_EMAIL:
         description: Correo del stack alerting (secret de repositorio; solo se exporta para ese stack)
         required: false
+      VIZ_VIEWER:
+        description: Correo del visor del stack viz (secret de repositorio; solo se exporta para ese stack)
+        required: false
 
 env:
   CHECKPOINT_DISABLE: "1"
@@ -52,6 +55,9 @@ jobs:
       # plan va a un bucket privado y no a un artefacto (cualquier cuenta de
       # GitHub descarga los artefactos de un repo público).
       TF_VAR_alert_email: ${{ inputs.stack == 'alerting' && secrets.ALERT_EMAIL || '' }}
+      # Igual para el correo del visor de viz (ITSC-307): secret de repositorio,
+      # enmascarado y exportado solo para el stack viz.
+      TF_VAR_viz_viewer: ${{ inputs.stack == 'viz' && secrets.VIZ_VIEWER || '' }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -70,6 +76,11 @@ jobs:
           # La variable alert_email valida que sea un correo: sin ALERT_EMAIL a nivel de repo, fallar aquí y con el motivo.
           if [[ "$STACK" == "alerting" && -z "$TF_VAR_alert_email" ]]; then
             echo "::error::Falta el secret de repositorio ALERT_EMAIL. Este job no ve los secrets del environment gcp: crea ALERT_EMAIL en Settings > Secrets and variables > Actions > Secrets (ver infra/README.md, stack alerting)."
+            exit 1
+          fi
+          # Lo mismo para viz: sin VIZ_VIEWER el binding del visor no tiene a quién dar lectura.
+          if [[ "$STACK" == "viz" && -z "$TF_VAR_viz_viewer" ]]; then
+            echo "::error::Falta el secret de repositorio VIZ_VIEWER. Este job no ve los secrets del environment gcp: crea VIZ_VIEWER en Settings > Secrets and variables > Actions > Secrets (ver infra/README.md, stack viz)."
             exit 1
           fi
           echo "STACK_DIR=infra/stacks/batch/${STACK}" >> "$GITHUB_ENV"

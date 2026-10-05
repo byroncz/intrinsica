@@ -230,3 +230,22 @@ resource "google_storage_bucket" "ops" {
 
   depends_on = [google_project_service.apis]
 }
+
+# Tiles de viz (ITSC-307): el job viz-tiles escribe en tiles/ los tiles de cada
+# día, su index.html autocontenido y latest.html; el humano los abre con su
+# cuenta de Google (objectViewer, que declara el stack viz). Sin versionado y
+# sin regla de ciclo de vida: todo lo que hay aquí se regenera desde L1 y L2, y
+# una versión no vigente solo sería costo. Terraform no publica ningún objeto.
+resource "google_storage_bucket" "viz" {
+  name                        = "${var.project_id}-viz"
+  project                     = google_project.this.project_id
+  location                    = var.region
+  uniform_bucket_level_access = true
+  public_access_prevention    = "enforced"
+
+  lifecycle {
+    prevent_destroy = true
+  }
+
+  depends_on = [google_project_service.apis]
+}

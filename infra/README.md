@@ -314,8 +314,8 @@ aunque la imagen se haya publicado; se arregla en `main` o se lanza el manual.
 
 **El plan guardado vive en un bucket, no en un artefacto.** El repositorio es
 público y cualquier cuenta de GitHub descarga los artefactos de un run; un plan
-guardado lleva dentro los valores de sus variables, entre ellos el correo de
-`alerting`. Por eso el job `plan` lo sube a
+guardado lleva dentro los valores de sus variables, entre ellos los correos de
+`alerting` y `viz`. Por eso el job `plan` lo sube a
 `gs://<proyecto>-tfstate/plans/<run>-<intento>/<stack>.tfplan` (privado), el
 `apply` lo borra al terminar y una regla de ciclo de vida de `data` borra a los 7
 días los que quedaron (rechazados, cancelados o con apply fallido). La regla
@@ -474,6 +474,74 @@ Orden de apply, todo por el humano:
 
 Un cambio de código de `ops_tools` sube su `VERSION` y se despliega como
 cualquier capa (ver "Desplegar un cambio de capa").
+
+## Stack viz (tiles de visualización)
+
+Instancia del módulo `layer` con un solo modo: el job `viz-tiles` (y la service
+account `viz-tiles`), que reduce L1 y L2 a tiles por día y deja, junto a ellos,
+el `index.html` autocontenido de cada día y `tiles/latest.html` (ITSC-307).
+Diseño en el [TRD-viz](../docs/TRD/viz.md); la imagen es `viz_tiles`
+(`layers/viz_tiles/`, versión en su `VERSION`). Terraform no publica ninguna
+página ni archivo: lo único que declara es el bucket (en `data`), el job y quién
+puede leer.
+
+**Qué crea**
+
+- En `data`: el bucket `<proyecto>-viz`, con acceso uniforme, acceso público
+  prevenido, sin versionado y sin regla de ciclo de vida (todo lo que hay es
+  `tiles/` y se regenera desde L1 y L2), y `bucketIamAdmin` sobre él para
+  `deploy-github`. Ese rol basta para el binding del visor; `deploy-github` no
+  tiene ningún rol de objetos sobre este bucket.
+- En `viz`: la service account `viz-tiles`, el job `viz-tiles` (4 vCPU, 4 GiB,
+  timeout de 36 000 s, 1 reintento) y el binding del visor. El tamaño es un
+  punto de partida y no una medida: la hija 8 de la Épica E6 lo redimensiona con
+  lo medido. El timeout alto es porque el mismo modo sirve al backfill por rangos.
+
+**Accesos**
+
+| Quién | Rol | Dónde |
+|---|---|---|
+| `viz-tiles` | `objectViewer` | `landing/l1/` y `dc-events/l2/` |
+| `viz-tiles` | `objectUser` | `viz/tiles/` (tiles, `index.html` de cada día y `latest.html`) y `dq-findings/viz/` |
+| El humano (`VIZ_VIEWER`) | `objectViewer` | todo el bucket `viz` |
+
+`viz-tiles` nunca escribe en `landing`, `dc-events` ni `manifest`.
+
+**Secret `VIZ_VIEWER`.** Es el correo de la cuenta de Google que abre los
+archivos del bucket (variable sensible `viz_viewer`, `TF_VAR_viz_viewer`). Igual
+que `ALERT_EMAIL` (ver "Secret `ALERT_EMAIL`"), debe ser **secret de
+repositorio** (*Settings → Secrets and variables → Actions → Secrets →
+Repository secrets*) y no del environment `gcp`: el job `plan` no usa ese
+environment y no ve sus secrets. Es secret y no variable porque GitHub no
+enmascara una variable y los logs de este repo público los lee cualquiera; el
+workflow solo lo exporta cuando el stack es `viz`. Sin él, el job `plan` de
+merge y manual falla de entrada con el motivo. El correo nunca va al repo ni a un
+`.tfvars`. El humano lo crea antes del primer deploy de `viz`.
+
+El plan de un PR usa el relleno `plan@example.invalid` y muestra
+`~ update in place` en `google_storage_bucket_iam_member.viewer` (el `member`
+cambia por el relleno): es ruido esperado, como en `alerting`, porque el PR no ve
+el secret. El plan de un merge o del manual usa el correo real.
+
+**Orden de aplicación**, todo por el humano:
+
+1. `data` desde Cloud Shell (ver "Habilitar el despliegue desde GitHub
+   Actions"): crea el bucket `viz` y da a `deploy-github` `bucketIamAdmin` sobre
+   él. Sin este apply, el plan de `viz` falla: el output `buckets` de `data` aún
+   no trae `viz`, y el check `stack (viz)` del PR queda en rojo hasta entonces
+   (es esperado). Aplica `data` con el checkout de la rama del PR, antes de
+   aprobar.
+2. Crear el secret de repositorio `VIZ_VIEWER`.
+3. Mergear. Al terminar CI en `main`, que publica `viz_tiles:<versión>` (la de
+   `layers/viz_tiles/VERSION`), el run *Terraform* deja el `apply` de `viz`
+   esperando; no se aprueba antes porque el apply falla si el tag aún no existe.
+4. Aprobar en *Review deployments*. El plan debe mostrar solo la service account,
+   sus cuatro bindings, el binding del visor y el job.
+
+**Lanzar tiles.** *Actions → Run job* con `job` = `viz-tiles`: `from` y `to` son
+meses `YYYY-MM` (vacíos, la CLI toma el mes anterior); `force` regenera aunque el
+`input_hash` no haya cambiado y exige `from`. `series_start`, `script` y `args`
+se rechazan. Es una sola tarea que recorre los meses del rango en orden.
 
 ## Stack alerting (alerta de hallazgos ERROR)
 

@@ -82,3 +82,38 @@ def test_job_invalido_nombra_ops_script():
     out = run("l9-x", "2023-03")
     assert out.returncode == 2
     assert "ops-script" in out.stderr
+
+
+@pytest.mark.parametrize(
+    ("desde", "hasta"),
+    [("", ""), ("2023-03", ""), ("2023-03", "2023-03"), ("2023-03", "2024-01")],
+)
+def test_viz_tiles_es_una_sola_unidad_para_todo_el_rango(desde, hasta):
+    # Una tarea recorre los meses en orden; vacíos, la CLI toma el mes anterior.
+    assert units("viz-tiles", desde, hasta) == ["1"]
+
+
+def test_viz_tiles_sin_argumentos_de_rango():
+    assert units("viz-tiles", "") == ["1"]
+
+
+@pytest.mark.parametrize(
+    ("desde", "hasta", "mensaje"),
+    [
+        ("2023-13", "", "from inválido"),
+        ("2023-03-01", "", "from inválido"),
+        ("2023-03", "2023-3", "to inválido"),
+        ("2023-05", "2023-03", "menor que from"),
+        ("", "2023-03", "to exige from"),
+    ],
+)
+def test_viz_tiles_rechaza_rangos_invalidos(desde, hasta, mensaje):
+    out = run("viz-tiles", desde, hasta)
+    assert out.returncode == 2
+    assert mensaje in out.stderr
+
+
+def test_viz_tiles_rechaza_script():
+    out = run("viz-tiles", "", "", URI)
+    assert out.returncode == 2
+    assert "no usa script" in out.stderr

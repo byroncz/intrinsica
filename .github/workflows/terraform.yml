@@ -40,6 +40,7 @@ on:
           - l4
           - alerting
           - ops
+          - viz
         required: true
       action:
         description: Acción de Terraform
@@ -119,6 +120,9 @@ jobs:
       # relleno (la variable es sensible, no se imprime) y el valor real, el
       # secret ALERT_EMAIL, solo entra en el job plan que sigue a un merge.
       TF_VAR_alert_email: plan@example.invalid
+      # Lo mismo para el visor del stack viz: relleno en el plan de un PR, y el
+      # valor real (secret VIZ_VIEWER) solo en el job plan tras un merge.
+      TF_VAR_viz_viewer: plan@example.invalid
     steps:
       - uses: actions/checkout@v7
 
@@ -186,7 +190,7 @@ jobs:
       stack: ${{ matrix.layer }}
       action: apply
       ref: ${{ github.event.workflow_run.head_sha }}
-    secrets: inherit # ALERT_EMAIL, para el plan del stack alerting
+    secrets: inherit # ALERT_EMAIL y VIZ_VIEWER, para el plan de alerting y viz
 
   # Camino manual: reaplicar sin cambio de código (cerrar deriva) o destroy. `data`
   # no está entre las opciones y lo aplica el humano.
@@ -200,4 +204,4 @@ jobs:
       stack: ${{ inputs.stack }}
       action: ${{ inputs.action }}
       ref: ${{ github.sha }}
-    secrets: inherit # ALERT_EMAIL, para el plan del stack alerting
+    secrets: inherit # ALERT_EMAIL y VIZ_VIEWER, para el plan de alerting y viz
