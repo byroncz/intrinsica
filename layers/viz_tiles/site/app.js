@@ -11,8 +11,9 @@
   var DAY_S = 86400;
   var EMPTY = -2147483648; // centinela de p en una columna sin ticks (§7.3)
   var KNOWN_MAJOR = 1;
-  // Desde este ancho (px CSS por columna) una columna deja de ser un segmento y se dibujan
-  // sus puntos M4 (primero, mínimo, máximo y último: ticks reales) en su instante exacto.
+  // Desde este ancho (px CSS por columna) se dibujan, sobre el segmento mín–máx de una columna
+  // con 3 ticks o más, sus puntos M4 (primero, mínimo, máximo y último: ticks reales) en su
+  // instante exacto.
   var DOT_MIN_COL_PX = 5;
   var DOT_PX = 3; // lado de un punto, en px CSS
   var MONO = 'ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace';
@@ -568,10 +569,12 @@
 
   // Lo que se dibuja es un tick o la envolvente exacta de ticks (§6.4):
   //  - columna con 1 o 2 ticks: M4 son todos sus ticks, un punto por tick;
-  //  - columna con más ticks y angosta (< DOT_MIN_COL_PX): el segmento del mínimo al máximo, la
-  //    unión de los píxeles que ocuparían sus puntos; si mínimo y máximo son iguales, el tramo
-  //    horizontal del primer al último tick;
-  //  - columna con más ticks y ancha: sus cuatro puntos M4 (ticks reales) en su instante exacto.
+  //  - columna con 3 ticks o más: siempre el segmento del mínimo al máximo, la unión de los
+  //    píxeles que ocuparían sus puntos; si mínimo y máximo son iguales, el tramo horizontal del
+  //    primer al último tick;
+  //  - y, si además es ancha (>= DOT_MIN_COL_PX), sus cuatro puntos M4 (ticks reales) en su
+  //    instante exacto, sobre el segmento: nunca solo cuatro puntos aislados, que se leerían
+  //    como "4 ticks" en una columna de miles.
   // Nada une una columna con la vecina: nadie midió lo que hay entre ellas (principio 6).
   var drawMode = "segments"; // "segments" | "points"
 
@@ -609,18 +612,23 @@
       drawn.points++;
     }
 
+    // Los puntos M4 de la columna que empieza en el índice k, sin repetir los que coinciden.
+    function m4Dots(k) {
+      for (var j = 0; j < 4; j++) {
+        var dup = false;
+        for (var q = 0; q < j; q++) {
+          if (t[k + q] === t[k + j] && y[k + q] === y[k + j]) dup = true;
+        }
+        if (!dup) dot(t[k + j], y[k + j]);
+      }
+    }
+
     for (var c = c0; c <= c1; c++) {
       if (emptyColumn(level, c)) continue; // hueco: lo marca drawRegions, aquí no se dibuja nada
       var k = 4 * c;
       var n = level.cnt ? level.cnt[c] : 3; // sin el tile de conteo no se sabe si M4 son todos los ticks
-      if (n <= 2 || wide) {
-        for (var j = 0; j < 4; j++) {
-          var dup = false;
-          for (var q = 0; q < j; q++) {
-            if (t[k + q] === t[k + j] && y[k + q] === y[k + j]) dup = true;
-          }
-          if (!dup) dot(t[k + j], y[k + j]);
-        }
+      if (n <= 2) {
+        m4Dots(k);
         continue;
       }
       var lo = Infinity;
@@ -646,6 +654,7 @@
         path.lineTo(xc, yBottom);
         drawn.segments++;
       }
+      if (wide) m4Dots(k);
     }
     setDrawMode(wide ? "points" : "segments", drawn);
     return { stroke: path, fill: null, clip: null, band: null, gaps: null, flags: 3 };
@@ -1131,8 +1140,8 @@
     var dur = cur.colDur;
     $("f-level").textContent =
       "nivel " + cur.w + " · " + (Number.isInteger(dur) ? dur : dur.toFixed(2)) + " s por columna" +
-      " · puntos M4 desde " + DOT_MIN_COL_PX + " px por columna · precio: " +
-      (drawMode === "points" ? "puntos" : "segmentos mín–máx");
+      " · puntos M4 sobre el segmento desde " + DOT_MIN_COL_PX + " px por columna · precio: " +
+      (drawMode === "points" ? "segmentos y puntos" : "segmentos mín–máx");
   }
 
   /* ---------- Arranque ---------- */

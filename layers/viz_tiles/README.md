@@ -172,9 +172,10 @@ volumen 20 %), franja de estado fija (día, θ, navegación por eventos, última
 actualización, datos completos o incompletos) y tooltip por cubeta.
 
 - **Precio**, nunca velas: una columna con 1 o 2 ticks es un punto por tick; con
-  más ticks y menos de 5 px de ancho, el segmento de su mínimo a su máximo (la
-  envolvente exacta de sus ticks); desde 5 px por columna, sus cuatro puntos M4
-  (ticks reales) en su instante exacto. Nada une una columna con la vecina. Una
+  más ticks, siempre el segmento de su mínimo a su máximo (la envolvente exacta
+  de sus ticks) y, desde 5 px por columna, además sus cuatro puntos M4 (ticks
+  reales) en su instante exacto, sobre el segmento. Nada une una columna con la
+  vecina. Una
   columna sin ticks se marca con una línea punteada ámbar de 1 px a media altura
   y `◇`.
 - **Franjas del θ activo**, dibujadas desde `events.bin` en los instantes exactos

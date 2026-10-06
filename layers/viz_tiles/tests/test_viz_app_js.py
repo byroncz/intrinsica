@@ -415,15 +415,15 @@ def test_each_envelope_spans_the_exact_min_to_max_of_its_column(normal, day_dir)
         assert ya <= px_y(start, p[c].max()) + 1 and yb >= px_y(start, p[c].min()) - 1
 
 
-def test_zoomed_in_columns_show_their_m4_ticks_at_their_exact_instant(normal, day_dir):
+def test_zoomed_in_columns_show_their_m4_ticks_over_their_envelope(normal, day_dir):
     zoom = step(normal, "zoom")  # una hora a 1 500 px: ~8 px por columna
     assert zoom["level"].startswith("nivel 4096")
     assert zoom["metrics"]["price_draw"]["mode"] == "points"
-    t, p, _ = m4_columns(day_dir, W)
+    t, p, count = m4_columns(day_dir, W)
     lo, hi = zoom["x"]
     ops = zoom["pathOps"]
-    assert {o[0] for o in ops} == {"rect"}  # puntos, ni un trazo
-    centers = {(round(o[1] + o[3] / 2), round(o[2] + o[4] / 2)) for o in ops}
+    rects = [o for o in ops if o[0] == "rect"]
+    centers = {(round(o[1] + o[3] / 2), round(o[2] + o[4] / 2)) for o in rects}
     expected = set()
     for c in range(int(lo // COL_S), int(np.ceil(hi / COL_S))):
         if p[c, 0] <= 0:
@@ -431,8 +431,15 @@ def test_zoomed_in_columns_show_their_m4_ticks_at_their_exact_instant(normal, da
         for k in range(4):
             expected.add((round(px_x(zoom, t[c, k])), round(px_y(zoom, p[c, k]))))
     assert centers == expected
-    assert len(ops) == zoom["metrics"]["price_draw"]["points"]
-    assert zoom["level"].endswith("precio: puntos")
+    assert len(rects) == zoom["metrics"]["price_draw"]["points"]
+    assert zoom["level"].endswith("precio: segmentos y puntos")
+    # Una columna con 3 ticks o más nunca queda en cuatro puntos sueltos: lleva su segmento.
+    visible = range(int(lo // COL_S), int(np.ceil(hi / COL_S)))
+    envelopes = [
+        c for c in visible if p[c, 0] > 0 and count[c] >= 3 and p[c].min() < p[c].max()
+    ]
+    assert envelopes
+    assert zoom["metrics"]["price_draw"]["segments"] == len(envelopes)
 
 
 def test_the_threshold_between_segments_and_points_is_5_px(crossings):
