@@ -92,9 +92,14 @@ def render_summary(
     tiles_version: str,
     template_hash: str,
     page_bytes: int,
+    decoded_bytes: int,
     content_hash: str,
 ) -> Finding:
-    """Uno por día del modo `render`, regenerado o ya al día. `metric_value` son los bytes de la página."""
+    """Uno por día del modo `render`, regenerado o ya al día.
+
+    `page_bytes` es lo guardado (gzip en un bucket, plano en disco) y
+    `decoded_bytes` el HTML ya descomprimido; `metric_value` es `page_bytes`.
+    """
     return finding(
         ctx,
         day,
@@ -108,6 +113,7 @@ def render_summary(
             "template_hash": template_hash,
             "content_hash": content_hash,
             "page_bytes": page_bytes,
+            "decoded_bytes": decoded_bytes,
         },
     )
 

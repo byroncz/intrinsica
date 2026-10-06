@@ -64,9 +64,12 @@ variable "max_retries" {
 }
 
 variable "modes" {
-  description = "Modos de la capa: mapa modo → acceso. Cada modo crea el job <layer>-<modo> y la service account <layer>-<modo>. access es un mapa nombre de bucket → {role, prefixes}: el rol de storage y los prefijos de objeto donde lo tiene. timeout (opcional, segundos) sobrescribe var.timeout para ese modo."
+  description = "Modos de la capa: mapa modo → acceso. Cada modo crea el job <layer>-<modo> y la service account <layer>-<modo>. access es un mapa nombre de bucket → {role, prefixes}: el rol de storage y los prefijos de objeto donde lo tiene. timeout (opcional, segundos), cpu y memory (opcionales) sobrescriben var.timeout, var.cpu y var.memory para ese modo; env (opcional) reemplaza a var.env, no se mezcla con él."
   type = map(object({
     timeout = optional(number)
+    cpu     = optional(string)
+    memory  = optional(string)
+    env     = optional(map(string))
     access = map(object({
       role     = string
       prefixes = list(string)

@@ -1,8 +1,10 @@
-# Visualización de los tiles (ITSC-307). Corre un solo job, viz-tiles: reduce L1
-# y L2 a tiles por día y los deja, con su página HTML, en el bucket viz. No es
-# una capa Medallion: lee del lago y nunca escribe en él (landing, dc-events ni
-# manifest). Este stack no posee buckets (el bucket viz lo crea data, como todos);
-# solo pide acceso a sus prefijos y le da lectura al humano.
+# Visualización de los tiles (ITSC-307, ITSC-310). Corre dos jobs: viz-tiles
+# reduce L1 y L2 a tiles por día y los deja, con su página HTML, en el bucket
+# viz; viz-render vuelve a armar esas páginas desde los tiles ya escritos cuando
+# cambia la plantilla. No es una capa Medallion: lee del lago y nunca escribe en
+# él (landing, dc-events ni manifest). Este stack no posee buckets (el bucket viz
+# lo crea data, como todos); solo pide acceso a sus prefijos y le da lectura al
+# humano.
 data "terraform_remote_state" "data" {
   backend = "gcs"
 
@@ -24,6 +26,16 @@ locals {
   access = {
     (local.buckets["landing"])     = { role = "roles/storage.objectViewer", prefixes = ["l1/"] }
     (local.buckets["dc-events"])   = { role = "roles/storage.objectViewer", prefixes = ["l2/"] }
+    (local.viz)                    = { role = "roles/storage.objectUser", prefixes = ["tiles/"] }
+    (local.buckets["dq-findings"]) = { role = "roles/storage.objectUser", prefixes = ["viz/"] }
+  }
+
+  # viz-render no lee L1 ni L2: parte de los tiles y escribe solo páginas
+  # (index.html del día y latest.html) y sus hallazgos. Sin acceso a landing ni a
+  # dc-events, una plantilla con un error no puede tocar el lago. objectUser por
+  # la misma razón que viz-tiles: regenerar una página pisa el index.html previo,
+  # y su idempotencia lee la huella guardada en él.
+  render_access = {
     (local.viz)                    = { role = "roles/storage.objectUser", prefixes = ["tiles/"] }
     (local.buckets["dq-findings"]) = { role = "roles/storage.objectUser", prefixes = ["viz/"] }
   }
@@ -67,10 +79,37 @@ module "layer" {
     VIZ_DQ_ROOT      = "gs://${local.buckets["dq-findings"]}/viz"
   }
 
-  # Un solo modo, una sola tarea (run-job-tasks.sh devuelve una unidad). Job
-  # viz-tiles y service account viz-tiles.
+  # Un job por modo, cada uno con una sola tarea (run-job-tasks.sh devuelve una
+  # unidad): job y service account viz-tiles, y viz-render.
   modes = {
     tiles = { access = local.access }
+
+    render = {
+      access = local.render_access
+
+      # 2 vCPU y 2 GiB: render lee los 18 arreglos de un día de uno en uno, los
+      # codifica y los suelta (pico O(un arreglo), no O(día)); no hay ticks ni
+      # Parquet, que es lo que pide los 4 GiB a viz-tiles. Punto de partida,
+      # como el de viz-tiles: la hija 8 de la Épica E6 (ITSC-303) lo mide.
+      cpu    = "2"
+      memory = "2Gi"
+
+      # 3 600 s (1 h): un re-render completo del histórico son ~3 300 días de
+      # leer y escribir ~1 MB cada uno, minutos de cómputo; la hora deja margen
+      # a la latencia de GCS. viz-tiles necesita 10 h porque reduce ticks; este
+      # no. Un rango que no quepa se lanza por partes.
+      timeout = 3600
+
+      # Solo las dos raíces que render usa (ROOT_VARS de la CLI): sin
+      # VIZ_LANDING_ROOT ni VIZ_EVENTS_ROOT, que el job no puede leer. Este env
+      # reemplaza al del módulo. max_retries sigue siendo el del módulo, 1: el
+      # reintento cubre fallos transitorios y repetir no rehace lo hecho, porque
+      # un día con la misma huella de plantilla se salta.
+      env = {
+        VIZ_TILES_ROOT = "gs://${local.viz}/tiles"
+        VIZ_DQ_ROOT    = "gs://${local.buckets["dq-findings"]}/viz"
+      }
+    }
   }
 }
 

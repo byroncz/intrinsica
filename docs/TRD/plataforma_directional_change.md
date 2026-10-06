@@ -132,7 +132,7 @@ Patrón medallion de 4 capas, todas materializadas en **Parquet** sobre Cloud St
 | Cómputo de Capa 1 (backfill + cierre mensual) | **Cloud Run Jobs** (task array, 1 tarea por mes) | Ejecuta la imagen de L1 en modos `backfill` / `monthly-close`; meses independientes |
 | Cómputo de Capa 2 (backfill + cierre mensual) | **Cloud Run Jobs** (una sola tarea, 4 vCPU / 4 GiB) | Ejecuta la imagen de L2 en modos `backfill` / `monthly`. **Sin task array**: los meses se encadenan por carry-over, así que el backfill es una tarea que recorre los 109 meses. Decidido en ADR-04 con la sonda (TRD-L2 §14.1) |
 | Cómputo pesado de Capas 3–4 | **Cloud Batch + Spot VMs (c2d/c3)** — *a confirmar por capa* | Joins/agregaciones multinúcleo. Se decide y justifica en el TRD de cada capa, con el mismo criterio de medir antes de fijar |
-| Cómputo de viz (tiles y exportación) | **Cloud Run Jobs** (`viz-tiles`, `viz-export`; una imagen, modos `tiles` / `export`) | Reduce cada día a tiles M4 por nivel de zoom y empaqueta un día en un zip. Escribe solo en el bucket viz y en el lago de DQ. Tamaño por medir (TRD-viz §10.2) |
+| Cómputo de viz (tiles y re-render) | **Cloud Run Jobs** (`viz-tiles`, `viz-render`; una imagen, modos `tiles` / `render`) | Reduce cada día a tiles M4 por nivel de zoom y regenera su `index.html` desde los tiles; ese archivo es el exportable de un día. Escribe solo en el bucket viz y en el lago de DQ. Tamaño por medir (TRD-viz §10.2) |
 | Motor de datos (L1/L3/L4) | DuckDB + Polars + Apache Arrow (embebidos) | Sort out-of-core, joins, agregaciones; interoperabilidad zero-copy vía Arrow |
 | Almacenamiento medallion | Cloud Storage (Standard/Nearline/Coldline) | Buckets de las 4 capas + carry-over de huérfanos (L2) + lago de hallazgos de DQ |
 | Metacatálogo / catálogo | Parquet hive-partitioned plano + DuckLake | Descubrimiento de particiones (provider × market × asset × θ × fecha); linaje barato sin Iceberg/Delta |
@@ -567,7 +567,7 @@ dc-platform/                      # raíz del monorepo
 | F5 | Observabilidad | Meta-métricas y hallazgos de DQ a BigQuery, budget y log-based alerts. El tablero de datos no es de esta fase: lo cubre viz (F8, ADR-09). | (este TRD) |
 | F6 | Backtesting/ML | Walk-forward (Walk-Through), features, evaluación de estrategias. | TRD-ML |
 | F7 | Capas futuras | Identificación de regímenes, análisis genético de estrategias, etc. (vía scaffolding). | TRD-Lx |
-| F8 | viz — Visualización (consumo, transversal) | Tiles M4 por día (`viz-tiles`), tablero estático con uPlot en un bucket sin servidor, exportación zip (`viz-export`), encadenamiento tras `l2-monthly`, backfill de tiles y runbook. Transversal: no bloquea ni es bloqueada por F3–F7. | [TRD-viz](viz.md) |
+| F8 | viz — Visualización (consumo, transversal) | Tiles M4 por día (`viz-tiles`), tablero estático con uPlot en un bucket sin servidor, re-render desde tiles (`viz-render`; el `index.html` del día es el exportable), encadenamiento tras `l2-monthly`, backfill de tiles y runbook. Transversal: no bloquea ni es bloqueada por F3–F7. | [TRD-viz](viz.md) |
  
 ### 11.1 Criterios de aceptación de la línea base (capa Batch)
  

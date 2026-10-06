@@ -541,7 +541,7 @@ El pico de una unidad es **O(lote)**: un row group de L1, o uno de eventos, más
 - **Sin argumentos**, el mes anterior (UTC), como `tiles`; con `--from` y `--to`, los días de cada mes del rango que tengan `index.json`; con `--day`, ese día.
 - **Entradas faltantes**: un `--day` sin `index.json`, un mes pedido sin ningún día con tiles, un arreglo que falta o que no coincide con el `content_hash` del índice dejan `input_missing` con `what = "tiles"` (con `reason` en los dos últimos) y código 1; el día **no se reescribe**.
 - **Memoria**: los 18 arreglos de un día se leen, se codifican y se sueltan de uno en uno (el mayor, `price-4096.i32`, pesa 131 KB); nunca más de un día en RAM.
-- El job `viz-render` y su disparo desde `run-job.yml` los trae la hija 7 (ITSC-310).
+- El job `viz-render` (2 vCPU, 2 GiB, 3 600 s; solo `VIZ_TILES_ROOT` y `VIZ_DQ_ROOT`, sin acceso a L1 ni a L2) y su disparo desde `run-job.yml` los trajo ITSC-310.
 
 ### 8.4 Modo y nombre de job
 
@@ -575,7 +575,7 @@ Todos llevan `layer = "viz"`, `mode ∈ {tiles, render}`, `stage = "canonical"`,
 |`input_missing`    |`error`   |`fail`  |Falta una entrada. `details`: `day` y `what` ∈ {`l1`, `events`, `carry_over`, `ticks`, `tiles`}; con `events` o `carry_over` lleva también `theta`; lleva `path` cuando aplica. Un día sin ticks es `what = "ticks"`. `tiles` solo lo emite `render` (día sin `index.json`, arreglo faltante o que no coincide con el `content_hash`: lleva `reason`).|
 |`price_rounded`    |`warning` |`pass`  |El día tiene ticks cuyo `price_int` no cae en el tick del activo; el tile los redondeó al tick más cercano, mitad al par (§7.3). El día **se escribe**. Uno por día afectado. `metric_value` = `count`. `details`: `day`, `count` (ticks del día fuera del tick) y `max_abs_delta_int` (la mayor distancia de uno de ellos a su tick más cercano, en enteros de L1, ×10⁻⁸).|
 |`price_unrepresentable`|`error`|`fail`  |Guarda: el precio máximo del día es mayor que `INT32_MAX / price_scale` (21 474 836,47 con 100). No se espera verla. El día no se escribe. `details`: `day`, `price_scale` y `max_price_int`.|
-|`render_summary`   |`info`    |`pass`  |Uno por día del modo `render`, regenerado o al día. `metric_value` = bytes de la página. `details`: `day`, `skipped`, `tiles_version`, `template_hash`, `content_hash` y `page_bytes`.|
+|`render_summary`   |`info`    |`pass`  |Uno por día del modo `render`, regenerado o al día. `metric_value` = bytes de la página. `details`: `day`, `skipped`, `tiles_version`, `template_hash`, `content_hash`, `page_bytes` (lo guardado: gzip en un bucket, plano en disco) y `decoded_bytes` (el HTML descomprimido; en un día saltado sale del ISIZE del gzip o, si el almacenamiento descomprime al leer, de contar los bytes por bloques).|
 
 Los `mode` nuevos (`tiles`, `render`) entran al catálogo de modos de `docs/data-contracts.md` y a la validación de `shared/dq`, si la hay; lo hace la hija 2 junto al código.
 
@@ -645,7 +645,7 @@ El backfill de tiles, tal como lo estima la servilleta, suma ≈ 3,9 USD de list
 ## 11. Operaciones
 
 - **Imagen:** una sola, `viz_tiles` (RF-15), con `--mode tiles` y `--mode render`. `layers/viz_tiles/VERSION` sube con todo cambio de código, como en L1 y L2 (`check-layer-versions.sh`); la capa entra en `LAYERS` de `ci.yml`. La **plantilla** de la página (`layers/viz_tiles/site/`) es código de la capa y viaja en la imagen (`/app/site`, `VIZ_TEMPLATE_DIR`): sin ella no hay página que rellenar. Cambiarla sube `VERSION` y se vuelve a aplicar con `--mode render`.
-- **Jobs:** `viz-tiles` y `viz-render`, del módulo `layer` (§8.4). El job `viz-render` y su disparo desde `run-job.yml` son de la hija 7 (ITSC-310).
+- **Jobs:** `viz-tiles` y `viz-render`, del módulo `layer` (§8.4). `viz-render` y su disparo desde `run-job.yml` son de ITSC-310.
 - **Orquestación:** Cloud Workflows lanza `viz-tiles` al terminar `l2-monthly` (sin argumentos: mes anterior). El backfill lo lanza el humano desde `run-job.yml`.
 - **Variables de entorno** (como `L2_*`: raíz local o `gs://…`; un argumento de línea de comandos, cuando exista, gana):
 

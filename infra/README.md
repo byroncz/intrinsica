@@ -477,9 +477,11 @@ cualquier capa (ver "Desplegar un cambio de capa").
 
 ## Stack viz (tiles de visualización)
 
-Instancia del módulo `layer` con un solo modo: el job `viz-tiles` (y la service
-account `viz-tiles`), que reduce L1 y L2 a tiles por día y deja, junto a ellos,
-el `index.html` autocontenido de cada día y `tiles/latest.html` (ITSC-307).
+Instancia del módulo `layer` con dos modos. `viz-tiles` (y su service account)
+reduce L1 y L2 a tiles por día y deja, junto a ellos, el `index.html`
+autocontenido de cada día y `tiles/latest.html` (ITSC-307). `viz-render` (y su
+service account, ITSC-310) vuelve a armar esas páginas desde los tiles del
+bucket cuando cambia la plantilla, sin leer L1 ni L2.
 Diseño en el [TRD-viz](../docs/TRD/viz.md); la imagen es `viz_tiles`
 (`layers/viz_tiles/`, versión en su `VERSION`). Terraform no publica ninguna
 página ni archivo: lo único que declara es el bucket (en `data`), el job y quién
@@ -492,10 +494,15 @@ puede leer.
   `tiles/` y se regenera desde L1 y L2), y `bucketIamAdmin` sobre él para
   `deploy-github`. Ese rol basta para el binding del visor; `deploy-github` no
   tiene ningún rol de objetos sobre este bucket.
-- En `viz`: la service account `viz-tiles`, el job `viz-tiles` (4 vCPU, 4 GiB,
-  timeout de 36 000 s, 1 reintento) y el binding del visor. El tamaño es un
+- En `viz`: la service account y el job `viz-tiles` (4 vCPU, 4 GiB, timeout de
+  36 000 s, 1 reintento), la service account y el job `viz-render` (2 vCPU,
+  2 GiB, timeout de 3 600 s, 1 reintento) y el binding del visor. El tamaño es un
   punto de partida y no una medida: la hija 8 de la Épica E6 lo redimensiona con
-  lo medido. El timeout alto es porque el mismo modo sirve al backfill por rangos.
+  lo medido. `viz-tiles` tiene el timeout alto porque el mismo modo sirve al
+  backfill por rangos; `viz-render` solo lee y escribe un archivo de ~1 MB por
+  día, sin ticks, y por eso pide la mitad del cómputo. El módulo `layer` admite
+  `cpu`, `memory` y `env` por modo para esto: el env de `viz-render` trae solo
+  `VIZ_TILES_ROOT` y `VIZ_DQ_ROOT`.
 
 **Accesos**
 
@@ -503,9 +510,12 @@ puede leer.
 |---|---|---|
 | `viz-tiles` | `objectViewer` | `landing/l1/` y `dc-events/l2/` |
 | `viz-tiles` | `objectUser` | `viz/tiles/` (tiles, `index.html` de cada día y `latest.html`) y `dq-findings/viz/` |
+| `viz-render` | `objectUser` | `viz/tiles/` y `dq-findings/viz/`; nada en `landing` ni en `dc-events` |
 | El humano (`VIZ_VIEWER`) | `objectViewer` | todo el bucket `viz` |
 
-`viz-tiles` nunca escribe en `landing`, `dc-events` ni `manifest`.
+`viz-tiles` y `viz-render` nunca escriben en `landing`, `dc-events` ni
+`manifest`; `viz-render` ni siquiera los lee. Los dos usan `objectUser` y no
+`objectCreator` porque regenerar un día pisa archivos que ya existen.
 
 **Secret `VIZ_VIEWER`.** Es el correo de la cuenta de Google que abre los
 archivos del bucket (variable sensible `viz_viewer`, `TF_VAR_viz_viewer`). Igual
@@ -535,13 +545,39 @@ el secret. El plan de un merge o del manual usa el correo real.
 3. Mergear. Al terminar CI en `main`, que publica `viz_tiles:<versión>` (la de
    `layers/viz_tiles/VERSION`), el run *Terraform* deja el `apply` de `viz`
    esperando; no se aprueba antes porque el apply falla si el tag aún no existe.
-4. Aprobar en *Review deployments*. El plan debe mostrar solo la service account,
-   sus cuatro bindings, el binding del visor y el job.
+4. Aprobar en *Review deployments*. En el primer deploy el plan muestra las dos
+   service accounts, sus seis bindings, el binding del visor y los dos jobs. Con
+   `viz-tiles` ya aplicado, el deploy de `viz-render` (ITSC-310) agrega solo su
+   service account, sus dos bindings y su job, y no cambia nada de `viz-tiles`.
 
 **Lanzar tiles.** *Actions → Run job* con `job` = `viz-tiles`: `from` y `to` son
 meses `YYYY-MM` (vacíos, la CLI toma el mes anterior); `force` regenera aunque el
 `input_hash` no haya cambiado y exige `from`. `series_start`, `script` y `args`
 se rechazan. Es una sola tarea que recorre los meses del rango en orden.
+
+**Re-renderizar páginas.** Tras cambiar la plantilla (sube `VERSION` y se
+despliega la imagen nueva), *Actions → Run job* con `job` = `viz-render`: mismos
+`from` y `to` (meses `YYYY-MM`, vacíos = el mes anterior) y mismo `force`
+(regenera aunque la huella de la plantilla no haya cambiado; exige `from`);
+`series_start`, `script` y `args` se rechazan. Lee solo los tiles del bucket: en
+un rango, los días sin `index.json` se omiten; `input_missing` (job en rojo) sale
+si un mes no tiene ningún día con tiles o si un día tiene arreglos rotos. Un
+re-render completo del histórico son unas 3 300 lecturas de `index.json` más 18
+arreglos por día y otras tantas escrituras: minutos de cómputo y centavos de
+operaciones, frente a repetir el backfill desde L1 y L2. Un rango que no
+quepa en la hora del job se lanza por partes. Los agentes no lanzan este
+workflow: lo corre el humano.
+
+**Compartir un día.** El `index.html` del día es el exportable; no hay zip. Dos
+caminos, sobre el bucket `<proyecto>-viz`:
+
+- Abrirlo: `https://storage.cloud.google.com/<bucket>/tiles/provider=binance/market=spot/asset=BTCUSDT/day=YYYY-MM-DD/index.html`,
+  o `.../tiles/latest.html` para el último día, con la cuenta de `VIZ_VIEWER`.
+- Descargarlo para enviarlo:
+  `gcloud storage cp "gs://<bucket>/tiles/provider=binance/market=spot/asset=BTCUSDT/day=YYYY-MM-DD/index.html" .`
+  El archivo es autocontenido y abre desde disco en un navegador, sin servidor.
+  Más detalle (gzip del bucket, qué hacer si llega comprimido) en el
+  [README de la capa](../layers/viz_tiles/README.md#compartir-un-día).
 
 ## Stack alerting (alerta de hallazgos ERROR)
 

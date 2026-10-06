@@ -10,6 +10,7 @@ import time
 from datetime import date
 from pathlib import Path
 
+import pyarrow as pa
 import pyarrow.fs as pafs
 import pytest
 from lake_fixture import DAY, build_lake
@@ -100,9 +101,8 @@ def test_page_embeds_the_arrays_byte_for_byte(tmp_path):
     assert len(files) == 18 and index["page"] == PAGE_FILE
 
 
-def test_page_is_one_self_contained_document(tmp_path):
-    _, _, directory = day_files(tmp_path)
-    html = (directory / PAGE_FILE).read_text()
+def assert_self_contained(html: str) -> None:
+    """La página no referencia nada fuera de sí misma: se abre por `file://` sin servidor."""
     # Los marcadores de la plantilla se reemplazaron todos.
     assert "@@" not in html
     # Lo único con una URL es el rótulo de licencia de uPlot, un comentario.
@@ -112,6 +112,11 @@ def test_page_is_one_self_contained_document(tmp_path):
     )
     assert html.count("<script") == 3 and html.count("<style") == 1
     assert html.lstrip().lower().startswith("<!doctype html>")
+
+
+def test_page_is_one_self_contained_document(tmp_path):
+    _, _, directory = day_files(tmp_path)
+    assert_self_contained((directory / PAGE_FILE).read_text())
 
 
 def test_page_closing_tag_cannot_appear_inside_the_data(tmp_path):
@@ -325,6 +330,60 @@ def test_render_rebuilds_when_the_template_changes(lake, tmp_path, fresh_templat
     assert snapshot(day_path(lake)) == again
 
 
+def test_render_summary_reports_stored_and_decoded_bytes_on_disk(lake, fresh_template):
+    assert (
+        cli.main(["--mode", "render", "--day", DAY, "--force"], render_env(lake)) == 0
+    )
+    size = (day_path(lake) / PAGE_FILE).stat().st_size
+    (summary,) = render_summaries(lake)
+    assert summary["metric_value"] == size
+    # En disco la página va plana: lo guardado y lo decodificado coinciden.
+    assert summary["details"]["page_bytes"] == size
+    assert summary["details"]["decoded_bytes"] == size
+
+
+class TranscodingFS(RecordingFS):
+    """Como GCS con `Content-Encoding: gzip`: entrega descomprimido lo que guarda en gzip."""
+
+    def _plain(self, path):
+        with self._fs.open_input_stream(path) as src:
+            data = src.read()
+        return pa.BufferReader(
+            gzip.decompress(data) if data[:2] == b"\x1f\x8b" else data
+        )
+
+    def open_input_stream(self, path, **kwargs):
+        return self._plain(path)
+
+    def open_input_file(self, path, **kwargs):
+        return self._plain(path)
+
+
+@pytest.mark.parametrize("fs_class", [RecordingFS, TranscodingFS])
+def test_render_summary_reports_stored_and_decoded_bytes_in_a_bucket(
+    lake, fresh_template, monkeypatch, fs_class
+):
+    import viz_tiles.pages as module
+
+    fs = fs_class()
+    real = module.resolve_fs
+    monkeypatch.setattr(
+        module, "resolve_fs", lambda root: (fs, real(root)[1]), raising=True
+    )
+    page = day_path(lake) / PAGE_FILE
+    for extra in (["--force"], []):  # regenerada y luego al día
+        assert (
+            cli.main(["--mode", "render", "--day", DAY, *extra], render_env(lake)) == 0
+        )
+        stored = page.read_bytes()
+        assert stored[:2] == b"\x1f\x8b"
+        details = render_summaries(lake)[-1]["details"]
+        assert details["skipped"] is (not extra)
+        assert details["page_bytes"] == len(stored)
+        assert details["decoded_bytes"] == len(gzip.decompress(stored))
+        assert details["decoded_bytes"] > details["page_bytes"]
+
+
 def test_render_force_rewrites_the_same_bytes(lake, fresh_template):
     before = (day_path(lake) / PAGE_FILE).read_bytes()
     assert (
@@ -432,3 +491,20 @@ def test_page_is_served_unchanged_by_a_static_http_server(tmp_path):
             assert response.headers["Content-Type"].startswith("text/html")
         server.shutdown()
     assert served == (directory / PAGE_FILE).read_bytes()
+
+
+def test_downloaded_gzip_page_of_the_smoke_day_is_self_contained(lake):
+    """Lo que se baja de un bucket (`gcloud storage cp`) es el gzip del día del humo.
+
+    Compartir un día es enviar ese archivo: descomprimido, abre desde disco sin
+    pedir nada fuera de sí mismo, y trae los 18 arreglos del día.
+    """
+    directory = day_path(lake)
+    index = json.loads((directory / "index.json").read_text())
+    arrays = [(n, (directory / n).read_bytes()) for n in render.expected_names(index)]
+    page = render.render_day(index, arrays, compress=True)
+    assert page[:2] == b"\x1f\x8b"
+    html = gzip.decompress(page).decode()
+    assert_self_contained(html)
+    data = embedded(html)
+    assert len(data["files"]) == 18 and data["index"] == index

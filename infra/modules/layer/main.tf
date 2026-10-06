@@ -59,7 +59,7 @@ resource "google_cloud_run_v2_job" "this" {
         args  = ["--mode", each.key]
 
         dynamic "env" {
-          for_each = var.env
+          for_each = coalesce(each.value.env, var.env)
           content {
             name  = env.key
             value = env.value
@@ -68,8 +68,8 @@ resource "google_cloud_run_v2_job" "this" {
 
         resources {
           limits = {
-            cpu    = var.cpu
-            memory = var.memory
+            cpu    = coalesce(each.value.cpu, var.cpu)
+            memory = coalesce(each.value.memory, var.memory)
           }
         }
       }
