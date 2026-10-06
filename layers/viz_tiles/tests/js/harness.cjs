@@ -8,6 +8,7 @@
 //   --zoom <min>,<max>: al final, un zoom explícito a ese rango (en segundos); se puede repetir.
 //   --sweep: pasa el cursor por todo el ancho con cada θ y devuelve los textos de θ del tooltip.
 //   --nav <k>: con el θ de la opción k, "evento siguiente" dos veces, "anterior" y "ajustar a la ventana".
+//   --nav-switch <j>: tras navegar, cambia al θ de la opción j y deja el paso "nav-switch".
 //   --nav-at <seg>: antes de navegar, un zoom de 600 s centrado en ese segundo (la escala "fijada" por el humano).
 //   --hover <seg>: pone el cursor del panel de confirmaciones en ese segundo y devuelve su tooltip.
 "use strict";
@@ -284,6 +285,12 @@ function snapshot(label) {
         await tick();
         out.steps.push(snapshot(label));
         if (label === "nav-fit") out.fitDraw = drawLog.filter((c) => ["fillStyle", "fillRect", "strokeRect"].includes(c[0]));
+      }
+      if (flag("--nav-switch") >= 0) {
+        byId.theta.value = byId.theta.options[Number(args[flag("--nav-switch") + 1])].value;
+        byId.theta.dispatch("change");
+        await tick();
+        out.steps.push(snapshot("nav-switch"));
       }
       out.navTexts = [...new Set(textLog)];
     }

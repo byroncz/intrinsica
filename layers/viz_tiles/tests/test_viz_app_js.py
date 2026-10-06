@@ -602,9 +602,14 @@ def test_the_selected_event_has_a_frame_and_the_info_says_its_times(navigated):
 
 
 def test_theta_change_forgets_the_selected_event(day_dir):
-    result = view(day_dir, "--nav", "0", "--nav-at", "43000")
+    result = view(day_dir, "--nav", "0", "--nav-at", "43000", "--nav-switch", "1")
     assert step(result, "nav-1")["nav"]["info"].startswith("evento ")
     assert step(result, "nav-fit")["metrics"]["nav"]["k"] >= 0
+    after = step(result, "nav-switch")
+    # Los índices de evento son de cada θ: al cambiar de θ no queda ninguno elegido.
+    assert after["metrics"]["nav"]["k"] == -1
+    assert after["nav"]["fit"]  # "Ajustar" queda deshabilitado
+    assert re.fullmatch(r"\d+ eventos? en el día", after["nav"]["info"])
 
 
 def test_a_missing_events_file_says_so_and_draws_no_bands(day_dir):

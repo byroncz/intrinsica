@@ -31,8 +31,8 @@ from viz_tiles.direction import PendingEvent, direction_tiles
 from viz_tiles.events import (
     ConfirmAccumulator,
     EventRows,
-    event_rows,
     EventsBuffer,
+    event_rows,
 )
 from viz_tiles.reduce import day_start_us, reduce_day
 from viz_tiles.write import ThetaTiles, write_day
@@ -289,8 +289,12 @@ def test_events_buffer_grows_and_packs_in_place():
     assert len(raw) == total * EVENT_BYTES
     for i, name in enumerate(("reference", "confirm", "extreme")):
         got = raw[i * 4 * total : (i + 1) * 4 * total].view("<i4")
-        assert got.tolist() == np.concatenate([getattr(r, name) for r in parts]).tolist()
-    assert raw[12 * total :].tolist() == np.concatenate([r.flags for r in parts]).tolist()
+        assert (
+            got.tolist() == np.concatenate([getattr(r, name) for r in parts]).tolist()
+        )
+    assert (
+        raw[12 * total :].tolist() == np.concatenate([r.flags for r in parts]).tolist()
+    )
 
 
 def test_a_theta_counts_once_per_column_and_instant():
