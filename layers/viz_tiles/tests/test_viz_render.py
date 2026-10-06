@@ -10,6 +10,7 @@ import time
 from datetime import date
 from pathlib import Path
 
+import pyarrow as pa
 import pyarrow.fs as pafs
 import pytest
 from lake_fixture import DAY, build_lake
@@ -341,12 +342,30 @@ def test_render_summary_reports_stored_and_decoded_bytes_on_disk(lake, fresh_tem
     assert summary["details"]["decoded_bytes"] == size
 
 
+class TranscodingFS(RecordingFS):
+    """Como GCS con `Content-Encoding: gzip`: entrega descomprimido lo que guarda en gzip."""
+
+    def _plain(self, path):
+        with self._fs.open_input_stream(path) as src:
+            data = src.read()
+        return pa.BufferReader(
+            gzip.decompress(data) if data[:2] == b"\x1f\x8b" else data
+        )
+
+    def open_input_stream(self, path, **kwargs):
+        return self._plain(path)
+
+    def open_input_file(self, path, **kwargs):
+        return self._plain(path)
+
+
+@pytest.mark.parametrize("fs_class", [RecordingFS, TranscodingFS])
 def test_render_summary_reports_stored_and_decoded_bytes_in_a_bucket(
-    lake, fresh_template, monkeypatch
+    lake, fresh_template, monkeypatch, fs_class
 ):
     import viz_tiles.pages as module
 
-    fs = RecordingFS()
+    fs = fs_class()
     real = module.resolve_fs
     monkeypatch.setattr(
         module, "resolve_fs", lambda root: (fs, real(root)[1]), raising=True

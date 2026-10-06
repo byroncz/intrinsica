@@ -41,6 +41,9 @@ from viz_tiles.write import (
 
 logger = logging.getLogger(__name__)
 
+GZIP_MAGIC = b"\x1f\x8b"
+_BLOCK = 1 << 20  # bloque con el que se cuentan los bytes de una página plana
+
 
 class TilesCorrupt(Exception):
     """Un arreglo del día falta o no coincide con el `content_hash` de su índice."""
@@ -55,13 +58,31 @@ def _exists(fs: pafs.FileSystem, path: str) -> bool:
     return fs.get_file_info(path).type == pafs.FileType.File
 
 
-def _decoded_bytes(fs: pafs.FileSystem, stored: int, tail: bytes) -> int:
-    """El tamaño del HTML plano de una página guardada con `stored` bytes.
+def _isize(stored: int, head: bytes, tail: bytes) -> int:
+    """El tamaño del HTML plano de una página recién renderizada con `stored` bytes.
 
-    En un bucket la página es un gzip y su tamaño plano son los últimos 4 bytes
-    (ISIZE, módulo 2^32: sobra para una página de unos MB); en disco ya va plana.
+    Si es un gzip, su tamaño plano son los últimos 4 bytes (ISIZE, módulo 2^32:
+    sobra para una página de unos MB); si va plana, es lo guardado.
     """
-    return int.from_bytes(tail[-4:], "little") if compresses_pages(fs) else stored
+    return int.from_bytes(tail[-4:], "little") if head[:2] == GZIP_MAGIC else stored
+
+
+def _skipped_decoded_bytes(fs: pafs.FileSystem, path: str, size: int) -> int:
+    """El tamaño plano de una página guardada con `size` bytes, sin cargarla entera.
+
+    En un bucket la página es un gzip y se lee el ISIZE del final. Pero si el
+    almacenamiento la descomprime al leer (transcodificación de GCS), llega
+    plana y `size` es el tamaño guardado: se cuentan los bytes por bloques.
+    """
+    with fs.open_input_file(path) as src:
+        head = src.read(len(GZIP_MAGIC))
+        if head == GZIP_MAGIC:
+            src.seek(max(size - 4, 0))
+            return _isize(size, head, src.read(4))
+        count = len(head)
+        while block := src.read(_BLOCK):
+            count += len(block)
+        return count
 
 
 def _stored_meta(fs: pafs.FileSystem, path: str) -> tuple[str, str] | None:
@@ -172,11 +193,11 @@ def _render_day(
             "unidad %s: página al día (plantilla %s), se salta", day, template.hash[:12]
         )
         size = fs.get_file_info(page_path).size or 0
-        decoded = size
-        if compresses_pages(fs):
-            with fs.open_input_file(page_path) as src:
-                src.seek(max(size - 4, 0))
-                decoded = _decoded_bytes(fs, size, src.read(4))
+        decoded = (
+            _skipped_decoded_bytes(fs, page_path, size)
+            if compresses_pages(fs)
+            else size
+        )
         out.append(_summary(ctx, day, index, template, True, size, decoded))
         return
 
@@ -196,7 +217,7 @@ def _render_day(
     if is_latest:
         write_page(fs, latest_path, page)
     logger.info("unidad %s: página regenerada (%d B)", day, len(page))
-    decoded = _decoded_bytes(fs, len(page), page[-4:])
+    decoded = _isize(len(page), page[:2], page[-4:])
     out.append(_summary(ctx, day, index, template, False, len(page), decoded))
 
 
