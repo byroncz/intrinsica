@@ -124,12 +124,13 @@ def _publish_page(
     template: Template | None,
     publish: Callable[[str], None],
 ) -> None:
-    """Renderiza la página en `tmp`, la publica con `publish(tmp)` y borra `tmp`.
+    """Renderiza la página en `tmp` y la publica con `publish(tmp)`, que consume `tmp`.
 
     Mismos metadatos que `write_page`. El temporal va también en un bucket: si el
     render falla a medias, el `with` cierra el flujo y GCS publica lo escrito
     (pyarrow no tiene `abort`); así cae en el temporal, que se borra, y no sobre la
-    página vigente. El temporal se borra también si falla `publish`, no solo el render.
+    página vigente. El temporal se borra también si falla `publish`, no solo el
+    render; ese borrado no tapa el error original.
     """
     compress = compresses_pages(fs)
     meta = PAGE_META | (GZIP_META if compress else {})
@@ -137,9 +138,9 @@ def _publish_page(
         with fs.open_output_stream(tmp, metadata=meta) as out:
             render_day_to(out, index, arrays, template=template, compress=compress)
         publish(tmp)
-    finally:
-        if _exists(fs, tmp):
-            fs.delete_file(tmp)
+    except BaseException:
+        _discard_tmp(fs, tmp)
+        raise
 
 
 def stream_page(
@@ -169,20 +170,37 @@ def stream_latest_page(
 ) -> None:
     """Escribe `latest.html` en la raíz sin que ninguna operación consulte la raíz.
 
-    `fs.move` a `<base>/latest.html` pregunta por el padre del destino, el objeto
-    `tiles` (sin barra), fuera del prefijo `tiles/` en que la cuenta tiene permiso
-    (ITSC-318). El temporal va en el directorio del día, cuyo padre sí cae bajo el
-    prefijo, y `copy_file` lo copia al destino (copia en el servidor: atómica y con
-    los mismos metadatos); el temporal se borra siempre.
+    En el `GcsFileSystem` de Arrow, `move` y `copy_file` pasan por el mismo
+    `CopyFile`, que pregunta por el padre del destino: el objeto `tiles` (sin
+    barra), fuera del prefijo `tiles/` en que la cuenta tiene permiso (ITSC-318;
+    `test_viz_gcs_requests.py` lo mide). Solo `open_output_stream` no lo consulta.
+    El render va a un temporal en el directorio del día, cuyo padre sí cae bajo el
+    prefijo, y de ahí se copia por bloques a la raíz (O(bloque) en RAM); el temporal
+    se borra siempre. En disco local no hay permisos por prefijo y `move` es atómico.
     """
+
+    def publish(tmp: str) -> None:
+        dest = f"{base}/{LATEST_PAGE_FILE}"
+        if isinstance(fs, pafs.LocalFileSystem):
+            fs.move(tmp, dest)
+            return
+        with fs.open_output_stream(dest, metadata=PAGE_META | GZIP_META) as out:
+            for block in read_blocks(fs, tmp):
+                out.write(block)
+        fs.delete_file(tmp)
+
     _publish_page(
-        fs,
-        f"{directory}/{LATEST_PAGE_FILE}.tmp",
-        index,
-        arrays,
-        template,
-        lambda tmp: fs.copy_file(tmp, f"{base}/{LATEST_PAGE_FILE}"),
+        fs, f"{directory}/{LATEST_PAGE_FILE}.tmp", index, arrays, template, publish
     )
+
+
+def _discard_tmp(fs: pafs.FileSystem, path: str) -> None:
+    """Borra un temporal que quedó tras un fallo; si no puede, avisa y no tapa el error."""
+    try:
+        if _exists(fs, path):
+            fs.delete_file(path)
+    except OSError as exc:
+        logger.warning("no se pudo borrar el temporal %s: %s", path, exc)
 
 
 def _exists(fs: pafs.FileSystem, path: str) -> bool:

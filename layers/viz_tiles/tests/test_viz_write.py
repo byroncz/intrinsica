@@ -306,8 +306,9 @@ def test_opening_ticks_file_drops_the_previous_index(tmp_path):
 
 
 class NoRootParentFS(BucketFS):
-    """Como GCS con rol por prefijo: `move` consulta el padre del destino y, para un
-    objeto de la raíz, ese padre cae fuera del prefijo permitido (ITSC-318)."""
+    """Como GCS con rol por prefijo: `move` y `copy_file` consultan el padre del destino
+    y, para un objeto de la raíz, ese padre cae fuera del prefijo permitido (ITSC-318;
+    `test_viz_gcs_requests.py` lo mide contra el cliente real de Arrow)."""
 
     def __init__(self, root) -> None:
         super().__init__()
@@ -321,6 +322,22 @@ class NoRootParentFS(BucketFS):
     def move(self, src, dest):
         self.get_file_info(str(Path(dest).parent))
         self._fs.move(src, dest)
+
+    def copy_file(self, src, dest):
+        self.get_file_info(str(Path(dest).parent))
+        self._fs.copy_file(src, dest)
+
+
+def _fail_writing_latest(fs, monkeypatch):
+    """Hace fallar la escritura de `latest.html` en la raíz, no la del temporal."""
+    real = fs.open_output_stream
+
+    def failing(path, **kwargs):
+        if Path(path).name == "latest.html":
+            raise OSError("se cayó")
+        return real(path, **kwargs)
+
+    monkeypatch.setattr(fs, "open_output_stream", failing)
 
 
 def _with_fs(monkeypatch, fs):
@@ -345,21 +362,27 @@ def test_latest_page_is_written_without_a_move_into_the_root(tmp_path, monkeypat
     assert not list(tmp_path.rglob("*.tmp"))
 
 
-def test_the_root_move_would_have_failed(tmp_path):
+@pytest.mark.parametrize("step", ["move", "copy_file"])
+def test_the_root_publish_would_have_failed(tmp_path, step):
     """El FS de la prueba reproduce el error de producción con el `move` de antes."""
     fs = NoRootParentFS(tmp_path)
     (tmp_path / "latest.html.tmp").write_bytes(b"x")
     with pytest.raises(PermissionError, match="storage.objects.get"):
-        fs.move(str(tmp_path / "latest.html.tmp"), str(tmp_path / "latest.html"))
+        getattr(fs, step)(
+            str(tmp_path / "latest.html.tmp"), str(tmp_path / "latest.html")
+        )
 
 
-@pytest.mark.parametrize("step", ["move", "copy_file"])
+@pytest.mark.parametrize("step", ["move", "write_latest"])
 def test_a_failed_publish_leaves_no_temporary(tmp_path, monkeypatch, step):
     fs = NoRootParentFS(tmp_path)
     _, index = write(tmp_path)
-    monkeypatch.setattr(
-        fs, step, lambda *a, **k: (_ for _ in ()).throw(OSError("se cayó"))
-    )
+    if step == "move":
+        monkeypatch.setattr(
+            fs, "move", lambda *a, **k: (_ for _ in ()).throw(OSError("se cayó"))
+        )
+    else:
+        _fail_writing_latest(fs, monkeypatch)
     directory = day_dir(tmp_path, **KEY, day=DAY)
 
     def parts():
@@ -374,6 +397,25 @@ def test_a_failed_publish_leaves_no_temporary(tmp_path, monkeypatch, step):
     assert not list(tmp_path.rglob("*.tmp"))
 
 
+def test_a_failed_cleanup_does_not_hide_the_original_error(tmp_path, monkeypatch):
+    fs = NoRootParentFS(tmp_path)
+    _, index = write(tmp_path)
+    directory = day_dir(tmp_path, **KEY, day=DAY)
+    _fail_writing_latest(fs, monkeypatch)
+
+    def cannot_delete(path):
+        raise PermissionError("storage.objects.delete denegado")
+
+    monkeypatch.setattr(fs, "delete_file", cannot_delete)
+
+    def parts():
+        yield "events.bin", [b"\0" * (4 * EVENT_BYTES)]
+        yield "ticks.bin", [b"\0" * 16]
+
+    with pytest.raises(OSError, match="se cayó"):
+        stream_latest_page(fs, str(tmp_path), directory, index, parts(), None)
+
+
 def test_a_failed_latest_copy_keeps_the_previous_latest(tmp_path, monkeypatch):
     fs = NoRootParentFS(tmp_path)
     _with_fs(monkeypatch, fs)
@@ -382,9 +424,7 @@ def test_a_failed_latest_copy_keeps_the_previous_latest(tmp_path, monkeypatch):
         (tmp_path / "latest.html").read_bytes(),
         (tmp_path / "latest.json").read_text(),
     )
-    monkeypatch.setattr(
-        fs, "copy_file", lambda *a, **k: (_ for _ in ()).throw(OSError("se cayó"))
-    )
+    _fail_writing_latest(fs, monkeypatch)
     with pytest.raises(OSError, match="se cayó"):
         write(tmp_path, input_hash="cd" * 32)
     assert (
