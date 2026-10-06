@@ -344,6 +344,8 @@ El `index.html` se escribe **antes** del `index.json` (§7.8): un índice implic
 |`thetas[].provisional_from_s`|Segundos desde el inicio del día a partir de los cuales el estado de ese θ es provisional hasta el final del día; `null` si todo el día es definitivo (§7.6).|
 |`missing_thetas`|θ del catálogo sin entrada completa en L2 ese mes; no tienen bloque en `dir-<w>.u8` (§9.3). El tablero los muestra como hueco.|
 
+**Una sola fuente para los campos.** Los campos, su orden y su tipo JSON son los de `INDEX_FIELDS` (`layers/viz_tiles/src/viz_tiles/contract.py`), que `write_day` escribe. El TRD se alinea al código y no al revés (ITSC-312): `t0` es lo que ya leen la página y las pruebas, y renombrarlo a `day_start_us` rompería a esos lectores sin ganar nada. `content_hash` entra porque `render` y la página lo usan para verificar los arreglos (§7.8, §7.9). Los mapas `price`, `volume` y `dir` son redundantes con la plantilla `<tipo>-<w>.<ext>`, pero se conservan: el lector no asume la plantilla y lee el nombre del índice, igual que lee `levels`. Dos pruebas rompen el CI si algo se desvía: la de `data-contracts.md` compara su tabla de campos con `INDEX_FIELDS`, y la de este TRD compara con `INDEX_FIELDS` el índice de ejemplo de arriba.
+
 ### 7.3 Tiles de precio y volumen; niveles de zoom y presupuesto
 
 **Columna de un tick.** Con `rel_us = transact_time − t0` y `col = floor(rel_us × w / 86 400 000 000)`, en enteros. Un tick cae en una sola columna de cada nivel.

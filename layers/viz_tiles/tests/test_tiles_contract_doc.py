@@ -1,3 +1,4 @@
+import json
 import re
 from decimal import Decimal
 from pathlib import Path
@@ -14,6 +15,7 @@ from viz_tiles.contract import (
 )
 
 DOC = Path(__file__).parents[3] / "docs" / "data-contracts.md"
+TRD = Path(__file__).parents[3] / "docs" / "TRD" / "viz.md"
 
 
 def _section() -> str:
@@ -70,6 +72,24 @@ def test_index_fields_doc_matches_code():
     expected = [(name, kind) for name, kind in INDEX_FIELDS]
     rows = _table("Campos de `index.json`", r"^\| `(\w+)` \| (\w+) \|")
     assert rows == expected
+
+
+def test_index_fields_trd_matches_code():
+    # El índice de ejemplo de TRD-viz §7.2 es JSON válido: sus llaves, en orden, y
+    # el tipo de cada valor deben ser los de INDEX_FIELDS.
+    text = TRD.read_text().split("### 7.2 ")[1].split("\n### ")[0]
+    example = re.search(r"```json\n(.*?)\n```", text, flags=re.DOTALL)
+    assert example, "TRD-viz §7.2 ya no trae el ejemplo de index.json"
+    index = json.loads(example.group(1))
+    json_types = {
+        str: "string",
+        int: "integer",
+        list: "array",
+        dict: "object",
+    }
+    assert [(name, json_types[type(v)]) for name, v in index.items()] == [
+        (name, kind) for name, kind in INDEX_FIELDS
+    ]
 
 
 def test_latest_fields_are_listed_in_the_doc():
