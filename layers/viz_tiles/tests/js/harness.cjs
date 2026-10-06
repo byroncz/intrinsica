@@ -5,6 +5,8 @@
 //   --drop <tile>: quita ese arreglo de window.VIZ_DATA antes de arrancar la vista.
 //   --corrupt <tile>: lo deja con 6 bytes (8 caracteres de base64): presente, de tamaño inesperado.
 //   --pick-last: elige la última opción del selector de θ (un θ sin datos).
+//   --zoom <min>,<max>: al final, un zoom explícito a ese rango (en segundos); se puede repetir.
+//   --sweep: pasa el cursor por todo el ancho con cada θ y devuelve los textos de θ del tooltip.
 "use strict";
 const fs = require("fs");
 const vm = require("vm");
@@ -19,6 +21,7 @@ const [uplotJs, dataJs, appJs] = scripts;
 const W = 1500;
 const H = 800;
 const drawLog = [];
+const textLog = []; // todo fillText de la corrida; drawLog se vacía en algunos pasos
 
 class HTMLElementStub {}
 
@@ -63,7 +66,10 @@ function element(tag) {
           get(t, k) {
             if (k === "measureText") return () => ({ width: 10 });
             if (k in t) return t[k];
-            return (...args) => { drawLog.push([String(k), ...args]); };
+            return (...args) => {
+              drawLog.push([String(k), ...args]);
+              if (k === "fillText") textLog.push(args[0]);
+            };
           },
           set(t, k, v) { t[k] = v; if (k === "fillStyle") drawLog.push(["fillStyle", v]); return true; },
         }
@@ -82,7 +88,7 @@ function element(tag) {
 }
 
 const byId = {};
-for (const id of ["s-day", "theta", "s-updated", "s-mode-box", "s-mode", "s-reasons", "panels", "price", "volume", "f-level", "tip", "viz-data"]) {
+for (const id of ["s-day", "theta", "s-updated", "s-data-box", "s-data", "panels", "price", "volume", "f-level", "tip", "viz-data"]) {
   byId[id] = element(id === "theta" ? "select" : "div");
 }
 byId.tip.hidden = true;
@@ -114,7 +120,13 @@ const sandbox = {
   innerWidth: W,
   innerHeight: H,
   performance,
-  Path2D: class { moveTo() {} lineTo() {} rect() {} closePath() {} addPath() {} arc() {} },
+  // Guarda los trazos de moveTo/lineTo para poder leer la geometría de un camino.
+  Path2D: class {
+    constructor() { this.ops = []; }
+    moveTo(x, y) { this.ops.push(["moveTo", x, y]); }
+    lineTo(x, y) { this.ops.push(["lineTo", x, y]); }
+    rect() {} closePath() {} addPath() {} arc() {}
+  },
   requestAnimationFrame: (fn) => setTimeout(fn, 0),
   cancelAnimationFrame: clearTimeout,
   matchMedia: () => ({ addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {}, matches: false }),
@@ -192,10 +204,22 @@ function snapshot(label) {
       volSum: Array.from(vol.data[1]).reduce((a, b) => a + b, 0),
     };
   }
-  info.mode = byId["s-mode"].textContent;
-  info.reasons = byId["s-reasons"].textContent;
+  info.status = byId["s-data"].textContent;
+  info.statusClass = byId["s-data-box"].className;
   info.level = byId["f-level"].textContent;
   info.metrics = JSON.parse(JSON.stringify(sandbox.VIZ_METRICS || {}));
+  if (price) {
+    // La geometría de lo que uPlot trazó para la serie: la línea (muchos tramos por píxel) o,
+    // en barras, tres tramos por columna. `ops` y los ejes bastan para reconstruir cada barra.
+    const paths = price.series[1]._paths;
+    info.plotW = price.bbox.width / sandbox.devicePixelRatio;
+    info.plot = { left: price.bbox.left, top: price.bbox.top, width: price.bbox.width, height: price.bbox.height };
+    info.yScale = [price.scales.p.min, price.scales.p.max];
+    const ops = paths && paths.stroke ? paths.stroke.ops : null;
+    const bars = info.metrics.price_draw && info.metrics.price_draw.mode === "bars";
+    info.pathOpCount = ops ? ops.length : 0;
+    info.pathOps = bars ? ops : null; // la línea tiene miles de tramos: solo se cuentan
+  }
   return info;
 }
 
@@ -254,7 +278,32 @@ function snapshot(label) {
     (winListeners.resize || []).forEach((fn) => fn());
     await tick();
     out.steps.push(snapshot("resize"));
+    // Zooms explícitos pedidos por la prueba (cruces del umbral de barras, en cualquier sentido).
+    for (let i = 0; i < args.length; i++) {
+      if (args[i] !== "--zoom") continue;
+      const [min, max] = args[i + 1].split(",").map(Number);
+      price.setScale("x", { min, max });
+      await tick();
+      await tick();
+      out.steps.push(snapshot("zoom:" + args[i + 1]));
+    }
+    // Los textos de θ del tooltip en todo el ancho y con cada θ: ningún estado lleva glifo.
+    if (flag("--sweep") >= 0) {
+      const texts = new Set();
+      price.over.dispatch("mouseenter");
+      for (let k = 0; k < byId.theta.options.length; k++) {
+        byId.theta.value = byId.theta.options[k].value;
+        byId.theta.dispatch("change");
+        for (let left = 40; left < 1440; left += 20) {
+          price.setCursor({ left, top: 200 });
+          if (!byId.tip.hidden) byId.tip.textContent.split("\n").filter((l) => l.startsWith("θ ")).forEach((l) => texts.add(l));
+        }
+      }
+      price.over.dispatch("mouseleave");
+      out.thetaLines = [...texts];
+    }
   }
+  out.texts = [...new Set(textLog)];
   out.logs = logs;
   out.errors = errors;
   process.stdout.write(JSON.stringify(out));

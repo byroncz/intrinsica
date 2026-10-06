@@ -169,7 +169,10 @@ la huella de la plantilla cambia sola y `--mode render` rehace las páginas.
 
 Panel de precio (serie M4) con las regiones de los eventos DC del θ activo, panel
 de volumen en barras con eje X y cursor compartidos, franja de estado fija (día,
-θ, última actualización, modo normal o degradado) y tooltip por cubeta. Los
+θ, última actualización, datos completos o incompletos) y tooltip por cubeta. El
+precio es una línea mientras una columna ocupa menos de 5 px y, desde 5 px, una
+barra de rango por columna (mínimo a máximo, con muescas en el primero y el
+último). Los
 principios y la Evaluación ergonómica que cada cambio de vista debe traer están en
 [TRD-viz §6.7](../../docs/TRD/viz.md#67-adr-vz-07--nueve-principios-de-ergonomía-y-evaluación-ergonómica-obligatoria).
 

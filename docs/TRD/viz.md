@@ -208,7 +208,7 @@ viz hereda y no contradice:
 |---|---|
 |**Decisión**|El volumen es un panel inferior de barras (20 a 25 % de la altura), con eje X y cursor compartidos con el precio.|
 |**Justificación**|Cleveland y McGill (1984) muestran que el ojo compara longitudes alineadas con precisión y áreas con error sistemático; además, una burbuja gruesa tapa el precio que está debajo.|
-|**Primera vista acordada**|Serie cruda de precio contra tiempo del último día disponible. Regiones verticales de fondo por evento DC, en dos tonos: claro para la fase de confirmación y fuerte para el overshoot; verde para alza, rojo para baja. Filtro de θ que cambia solo el tile de dirección. Tooltip sobre la cubeta: hora, mínimo y máximo del cubo M4, estado DC. Volumen como panel inferior.|
+|**Primera vista acordada**|Serie cruda de precio contra tiempo del último día disponible. Regiones verticales de fondo por evento DC, en dos tonos: tenue para la fase de confirmación e intenso para el overshoot (sobre fondo oscuro, menos opacidad se ve más oscuro); verde para alza, rojo para baja; la dirección y la fase se repiten en una franja del borde (arriba alza, abajo baja; fina confirmación, gruesa overshoot), sin glifos (ITSC-315). La serie es la línea M4 mientras una columna ocupa menos de 5 px y, desde 5 px, una barra de rango por columna. Filtro de θ que cambia solo el tile de dirección. Tooltip sobre la cubeta: hora, mínimo y máximo del cubo M4, estado DC. Volumen como panel inferior.|
 
 ### 6.7 ADR-VZ-07 — Nueve principios de ergonomía y Evaluación ergonómica obligatoria
 
