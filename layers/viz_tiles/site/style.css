@@ -87,6 +87,41 @@ body {
   border-top: 1px solid var(--line);
 }
 
+/* Leyenda con muestras: cada una se dibuja como en el gráfico, sin frases. */
+#legend { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px 14px; }
+.key { display: inline-flex; align-items: center; }
+.key i { display: inline-block; box-sizing: border-box; vertical-align: middle; }
+.sw { width: 26px; height: 14px; }
+.sw.up { --rgb: 63, 185, 80; }
+.sw.down { --rgb: 248, 81, 73; }
+.sw.conf { background: rgba(var(--rgb), 0.18); }
+.sw.over { background: rgba(var(--rgb), 0.42); }
+.sw.up.conf { border-top: 3px solid rgb(var(--rgb)); }
+.sw.up.over { border-top: 8px solid rgb(var(--rgb)); }
+.sw.down.conf { border-bottom: 3px solid rgb(var(--rgb)); }
+.sw.down.over { border-bottom: 8px solid rgb(var(--rgb)); }
+.sw.dense {
+  background: rgba(215, 222, 230, 0.26);
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 14px;
+  text-align: center;
+}
+.ln { width: 22px; height: 0; border-top: 2px solid; }
+.ln.up { border-color: rgb(63, 185, 80); }
+.ln.down { border-color: rgb(248, 81, 73); }
+.ln.prov { border-color: var(--amber); border-top-style: dashed; }
+.mk.price {
+  width: 22px;
+  height: 14px;
+  background:
+    linear-gradient(#e6edf3, #e6edf3) 3px 50% / 3px 3px no-repeat,
+    linear-gradient(#e6edf3, #e6edf3) 14px 50% / 1px 12px no-repeat;
+}
+.bar { width: 8px; height: 14px; }
+.bar.both { background: linear-gradient(to top, rgb(86, 182, 194) 40%, rgba(86, 182, 194, 0.42) 40%); }
+.bar.vol { background: rgba(110, 138, 168, 0.85); }
+
 #tip {
   position: fixed;
   z-index: 10;
