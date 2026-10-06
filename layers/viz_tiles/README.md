@@ -234,6 +234,14 @@ gzip en streaming; si falla a medias, la página vigente queda intacta) y lee
 `ticks.bin` de vuelta por bloques de 1 MB: ni la página ni un archivo del día están
 enteros en RAM. Regla sin excepción (TRD-viz §7.3 y §8.1, ITSC-317).
 
+`latest.html` no se renombra ni se copia en la raíz: en GCS `move` y `copy_file` consultan
+el padre del destino (`tiles`, fuera del prefijo con permiso; se midió contra el cliente
+real de Arrow en `tests/test_viz_gcs_requests.py`). Se renderiza a `<día>/latest.html.tmp`,
+se escribe por bloques a `tiles/latest.html` con `open_output_stream` (que no consulta el
+padre) y el temporal se borra siempre, también si falla. Un día al día avanza `latest.*`
+si estaba atrasado, y se borra el `tiles/latest.html.tmp` huérfano de antes (TRD-viz
+ADR-VZ-10, ITSC-318).
+
 ## Imagen
 
 ```bash

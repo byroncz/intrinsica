@@ -15,7 +15,14 @@ from viz_tiles.contract import (
 )
 from viz_tiles.events import EventsBuffer, event_rows
 from viz_tiles.ticks import day_start_us, decode_ticks
-from viz_tiles.write import ThetaEvents, day_dir, read_index, stream_page, write_day
+from viz_tiles.write import (
+    ThetaEvents,
+    day_dir,
+    read_index,
+    stream_latest_page,
+    stream_page,
+    write_day,
+)
 
 DAY = date(2026, 8, 31)
 SCALE = price_scale("BTCUSDT")
@@ -296,3 +303,138 @@ def test_opening_ticks_file_drops_the_previous_index(tmp_path):
     assert (Path(day_dir(tmp_path, **KEY, day=DAY)) / "index.json").exists()
     encode_to(tmp_path, DAY, [ticks_batch(DAY, ROWS)], SCALE)
     assert not (Path(day_dir(tmp_path, **KEY, day=DAY)) / "index.json").exists()
+
+
+class NoRootParentFS(BucketFS):
+    """Como GCS con rol por prefijo: `move` y `copy_file` consultan el padre del destino
+    y, para un objeto de la raíz, ese padre cae fuera del prefijo permitido (ITSC-318;
+    `test_viz_gcs_requests.py` lo mide contra el cliente real de Arrow)."""
+
+    def __init__(self, root) -> None:
+        super().__init__()
+        self._root = str(root)
+
+    def get_file_info(self, paths):
+        if paths == self._root:
+            raise PermissionError("storage.objects.get denegado sobre el padre")
+        return self._fs.get_file_info(paths)
+
+    def move(self, src, dest):
+        self.get_file_info(str(Path(dest).parent))
+        self._fs.move(src, dest)
+
+    def copy_file(self, src, dest):
+        self.get_file_info(str(Path(dest).parent))
+        self._fs.copy_file(src, dest)
+
+
+def _fail_writing_latest(fs, monkeypatch):
+    """Hace fallar la escritura de `latest.html` en la raíz, no la del temporal."""
+    real = fs.open_output_stream
+
+    def failing(path, **kwargs):
+        if Path(path).name == "latest.html":
+            raise OSError("se cayó")
+        return real(path, **kwargs)
+
+    monkeypatch.setattr(fs, "open_output_stream", failing)
+
+
+def _with_fs(monkeypatch, fs):
+    import viz_tiles.write as module
+
+    real = module.resolve_fs
+    monkeypatch.setattr(
+        module, "resolve_fs", lambda root: (fs, real(root)[1]), raising=True
+    )
+
+
+def test_latest_page_is_written_without_a_move_into_the_root(tmp_path, monkeypatch):
+    _with_fs(monkeypatch, NoRootParentFS(tmp_path))
+    write(tmp_path)
+    directory = Path(day_dir(tmp_path, **KEY, day=DAY))
+    assert (directory / "index.html").exists()
+    assert (tmp_path / "latest.json").exists() and (tmp_path / "latest.html").exists()
+    assert (tmp_path / "latest.html").read_bytes() == (
+        directory / "index.html"
+    ).read_bytes()
+    # Ni el temporal del día ni uno en la raíz.
+    assert not list(tmp_path.rglob("*.tmp"))
+
+
+@pytest.mark.parametrize("step", ["move", "copy_file"])
+def test_the_root_publish_would_have_failed(tmp_path, step):
+    """El FS de la prueba reproduce el error de producción con el `move` de antes."""
+    fs = NoRootParentFS(tmp_path)
+    (tmp_path / "latest.html.tmp").write_bytes(b"x")
+    with pytest.raises(PermissionError, match="storage.objects.get"):
+        getattr(fs, step)(
+            str(tmp_path / "latest.html.tmp"), str(tmp_path / "latest.html")
+        )
+
+
+@pytest.mark.parametrize("step", ["move", "write_latest"])
+def test_a_failed_publish_leaves_no_temporary(tmp_path, monkeypatch, step):
+    fs = NoRootParentFS(tmp_path)
+    _, index = write(tmp_path)
+    if step == "move":
+        monkeypatch.setattr(
+            fs, "move", lambda *a, **k: (_ for _ in ()).throw(OSError("se cayó"))
+        )
+    else:
+        _fail_writing_latest(fs, monkeypatch)
+    directory = day_dir(tmp_path, **KEY, day=DAY)
+
+    def parts():
+        yield "events.bin", [b"\0" * (4 * EVENT_BYTES)]
+        yield "ticks.bin", [b"\0" * 16]
+
+    with pytest.raises(OSError, match="se cayó"):
+        if step == "move":
+            stream_page(fs, f"{directory}/index.html", index, parts(), None)
+        else:
+            stream_latest_page(fs, str(tmp_path), directory, index, parts(), None)
+    assert not list(tmp_path.rglob("*.tmp"))
+
+
+def test_a_failed_cleanup_does_not_hide_the_original_error(tmp_path, monkeypatch):
+    fs = NoRootParentFS(tmp_path)
+    _, index = write(tmp_path)
+    directory = day_dir(tmp_path, **KEY, day=DAY)
+    _fail_writing_latest(fs, monkeypatch)
+
+    def cannot_delete(path):
+        raise PermissionError("storage.objects.delete denegado")
+
+    monkeypatch.setattr(fs, "delete_file", cannot_delete)
+
+    def parts():
+        yield "events.bin", [b"\0" * (4 * EVENT_BYTES)]
+        yield "ticks.bin", [b"\0" * 16]
+
+    with pytest.raises(OSError, match="se cayó"):
+        stream_latest_page(fs, str(tmp_path), directory, index, parts(), None)
+
+
+def test_a_failed_latest_copy_keeps_the_previous_latest(tmp_path, monkeypatch):
+    fs = NoRootParentFS(tmp_path)
+    _with_fs(monkeypatch, fs)
+    write(tmp_path)
+    before = (
+        (tmp_path / "latest.html").read_bytes(),
+        (tmp_path / "latest.json").read_text(),
+    )
+    _fail_writing_latest(fs, monkeypatch)
+    with pytest.raises(OSError, match="se cayó"):
+        write(tmp_path, input_hash="cd" * 32)
+    assert (
+        (tmp_path / "latest.html").read_bytes(),
+        (tmp_path / "latest.json").read_text(),
+    ) == before
+    assert not list(tmp_path.rglob("*.tmp"))
+
+
+def test_an_orphan_root_temporary_is_removed_when_latest_advances(tmp_path):
+    (tmp_path / "latest.html.tmp").write_bytes(b"huerfano")
+    write(tmp_path)
+    assert not (tmp_path / "latest.html.tmp").exists()

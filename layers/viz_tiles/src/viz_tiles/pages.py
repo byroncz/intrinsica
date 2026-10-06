@@ -13,7 +13,6 @@ objeto, sin armarla en RAM; nunca hay más de un día a la vez.
 import hashlib
 import json
 import logging
-from collections.abc import Iterator
 from datetime import date
 
 import pyarrow.fs as pafs
@@ -34,9 +33,10 @@ from viz_tiles.render import (
 )
 from viz_tiles.write import (
     compresses_pages,
+    day_blocks,
     day_dir,
     find_index,
-    read_blocks,
+    stream_latest_page,
     stream_page,
 )
 
@@ -93,14 +93,6 @@ def _stored_meta(fs: pafs.FileSystem, path: str) -> tuple[str, str] | None:
     return page_meta(_read(fs, path, META_PROBE))
 
 
-def _blocks(
-    fs: pafs.FileSystem, directory: str, index: dict
-) -> Iterator[tuple[str, Iterator[bytes]]]:
-    """Los archivos del día en orden de nombre, de uno en uno y por bloques."""
-    for name in expected_names(index):
-        yield name, read_blocks(fs, f"{directory}/{name}")
-
-
 def _verify(fs: pafs.FileSystem, directory: str, index: dict) -> None:
     """Comprueba que los archivos coincidan con el `content_hash` del índice.
 
@@ -108,7 +100,7 @@ def _verify(fs: pafs.FileSystem, directory: str, index: dict) -> None:
     archivos que no son los del índice.
     """
     digest = hashlib.sha256()
-    for name, blocks in _blocks(fs, directory, index):
+    for name, blocks in day_blocks(fs, directory, index):
         if not _exists(fs, f"{directory}/{name}"):
             raise TilesCorrupt(f"falta {name}")
         digest.update(name.encode() + b"\0")
@@ -224,9 +216,11 @@ def _render_day(
         return
 
     _verify(fs, directory, index)
-    stream_page(fs, page_path, index, _blocks(fs, directory, index), template)
+    stream_page(fs, page_path, index, day_blocks(fs, directory, index), template)
     if is_latest:
-        stream_page(fs, latest_path, index, _blocks(fs, directory, index), template)
+        stream_latest_page(
+            fs, base, directory, index, day_blocks(fs, directory, index), template
+        )
     size = fs.get_file_info(page_path).size or 0
     decoded = (
         _skipped_decoded_bytes(fs, page_path, size) if compresses_pages(fs) else size

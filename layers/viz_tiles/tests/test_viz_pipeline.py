@@ -1,6 +1,7 @@
 import functools
 import hashlib
 import json
+import logging
 import struct
 from datetime import date
 from pathlib import Path
@@ -177,3 +178,92 @@ def test_a_day_with_an_unrepresentable_price_leaves_no_ticks_file(tmp_path):
     assert isinstance(closed[0][2], PriceUnrepresentable)
     directory = tmp_path / f"provider=binance/market=spot/asset=BTCUSDT/day={day}"
     assert not (directory / "ticks.bin").exists()
+
+
+def test_a_day_already_up_to_date_still_advances_a_stale_latest(tmp_path, caplog):
+    """Un run anterior cayó antes de avanzar `latest.*` (ITSC-318): el reintento salta
+    los días, pero igual los avanza."""
+    roots, _, _ = two_day_lake(tmp_path)
+    assert run(roots, "--from", "2017-08") == 0
+    latest = Path(roots.tiles) / "latest.json"
+    page = Path(roots.tiles) / "latest.html"
+    good = json.loads(latest.read_text())
+    latest.write_text(json.dumps({**good, "tiles_version": "1.2.0"}))
+    page.write_text("<html>vieja</html>")
+    (Path(roots.tiles) / "latest.html.tmp").write_text("huérfano")
+
+    with caplog.at_level(logging.INFO):
+        assert run(roots, "--from", "2017-08") == 0
+
+    assert sum("al día" in m for m in caplog.messages) == 2
+    assert json.loads(latest.read_text()) == good
+    assert b"vieja" not in page.read_bytes() and page.stat().st_size > 1000
+    assert not (Path(roots.tiles) / "latest.html.tmp").exists()
+
+
+def test_a_day_already_up_to_date_does_not_rewrite_a_current_latest(
+    tmp_path, monkeypatch
+):
+    roots, _, _ = two_day_lake(tmp_path)
+    assert run(roots, "--from", "2017-08") == 0
+
+    def boom(*args, **kwargs):
+        raise AssertionError("latest.html no debía renderizarse")
+
+    monkeypatch.setattr("viz_tiles.write.stream_latest_page", boom)
+    assert run(roots, "--from", "2017-08") == 0
+
+
+def _count_latest_renders(monkeypatch) -> list:
+    import viz_tiles.write as write_module
+
+    renders = []
+    real = write_module.stream_latest_page
+
+    def counting(*args, **kwargs):
+        renders.append(args[3]["day"])
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(write_module, "stream_latest_page", counting)
+    return renders
+
+
+def _index_path(roots, day: str) -> Path:
+    directory = (
+        Path(roots.tiles) / "provider=binance/market=spot/asset=BTCUSDT" / f"day={day}"
+    )
+    return directory / "index.json"
+
+
+def test_a_skipped_day_before_a_pending_one_renders_latest_once(tmp_path, monkeypatch):
+    roots, _, _ = two_day_lake(tmp_path)
+    assert run(roots, "--from", "2017-08") == 0
+    latest = Path(roots.tiles) / "latest.json"
+    good = json.loads(latest.read_text())
+    latest.write_text(json.dumps({**good, "day": DAY, "tiles_version": "1.2.0"}))
+    _index_path(roots, NEXT_DAY).unlink()
+
+    renders = _count_latest_renders(monkeypatch)
+    assert run(roots, "--from", "2017-08") == 0
+
+    assert renders == [NEXT_DAY]
+    assert json.loads(latest.read_text()) == good
+
+
+def test_a_failing_latest_does_not_stop_the_pending_days(tmp_path, monkeypatch):
+    """El avance de `latest` por un día saltado va después de escribir los pendientes."""
+    roots, _, _ = two_day_lake(tmp_path)
+    assert run(roots, "--from", "2017-08") == 0
+    latest = Path(roots.tiles) / "latest.json"
+    good = json.loads(latest.read_text())
+    latest.write_text(json.dumps({**good, "tiles_version": "1.2.0"}))
+    _index_path(roots, DAY).unlink()
+
+    def boom(*args, **kwargs):
+        raise OSError("latest no se pudo escribir")
+
+    monkeypatch.setattr("viz_tiles.write.stream_latest_page", boom)
+    with pytest.raises(OSError, match="latest no se pudo escribir"):
+        run(roots, "--from", "2017-08")
+
+    assert _index_path(roots, DAY).exists()
