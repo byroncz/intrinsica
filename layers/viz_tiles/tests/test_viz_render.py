@@ -329,6 +329,42 @@ def test_render_rebuilds_when_the_template_changes(lake, tmp_path, fresh_templat
     assert snapshot(day_path(lake)) == again
 
 
+def test_render_summary_reports_stored_and_decoded_bytes_on_disk(lake, fresh_template):
+    assert (
+        cli.main(["--mode", "render", "--day", DAY, "--force"], render_env(lake)) == 0
+    )
+    size = (day_path(lake) / PAGE_FILE).stat().st_size
+    (summary,) = render_summaries(lake)
+    assert summary["metric_value"] == size
+    # En disco la página va plana: lo guardado y lo decodificado coinciden.
+    assert summary["details"]["page_bytes"] == size
+    assert summary["details"]["decoded_bytes"] == size
+
+
+def test_render_summary_reports_stored_and_decoded_bytes_in_a_bucket(
+    lake, fresh_template, monkeypatch
+):
+    import viz_tiles.pages as module
+
+    fs = RecordingFS()
+    real = module.resolve_fs
+    monkeypatch.setattr(
+        module, "resolve_fs", lambda root: (fs, real(root)[1]), raising=True
+    )
+    page = day_path(lake) / PAGE_FILE
+    for extra in (["--force"], []):  # regenerada y luego al día
+        assert (
+            cli.main(["--mode", "render", "--day", DAY, *extra], render_env(lake)) == 0
+        )
+        stored = page.read_bytes()
+        assert stored[:2] == b"\x1f\x8b"
+        details = render_summaries(lake)[-1]["details"]
+        assert details["skipped"] is (not extra)
+        assert details["page_bytes"] == len(stored)
+        assert details["decoded_bytes"] == len(gzip.decompress(stored))
+        assert details["decoded_bytes"] > details["page_bytes"]
+
+
 def test_render_force_rewrites_the_same_bytes(lake, fresh_template):
     before = (day_path(lake) / PAGE_FILE).read_bytes()
     assert (

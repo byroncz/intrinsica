@@ -55,6 +55,15 @@ def _exists(fs: pafs.FileSystem, path: str) -> bool:
     return fs.get_file_info(path).type == pafs.FileType.File
 
 
+def _decoded_bytes(fs: pafs.FileSystem, stored: int, tail: bytes) -> int:
+    """El tamaño del HTML plano de una página guardada con `stored` bytes.
+
+    En un bucket la página es un gzip y su tamaño plano son los últimos 4 bytes
+    (ISIZE, módulo 2^32: sobra para una página de unos MB); en disco ya va plana.
+    """
+    return int.from_bytes(tail[-4:], "little") if compresses_pages(fs) else stored
+
+
 def _stored_meta(fs: pafs.FileSystem, path: str) -> tuple[str, str] | None:
     """La huella guardada en una página, o `None` si no existe o no la trae."""
     if not _exists(fs, path):
@@ -163,7 +172,12 @@ def _render_day(
             "unidad %s: página al día (plantilla %s), se salta", day, template.hash[:12]
         )
         size = fs.get_file_info(page_path).size or 0
-        out.append(_summary(ctx, day, index, template, True, size))
+        decoded = size
+        if compresses_pages(fs):
+            with fs.open_input_file(page_path) as src:
+                src.seek(max(size - 4, 0))
+                decoded = _decoded_bytes(fs, size, src.read(4))
+        out.append(_summary(ctx, day, index, template, True, size, decoded))
         return
 
     digest = hashlib.sha256()
@@ -182,7 +196,8 @@ def _render_day(
     if is_latest:
         write_page(fs, latest_path, page)
     logger.info("unidad %s: página regenerada (%d B)", day, len(page))
-    out.append(_summary(ctx, day, index, template, False, len(page)))
+    decoded = _decoded_bytes(fs, len(page), page[-4:])
+    out.append(_summary(ctx, day, index, template, False, len(page), decoded))
 
 
 def _summary(
@@ -192,6 +207,7 @@ def _summary(
     template: Template,
     skipped: bool,
     size: int,
+    decoded: int,
 ) -> Finding:
     return findings.render_summary(
         ctx,
@@ -200,5 +216,6 @@ def _summary(
         tiles_version=index["tiles_version"],
         template_hash=template.hash,
         page_bytes=size,
+        decoded_bytes=decoded,
         content_hash=index["content_hash"],
     )

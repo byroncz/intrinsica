@@ -149,7 +149,7 @@ frente a repetir el backfill desde L1 y L2. Esa diferencia es la razón de
 conservar los tiles como artefacto separado.
 
 Cada día deja un `render_summary` (`skipped`, hash de la plantilla, bytes de la
-página); un día del rango sin `index.json` deja `input_missing` (`what = tiles`)
+página guardados y descomprimidos); un día del rango sin `index.json` deja `input_missing` (`what = tiles`)
 y el job termina con código 1. Un día cuya página ya trae la misma
 `tiles_version` y la misma huella de plantilla se salta, salvo con `force`. Si el
 rango incluye el último día, `latest.html` se actualiza con él.
@@ -184,7 +184,7 @@ resume `run-job.yml`) y las filas en `VIZ_DQ_ROOT`.
 | `input_missing` | error | Sin `consolidated.parquet` (`what = l1`), sin `events.parquet` en el mes (`events`), un θ sin `events.parquet` o `carry_over.parquet` o con la cadena rota (`events`, `carry_over`, con `theta`), o un día sin ticks (`ticks`). En modo `render`, un día sin `index.json` o con arreglos que faltan o no coinciden con su `content_hash` (`what = tiles`). Los de mes llevan el primer día pedido en `details.day` y `days`. |
 | `price_rounded` | warning | Ticks fuera del tick del activo: se redondean y el día se escribe. |
 | `price_unrepresentable` | error | El precio máximo no cabe en `int32`: el día no se escribe. |
-| `render_summary` | info | Modo `render`: uno por día, regenerado o al día. `skipped`, `tiles_version`, `template_hash`, `content_hash` y `page_bytes`. |
+| `render_summary` | info | Modo `render`: uno por día, regenerado o al día. `skipped`, `tiles_version`, `template_hash`, `content_hash`, `page_bytes` (lo guardado: gzip en un bucket, plano en disco) y `decoded_bytes` (el HTML ya descomprimido). |
 
 Cada día termina con una línea sonda: `sonda: unit=<día> ticks=… wall_s=…
 rss_mib=…`.
