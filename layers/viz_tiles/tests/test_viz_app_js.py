@@ -989,3 +989,21 @@ def test_a_real_sized_day_decodes_and_redraws_well_inside_the_budget(big):
     assert result["bench"][1]["ticks"] == 950_000
     assert result["bench"][0]["ticks"] < 950_000 / 5
     assert start["metrics"]["decoded_bytes"] > 5_000_000
+
+
+def test_the_tooltip_names_the_event_that_closes_at_its_extreme_millisecond(flash):
+    """El tick extremo pertenece al evento que cierra, (referencia, extremo] (ADR-VZ-12)."""
+    # FLASH + 0,300 es el extremo del evento 2 y la referencia del 3: ese ms es del 2.
+    ms = FLASH + 0.300
+    window = f"{ms - 0.0005},{ms + 0.0015}"
+    result = view(
+        flash, "--theta", "0", "--zoom", window, "--hover", f"price@{ms + 0.0005}"
+    )
+    tip = result["hovers"][0]["tooltip"]
+    assert "evento 2 / 6" in tip and "extremo 12:40:26.300" in tip
+    # Un ms después ya es del evento 3.
+    window = f"{ms + 0.0005},{ms + 0.0025}"
+    result = view(
+        flash, "--theta", "0", "--zoom", window, "--hover", f"price@{ms + 0.0015}"
+    )
+    assert "evento 3 / 6" in result["hovers"][0]["tooltip"]

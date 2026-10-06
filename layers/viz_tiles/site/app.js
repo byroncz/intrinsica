@@ -275,11 +275,6 @@
     return lo;
   }
 
-  // Primer evento i del bloque con arr[off + i] > value.
-  function upperBound(arr, b, value) {
-    return lowerBound(arr, b, value + 1);
-  }
-
   /* ---------- Selección de θ ---------- */
 
   var select = $("theta");
@@ -783,14 +778,13 @@
     return lines;
   }
 
-  // El evento del θ activo que contiene el instante `ms`, o -1: de su referencia a su extremo.
+  // El evento del θ activo que contiene el instante `ms`, o -1: (referencia, extremo]; el tick extremo
+  // pertenece al evento que cierra (ADR-VZ-12).
   function eventAt(ms) {
     var tr = activeBlock();
     if (!tr || !tr.n) return -1;
-    var i = upperBound(ev.ref, tr, ms) - 1;
-    if (i < 0) return -1;
-    var ext = ev.ext[tr.off + i];
-    return ms < ext || (ms === ext && i === tr.n - 1) ? i : -1;
+    var i = lowerBound(ev.ref, tr, ms) - 1; // último evento con referencia < ms
+    return i >= 0 && ms <= ev.ext[tr.off + i] ? i : -1;
   }
 
   // Todo lo que se sabe de un evento, para el tooltip: la franja de estado no lo repite.
