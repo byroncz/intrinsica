@@ -172,7 +172,12 @@ de volumen en barras con eje X y cursor compartidos, franja de estado fija (día
 θ, última actualización, datos completos o incompletos) y tooltip por cubeta. El
 precio es una línea mientras una columna ocupa menos de 5 px y, desde 5 px, una
 barra de rango por columna (mínimo a máximo, con muescas en el primero y el
-último). Los
+último). Cada muesca mide `min(8, px/2 − 1)` px y el trazo 1,5 px: entre 5 y
+≈ 7 px por columna la muesca es del tamaño del trazo y se ve como un punto pegado
+a la barra; se lee como muesca desde ≈ 7 px (mide ≥ 2,5 px). El humano valida ese
+ancho frente a la pantalla; si no basta, se sube `BAR_MIN_COL_PX`. Una columna sin
+ticks se marca con una línea punteada ámbar de 1 px a media altura y `◇` (las
+franjas de dirección van al borde y son sólidas). Los
 principios y la Evaluación ergonómica que cada cambio de vista debe traer están en
 [TRD-viz §6.7](../../docs/TRD/viz.md#67-adr-vz-07--nueve-principios-de-ergonomía-y-evaluación-ergonómica-obligatoria).
 
