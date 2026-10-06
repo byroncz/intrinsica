@@ -370,12 +370,13 @@ documentan aquí, con su porqué:
   es posterior al día de publicación: la fuente se retrasó sobre su
   calendario. `severity = error`, `status = fail`, `metric_value` = días de
   retraso (`details.reason` lo dice con palabras). La CLI sale con 3, la tarea
-  falla y la orquestación no ejecuta el `next_job` (`l2-monthly`). No escribe
-  Parquet ni manifiesto. Solo existe cuando ocurre. Los jobs de L1 tienen
-  `max_retries = 1`: Cloud Run reintenta la tarea con salida 3, que repite el
-  404 y deja una segunda fila `source_delayed` (otro `finding_id`) en el lago.
-  Se acepta: el resumen de `run-job.yml` las junta por contenido (el
-  hallazgo completo menos `finding_id`, `run_id` y `detected_at`).
+  falla y la orquestación no ejecuta los `next_jobs` (`l2-monthly` y
+  `viz-tiles`). No escribe Parquet ni manifiesto. Solo existe cuando ocurre.
+  Los jobs de L1 tienen `max_retries = 1`: Cloud Run reintenta la tarea con
+  salida 3, que repite el 404 y deja una segunda fila `source_delayed` (otro
+  `finding_id`) en el lago. Se acepta: el resumen de `run-job.yml` las junta
+  por contenido (el hallazgo completo menos `finding_id`, `run_id` y
+  `detected_at`).
 
 Ni `source_not_published` ni `source_delayed` se reintentan: un 404 no cambia
 por esperar. El backoff queda solo para fallos de red y 5xx.

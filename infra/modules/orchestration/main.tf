@@ -5,12 +5,15 @@ locals {
   modes = keys(var.schedules)
   # Misma fuente que el IAM: el workflow no reconstruye el nombre del job.
   job_names = { for m in local.modes : m => var.job_names[m] }
-  # Modos encadenados: modo → job que se ejecuta cuando el suyo termina bien.
-  next_jobs = { for m, s in var.schedules : m => s.next_job if s.next_job != null }
+  # Modos encadenados: modo → lista ordenada de jobs que se ejecutan uno tras
+  # otro, cada uno cuando el anterior termina bien.
+  next_jobs = { for m, s in var.schedules : m => s.next_jobs if length(s.next_jobs) > 0 }
+  # Eslabones que el workflow espera: todos menos el último de cada cadena.
+  waited_links = toset(flatten([for l in values(local.next_jobs) : slice(l, 0, length(l) - 1)]))
 }
 
 # Identidad propia del workflow. Solo puede ejecutar los jobs de schedules y los
-# next_job, y leer las ejecuciones de los modos encadenados (roles por job,
+# next_jobs, y leer las ejecuciones de los jobs que espera (roles por job,
 # abajo); no tiene roles de project.
 resource "google_service_account" "workflow" {
   project      = var.project_id
@@ -42,10 +45,24 @@ resource "google_cloud_run_v2_job_iam_member" "workflow_viewer" {
   member   = "serviceAccount:${google_service_account.workflow.email}"
 }
 
-# Ejecutar el next_job (puede ser de otra capa, por eso no sale de job_names).
+# Lo mismo para cada eslabón que el workflow espera (el último de la cadena no:
+# nadie lee su ejecución). Un eslabón que ya es el job de un modo encadenado de
+# esta capa tiene su viewer arriba; setsubtract evita el binding duplicado. El
+# job de un modo sin cadena no lo tiene, así que ese sí se declara aquí.
+resource "google_cloud_run_v2_job_iam_member" "workflow_chain_viewer" {
+  for_each = setsubtract(local.waited_links, [for m in keys(local.next_jobs) : local.job_names[m]])
+
+  project  = var.project_id
+  location = var.region
+  name     = each.value
+  role     = "roles/run.viewer"
+  member   = "serviceAccount:${google_service_account.workflow.email}"
+}
+
+# Ejecutar cada eslabón (puede ser de otra capa, por eso no sale de job_names).
 # toset evita repetir el binding si dos modos encadenan al mismo job.
 resource "google_cloud_run_v2_job_iam_member" "workflow_next_invoker" {
-  for_each = toset(values(local.next_jobs))
+  for_each = toset(flatten(values(local.next_jobs)))
 
   project  = var.project_id
   location = var.region
@@ -57,20 +74,21 @@ resource "google_cloud_run_v2_job_iam_member" "workflow_next_invoker" {
 # Recibe {"mode": "..."} y llama jobs.run por HTTP con OAuth2 en vez del
 # conector googleapis.run.v2: el conector espera la operación y pide
 # run.operations.get, que es un permiso de project. Así la service account
-# queda sin roles de project. Consecuencia: en un modo sin next_job el workflow
+# queda sin roles de project. Consecuencia: en un modo sin next_jobs el workflow
 # termina al aceptar la ejecución; el resultado se ve en Cloud Run.
-# En un modo con next_job sondea executions.get cada 30 s hasta que trae
-# completionTime (el nombre de la ejecución viene en body.metadata.name;
+# En un modo con next_jobs sondea executions.get cada 30 s hasta que la
+# ejecución trae completionTime (el nombre viene en body.metadata.name;
 # body.name es el de la operación). Solo si hubo éxito (algún task exitoso,
-# ninguno fallido ni cancelado) ejecuta el next_job; si no, termina con error y
-# el next_job no corre. El GET se reintenta con la política por defecto de
-# Workflows; el POST no, porque repetirlo lanzaría otra ejecución.
+# ninguno fallido ni cancelado) ejecuta el siguiente de la lista y repite la
+# espera con él; el último no se espera. Un eslabón fallido termina el workflow
+# con error y los que siguen no corren. El GET se reintenta con la política por
+# defecto de Workflows; el POST no, porque repetirlo lanzaría otra ejecución.
 # Sin overrides: el día y el mes por defecto los pone el propio modo.
 resource "google_workflows_workflow" "run_job" {
   project         = var.project_id
   region          = var.region
   name            = "${var.layer}-run-job"
-  description     = "Ejecuta el Cloud Run Job ${var.layer}-<modo> (${join(" | ", local.modes)}) sin overrides y encadena el next_job de los modos que lo tienen."
+  description     = "Ejecuta el Cloud Run Job ${var.layer}-<modo> (${join(" | ", local.modes)}) sin overrides y encadena los next_jobs de los modos que los tienen."
   service_account = google_service_account.workflow.id
 
   # Regla: toda expresión ${...} del YAML va entre comillas simples. Si contiene
@@ -99,13 +117,15 @@ resource "google_workflows_workflow" "run_job" {
               auth:
                 type: OAuth2
             result: ejecucion
+        - iniciar_cadena:
+            assign:
+              - cadena: '$${default(map.get(siguientes, args.mode), [])}'
+              - indice: 0
         - hay_siguiente:
             switch:
-              - condition: '$${args.mode in keys(siguientes)}'
+              - condition: '$${indice < len(cadena)}'
                 next: nombre_ejecucion
             next: fin
-        - fin:
-            return: '$${ejecucion.body.name}'
         - nombre_ejecucion:
             assign:
               - ejecucion_nombre: '$${ejecucion.body.metadata.name}'
@@ -130,21 +150,26 @@ resource "google_workflows_workflow" "run_job" {
                 next: ejecutar_siguiente
             next: ejecucion_fallida
         - ejecucion_fallida:
-            raise: '$${"la ejecucion " + ejecucion_nombre + " no termino con exito; no se ejecuta " + siguientes[args.mode]}'
+            raise: '$${"la ejecucion " + ejecucion_nombre + " no termino con exito; no se ejecuta " + cadena[indice]}'
         - ejecutar_siguiente:
             call: http.post
             args:
-              url: '$${"https://run.googleapis.com/v2/projects/${var.project_id}/locations/${var.region}/jobs/" + siguientes[args.mode] + ":run"}'
+              url: '$${"https://run.googleapis.com/v2/projects/${var.project_id}/locations/${var.region}/jobs/" + cadena[indice] + ":run"}'
               auth:
                 type: OAuth2
-            result: ejecucion_siguiente
-        - fin_encadenado:
-            return: '$${ejecucion_siguiente.body.name}'
+            result: ejecucion
+        - avanzar:
+            assign:
+              - indice: '$${indice + 1}'
+            next: hay_siguiente
+        - fin:
+            return: '$${ejecucion.body.name}'
   EOT
 
   depends_on = [
     google_cloud_run_v2_job_iam_member.workflow_invoker,
     google_cloud_run_v2_job_iam_member.workflow_viewer,
+    google_cloud_run_v2_job_iam_member.workflow_chain_viewer,
     google_cloud_run_v2_job_iam_member.workflow_next_invoker,
   ]
 }

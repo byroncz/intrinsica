@@ -7,29 +7,32 @@ TRD-L1 §10.1 y §11.
 ## Qué crea
 
 - `<layer>-run-job` (Workflow): recibe `{"mode": "<modo>"}`, llama
-  `jobs.run` de `<layer>-<modo>` por HTTP con OAuth2. Un modo sin `next_job`
+  `jobs.run` de `<layer>-<modo>` por HTTP con OAuth2. Un modo sin `next_jobs`
   termina al aceptar la ejecución (el resultado se ve en Cloud Run); uno con
-  `next_job` espera su fin y encadena (ver "Encadenar un modo"). Un `mode` que
+  `next_jobs` espera su fin y encadena (ver "Encadenar un modo"). Un `mode` que
   no esté en `schedules` termina el workflow con error. Usa HTTP y no el
   conector `googleapis.run.v2` porque el conector espera la operación y pide
   `run.operations.get`, permiso de project.
 - `<layer>-workflow` (service account): sin roles de project. Por job recibe
-  `roles/run.invoker` sobre los jobs de `schedules` y sobre cada `next_job`, y
-  `roles/run.viewer` sobre el job de cada modo encadenado.
+  `roles/run.invoker` sobre los jobs de `schedules` y sobre cada eslabón de
+  `next_jobs`, y `roles/run.viewer` sobre el job de cada modo encadenado y
+  sobre cada eslabón que el workflow espera (todos menos el último de la
+  cadena).
 - `<layer>-<modo>` (Scheduler, uno por entrada de `schedules`): inicia una
   ejecución del workflow con la identidad `scheduler-invoker` del stack data.
 
 ## Encadenar un modo
 
-`next_job` en una entrada de `schedules` es el nombre de un Cloud Run Job (de
-la capa o de otra) que corre cuando el job del modo termina bien. Ejemplo, el
-cierre mensual de L1 dispara `l2-monthly`:
+`next_jobs` en una entrada de `schedules` es una lista ordenada de nombres de
+Cloud Run Jobs (de la capa o de otras). Corren uno tras otro: cada uno solo
+cuando el anterior terminó bien, y el primero cuando termina el job del modo.
+Ejemplo, el cierre mensual de L1 encadena `l2-monthly` y luego `viz-tiles`:
 
 ```hcl
 monthly-close = {
   schedule = "0 6 8 * *"
   # ...
-  next_job = "l2-monthly"
+  next_jobs = ["l2-monthly", "viz-tiles"]
 }
 ```
 
@@ -39,16 +42,35 @@ Qué hace el workflow con ese modo:
    `body.metadata.name`.
 2. Cada 30 s llama `executions.get` hasta que la ejecución trae
    `completionTime`.
-3. Si hubo algún task exitoso y ninguno fallido ni cancelado, ejecuta
-   `next_job` con `jobs.run` y sin overrides: el job aplica sus valores por
-   defecto. Si no, el workflow termina con error y `next_job` no corre.
+3. Si hubo algún task exitoso y ninguno fallido ni cancelado, ejecuta el
+   siguiente de la lista con `jobs.run` y sin overrides: el job aplica sus
+   valores por defecto.
+4. Repite los pasos 2 y 3 con ese eslabón, y así hasta el final. El último de
+   la lista no se espera: el workflow termina al aceptar su ejecución y
+   devuelve el nombre de su operación.
 
-Los modos sin `next_job` no cambian. Como el workflow espera, la ejecución dura
-lo que dure el job (hasta su timeout, más el reintento): se ve en Workflows como
-"Active" todo ese tiempo.
+Casos de borde:
 
-Requisito: el job de `next_job` debe existir antes del apply, porque el IAM se
-da sobre él (aplica primero su stack).
+- **Modo sin `next_jobs`**: no cambia nada. El workflow termina al aceptar la
+  ejecución y el resultado se ve en Cloud Run.
+- **Un eslabón falla** (o se cancela): el workflow termina con error, con un
+  mensaje que nombra la ejecución fallida y el job que no se ejecuta, y los
+  eslabones que siguen no corren. Si falla `l2-monthly`, `viz-tiles` no corre.
+
+Como el workflow espera, su ejecución dura lo que duren los jobs esperados
+(hasta su timeout, más el reintento): se ve en Workflows como "Active" todo ese
+tiempo.
+
+Requisito: los jobs de `next_jobs` deben existir antes del apply, porque el IAM
+se da sobre ellos (aplica primero sus stacks).
+
+### Cierre mensual de L1: `l2-monthly` y `viz-tiles`
+
+`l1-run-job` con `monthly-close` ejecuta `l1-monthly-close`, luego
+`l2-monthly` y luego `viz-tiles`, sin overrides. `viz-tiles` sin argumentos
+construye el mes anterior al actual (UTC): el mismo que `l2-monthly` acaba de
+cerrar, porque el scheduler corre el día 8. Los stacks `l2` y `viz` deben estar
+aplicados antes del apply de `l1`.
 
 ### Probarlo a mano
 
@@ -59,11 +81,14 @@ Con los schedulers en pausa, el humano lanza el workflow desde Cloud Shell
 gcloud workflows run l1-run-job --location=us-east1 --data '{"mode":"monthly-close"}'
 ```
 
-El comando espera el resultado. Si terminó bien, devuelve el nombre de la
-operación de `l2-monthly`, cuya ejecución aparece en Cloud Run Jobs y escribe
-el mes cerrado en `dc-events`. Si `monthly-close` falló, el estado es `FAILED`
-con el motivo y no hay ejecución de `l2-monthly`. Con `{"mode":"daily"}` el
-workflow no encadena nada.
+El comando espera el resultado. Qué se espera ver: en Cloud Run Jobs, las
+ejecuciones de `l1-monthly-close`, después de `l2-monthly` y después de
+`viz-tiles`, en ese orden, cada una iniciada cuando la anterior terminó bien.
+El comando devuelve el nombre de la operación de `viz-tiles` apenas la acepta
+(esa última ejecución no se espera); sus tiles del mes aparecen en el bucket
+viz. Si `monthly-close` falló, el estado es `FAILED` con el motivo y no hay
+ejecución de `l2-monthly` ni de `viz-tiles`; si falló `l2-monthly`, no hay
+ejecución de `viz-tiles`. Con `{"mode":"daily"}` el workflow no encadena nada.
 
 ## Encender un scheduler
 
