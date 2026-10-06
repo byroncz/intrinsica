@@ -32,7 +32,7 @@ from viz_tiles.events import (
     ConfirmAccumulator,
     EventRows,
     event_rows,
-    pack_events,
+    EventsBuffer,
 )
 from viz_tiles.reduce import day_start_us, reduce_day
 from viz_tiles.write import ThetaTiles, write_day
@@ -257,11 +257,40 @@ def test_pack_events_has_four_aligned_sections():
         np.array([9], "<i4"),
         np.array([3], "u1"),
     )
-    raw = bytes(pack_events([a, EventRows.empty(), b]))
-    assert len(raw) == 3 * EVENT_BYTES
+    buffer = EventsBuffer()
+    for rows in (a, EventRows.empty(), b):
+        buffer.add(rows)
+    raw = bytes(buffer.packed())
+    assert len(buffer) == 3 and len(raw) == 3 * EVENT_BYTES
     assert np.frombuffer(raw, "<i4", 9).tolist() == [1, 2, 7, 3, 4, 8, 5, 6, 9]
     assert list(raw[36:]) == [1, 0, 3]
-    assert bytes(pack_events([])) == b""
+    assert bytes(buffer.packed()) == raw  # idempotente
+    assert bytes(EventsBuffer().packed()) == b""
+    with pytest.raises(ValueError, match="empaquet"):
+        buffer.add(a)
+
+
+def test_events_buffer_grows_and_packs_in_place():
+    """Más eventos que la capacidad inicial: crece y las secciones quedan en orden."""
+    rng = np.random.default_rng(7)
+    parts = []
+    buffer = EventsBuffer()
+    for n in (3, 2_000, 0, 5_000, 1):
+        rows = EventRows(
+            rng.integers(0, 86_400_000, n, dtype="<i4"),
+            rng.integers(0, 86_400_000, n, dtype="<i4"),
+            rng.integers(0, 86_400_000, n, dtype="<i4"),
+            rng.integers(0, 32, n, dtype="u1"),
+        )
+        parts.append(rows)
+        buffer.add(rows)
+    total = sum(len(r) for r in parts)
+    raw = np.frombuffer(buffer.packed(), "u1")
+    assert len(raw) == total * EVENT_BYTES
+    for i, name in enumerate(("reference", "confirm", "extreme")):
+        got = raw[i * 4 * total : (i + 1) * 4 * total].view("<i4")
+        assert got.tolist() == np.concatenate([getattr(r, name) for r in parts]).tolist()
+    assert raw[12 * total :].tolist() == np.concatenate([r.flags for r in parts]).tolist()
 
 
 def test_a_theta_counts_once_per_column_and_instant():
@@ -306,7 +335,6 @@ def test_write_day_rejects_rows_that_disagree_with_the_event_count(tmp_path):
         3,
         None,
         direction_tiles(reduction.last_ids, events(UP)),
-        EventRows.empty(),
     )
     from viz_tiles.events import Confirmations
 
@@ -352,25 +380,26 @@ def write_flash_day(root: Path, day: date = date(2026, 9, 30)) -> Path:
         (11, 12, 13, 1, FLASH + 0.982, 45_700.0, 46_500.0),
     )
     acc = ConfirmAccumulator()
+    buffer = EventsBuffer()
     event, confirm_us = event_rows(table, None, False, day_start_us(day))
     acc.add(confirm_us)
+    buffer.add(event)
     theta = ThetaTiles(
         "0.00509931",
         len(event),
         None,
         direction_tiles(reduction.last_ids, events((1, 2, 3, -1), (3, 4, 5, 1))),
-        event,
     )
     # Un segundo θ confirma el mismo instante que el segundo evento (FLASH + 0,051).
     other = timed_events(day, (1, 2, 3, 1, FLASH - 5.0, FLASH + 0.051, FLASH + 2.0))
     other_rows, other_confirm = event_rows(other, None, False, day_start_us(day))
     acc.add(other_confirm)
+    buffer.add(other_rows)
     second = ThetaTiles(
         "0.01000000",
         len(other_rows),
         None,
         direction_tiles(reduction.last_ids, events((1, 2, 3, 1))),
-        other_rows,
     )
     write_day(
         root,
@@ -380,6 +409,7 @@ def write_flash_day(root: Path, day: date = date(2026, 9, 30)) -> Path:
         day=day,
         reduction=reduction,
         confirmations=acc.finish(),
+        events=buffer,
         thetas=[theta, second],
         input_hash="ab" * 32,
         image_version="0.1.0+test",

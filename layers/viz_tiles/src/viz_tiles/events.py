@@ -107,19 +107,83 @@ def event_rows(
     return rows, confirm[inside]
 
 
-def pack_events(rows: list[EventRows]) -> memoryview:
-    """Los bytes de `events.bin`: cuatro secciones con los eventos de todos los θ en orden."""
-    parts = [
-        np.concatenate([getattr(r, name) for r in rows]) if rows else np.empty(0, dt)
-        for name, dt in (
-            ("reference", "<i4"),
-            ("confirm", "<i4"),
-            ("extreme", "<i4"),
-            ("flags", "u1"),
-        )
-    ]
-    out = np.concatenate([p.view("u1") for p in parts]) if rows else np.empty(0, "u1")
-    return memoryview(out)
+class EventsBuffer:
+    """Los eventos del día de todos los θ en un solo buffer: los bytes de `events.bin`.
+
+    Cuatro secciones (`reference`, `confirm` y `extreme` en `int32`, y `flags` en
+    `uint8`), cada una con los eventos de todos los θ en orden. Es la única
+    representación de los eventos del día en RAM (13 bytes por evento): `add` copia
+    las filas de un θ y quien llama las suelta; `packed` junta las secciones dentro
+    del mismo buffer, sin concatenar. El buffer crece al doble; mientras crece
+    conviven el viejo y el nuevo, una vez por duplicación.
+    """
+
+    SECTIONS = (
+        ("reference", "<i4"),
+        ("confirm", "<i4"),
+        ("extreme", "<i4"),
+        ("flags", "u1"),
+    )
+    _WIDTHS = tuple(np.dtype(dt).itemsize for _, dt in SECTIONS)
+    _CHUNK = 1 << 20  # bytes por copia al juntar las secciones
+
+    def __init__(self) -> None:
+        self._buf = np.empty(0, "u1")
+        self._capacity = 0  # eventos que caben; las secciones se separan por ella
+        self._count = 0
+        self._packed = False
+
+    def __len__(self) -> int:
+        return self._count
+
+    def _section(self, i: int, count: int) -> np.ndarray:
+        """Los primeros `count` valores de la sección `i` del buffer actual."""
+        start = sum(self._WIDTHS[:i]) * self._capacity
+        raw = self._buf[start : start + self._WIDTHS[i] * count]
+        return raw.view(self.SECTIONS[i][1])
+
+    def add(self, rows: EventRows) -> None:
+        """Agrega los eventos de un θ al final de cada sección."""
+        if self._packed:
+            raise ValueError("el buffer ya se empaquetó: no admite más eventos")
+        n = len(rows)
+        if self._count + n > self._capacity:
+            self._grow(max(2 * self._capacity, self._count + n, 1024))
+        end = self._count + n
+        for i, (name, _) in enumerate(self.SECTIONS):
+            self._section(i, end)[self._count : end] = getattr(rows, name)
+        self._count = end
+
+    def _grow(self, capacity: int) -> None:
+        sections = [self._section(i, self._count) for i in range(len(self.SECTIONS))]
+        old = self._buf
+        self._buf = np.empty(capacity * sum(self._WIDTHS), "u1")
+        previous, self._capacity = self._capacity, capacity
+        for i, section in enumerate(sections):
+            self._section(i, self._count)[:] = section
+        del sections, old, previous
+
+    def packed(self) -> memoryview:
+        """Los bytes de `events.bin`: las secciones contiguas, sin otro buffer.
+
+        Mueve cada sección hacia el inicio del mismo buffer, por tramos: el destino
+        siempre queda antes que el origen, así que copiar hacia delante es seguro.
+        Se puede llamar más de una vez: las siguientes devuelven la misma vista.
+        """
+        n = self._count
+        if not self._packed:
+            dst = 0
+            for i, width in enumerate(self._WIDTHS):
+                src = sum(self._WIDTHS[:i]) * self._capacity
+                size = width * n
+                for off in range(0, size, self._CHUNK):
+                    stop = min(off + self._CHUNK, size)
+                    self._buf[dst + off : dst + stop] = self._buf[
+                        src + off : src + stop
+                    ]
+                dst += size
+            self._packed = True
+        return memoryview(self._buf[: sum(self._WIDTHS) * n])
 
 
 @dataclass(frozen=True)

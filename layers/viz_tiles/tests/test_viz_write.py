@@ -14,7 +14,12 @@ from viz_tiles.contract import (
     price_scale,
 )
 from viz_tiles.direction import direction_tiles
-from viz_tiles.events import ConfirmAccumulator, Confirmations, event_rows
+from viz_tiles.events import (
+    ConfirmAccumulator,
+    Confirmations,
+    EventsBuffer,
+    event_rows,
+)
 from viz_tiles.reduce import day_start_us, reduce_day
 from viz_tiles.write import ThetaTiles, day_dir, read_index, write_day
 
@@ -25,28 +30,39 @@ ROWS = [(11, 1, 100, 1), (21, 30, 102, "0.5"), (31, 70, 103, 1), (56, 80, 104, 1
 WHEN = datetime(2026, 10, 5, 17, 0, tzinfo=UTC)
 
 
-def theta(name: str, reduction, acc: ConfirmAccumulator, pending=None) -> ThetaTiles:
+def theta(
+    name: str,
+    reduction,
+    acc: ConfirmAccumulator,
+    buffer: EventsBuffer,
+    pending=None,
+) -> ThetaTiles:
     table = timed_events(DAY, UP_T, DOWN_T)
     rows, confirm_us = event_rows(table, pending, False, day_start_us(DAY))
     acc.add(confirm_us)
+    buffer.add(rows)
     return ThetaTiles(
         theta=name,
         events=len(rows),
         provisional_from_s=None,
         direction=direction_tiles(reduction.last_ids, table, pending),
-        rows=rows,
     )
 
 
 def write(root, day=DAY, rows=ROWS, **kwargs):
     reduction = reduce_day([ticks_batch(day, rows)], day, SCALE)
     acc = ConfirmAccumulator()
-    thetas = [theta("0.00010000", reduction, acc), theta("0.05000000", reduction, acc)]
+    buffer = EventsBuffer()
+    thetas = [
+        theta("0.00010000", reduction, acc, buffer),
+        theta("0.05000000", reduction, acc, buffer),
+    ]
     args = {
         **KEY,
         "day": day,
         "reduction": reduction,
         "confirmations": acc.finish(),
+        "events": buffer,
         "thetas": thetas,
         "input_hash": "ab" * 32,
         "image_version": "0.1.0+test",

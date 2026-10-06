@@ -9,7 +9,7 @@ medias, el día queda sin índice y la siguiente corrida lo rehace. La página
 import hashlib
 import json
 from collections.abc import Iterator, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
 
@@ -31,7 +31,7 @@ from viz_tiles.contract import (
     TILES_VERSION,
     tile_name,
 )
-from viz_tiles.events import Confirmations, EventRows, pack_events
+from viz_tiles.events import Confirmations, EventsBuffer
 from viz_tiles.reduce import DayReduction, day_start_us
 from viz_tiles.render import Template, render_day
 
@@ -52,17 +52,16 @@ class SeriesMismatch(ValueError):
 
 @dataclass(frozen=True)
 class ThetaTiles:
-    """Tiles de un θ: dirección por nivel y eventos exactos del día.
+    """Tiles de un θ: dirección por nivel y cuántos eventos suyos tocan el día.
 
-    `direction[w]` es el arreglo uint8 del nivel `w`; `rows`, los `events` eventos
-    que tocan el día (`EventRows`).
+    `direction[w]` es el arreglo uint8 del nivel `w`. Los eventos mismos no viajan
+    aquí: van al `EventsBuffer` del día, `events` por θ y en el orden de `thetas`.
     """
 
     theta: str
     events: int
     provisional_from_s: float | None
     direction: Mapping[int, np.ndarray]  # un bloque de `w` bytes por nivel
-    rows: EventRows = field(default_factory=EventRows.empty)
 
 
 def day_dir(root: str | Path, provider: str, market: str, asset: str, day: date) -> str:
@@ -143,6 +142,7 @@ def write_day(
     day: date,
     reduction: DayReduction,
     confirmations: Confirmations,
+    events: EventsBuffer | None = None,
     thetas: Sequence[ThetaTiles],
     missing_thetas: Sequence[str] = (),
     input_hash: str,
@@ -179,11 +179,12 @@ def write_day(
         for w in LEVELS:
             files[by_level[str(w)]] = (kind, w)
 
-    for theta in thetas:
-        if len(theta.rows) != theta.events:
-            raise ValueError(
-                f"{theta.theta}: events={theta.events} pero trae {len(theta.rows)} filas"
-            )
+    events = events if events is not None else EventsBuffer()
+    declared = sum(t.events for t in thetas)
+    if len(events) != declared:
+        raise ValueError(
+            f"los θ declaran {declared} eventos pero el buffer trae {len(events)} filas"
+        )
     offsets = np.cumsum([0] + [t.events for t in thetas])
 
     def array_of(kind: str, w: int) -> np.ndarray:
@@ -218,7 +219,7 @@ def write_day(
         for name in sorted(files):
             kind, w = files[name]
             if kind == "events":
-                yield name, pack_events([t.rows for t in thetas])
+                yield name, events.packed()
                 continue
             yield (
                 name,
