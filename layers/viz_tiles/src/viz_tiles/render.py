@@ -1,13 +1,15 @@
 """La página HTML autocontenida de un día (TRD-viz §6.5 y §7.9).
 
 Una plantilla (`layers/viz_tiles/site/`: HTML, JS y CSS propios más uPlot) se
-rellena con los 37 arreglos del día en base64, bajo su nombre, dentro de un
-`<script>` (`window.VIZ_DATA`). El documento no pide nada a la red: Google sirve
-cada archivo privado de un bucket desde un dominio bloqueado de un solo uso, así
-que una página que descarga sus tiles con `fetch` no funciona (RVZ-06).
+rellena con los dos archivos del día (`ticks.bin` y `events.bin`) en base64, bajo
+su nombre, dentro de un `<script>` (`window.VIZ_DATA`). El documento no pide nada a
+la red: Google sirve cada archivo privado de un bucket desde un dominio bloqueado
+de un solo uso, así que una página que descarga sus datos con `fetch` no funciona
+(RVZ-06).
 
-Memoria: los arreglos entran de uno en uno, se codifican y se sueltan; nunca hay
-más de un arreglo y su base64 vivos a la vez, y la salida es un solo documento.
+Memoria: los archivos entran de uno en uno y por tramos de unos cientos de KB, se
+codifican y se sueltan; nunca vive más de un tramo y su base64, y la salida es un
+solo documento.
 """
 
 import base64
@@ -18,11 +20,11 @@ import json
 import os
 import re
 import zlib
-from collections.abc import Buffer, Iterable, Iterator, Mapping
+from collections.abc import Buffer, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from viz_tiles.contract import KINDS, PAGE_FILE
+from viz_tiles.contract import PAGE_FILE
 
 # Archivos de la plantilla, en el orden en que entran al hash.
 TEMPLATE_FILES = (
@@ -102,16 +104,35 @@ def _json(doc: object) -> str:
 
 
 def expected_names(index: Mapping) -> list[str]:
-    """Los archivos de tile que el índice lista, en orden de nombre."""
-    return sorted(
-        [index["events"]] + [name for kind in KINDS for name in index[kind].values()]
-    )
+    """Los archivos de datos que el índice lista, en orden de nombre."""
+    return sorted([index["events"], index["ticks_file"]])
+
+
+# Bytes por tramo al codificar en base64: múltiplo de 3, así los tramos no dejan
+# relleno (`=`) en medio del texto.
+B64_STEP = 3 << 18
+
+
+def _base64(parts: Sequence[Buffer]) -> Iterator[str]:
+    """El base64 de los tramos de un archivo, sin juntarlos en un solo buffer."""
+    carry = b""
+    for part in parts:
+        view = memoryview(part)
+        for off in range(0, len(view), B64_STEP):
+            chunk = carry + view[off : off + B64_STEP]
+            cut = len(chunk) - len(chunk) % 3
+            yield base64.b64encode(chunk[:cut]).decode("ascii")
+            carry = chunk[cut:]
+    if carry:
+        yield base64.b64encode(carry).decode("ascii")
 
 
 def page_chunks(
-    index: Mapping, arrays: Iterable[tuple[str, Buffer]], template: Template
+    index: Mapping,
+    arrays: Iterable[tuple[str, Sequence[Buffer]]],
+    template: Template,
 ) -> Iterator[str]:
-    """El documento en pedazos: cada arreglo se codifica cuando llega y se suelta."""
+    """El documento en pedazos: cada archivo se codifica cuando llega y se suelta."""
     values = {key: template.sources[name] for key, name in _SOURCES.items()} | {
         "RENDER_META": render_meta(index["tiles_version"], template)
     }
@@ -122,11 +143,11 @@ def page_chunks(
         f'"generated_at":{_json(index["generated_at"])},"files":{{'
     )
     names: list[str] = []
-    for name, array in arrays:
+    for name, parts in arrays:
         names.append(name)
-        encoded = base64.b64encode(array).decode("ascii")
-        yield f'{"," if len(names) > 1 else ""}{_json(name)}:"{encoded}"'
-        del encoded
+        yield f'{"," if len(names) > 1 else ""}{_json(name)}:"'
+        yield from _base64(parts)
+        yield '"'
     yield f'}},"index":{_json(index)}}}'
     yield _fill(tail, values)
     if names != expected_names(index):
@@ -138,14 +159,15 @@ def page_chunks(
 
 def render_day(
     index: Mapping,
-    arrays: Iterable[tuple[str, Buffer]],
+    arrays: Iterable[tuple[str, Sequence[Buffer]]],
     *,
     template: Template | None = None,
     compress: bool = False,
 ) -> bytes:
-    """El `index.html` de un día: la plantilla con `index` y los 37 arreglos dentro.
+    """El `index.html` de un día: la plantilla con `index` y sus dos archivos dentro.
 
-    `arrays` entrega `(nombre, bytes)` en orden de nombre (el de `content_hash`).
+    `arrays` entrega `(nombre, tramos)` en orden de nombre (el de `content_hash`);
+    los tramos de un archivo, puestos uno tras otro, son sus bytes.
     Con `compress` el resultado es un gzip determinista (sin marca de tiempo): es
     lo que se guarda en un bucket con `Content-Encoding: gzip`; en disco local el
     archivo va sin comprimir para que abra por `file://`.

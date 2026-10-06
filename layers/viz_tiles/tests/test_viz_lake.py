@@ -2,6 +2,8 @@ import base64
 import hashlib
 from datetime import date
 
+import numpy as np
+import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 from lake_fixture import EVENTS, MONTH, build_lake, events_path, read_events
@@ -9,13 +11,12 @@ from viz_tiles import lake
 from viz_tiles.lake import (
     EventsIndex,
     InputError,
+    MonthEvents,
     find_extreme,
     input_hash,
     object_stat,
     read_carry_over,
-)
-from viz_tiles.lake import (
-    read_events as read_event_rows,
+    read_month_events,
 )
 
 DAY = date(2017, 8, 18)
@@ -100,18 +101,17 @@ def test_events_index_lists_months_and_thetas(tmp_path):
     )
 
 
-def test_read_events_reads_only_row_groups_that_can_match(tmp_path, monkeypatch):
+def test_read_month_events_reads_each_row_group_once_and_keeps_every_event(
+    tmp_path, monkeypatch
+):
+    """Una sola lectura del mes por θ: de ahí salen los eventos de cada día."""
     roots, _, _ = build_lake(tmp_path)
     theta = 100_000
     path = str(events_path(roots, theta, MONTH, EVENTS))
     rows = read_events()[theta][:-1]
     groups = pq.ParquetFile(path).num_row_groups
-    assert (
-        groups > 10
-    )  # row groups de 3 filas: el salto por estadísticas tiene qué saltar
+    assert groups > 10  # row groups de 3 filas
 
-    lo = int(rows[100]["reference_agg_trade_id"]) + 1
-    hi = int(rows[110]["extreme_agg_trade_id"])
     reads = []
     original = pq.ParquetFile.read_row_group
 
@@ -120,34 +120,74 @@ def test_read_events_reads_only_row_groups_that_can_match(tmp_path, monkeypatch)
         return original(self, i, *args, **kwargs)
 
     monkeypatch.setattr(pq.ParquetFile, "read_row_group", counting)
-    table = read_event_rows(path, lo, hi)
-    assert len(reads) < groups // 3
-    expected = [
-        r
-        for r in rows
-        if int(r["reference_agg_trade_id"]) < hi
-        and int(r["extreme_agg_trade_id"]) >= lo
+    events = read_month_events(path)
+    assert sorted(reads) == list(range(groups))
+    assert len(events) == len(rows)
+    assert events.reference_id.tolist() == [
+        int(r["reference_agg_trade_id"]) for r in rows
     ]
-    assert table["reference_agg_trade_id"].to_pylist() == [
-        int(r["reference_agg_trade_id"]) for r in expected
-    ]
-    assert table.num_rows >= 10
+    assert events.extreme_id.tolist() == [int(r["extreme_agg_trade_id"]) for r in rows]
+    for name in ("reference", "confirm", "extreme"):
+        assert getattr(events, f"{name}_time").tolist() == [
+            int(r[f"{name}_time"]) for r in rows
+        ]
+    assert events.direction.tolist() == [int(r["direction"]) for r in rows]
 
 
-def test_read_events_without_matches_is_an_empty_table(tmp_path):
-    roots, _, _ = build_lake(tmp_path)
-    path = str(events_path(roots, 100_000, MONTH, EVENTS))
-    table = read_event_rows(path, 1, 2)
-    assert table.num_rows == 0
-    assert table.column_names == [
-        "reference_agg_trade_id",
-        "confirm_agg_trade_id",
-        "extreme_agg_trade_id",
-        "reference_time",
-        "confirm_time",
-        "extreme_time",
-        "direction",
-    ]
+def test_touching_keeps_the_events_that_reach_the_ticks_of_a_day():
+    events = MonthEvents(
+        reference_id=np.array([10, 30, 55, 90], np.int64),
+        extreme_id=np.array([30, 55, 90, 120], np.int64),
+        reference_time=np.arange(4, dtype=np.int64),
+        confirm_time=np.arange(4, dtype=np.int64),
+        extreme_time=np.arange(4, dtype=np.int64),
+        direction=np.array([1, -1, 1, -1], np.int8),
+    )
+    # Un evento toca [lo, hi] si su referencia es < hi y su extremo >= lo.
+    assert events.touching(31, 60).reference_id.tolist() == [30, 55]
+    assert events.touching(55, 56).reference_id.tolist() == [30, 55]
+    assert events.touching(120, 130).reference_id.tolist() == [90]
+    assert len(events.touching(200, 300)) == 0
+    assert len(events.touching(1, 10)) == 0
+
+
+def test_month_events_are_sorted_by_reference_and_a_duplicate_is_rejected(tmp_path):
+    def write(refs):
+        path = tmp_path / "events.parquet"
+        n = len(refs)
+        pq.write_table(
+            pa.table(
+                {
+                    "reference_agg_trade_id": pa.array(refs, pa.int64()),
+                    "extreme_agg_trade_id": pa.array([r + 5 for r in refs], pa.int64()),
+                    "reference_time": pa.array(range(n), pa.int64()),
+                    "confirm_time": pa.array(range(n), pa.int64()),
+                    "extreme_time": pa.array(range(n), pa.int64()),
+                    "direction": pa.array([1] * n, pa.int8()),
+                }
+            ),
+            path,
+            row_group_size=2,
+        )
+        return str(path)
+
+    assert read_month_events(write([30, 10, 20])).reference_id.tolist() == [10, 20, 30]
+    with pytest.raises(ValueError, match="misma referencia"):
+        read_month_events(write([10, 20, 20]))
+
+
+def test_month_events_of_an_empty_file_are_empty(tmp_path):
+    path = tmp_path / "events.parquet"
+    pq.write_table(
+        pa.table(
+            {
+                name: pa.array([], pa.int8() if name == "direction" else pa.int64())
+                for name in lake.EVENT_COLUMNS
+            }
+        ),
+        path,
+    )
+    assert len(read_month_events(str(path))) == 0
 
 
 def test_find_extreme_returns_the_closed_event(tmp_path):

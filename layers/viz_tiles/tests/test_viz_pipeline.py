@@ -7,6 +7,8 @@ import pytest
 from lake_fixture import (
     CARRY_OVER,
     DAY,
+    EVENTS,
+    MONTH,
     build_lake,
     events_path,
     landing_path,
@@ -65,6 +67,28 @@ def test_only_the_row_groups_of_the_requested_day_are_read(tmp_path, monkeypatch
     assert groups == 19
     assert reads and min(reads) >= 9
     assert len(reads) <= 10
+
+
+def test_each_events_file_is_read_once_per_month_not_once_per_day(
+    tmp_path, monkeypatch
+):
+    """TRD-viz §8.1: dos días del mes leen los row groups de cada θ una sola vez."""
+    roots, _, _ = two_day_lake(tmp_path)
+    expected = sum(
+        pq.ParquetFile(events_path(roots, theta, MONTH, EVENTS)).num_row_groups
+        for theta in (100_000, 250_000, 500_000, 1_000_000, 2_000_000)
+    )
+    reads = []
+    original = pq.ParquetFile.read_row_group
+
+    def counting(self, i, *args, **kwargs):
+        if "confirm_time" in kwargs.get("columns", ()):  # lectura de eventos del mes
+            reads.append(i)
+        return original(self, i, *args, **kwargs)
+
+    monkeypatch.setattr(pq.ParquetFile, "read_row_group", counting)
+    assert run(roots, "--from", "2017-08") == 0
+    assert expected > 5 and len(reads) == expected
 
 
 def test_a_second_day_with_only_the_tail_has_the_provisional_state(tmp_path):

@@ -2,7 +2,7 @@
 # Prueba de humo de la imagen: arma un lago local con el día real 2017-08-18
 # (4 735 ticks de shared/dc_core/tests/fixtures/ticks.csv y sus eventos de
 # events_v0.csv para cinco θ), corre --mode tiles sobre ese día y verifica el
-# índice, los arreglos, la página index.html y el Parquet de hallazgos; luego
+# índice, ticks.bin y events.bin, la página index.html y el Parquet de hallazgos; luego
 # corre --mode render, que no lee L1 ni L2. Uso: smoke.sh <imagen>
 #
 # La entrada no viene de L1 ni de L2: los CSV se convierten con el pyarrow de la
@@ -190,7 +190,7 @@ grep -q 'sonda: unit=2017-08-18 ticks=4735 ' "$data/run.log" \
 grep -q '"check_type": "tiles_summary"' "$data/run.log" \
   || { echo "::error::falta el hallazgo tiles_summary en el log"; exit 1; }
 
-# El índice, los 39 objetos con su tamaño y el Parquet de hallazgos.
+# El índice, los 4 objetos con su tamaño y el Parquet de hallazgos.
 docker run --rm -v "$data:/data" --entrypoint python "$image" - <<'PY'
 import base64
 import gzip
@@ -204,26 +204,56 @@ import pyarrow.parquet as pq
 day = Path("/data/tiles/provider=binance/market=spot/asset=BTCUSDT/day=2017-08-18")
 index = json.loads((day / "index.json").read_text())
 assert index["ticks"] == 4735, index["ticks"]
-assert index["tiles_version"] == "1.2.0", index["tiles_version"]
+assert index["tiles_version"] == "2.0.0", index["tiles_version"]
 assert index["page"] == "index.html", index["page"]
+assert (index["ticks_file"], index["events"]) == ("ticks.bin", "events.bin")
+assert index["first_agg_trade_id"] == 3089 and index["last_agg_trade_id"] == 7823, index
 assert len(index["thetas"]) == 5 and index["missing_thetas"] == [], index["thetas"]
 assert all(t["provisional_from_s"] is not None for t in index["thetas"]), "cola provisional"
 files = sorted(p.name for p in day.iterdir())
-assert len(files) == 39, files  # 37 arreglos, index.json e index.html
-for w in index["levels"]:
-    assert (day / f"price-{w}.i32").stat().st_size == 32 * w
-    assert (day / f"volume-{w}.f32").stat().st_size == 4 * w
-    assert (day / f"dir-{w}.u8").stat().st_size == 5 * w
-    assert (day / f"count-{w}.u32").stat().st_size == 4 * w
-    assert (day / f"confirms-{w}.u8").stat().st_size == w
-    assert (day / f"simul-{w}.u8").stat().st_size == w
+assert files == ["events.bin", "index.html", "index.json", "ticks.bin"], files
 total = sum(t["events"] for t in index["thetas"])
 assert (day / index["events"]).stat().st_size == 13 * total, total
 assert [t["events_offset"] for t in index["thetas"]][0] == 0
+
+
+def varints(raw, pos, count):
+    """`count` enteros varint (LEB128) de `raw` desde `pos`, y la posición que sigue."""
+    out = []
+    for _ in range(count):
+        value, shift = 0, 0
+        while True:
+            byte = raw[pos]
+            pos += 1
+            value |= (byte & 0x7F) << shift
+            shift += 7
+            if byte < 0x80:
+                break
+        out.append(value)
+    return out, pos
+
+
+# ticks.bin: tres secciones de varint que ocupan el archivo entero y decodifican a los
+# 4 735 ticks del día (ticks.csv: id, precio y tiempo; la cantidad de la prueba es 1).
+raw = (day / "ticks.bin").read_bytes()
+dt, pos = varints(raw, 0, index["ticks"])
+dprice, pos = varints(raw, pos, index["ticks"])
+quantity, pos = varints(raw, pos, index["ticks"])
+assert pos == len(raw), (pos, len(raw))
+assert set(quantity) == {10**8}, set(quantity)
+times, prices = [], []
+t = p = 0
+for a, z in zip(dt, dprice):
+    t += a
+    p += (z >> 1) ^ -(z & 1)
+    times.append(t)
+    prices.append(p)
+assert times == sorted(times) and 0 <= times[0] and times[-1] < 86_400_000
+assert min(prices) > 0
 latest = json.loads(Path("/data/tiles/latest.json").read_text())
 assert latest["day"] == "2017-08-18", latest
 
-# La página: un solo documento con los 37 arreglos dentro, que reproducen el
+# La página: un solo documento con los dos archivos dentro, que reproducen el
 # content_hash del índice, y su copia latest.html.
 html = (day / "index.html").read_text()
 assert (Path("/data/tiles/latest.html")).read_text() == html
@@ -231,7 +261,7 @@ assert "@@" not in html and 'name="viz-render"' in html
 match = re.search(r"window\.VIZ_DATA=(\{.*\});\n</script>", html, re.S)
 data = json.loads(match.group(1))
 assert data["index"] == index and data["tiles_version"] == index["tiles_version"]
-assert len(data["files"]) == 37, len(data["files"])
+assert sorted(data["files"]) == ["events.bin", "ticks.bin"], sorted(data["files"])
 digest = hashlib.sha256()
 for name in sorted(data["files"]):
     raw = base64.b64decode(data["files"][name])
@@ -250,7 +280,7 @@ assert (summary["layer"], summary["mode"], summary["stage"]) == ("viz", "tiles",
 details = json.loads(summary["details"])
 assert details["day"] == "2017-08-18" and details["skipped"] is False, details
 assert details["content_hash"] == index["content_hash"]
-print("índice y arreglos OK, content_hash", index["content_hash"][:16])
+print("índice y archivos OK, content_hash", index["content_hash"][:16])
 PY
 
 # Segunda corrida: el día está al día y no se reescribe. Con --force se rehace
@@ -262,7 +292,7 @@ run_tiles --force | tee "$data/forced.log"
 [ "$(grep -o -m1 '"content_hash": "[0-9a-f]*"' "$data/forced.log")" = "$first" ] \
   || { echo "::error::--force cambió el content_hash"; exit 1; }
 
-# Modo render: regenera la página desde los tiles, sin L1 ni L2. Con las mismas
+# Modo render: regenera la página desde ticks.bin y events.bin, sin L1 ni L2. Con las mismas
 # entradas la página sale idéntica; sin --force, el día está al día y se salta.
 run_render() {
   docker run --rm -v "$data:/data" \

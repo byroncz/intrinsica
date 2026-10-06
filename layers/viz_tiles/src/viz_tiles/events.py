@@ -1,19 +1,15 @@
-"""Eventos exactos de un θ y confirmaciones multiescala de un día.
+"""Eventos exactos de los θ de un día: las filas de `events.bin`.
 
-TRD-viz §7.4 y §7.5. El estado por columna de `dir-<w>.u8` no representa varios
-eventos en una columna (ADR-VZ-09); el navegador dibuja las franjas desde los
-tiempos exactos de cada evento, que aquí se bajan a milisegundos desde el inicio
-del día. Las confirmaciones multiescala (cuántos θ confirman en una columna y
-cuántos lo hacen en el mismo instante) se acumulan en arreglos de tamaño fijo por
-nivel, como M4: lo único que crece con los eventos es la lista de tiempos de
-confirmación, 8 bytes por evento del día, hasta `finish`.
+TRD-viz §7.4. El navegador dibuja las franjas desde los tiempos exactos de cada
+evento, que aquí se bajan a milisegundos desde el inicio del día, y deriva de ellos
+las confirmaciones por píxel (cuántos θ confirman y cuántos en el mismo instante).
 """
 
 from dataclasses import dataclass
 
 import numpy as np
-import pyarrow as pa
 
+from viz_tiles.chain import PendingEvent
 from viz_tiles.contract import (
     DAY_MS,
     DAY_US,
@@ -22,10 +18,8 @@ from viz_tiles.contract import (
     FLAG_PROVISIONAL,
     FLAG_REF_CLIPPED,
     FLAG_UP,
-    LEVELS,
-    MAX_THETAS,
 )
-from viz_tiles.direction import PendingEvent
+from viz_tiles.lake import MonthEvents
 
 
 @dataclass(frozen=True)
@@ -64,24 +58,21 @@ def _clip(times_us: np.ndarray, flag: int) -> tuple[np.ndarray, np.ndarray]:
 
 
 def event_rows(
-    events: pa.Table | pa.RecordBatch,
+    events: MonthEvents,
     pending: PendingEvent | None,
     provisional: bool,
     day_start_us: int,
-) -> tuple[EventRows, np.ndarray]:
-    """Las filas de eventos de un θ y los tiempos (µs) en que confirman dentro del día.
+) -> EventRows:
+    """Las filas de eventos de un θ para el día que arranca en `day_start_us` (µs).
 
-    `events` son las filas de `events.parquet` que tocan el día, ordenadas por
-    referencia, y `pending` la cola del carry-over si el día la incluye (con sus
-    tres tiempos); `provisional` marca esa cola como candidata, no definitiva. El
-    segundo valor son las confirmaciones del día, relativas a su inicio, para
-    `ConfirmAccumulator.add`: nunca se guarda junto a las filas.
+    `events` son los eventos del θ que tocan el día, ordenados por referencia, y
+    `pending` la cola del carry-over si el día la incluye (con sus tres tiempos);
+    `provisional` marca esa cola como candidata, no definitiva.
     """
-    reference = events.column("reference_time").to_numpy()
-    confirm = events.column("confirm_time").to_numpy()
-    extreme = events.column("extreme_time").to_numpy()
-    up = events.column("direction").to_numpy() == 1
-    flags = np.where(up, FLAG_UP, 0).astype("u1")
+    reference = events.reference_time
+    confirm = events.confirm_time
+    extreme = events.extreme_time
+    flags = np.where(events.direction == 1, FLAG_UP, 0).astype("u1")
     if pending is not None:
         if None in (pending.reference_time, pending.confirm_time, pending.extreme_time):
             raise ValueError("el pendiente no trae los tiempos de sus tres puntos")
@@ -100,11 +91,9 @@ def event_rows(
     ref_ms, ref_flag = _clip(reference, FLAG_REF_CLIPPED)
     confirm_ms, confirm_flag = _clip(confirm, FLAG_CONFIRM_CLIPPED)
     extreme_ms, extreme_flag = _clip(extreme, FLAG_EXTREME_CLIPPED)
-    rows = EventRows(
+    return EventRows(
         ref_ms, confirm_ms, extreme_ms, flags | ref_flag | confirm_flag | extreme_flag
     )
-    inside = (confirm >= 0) & (confirm < DAY_US)
-    return rows, confirm[inside]
 
 
 class EventsBuffer:
@@ -184,58 +173,3 @@ class EventsBuffer:
                 dst += size
             self._packed = True
         return memoryview(self._buf[: sum(self._WIDTHS) * n])
-
-
-@dataclass(frozen=True)
-class Confirmations:
-    """Confirmaciones multiescala de un día: un arreglo `uint8` de `w` valores por nivel.
-
-    `confirms[w][c]` es el número de θ con al menos una confirmación en la columna
-    `c`; `simul[w][c]`, el mayor número de θ que comparten un mismo `confirm_time`
-    dentro de la columna. 0 si la columna no tiene confirmaciones.
-    """
-
-    confirms: dict[int, np.ndarray]
-    simul: dict[int, np.ndarray]
-
-    @classmethod
-    def empty(cls) -> Confirmations:
-        return cls(
-            {w: np.zeros(w, "u1") for w in LEVELS},
-            {w: np.zeros(w, "u1") for w in LEVELS},
-        )
-
-
-class ConfirmAccumulator:
-    """Acumula θ por θ las confirmaciones del día: no retiene ningún evento.
-
-    `confirms` se acumula por nivel directamente (un θ cuenta una vez por columna
-    aunque confirme varias veces en ella: no se puede derivar del nivel fino).
-    `simul` necesita agrupar los θ por instante exacto de confirmación: se guardan
-    los tiempos de confirmación (µs, un arreglo por θ) y se agrupan en `finish`.
-    """
-
-    def __init__(self) -> None:
-        self._confirms = {w: np.zeros(w, np.int64) for w in LEVELS}
-        self._times: list[np.ndarray] = []
-
-    def add(self, confirm_us: np.ndarray) -> None:
-        """Suma un θ: `confirm_us` son sus confirmaciones dentro del día (µs desde su inicio)."""
-        if len(self._times) >= MAX_THETAS:
-            raise ValueError(f"más de {MAX_THETAS} θ no caben en un uint8")
-        once = np.unique(confirm_us)  # un θ cuenta una vez por instante
-        for w, level in self._confirms.items():
-            level[np.unique(once * w // DAY_US)] += 1
-        self._times.append(once)
-
-    def finish(self) -> Confirmations:
-        """Los tiles del día. Suelta los tiempos acumulados."""
-        times, self._times = self._times, []
-        confirms = {w: a.astype("u1") for w, a in self._confirms.items()}
-        simul = {w: np.zeros(w, "u1") for w in LEVELS}
-        if times:
-            instants, thetas = np.unique(np.concatenate(times), return_counts=True)
-            del times
-            for w, level in simul.items():
-                np.maximum.at(level, instants * w // DAY_US, thetas.astype("u1"))
-        return Confirmations(confirms, simul)

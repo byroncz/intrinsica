@@ -5,7 +5,7 @@ uPlot) y hay que regenerar las páginas sin repetir la reducción. Un día se sa
 si su página ya trae la misma `tiles_version` y la misma huella de plantilla
 (guardadas en su `<meta name="viz-render">`).
 
-Memoria: los 37 arreglos de un día se leen, se codifican y se sueltan de uno en
+Memoria: los dos archivos de un día se leen, se codifican y se sueltan de uno en
 uno; nunca hay más de un día a la vez.
 """
 
@@ -46,7 +46,7 @@ _BLOCK = 1 << 20  # bloque con el que se cuentan los bytes de una página plana
 
 
 class TilesCorrupt(Exception):
-    """Un arreglo del día falta o no coincide con el `content_hash` de su índice."""
+    """Un archivo del día falta o no coincide con el `content_hash` de su índice."""
 
 
 def _read(fs: pafs.FileSystem, path: str, size: int | None = None) -> bytes:
@@ -94,8 +94,8 @@ def _stored_meta(fs: pafs.FileSystem, path: str) -> tuple[str, str] | None:
 
 def _arrays(
     fs: pafs.FileSystem, directory: str, index: dict, update: Callable[[bytes], None]
-) -> Iterator[tuple[str, bytes]]:
-    """Los arreglos del día en orden de nombre, de uno en uno, hasheándolos al pasar."""
+) -> Iterator[tuple[str, list[bytes]]]:
+    """Los archivos del día en orden de nombre, de uno en uno, hasheándolos al pasar."""
     for name in expected_names(index):
         path = f"{directory}/{name}"
         if not _exists(fs, path):
@@ -103,7 +103,7 @@ def _arrays(
         data = _read(fs, path)
         update(name.encode() + b"\0")
         update(data)
-        yield name, data
+        yield name, [data]
         del data
 
 
@@ -183,7 +183,7 @@ def _render_day(
     try:
         expected_names(index)
     except KeyError as exc:
-        # Tiles de una versión anterior: no traen todos los archivos de la actual.
+        # Tiles de una versión anterior: no traen los archivos de la actual.
         raise TilesCorrupt(
             f"el índice no trae {exc} (tiles_version {index.get('tiles_version')}): "
             "el día se rehace con --mode tiles, no con render"
@@ -218,7 +218,7 @@ def _render_day(
     )
     if digest.hexdigest() != index["content_hash"]:
         raise TilesCorrupt(
-            "los arreglos no coinciden con el content_hash del índice "
+            "los archivos no coinciden con el content_hash del índice "
             f"({digest.hexdigest()[:12]} ≠ {index['content_hash'][:12]})"
         )
     write_page(fs, page_path, page)

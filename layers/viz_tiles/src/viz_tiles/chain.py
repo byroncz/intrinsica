@@ -8,11 +8,11 @@ cadena: los `carry_over.parquet` de `M+1`, `M+2`… mientras traigan el mismo
 pendiente, y el `events.parquet` del primer mes que ya no lo trae.
 """
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date
 
 from viz_tiles.contract import DAY_US
-from viz_tiles.direction import PendingEvent
 from viz_tiles.lake import (
     CARRY_OVER,
     EVENTS,
@@ -26,7 +26,49 @@ from viz_tiles.lake import (
     ordinal,
     read_carry_over,
 )
-from viz_tiles.reduce import day_start_us
+from viz_tiles.ticks import day_start_us
+
+
+def _optional_int(value: object) -> int | None:
+    return None if value is None else int(value)
+
+
+@dataclass(frozen=True)
+class PendingEvent:
+    """Evento pendiente al cierre del mes, de `carry_over.parquet` (TRD-viz §7.6).
+
+    Su referencia y su confirmación son conocidas; su extremo no. El extremo
+    vigente (`extreme_agg_trade_id`, el `ext_high_*` si `direction = 1` o el
+    `ext_low_*` si `direction = -1`) es un candidato que un tick posterior puede
+    superar: hasta él los ticks son overshoot del pendiente, y después de él son
+    la confirmación del sentido contrario (provisional).
+    """
+
+    reference_agg_trade_id: int
+    confirm_agg_trade_id: int
+    extreme_agg_trade_id: int
+    direction: int
+    # Tiempos (µs UTC) de los tres puntos: los usa `events.bin` (`events.py`).
+    reference_time: int | None = None
+    confirm_time: int | None = None
+    extreme_time: int | None = None
+
+    @classmethod
+    def from_carry_over(cls, row: Mapping[str, object]) -> PendingEvent | None:
+        """El pendiente de una fila de `carry_over.parquet`, o `None` si no hay."""
+        if not row["has_pending_event"]:
+            return None
+        direction = int(row["direction"])
+        extreme = "ext_high" if direction == 1 else "ext_low"
+        return cls(
+            reference_agg_trade_id=int(row["pending_reference_agg_trade_id"]),
+            confirm_agg_trade_id=int(row["pending_confirm_agg_trade_id"]),
+            extreme_agg_trade_id=int(row[f"{extreme}_agg_trade_id"]),
+            direction=direction,
+            reference_time=_optional_int(row.get("pending_reference_time")),
+            confirm_time=_optional_int(row.get("pending_confirm_time")),
+            extreme_time=_optional_int(row.get(f"{extreme}_time")),
+        )
 
 
 @dataclass(frozen=True)
