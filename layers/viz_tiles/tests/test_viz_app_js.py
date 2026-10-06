@@ -776,12 +776,12 @@ def test_legend_is_made_of_samples_not_sentences(day_dir):
     ):
         assert f'class="{sample}"' in legend
     assert legend.count('class="key"') == 11
-    # El único texto visible es el número de la marca gris: nada obliga a leer una frase.
+    # El único texto visible es la marca gris con su número, tal como se dibuja: nada obliga a leer una frase.
     samples = legend.split('<span id="f-help">')[0]
     visible = re.sub(
         r"<[^>]*>", " ", re.sub(r'\s(title|aria-label)="[^"]*"', "", samples)
     )
-    assert visible.split() == ["12"], visible.split()
+    assert visible.split() == ["12", "eventos"], visible.split()
     assert "tenue: confirmación" not in page and "línea clara" not in page
     assert "marca gris con número" not in page
     # Cada muestra se explica al pasar el mouse.
