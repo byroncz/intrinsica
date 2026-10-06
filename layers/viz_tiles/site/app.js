@@ -8,6 +8,10 @@
   var DAY_S = 86400;
   var EMPTY = -2147483648; // centinela de p en una columna sin ticks (§7.3)
   var KNOWN_MAJOR = 1;
+  // Desde este ancho (px CSS por columna) la serie deja de ser una línea y cada columna
+  // se dibuja como una barra de rango. Se declara en el pie junto al nivel.
+  var BAR_MIN_COL_PX = 5;
+  var BAR_NOTCH_MAX_PX = 8; // largo máximo de cada muesca (primero / último)
   var MONO = 'ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace';
   var C = {
     text: "#d7dee6",
@@ -19,14 +23,20 @@
     up: "63, 185, 80",
     down: "248, 81, 73",
   };
-  // Estados de dirección (§7.4): texto, sentido (+1 alza, -1 baja) y fase.
+  // Estados de dirección (§7.4): texto, sentido (+1 alza, -1 baja) y fase. El sentido y la
+  // fase los dan la franja del borde y el relleno; nada más se dibuja sobre la región.
   var STATES = {
     0: { text: "sin evento", sign: 0, strong: false },
-    1: { text: "confirmación alza ▲", sign: 1, strong: false },
-    2: { text: "overshoot alza ▲", sign: 1, strong: true },
-    3: { text: "confirmación baja ▼", sign: -1, strong: false },
-    4: { text: "overshoot baja ▼", sign: -1, strong: true },
+    1: { text: "confirmación alza", sign: 1, strong: false },
+    2: { text: "overshoot alza", sign: 1, strong: true },
+    3: { text: "confirmación baja", sign: -1, strong: false },
+    4: { text: "overshoot baja", sign: -1, strong: true },
   };
+  // Franja del borde, en px CSS: fina en la confirmación, gruesa en el overshoot.
+  var BAND_PX = { thin: 3, thick: 8 };
+  // Marca del hueco (columnas sin ticks): línea punteada de 1 px a media altura. Ninguna franja
+  // DC es punteada, así de fina ni va al centro: un hueco nunca se lee como una confirmación.
+  var GAP_MARK = { px: 1, dash: [4, 3] };
 
   var started = performance.now();
   var metrics = (window.VIZ_METRICS = {
@@ -57,9 +67,9 @@
   var thetas = index.thetas;
   var missingThetas = index.missing_thetas;
 
-  /* ---------- Modo degradado (principio 6) ---------- */
+  /* ---------- Datos completos o incompletos (principio 6) ---------- */
 
-  var reasons = {}; // clave -> texto; si hay alguna, el modo es degradado
+  var reasons = {}; // clave -> texto; si hay alguna, los datos están incompletos
 
   function setReason(key, text) {
     if (text) reasons[key] = text;
@@ -68,10 +78,11 @@
 
   function renderStatus() {
     var keys = Object.keys(reasons);
-    var degraded = keys.length > 0;
-    $("s-mode").textContent = degraded ? "⚠ DEGRADADO" : "NORMAL";
-    $("s-mode-box").className = "item" + (degraded ? " degraded" : "");
-    $("s-reasons").textContent = keys.map(function (k) { return reasons[k]; }).join(" · ");
+    var incomplete = keys.length > 0;
+    $("s-data").textContent = incomplete
+      ? "incompletos: " + keys.map(function (k) { return reasons[k]; }).join(" · ")
+      : "completos";
+    $("s-data-box").className = "item" + (incomplete ? " incomplete" : "");
   }
 
   $("s-day").textContent = index.day;
@@ -327,8 +338,15 @@
         // Hueco: columnas sin ticks. Marcador y texto; nunca se rellena.
         ctx.fillStyle = "rgba(227, 179, 65, 0.10)";
         ctx.fillRect(x0, b.top, wpx, b.height);
+        ctx.strokeStyle = C.amber;
+        ctx.lineWidth = GAP_MARK.px * dpr;
+        ctx.setLineDash([GAP_MARK.dash[0] * dpr, GAP_MARK.dash[1] * dpr]);
+        ctx.beginPath();
+        ctx.moveTo(x0, b.top + b.height / 2);
+        ctx.lineTo(x0 + wpx, b.top + b.height / 2);
+        ctx.stroke();
+        ctx.setLineDash([]);
         ctx.fillStyle = C.amber;
-        ctx.fillRect(x0, b.top + b.height - 3 * dpr, wpx, 3 * dpr);
         if (wpx > 70 * dpr) {
           ctx.textAlign = "center";
           ctx.fillText("◇ sin ticks", x0 + wpx / 2, b.top + b.height - 8 * dpr);
@@ -342,19 +360,11 @@
         ctx.fillStyle = "rgba(" + rgb + ", " + (st.strong ? 0.42 : 0.18) + ")";
         ctx.fillRect(x0, b.top, wpx, b.height);
         // Forma y posición además del color (principio 2): alza arriba, baja abajo;
-        // franja gruesa en el overshoot y fina en la confirmación.
-        var band = (st.strong ? 5 : 2) * dpr;
+        // franja gruesa en el overshoot y fina en la confirmación. Es la única marca de
+        // dirección y fase: no se repite con un glifo (principio 9).
+        var band = (st.strong ? BAND_PX.thick : BAND_PX.thin) * dpr;
         ctx.fillStyle = "rgb(" + rgb + ")";
         ctx.fillRect(x0, st.sign > 0 ? b.top : b.top + b.height - band, wpx, band);
-        if (wpx > 16 * dpr) {
-          ctx.fillStyle = C.text; // el glifo va en el color del texto (≥ 7:1); el tono lo da el relleno
-          ctx.textAlign = "left";
-          ctx.fillText(
-            st.sign > 0 ? "▲" : "▼",
-            x0 + 3 * dpr,
-            st.sign > 0 ? b.top + band + 12 * dpr : b.top + b.height - band - 4 * dpr
-          );
-        }
       }
       c = end + 1;
     }
@@ -383,6 +393,67 @@
       setReason("reserved", text);
       renderStatus();
     }
+  }
+
+  /* ---------- Serie de precio: línea o barras de rango por columna ---------- */
+
+  // Con menos de BAR_MIN_COL_PX por columna la línea M4 es la imagen exacta de la serie
+  // (§6.4). Con más, une puntos que nadie midió entre sí: cada columna pasa a ser un objeto
+  // discreto (una barra del mínimo al máximo, con muescas en el primero y el último) y nada
+  // la une con la vecina (principio 6). Se dibuja desde los mismos arreglos ya decodificados.
+  var linePaths = uPlot.paths.linear();
+  var drawMode = "line"; // "line" | "bars"
+
+  // Ancho en pantalla de una columna del nivel actual, en px CSS.
+  function columnPx(u) {
+    var xs = u.scales.x;
+    return (u.bbox.width / (window.devicePixelRatio || 1)) * (cur.colDur / (xs.max - xs.min));
+  }
+
+  function setDrawMode(mode, columns) {
+    metrics.price_draw = { mode: mode, columns: columns };
+    if (mode === drawMode) return;
+    drawMode = mode;
+    console.info("viz: precio en " + (mode === "bars" ? "barras de rango por columna" : "línea"));
+    renderFooter();
+  }
+
+  function pricePaths(u, seriesIdx, idx0, idx1) {
+    if (columnPx(u) < BAR_MIN_COL_PX) {
+      setDrawMode("line", 0);
+      return linePaths(u, seriesIdx, idx0, idx1);
+    }
+    var level = cur;
+    var dpr = window.devicePixelRatio || 1;
+    var xs = u.scales.x;
+    var y = level.price.y;
+    var c0 = Math.max(0, Math.floor(xs.min / level.colDur));
+    var c1 = Math.min(level.w - 1, Math.ceil(xs.max / level.colDur) - 1);
+    // Cada muesca deja un píxel libre en su borde: dos columnas vecinas no se tocan.
+    var notch = Math.min(BAR_NOTCH_MAX_PX, columnPx(u) / 2 - 1) * dpr;
+    var path = new Path2D();
+    var drawn = 0;
+    for (var c = c0; c <= c1; c++) {
+      if (emptyColumn(level, c)) continue; // hueco: lo marca drawRegions, aquí no se dibuja nada
+      var lo = Infinity;
+      var hi = -Infinity;
+      for (var k = 4 * c; k < 4 * c + 4; k++) {
+        if (y[k] < lo) lo = y[k];
+        if (y[k] > hi) hi = y[k];
+      }
+      var xc = u.valToPos((c + 0.5) * level.colDur, "x", true);
+      var yFirst = u.valToPos(y[4 * c], "p", true); // los puntos M4 vienen en orden de tiempo
+      var yLast = u.valToPos(y[4 * c + 3], "p", true);
+      path.moveTo(xc, u.valToPos(hi, "p", true));
+      path.lineTo(xc, u.valToPos(lo, "p", true));
+      path.moveTo(xc - notch, yFirst); // primero, a la izquierda
+      path.lineTo(xc, yFirst);
+      path.moveTo(xc, yLast); // último, a la derecha
+      path.lineTo(xc + notch, yLast);
+      drawn++;
+    }
+    setDrawMode("bars", drawn);
+    return { stroke: path, fill: null, clip: null, band: null, gaps: null, flags: 3 };
   }
 
   function drawMessages(u) {
@@ -580,7 +651,7 @@
         padding: [8, 12, 0, 0],
         scales: { x: { time: false, auto: false, min: 0, max: DAY_S }, p: { range: yPrice } },
         axes: [xAxis(false), yAxis("p", fixed)],
-        series: [{}, { scale: "p", stroke: C.price, width: 1.5, points: { show: false } }],
+        series: [{}, { scale: "p", stroke: C.price, width: 1.5, points: { show: false }, paths: pricePaths }],
         hooks: {
           drawClear: [drawRegions],
           draw: [
@@ -649,7 +720,8 @@
   function renderFooter() {
     var dur = cur.colDur;
     $("f-level").textContent =
-      "nivel " + cur.w + " · " + (Number.isInteger(dur) ? dur : dur.toFixed(2)) + " s por columna";
+      "nivel " + cur.w + " · " + (Number.isInteger(dur) ? dur : dur.toFixed(2)) + " s por columna" +
+      " · barras desde " + BAR_MIN_COL_PX + " px por columna · dibujo: " + (drawMode === "bars" ? "barras" : "línea");
   }
 
   /* ---------- Arranque ---------- */
