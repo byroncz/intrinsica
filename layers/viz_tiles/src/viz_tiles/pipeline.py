@@ -1,11 +1,13 @@
-"""Un mes de tiles: decide qué días rehacer, lee L1 una vez y escribe cada día.
+"""Un mes de días: decide qué días rehacer, lee L1 una vez y escribe cada día.
 
 TRD-viz §7.8 y §8.1. El orden respeta la eficiencia de memoria: el `input_hash`
 se calcula con los metadatos de los archivos (nunca se lee un tick para decidir);
 los días al día se saltan; los demás salen de **una** pasada por el
 `consolidated.parquet` del mes, row group a row group, y cada día cierra cuando
-los ticks cambian de día. En RAM: un row group de L1, los acumuladores del día en
-curso y, por θ, los eventos que tocan el día.
+los ticks cambian de día. Cada `events.parquet` de θ se lee **una vez por mes**
+(no una por día). En RAM: un row group de L1, un tramo de `ticks.bin` (≈ 330 KB;
+cada tramo se escribe al objeto en cuanto se llena) y, por θ, los eventos del mes en
+arreglos de NumPy.
 """
 
 import calendar
@@ -23,9 +25,16 @@ from dq import Finding, Severity
 from viz_tiles import findings
 from viz_tiles.chain import ThetaMonth, theta_month
 from viz_tiles.context import RunContext
-from viz_tiles.contract import DAY_US, FINEST, TILES_VERSION, price_scale
-from viz_tiles.direction import direction_tiles
-from viz_tiles.events import ConfirmAccumulator, EventsBuffer, event_rows
+from viz_tiles.contract import (
+    DAY_US,
+    EVENTS_FILE,
+    MAX_THETAS,
+    PAGE_FILE,
+    TICKS_FILE,
+    TILES_VERSION,
+    price_scale,
+)
+from viz_tiles.events import EventsBuffer, event_rows
 from viz_tiles.lake import (
     CARRY_OVER,
     EVENTS,
@@ -33,6 +42,7 @@ from viz_tiles.lake import (
     EventsIndex,
     InputError,
     Month,
+    MonthEvents,
     column_bounds,
     events_rel,
     exists,
@@ -41,16 +51,16 @@ from viz_tiles.lake import (
     landing_rel,
     object_stat,
     open_parquet,
-    read_events,
+    read_month_events,
     validate_ticks,
 )
-from viz_tiles.reduce import (
-    DayReduction,
-    M4Accumulator,
+from viz_tiles.ticks import (
+    DayTicks,
     PriceUnrepresentable,
+    TicksAccumulator,
     day_start_us,
 )
-from viz_tiles.write import ThetaTiles, day_objects, find_index, write_day
+from viz_tiles.write import ThetaEvents, TicksFile, day_sizes, find_index, write_day
 
 logger = logging.getLogger(__name__)
 
@@ -105,7 +115,11 @@ class _Stats:
 
 
 def _probe(day: date, ticks: int, started: float, **extra: object) -> None:
-    """Línea de cierre de un día: ticks, pared y RSS pico (KiB en Linux → MiB)."""
+    """Línea de cierre de un día: ticks, pared y RSS pico (KiB en Linux → MiB).
+
+    `wall_s` es el tiempo del día desde que su primer tick entra al acumulador
+    hasta que se escribe (el criterio de aceptación: un mes en menos de 10 min).
+    """
     rss_mib = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss // 1024
     wall_s = max(0.1, round(time.monotonic() - started, 1))
     tail = "".join(f" {name}={value}" for name, value in extra.items())
@@ -120,7 +134,7 @@ def _probe(day: date, ticks: int, started: float, **extra: object) -> None:
 
 
 class _Month:
-    """El estado de un mes en curso: los θ listos y los hallazgos que va juntando."""
+    """El estado de un mes en curso: los θ listos, sus eventos y los hallazgos."""
 
     def __init__(
         self,
@@ -136,6 +150,8 @@ class _Month:
         self.missing = missing
         self.out = out
         self.scale = price_scale(ctx.asset)
+        # Los eventos del mes de cada θ, leídos la primera vez que un día los pide.
+        self._events: dict[str, MonthEvents] = {}
 
     def _key(self, day: date) -> dict:
         c = self.ctx
@@ -149,7 +165,7 @@ class _Month:
 
     def summary(self, day: date, index: dict, skipped: bool, started: float) -> None:
         """`tiles_summary` y sonda de un día, escrito ahora o ya al día."""
-        objects, size = day_objects(
+        sizes = day_sizes(
             self.ctx.tiles_root, self.ctx.provider, self.ctx.market, self.ctx.asset, day
         )
         thetas = index["thetas"]
@@ -162,9 +178,11 @@ class _Month:
                 tiles_version=index["tiles_version"],
                 input_hash=index["input_hash"],
                 content_hash=index["content_hash"],
-                objects=objects,
-                size=size,
-                levels=index["levels"],
+                objects=len(sizes),
+                size=sum(sizes.values()),
+                ticks_bytes=sizes.get(TICKS_FILE, 0),
+                events_bytes=sizes.get(EVENTS_FILE, 0),
+                page_bytes=sizes.get(PAGE_FILE, 0),
                 thetas=[t["theta"] for t in thetas],
                 provisional_thetas=[
                     t["theta"] for t in thetas if t["provisional_from_s"] is not None
@@ -172,48 +190,45 @@ class _Month:
                 missing_thetas=index["missing_thetas"],
             )
         )
-        _probe(day, index["ticks"], started, **({"skipped": "true"} if skipped else {}))
+        _probe(
+            day,
+            index["ticks"],
+            started,
+            ticks_bytes=sizes.get(TICKS_FILE, 0),
+            page_bytes=sizes.get(PAGE_FILE, 0),
+            **({"skipped": "true"} if skipped else {}),
+        )
 
-    def build(
-        self, day: date, digest: str, reduction: DayReduction, started: float
-    ) -> None:
-        """Pasada por θ de un día (TRD-viz §8.1, paso 4): dirección, escritura y resumen."""
+    def build(self, day: date, digest: str, ticks: DayTicks, started: float) -> None:
+        """Eventos por θ de un día (TRD-viz §8.1, paso 4): escritura y resumen."""
         ctx = self.ctx
-        if reduction.ticks == 0:
+        if ticks.ticks == 0:
             self.out.append(
                 findings.input_missing(
                     ctx, day, "ticks", path=join(ctx.landing_root, self._landing())
                 )
             )
             return
-        if reduction.rounded:
+        if len(self.ready) > MAX_THETAS:
+            raise ValueError(f"más de {MAX_THETAS} θ no caben en un uint8")
+        if ticks.rounded:
             self.out.append(
                 findings.price_rounded(
                     ctx,
                     day,
-                    count=reduction.rounded,
-                    max_abs_delta_int=reduction.max_abs_delta_int,
+                    count=ticks.rounded,
+                    max_abs_delta_int=ticks.max_abs_delta_int,
                 )
             )
-        # Los eventos que tocan el día son los de ids entre el primer y el último
-        # tick que fija el estado de una columna.
-        ids = reduction.last_ids[FINEST]
-        valid = ids[ids >= 0]
-        lo, hi = int(valid.min()), int(valid.max())
-        confirmations = ConfirmAccumulator()
         events = EventsBuffer()
-        thetas = [
-            self._theta_tiles(state, day, reduction, lo, hi, confirmations, events)
-            for state in self.ready
-        ]
+        thetas = [self._theta_events(state, day, ticks, events) for state in self.ready]
         write_day(
             ctx.tiles_root,
             provider=ctx.provider,
             market=ctx.market,
             asset=ctx.asset,
             day=day,
-            reduction=reduction,
-            confirmations=confirmations.finish(),
+            ticks=ticks,
             events=events,
             thetas=thetas,
             missing_thetas=self.missing,
@@ -227,42 +242,44 @@ class _Month:
         c = self.ctx
         return landing_rel(c.provider, c.market, c.asset, self.month)
 
-    def _theta_tiles(
+    def _month_events(self, theta: str) -> MonthEvents:
+        """Los eventos del θ en el mes: se leen de `events.parquet` una sola vez."""
+        if theta not in self._events:
+            c = self.ctx
+            path = join(
+                c.events_root,
+                events_rel(c.provider, c.market, c.asset, theta, self.month, EVENTS),
+            )
+            self._events[theta] = read_month_events(path)
+        return self._events[theta]
+
+    def _theta_events(
         self,
         state: ThetaMonth,
         day: date,
-        reduction: DayReduction,
-        lo: int,
-        hi: int,
-        confirmations: ConfirmAccumulator,
+        ticks: DayTicks,
         buffer: EventsBuffer,
-    ) -> ThetaTiles:
-        c = self.ctx
-        path = join(
-            c.events_root,
-            events_rel(c.provider, c.market, c.asset, state.theta, self.month, EVENTS),
-        )
-        events = read_events(path, lo, hi)
+    ) -> ThetaEvents:
+        # Los eventos que tocan el día son los de ids entre su primer y su último tick.
+        first, last = ticks.first_agg_trade_id, ticks.last_agg_trade_id
+        events = self._month_events(state.theta).touching(first, last)
         tail = state.tail
         # La cola entra solo si el día tiene ticks posteriores a la referencia del pendiente.
         pending = (
-            tail if tail is not None and tail.reference_agg_trade_id < hi else None
+            tail if tail is not None and tail.reference_agg_trade_id < last else None
         )
-        directions = direction_tiles(reduction.last_ids, events, pending)
         provisional_from_s = state.provisional_from_s(day)
-        rows, confirm_us = event_rows(
+        rows = event_rows(
             events, pending, provisional_from_s is not None, day_start_us(day)
         )
-        del events  # las filas del θ ya son los tiles: la tabla no se necesita más
-        confirmations.add(confirm_us)
+        del events  # las filas del θ ya son los bytes de `events.bin`
         buffer.add(rows)
         count = len(rows)
         del rows  # el buffer del día es la única copia de los eventos
-        return ThetaTiles(
+        return ThetaEvents(
             theta=state.theta,
             events=count,
             provisional_from_s=provisional_from_s,
-            direction=directions,
         )
 
 
@@ -278,13 +295,16 @@ class _DayStream:
         self,
         pending: list[tuple[date, str]],
         scale: int,
-        close: Callable[[date, str, DayReduction, float], None],
+        close: Callable[[date, str, DayTicks | PriceUnrepresentable, float], None],
+        open_file: Callable[[date], TicksFile],
     ) -> None:
         self._pending = pending
         self._scale = scale
         self._close = close
+        self._open_file = open_file
         self._pos = -1
-        self.acc: M4Accumulator | None = None
+        self.acc: TicksAccumulator | None = None
+        self._file: TicksFile | None = None
         self._started = 0.0
         self._end = 0
         self._advance()
@@ -295,20 +315,34 @@ class _DayStream:
             self.acc = None
             return
         day = self._pending[self._pos][0]
-        self.acc = M4Accumulator(day, self._scale)
+        self._file = self._open_file(day)
+        self.acc = TicksAccumulator(day, self._scale, self._file)
         self._started = time.monotonic()
         self._end = day_start_us(day) + DAY_US
 
     def _finish(self) -> None:
         day, digest = self._pending[self._pos]
         acc, self.acc = self.acc, None
+        file, self._file = self._file, None
         try:
-            reduction = acc.finish()
+            ticks = acc.finish()
         except PriceUnrepresentable as exc:
+            file.discard()  # un día que no se escribe no deja su `ticks.bin`
             self._close(day, digest, exc, self._started)
+        except BaseException:
+            file.close()
+            raise
         else:
-            self._close(day, digest, reduction, self._started)
+            file.close()
+            self._close(day, digest, ticks, self._started)
         self._advance()
+
+    def abort(self) -> None:
+        """Corta el día en curso (la corrida falló): cierra su `ticks.bin` sin indexarlo."""
+        self.acc = None
+        if self._file is not None:
+            self._file.close()
+            self._file = None
 
     def feed(self, batch: pa.RecordBatch) -> None:
         top = batch.column("transact_time")[-1].as_py()
@@ -432,7 +466,7 @@ def _theta_states(
     """Los θ con entrada completa en el mes y los que no (`missing_thetas`).
 
     Un θ sin `events.parquet` o sin `carry_over.parquet` en el mes, o con la
-    cadena rota, no tiene bloque en `dir-<w>.u8`: deja `input_missing` y el día
+    cadena rota, no aporta eventos a `events.bin`: deja `input_missing` y el día
     se escribe con los demás (TRD-viz §9.1).
     """
     ready: list[ThetaMonth] = []
@@ -534,11 +568,18 @@ def _process(
             return
         month_state.build(day, digest, result, started)
 
+    def open_file(day: date) -> TicksFile:
+        return TicksFile(ctx.tiles_root, ctx.provider, ctx.market, ctx.asset, day)
+
     spans = [(day_start_us(d), day_start_us(d) + DAY_US) for d, _ in pending]
-    stream = _DayStream(pending, month_state.scale, close)
-    for batch in _read_batches(parquet, _row_groups(bounds, spans)):
-        stream.feed(batch)
-        del batch
-        if stream.done:
-            break
-    stream.drain()
+    stream = _DayStream(pending, month_state.scale, close, open_file)
+    try:
+        for batch in _read_batches(parquet, _row_groups(bounds, spans)):
+            stream.feed(batch)
+            del batch
+            if stream.done:
+                break
+        stream.drain()
+    except BaseException:
+        stream.abort()
+        raise

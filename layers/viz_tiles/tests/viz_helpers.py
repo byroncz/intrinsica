@@ -2,8 +2,12 @@ import csv
 from decimal import Decimal
 from pathlib import Path
 
+import numpy as np
 import pyarrow as pa
-from viz_tiles.reduce import day_start_us
+from viz_tiles.contract import TICKS_CHUNK
+from viz_tiles.lake import MonthEvents
+from viz_tiles.ticks import DayTicks, day_start_us, encode_day
+from viz_tiles.write import TicksFile
 
 FIXTURES = Path(__file__).resolve().parents[3] / "shared/dc_core/tests/fixtures"
 
@@ -31,35 +35,13 @@ def ticks_batch(day, rows) -> pa.RecordBatch:
     )
 
 
-EVENT_SCHEMA = pa.schema(
-    [
-        pa.field("reference_agg_trade_id", pa.int64()),
-        pa.field("confirm_agg_trade_id", pa.int64()),
-        pa.field("extreme_agg_trade_id", pa.int64()),
-        pa.field("direction", pa.int8()),
-    ]
-)
-
-
-def events(*rows: tuple[int, int, int, int]) -> pa.Table:
-    """Eventos `(referencia, confirmación, extremo, dirección)` con ids de tick."""
-    return (
-        pa.Table.from_arrays(
-            [
-                pa.array(col, f.type)
-                for col, f in zip(zip(*rows), EVENT_SCHEMA, strict=True)
-            ],
-            schema=EVENT_SCHEMA,
-        )
-        if rows
-        else EVENT_SCHEMA.empty_table()
-    )
-
-
-# Un alza (10, 20, 30] y una baja (30, 40, 55]: la referencia de una es el
-# extremo de la otra, como en L2.
-UP = (10, 20, 30, 1)
-DOWN = (30, 40, 55, -1)
+def encode_to(root, day, batches, scale: int, chunk: int = TICKS_CHUNK) -> DayTicks:
+    """Escribe `ticks.bin` del día bajo `root` (como lo hace el job) y devuelve su resumen."""
+    out = TicksFile(root, "binance", "spot", "BTCUSDT", day)
+    try:
+        return encode_day(batches, day, scale, out, chunk)
+    finally:
+        out.close()
 
 
 def read_ticks_csv() -> list[dict[str, str]]:
@@ -68,34 +50,25 @@ def read_ticks_csv() -> list[dict[str, str]]:
         return list(csv.DictReader(f))
 
 
-TIMED_EVENT_SCHEMA = pa.schema(
-    [
-        *EVENT_SCHEMA,
-        pa.field("reference_time", pa.int64()),
-        pa.field("confirm_time", pa.int64()),
-        pa.field("extreme_time", pa.int64()),
-    ]
-)
-
-
-def timed_events(day, *rows: tuple) -> pa.Table:
+def month_events(day, *rows: tuple) -> MonthEvents:
     """Eventos `(ref_id, confirm_id, extremo_id, dirección, ref_s, confirm_s, extremo_s)`.
 
     Los tres últimos son segundos desde el inicio del día (pueden salirse de él).
+    `confirm_id` no viaja: el día ya no lo necesita.
     """
+    if not rows:
+        return MonthEvents.empty()
     t0 = day_start_us(day)
     us = [[t0 + round(r[i] * 1_000_000) for r in rows] for i in (4, 5, 6)]
-    base = [[r[i] for r in rows] for i in range(4)]
-    columns = [*base, *us]
-    return pa.Table.from_arrays(
-        [
-            pa.array(col, f.type)
-            for col, f in zip(columns, TIMED_EVENT_SCHEMA, strict=True)
-        ],
-        schema=TIMED_EVENT_SCHEMA,
+    return MonthEvents(
+        np.array([r[0] for r in rows], np.int64),
+        np.array([r[2] for r in rows], np.int64),
+        *(np.array(col, np.int64) for col in us),
+        np.array([r[3] for r in rows], np.int8),
     )
 
 
-# Los eventos UP y DOWN con tiempos: el alza de 0,5 s a 50 s y la baja de 50 s a 85 s.
-UP_T = (*UP, 0.5, 20, 50)
-DOWN_T = (*DOWN, 50, 60, 85)
+# El alza (10, 20, 30] de 0,5 s a 50 s y la baja (30, 40, 55] de 50 s a 85 s: la
+# referencia de una es el extremo de la otra, como en L2.
+UP_T = (10, 20, 30, 1, 0.5, 20, 50)
+DOWN_T = (30, 40, 55, -1, 50, 60, 85)

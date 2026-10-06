@@ -5,14 +5,15 @@ uPlot) y hay que regenerar las páginas sin repetir la reducción. Un día se sa
 si su página ya trae la misma `tiles_version` y la misma huella de plantilla
 (guardadas en su `<meta name="viz-render">`).
 
-Memoria: los 37 arreglos de un día se leen, se codifican y se sueltan de uno en
-uno; nunca hay más de un día a la vez.
+Memoria: los dos archivos de un día se leen por bloques de 1 MB (una vez para
+comprobar su hash y otra para la página), se codifican y la página sale directo al
+objeto, sin armarla en RAM; nunca hay más de un día a la vez.
 """
 
 import hashlib
 import json
 import logging
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from datetime import date
 
 import pyarrow.fs as pafs
@@ -30,13 +31,13 @@ from viz_tiles.render import (
     expected_names,
     load_template,
     page_meta,
-    render_day,
 )
 from viz_tiles.write import (
     compresses_pages,
     day_dir,
     find_index,
-    write_page,
+    read_blocks,
+    stream_page,
 )
 
 logger = logging.getLogger(__name__)
@@ -46,7 +47,7 @@ _BLOCK = 1 << 20  # bloque con el que se cuentan los bytes de una página plana
 
 
 class TilesCorrupt(Exception):
-    """Un arreglo del día falta o no coincide con el `content_hash` de su índice."""
+    """Un archivo del día falta o no coincide con el `content_hash` de su índice."""
 
 
 def _read(fs: pafs.FileSystem, path: str, size: int | None = None) -> bytes:
@@ -92,19 +93,32 @@ def _stored_meta(fs: pafs.FileSystem, path: str) -> tuple[str, str] | None:
     return page_meta(_read(fs, path, META_PROBE))
 
 
-def _arrays(
-    fs: pafs.FileSystem, directory: str, index: dict, update: Callable[[bytes], None]
-) -> Iterator[tuple[str, bytes]]:
-    """Los arreglos del día en orden de nombre, de uno en uno, hasheándolos al pasar."""
+def _blocks(
+    fs: pafs.FileSystem, directory: str, index: dict
+) -> Iterator[tuple[str, Iterator[bytes]]]:
+    """Los archivos del día en orden de nombre, de uno en uno y por bloques."""
     for name in expected_names(index):
-        path = f"{directory}/{name}"
-        if not _exists(fs, path):
+        yield name, read_blocks(fs, f"{directory}/{name}")
+
+
+def _verify(fs: pafs.FileSystem, directory: str, index: dict) -> None:
+    """Comprueba que los archivos coincidan con el `content_hash` del índice.
+
+    Se lee por bloques y antes de escribir nada: una página nunca se arma con
+    archivos que no son los del índice.
+    """
+    digest = hashlib.sha256()
+    for name, blocks in _blocks(fs, directory, index):
+        if not _exists(fs, f"{directory}/{name}"):
             raise TilesCorrupt(f"falta {name}")
-        data = _read(fs, path)
-        update(name.encode() + b"\0")
-        update(data)
-        yield name, data
-        del data
+        digest.update(name.encode() + b"\0")
+        for block in blocks:
+            digest.update(block)
+    if digest.hexdigest() != index["content_hash"]:
+        raise TilesCorrupt(
+            "los archivos no coinciden con el content_hash del índice "
+            f"({digest.hexdigest()[:12]} ≠ {index['content_hash'][:12]})"
+        )
 
 
 def _latest_day(fs: pafs.FileSystem, base: str) -> str | None:
@@ -183,7 +197,7 @@ def _render_day(
     try:
         expected_names(index)
     except KeyError as exc:
-        # Tiles de una versión anterior: no traen todos los archivos de la actual.
+        # Tiles de una versión anterior: no traen los archivos de la actual.
         raise TilesCorrupt(
             f"el índice no trae {exc} (tiles_version {index.get('tiles_version')}): "
             "el día se rehace con --mode tiles, no con render"
@@ -209,24 +223,16 @@ def _render_day(
         out.append(_summary(ctx, day, index, template, True, size, decoded))
         return
 
-    digest = hashlib.sha256()
-    page = render_day(
-        index,
-        _arrays(fs, directory, index, digest.update),
-        template=template,
-        compress=compresses_pages(fs),
-    )
-    if digest.hexdigest() != index["content_hash"]:
-        raise TilesCorrupt(
-            "los arreglos no coinciden con el content_hash del índice "
-            f"({digest.hexdigest()[:12]} ≠ {index['content_hash'][:12]})"
-        )
-    write_page(fs, page_path, page)
+    _verify(fs, directory, index)
+    stream_page(fs, page_path, index, _blocks(fs, directory, index), template)
     if is_latest:
-        write_page(fs, latest_path, page)
-    logger.info("unidad %s: página regenerada (%d B)", day, len(page))
-    decoded = _isize(len(page), page[:2], page[-4:])
-    out.append(_summary(ctx, day, index, template, False, len(page), decoded))
+        stream_page(fs, latest_path, index, _blocks(fs, directory, index), template)
+    size = fs.get_file_info(page_path).size or 0
+    decoded = (
+        _skipped_decoded_bytes(fs, page_path, size) if compresses_pages(fs) else size
+    )
+    logger.info("unidad %s: página regenerada (%d B)", day, size)
+    out.append(_summary(ctx, day, index, template, False, size, decoded))
 
 
 def _summary(

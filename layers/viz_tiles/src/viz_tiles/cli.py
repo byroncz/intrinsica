@@ -143,7 +143,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--mode",
         required=True,
         choices=MODES,
-        help="tiles: reduce L1 y L2 a tiles y escribe la página; render: vuelve a "
+        help="tiles: codifica L1 y L2 en ticks.bin y events.bin y escribe la página; render: vuelve a "
         "armar la página desde los tiles ya escritos, sin leer L1 ni L2",
     )
     parser.add_argument(

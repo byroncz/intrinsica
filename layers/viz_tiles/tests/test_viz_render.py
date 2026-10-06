@@ -17,7 +17,7 @@ from lake_fixture import DAY, build_lake
 from test_viz_write import DAY as WRITE_DAY
 from test_viz_write import KEY, write
 from viz_tiles import cli, render
-from viz_tiles.contract import LATEST_PAGE_FILE, LEVELS, PAGE_FILE, TILES_VERSION
+from viz_tiles.contract import LATEST_PAGE_FILE, PAGE_FILE, TILES_VERSION
 from viz_tiles.write import (
     BINARY_META,
     GZIP_META,
@@ -33,6 +33,11 @@ DATA = re.compile(r"window\.VIZ_DATA=(\{.*\});\n</script>", re.DOTALL)
 def embedded(html: str) -> dict:
     """El `window.VIZ_DATA` de una página, ya como diccionario."""
     return json.loads(DATA.search(html).group(1))
+
+
+def parts(files: dict[str, bytes]) -> list[tuple[str, list[bytes]]]:
+    """Los archivos del día como los entrega `write_day`: `(nombre, tramos)` en orden de nombre."""
+    return [(name, [data]) for name, data in sorted(files.items())]
 
 
 def content_hash(files: dict[str, bytes]) -> str:
@@ -88,7 +93,7 @@ def day_files(tmp_path, **kwargs) -> tuple[dict, dict[str, bytes], Path]:
     return index, {n: (directory / n).read_bytes() for n in names}, directory
 
 
-def test_page_embeds_the_arrays_byte_for_byte(tmp_path):
+def test_page_embeds_the_files_byte_for_byte(tmp_path):
     index, files, directory = day_files(tmp_path)
     html = (directory / PAGE_FILE).read_text()
     data = embedded(html)
@@ -98,7 +103,7 @@ def test_page_embeds_the_arrays_byte_for_byte(tmp_path):
     assert data["index"] == json.loads((directory / "index.json").read_text())
     assert data["tiles_version"] == index["tiles_version"] == TILES_VERSION
     assert data["generated_at"] == index["generated_at"]
-    assert len(files) == 37 and index["page"] == PAGE_FILE
+    assert sorted(files) == ["events.bin", "ticks.bin"] and index["page"] == PAGE_FILE
 
 
 def assert_self_contained(html: str) -> None:
@@ -122,14 +127,38 @@ def test_page_is_one_self_contained_document(tmp_path):
 def test_page_closing_tag_cannot_appear_inside_the_data(tmp_path):
     index, files, _ = day_files(tmp_path)
     tricky = {**index, "image_version": "</script><b>"}
-    page = render.render_day(tricky, sorted(files.items())).decode()
+    page = render.render_day(tricky, parts(files)).decode()
     assert page.count("</script>") == 3
     assert embedded(page)["index"]["image_version"] == "</script><b>"
 
 
+def test_a_file_in_pieces_encodes_like_the_same_file_whole(tmp_path):
+    """Los tramos de un archivo no dejan relleno de base64 en medio: tramos de cualquier largo dan lo mismo."""
+    index, files, _ = day_files(tmp_path)
+    whole = render.render_day(index, parts(files))
+    for step in (1, 2, 5, 4093):
+        pieces = [
+            (n, [data[i : i + step] for i in range(0, len(data), step)])
+            for n, data in sorted(files.items())
+        ]
+        assert render.render_day(index, pieces) == whole, step
+
+
+def test_big_files_are_encoded_in_steps_of_whole_triplets(tmp_path):
+    index, files, _ = day_files(tmp_path)
+    big = {
+        **files,
+        "ticks.bin": files["ticks.bin"]
+        * (3 * render.B64_STEP // len(files["ticks.bin"]) + 1),
+    }
+    assert len(big["ticks.bin"]) > 2 * render.B64_STEP
+    page = render.render_day(index, parts(big)).decode()
+    assert base64.b64decode(embedded(page)["files"]["ticks.bin"]) == big["ticks.bin"]
+
+
 def test_gzip_page_is_deterministic_and_equals_the_plain_one(tmp_path):
     index, files, _ = day_files(tmp_path)
-    arrays = sorted(files.items())
+    arrays = parts(files)
     plain = render.render_day(index, arrays)
     zipped = render.render_day(index, arrays, compress=True)
     assert gzip.decompress(zipped) == plain
@@ -137,9 +166,18 @@ def test_gzip_page_is_deterministic_and_equals_the_plain_one(tmp_path):
     assert len(zipped) < len(plain)
 
 
+@pytest.mark.parametrize("compress", [False, True])
+def test_a_streamed_page_is_the_same_bytes_as_the_returned_one(tmp_path, compress):
+    index, files, _ = day_files(tmp_path)
+    streamed = pa.BufferOutputStream()
+    render.render_day_to(streamed, index, parts(files), compress=compress)
+    whole = render.render_day(index, parts(files), compress=compress)
+    assert streamed.getvalue().to_pybytes() == whole
+
+
 def test_arrays_must_match_the_index(tmp_path):
     index, files, _ = day_files(tmp_path)
-    arrays = sorted(files.items())
+    arrays = parts(files)
     with pytest.raises(ValueError, match="no son los que el índice lista"):
         render.render_day(index, arrays[:-1])
 
@@ -147,7 +185,7 @@ def test_arrays_must_match_the_index(tmp_path):
 def test_page_meta_reads_plain_and_gzip_heads(tmp_path):
     index, files, _ = day_files(tmp_path)
     expected = (TILES_VERSION, render.load_template().hash)
-    arrays = sorted(files.items())
+    arrays = parts(files)
     plain = render.render_day(index, arrays)
     zipped = render.render_day(index, arrays, compress=True)
     assert render.page_meta(plain[: render.META_PROBE]) == expected
@@ -171,6 +209,11 @@ class RecordingFS:
         # Como un bucket: escribir un objeto crea su ruta.
         self._fs.create_dir(str(Path(path).parent), recursive=True)
         return self._fs.open_output_stream(path)
+
+    def move(self, src, dest):
+        # En GCS `move` es copia más borrado: el destino hereda los metadatos.
+        self.metadata[Path(dest).name] = self.metadata.pop(Path(src).name)
+        self._fs.move(src, dest)
 
     def __getattr__(self, name):
         return getattr(self._fs, name)
@@ -223,7 +266,7 @@ def test_index_lists_the_page_and_the_page_exists_before_it(tmp_path):
     assert index["page"] == PAGE_FILE
     assert (directory / index["page"]).is_file()
     assert sorted(p.name for p in directory.iterdir()).count(PAGE_FILE) == 1
-    assert len(list(directory.iterdir())) == 6 * len(LEVELS) + 3
+    assert len(list(directory.iterdir())) == 4
 
 
 # -- modo render -------------------------------------------------------------
@@ -452,7 +495,7 @@ def test_render_refuses_tiles_that_do_not_match_their_content_hash(
 ):
     page = day_path(lake) / PAGE_FILE
     before = page.read_bytes()
-    tile = day_path(lake) / "price-128.i32"
+    tile = day_path(lake) / "ticks.bin"
     raw = bytearray(tile.read_bytes())
     raw[0] ^= 0xFF
     tile.write_bytes(bytes(raw))
@@ -462,8 +505,8 @@ def test_render_refuses_tiles_that_do_not_match_their_content_hash(
     assert page.read_bytes() == before
 
 
-def test_render_refuses_a_day_with_a_missing_tile(lake, fresh_template):
-    (day_path(lake) / "dir-4096.u8").unlink()
+def test_render_refuses_a_day_with_a_missing_file(lake, fresh_template):
+    (day_path(lake) / "events.bin").unlink()
     assert (
         cli.main(["--mode", "render", "--day", DAY, "--force"], render_env(lake)) == 1
     )
@@ -472,12 +515,11 @@ def test_render_refuses_a_day_with_a_missing_tile(lake, fresh_template):
 def test_render_refuses_tiles_of_an_older_version_and_says_to_rebuild_them(
     lake, fresh_template
 ):
-    """Un índice 1.1.0 no trae `events`, `count`…: render no lo rehace, lo dice."""
+    """Un índice 1.2.0 no trae `ticks_file`: render no lo rehace, lo dice."""
     index_path = day_path(lake) / "index.json"
     index = json.loads(index_path.read_text())
-    for key in ("count", "confirms", "simul", "events"):
-        del index[key]
-    index["tiles_version"] = "1.1.0"
+    del index["ticks_file"]
+    index["tiles_version"] = "1.2.0"
     index_path.write_text(json.dumps(index))
     page = day_path(lake) / PAGE_FILE
     before = page.read_bytes()
@@ -516,14 +558,16 @@ def test_downloaded_gzip_page_of_the_smoke_day_is_self_contained(lake):
     """Lo que se baja de un bucket (`gcloud storage cp`) es el gzip del día del humo.
 
     Compartir un día es enviar ese archivo: descomprimido, abre desde disco sin
-    pedir nada fuera de sí mismo, y trae los 37 arreglos del día.
+    pedir nada fuera de sí mismo, y trae los dos archivos del día.
     """
     directory = day_path(lake)
     index = json.loads((directory / "index.json").read_text())
-    arrays = [(n, (directory / n).read_bytes()) for n in render.expected_names(index)]
+    arrays = [(n, [(directory / n).read_bytes()]) for n in render.expected_names(index)]
     page = render.render_day(index, arrays, compress=True)
     assert page[:2] == b"\x1f\x8b"
     html = gzip.decompress(page).decode()
     assert_self_contained(html)
     data = embedded(html)
-    assert len(data["files"]) == 37 and data["index"] == index
+    assert (
+        sorted(data["files"]) == ["events.bin", "ticks.bin"] and data["index"] == index
+    )

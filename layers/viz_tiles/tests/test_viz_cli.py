@@ -1,3 +1,4 @@
+import io
 import json
 import logging
 import time
@@ -24,8 +25,15 @@ from lake_fixture import (
 from viz_helpers import TICKS_SCHEMA
 from viz_tiles import cli
 from viz_tiles.context import RunContext
-from viz_tiles.contract import DAY_US, LEVELS, TILES_VERSION, price_scale
-from viz_tiles.reduce import day_start_us, reduce_day
+from viz_tiles.contract import (
+    DAY_MS,
+    DAY_US,
+    FLAG_EXTREME_CLIPPED,
+    FLAG_PROVISIONAL,
+    TILES_VERSION,
+    price_scale,
+)
+from viz_tiles.ticks import day_start_us, decode_ticks, encode_day
 from viz_tiles.write import find_index, read_index
 
 KEY = {"provider": "binance", "market": "spot", "asset": "BTCUSDT"}
@@ -61,41 +69,24 @@ def tile_bytes(roots, name) -> bytes:
     return (day_directory(roots) / name).read_bytes()
 
 
-def block_of(roots, w: int, k: int) -> np.ndarray:
-    """El bloque del θ en la posición `k` de `dir-<w>.u8`."""
-    return np.frombuffer(tile_bytes(roots, f"dir-{w}.u8"), "u1")[k * w : (k + 1) * w]
+def events_of(roots, k: int) -> list[tuple[int, int, int, int]]:
+    """Las filas `(ref_ms, confirm_ms, extremo_ms, banderas)` del θ en la posición `k`."""
+    index = read_index(roots.tiles, **KEY, day=DAY_DATE)
+    raw = tile_bytes(roots, index["events"])
+    total = sum(t["events"] for t in index["thetas"])
+    doc = index["thetas"][k]
+    lo, hi = doc["events_offset"], doc["events_offset"] + doc["events"]
+    sections = [np.frombuffer(raw, "<i4", total, 4 * total * i) for i in range(3)]
+    flags = np.frombuffer(raw, "u1", total, 12 * total)
+    return [
+        (int(sections[0][i]), int(sections[1][i]), int(sections[2][i]), int(flags[i]))
+        for i in range(lo, hi)
+    ]
 
 
 @pytest.fixture
 def lake(tmp_path):
     return build_lake(tmp_path)
-
-
-def state_oracle(x: int, events: list[tuple[int, int, int, int]], tail) -> int:
-    """El estado del tick `x` (TRD-viz §7.5), sin pasar por `direction.py`.
-
-    `events` son `(referencia, confirmación, extremo, dirección)` cerrados y
-    `tail` el pendiente `(referencia, confirmación, candidato, dirección)`.
-    """
-    for ref, confirm, extreme, direction in [*events, tail]:
-        if ref < x <= extreme:
-            over = x > confirm
-            return (2 if over else 1) if direction == 1 else (4 if over else 3)
-    _, _, candidate, direction = tail
-    if x > candidate:  # confirmación provisional del sentido contrario
-        return 3 if direction == 1 else 1
-    return 0
-
-
-def expected_direction(ticks, w, events, tail) -> np.ndarray:
-    t0 = day_start_us(DAY_DATE)
-    last: dict[int, int] = {}
-    for t in ticks:
-        last[(t["time"] - t0) * w // DAY_US] = t["id"]
-    out = np.zeros(w, "u1")
-    for col, x in last.items():
-        out[col] = state_oracle(x, events, tail)
-    return out
 
 
 # -- uso ---------------------------------------------------------------------
@@ -133,14 +124,17 @@ def test_missing_root_exits_2(lake, missing, capsys):
 
 
 def test_day_builds_tiles_from_the_fixture(lake, caplog):
-    roots, ticks, pending = lake
+    roots, ticks, _pending = lake
     with caplog.at_level(logging.INFO):
         assert run(roots, "--day", DAY) == 0
 
     index = read_index(roots.tiles, **KEY, day=DAY_DATE)
     assert index["ticks"] == len(ticks) == 4735
     assert index["tiles_version"] == TILES_VERSION
-    assert index["levels"] == list(LEVELS)
+    assert (index["first_agg_trade_id"], index["last_agg_trade_id"]) == (
+        ticks[0]["id"],
+        ticks[-1]["id"],
+    )
     assert [t["theta"] for t in index["thetas"]] == [
         "0.00100000",
         "0.00250000",
@@ -152,37 +146,12 @@ def test_day_builds_tiles_from_the_fixture(lake, caplog):
     # El candidato de cada pendiente cae dentro del día: la cola es provisional.
     assert all(t["provisional_from_s"] is not None for t in index["thetas"])
 
-    for w in LEVELS:
-        assert len(tile_bytes(roots, f"price-{w}.i32")) == 32 * w
-        volume = np.frombuffer(tile_bytes(roots, f"volume-{w}.f32"), "<f4")
-        assert volume.sum() == pytest.approx(4735)
-
-    # Dirección: cada θ contra un oráculo independiente de direction.py.
-    csv_events = read_events()
-    for k, doc in enumerate(index["thetas"]):
-        theta = int(doc["theta"].split(".")[1])
-        closed = [
-            (
-                int(r["reference_agg_trade_id"]),
-                int(r["confirm_agg_trade_id"]),
-                int(r["extreme_agg_trade_id"]),
-                int(r["direction"]),
-            )
-            for r in csv_events[theta][:-1]
-        ]
-        last = pending[theta]
-        tail = (
-            int(last["row"]["reference_agg_trade_id"]),
-            int(last["row"]["confirm_agg_trade_id"]),
-            last["extreme"]["id"],
-            last["direction"],
-        )
-        for w in LEVELS:
-            np.testing.assert_array_equal(
-                block_of(roots, w, k),
-                expected_direction(ticks, w, closed, tail),
-                err_msg=f"θ={theta} w={w}",
-            )
+    # `ticks.bin` decodifica a los ticks de L1, uno por uno.
+    t0 = day_start_us(DAY_DATE)
+    got = decode_ticks(tile_bytes(roots, "ticks.bin"), index["ticks"])
+    assert got.time_ms.tolist() == [(t["time"] - t0) // 1000 for t in ticks]
+    assert got.price.tolist() == [int(t["price"] * 100) for t in ticks]
+    assert got.quantity.tolist() == [10**8] * len(ticks)
 
     (summary,) = summaries(roots)
     assert (summary["layer"], summary["mode"], summary["stage"]) == (
@@ -194,22 +163,24 @@ def test_day_builds_tiles_from_the_fixture(lake, caplog):
     assert summary["metric_value"] == 4735
     details = summary["details"]
     assert details["day"] == DAY and details["skipped"] is False
-    assert details["objects"] == 39
-    assert details["bytes"] == sum(
-        p.stat().st_size for p in day_directory(roots).iterdir()
-    )
+    assert details["objects"] == 4
+    sizes = {p.name: p.stat().st_size for p in day_directory(roots).iterdir()}
+    assert details["bytes"] == sum(sizes.values())
+    assert details["ticks_bytes"] == sizes["ticks.bin"]
+    assert details["events_bytes"] == sizes["events.bin"]
+    assert details["page_bytes"] == sizes["index.html"]
     assert details["input_hash"] == index["input_hash"]
     assert details["content_hash"] == index["content_hash"]
-    assert details["levels"] == list(LEVELS)
     assert len(details["provisional_thetas"]) == 5
     assert details["provisional_tail"] is True
     probe = [m for m in caplog.messages if m.startswith("sonda: unit=2017-08-18")]
     assert len(probe) == 1
     assert "ticks=4735 wall_s=" in probe[0] and "rss_mib=" in probe[0]
+    assert "ticks_bytes=" in probe[0] and "page_bytes=" in probe[0]
     assert any('"check_type": "tiles_summary"' in m for m in caplog.messages)
 
 
-def test_price_tile_matches_direct_reduction(lake):
+def test_ticks_file_matches_a_direct_encoding_of_l1(lake):
     roots, ticks, _ = lake
     assert run(roots, "--day", DAY) == 0
     batch = pa.record_batch(
@@ -221,10 +192,9 @@ def test_price_tile_matches_direct_reduction(lake):
         ],
         schema=TICKS_SCHEMA,
     )
-    expected = reduce_day([batch], DAY_DATE, price_scale("BTCUSDT"))
-    for w in LEVELS:
-        on_disk = np.frombuffer(tile_bytes(roots, f"price-{w}.i32"), "<i4")
-        np.testing.assert_array_equal(on_disk, expected.price[w])
+    expected = io.BytesIO()
+    encode_day([batch], DAY_DATE, price_scale("BTCUSDT"), expected)
+    assert tile_bytes(roots, "ticks.bin") == expected.getvalue()
 
 
 # -- idempotencia ------------------------------------------------------------
@@ -257,21 +227,21 @@ def test_second_run_skips_and_writes_nothing(lake, caplog):
     assert first["details"]["skipped"] is False
     assert second["details"]["skipped"] is True
     assert second["details"]["content_hash"] == first["details"]["content_hash"]
-    assert second["details"]["objects"] == 39
+    assert second["details"]["objects"] == 4
 
 
 def test_force_rewrites_with_the_same_content(lake):
     roots, _, _ = lake
     assert run(roots, "--day", DAY) == 0
     first = read_index(roots.tiles, **KEY, day=DAY_DATE)
-    (day_directory(roots) / "price-128.i32").unlink()
+    (day_directory(roots) / "ticks.bin").unlink()
 
     # Sin --force el día está al día y no se toca, aunque falte un archivo.
     assert run(roots, "--day", DAY) == 0
-    assert not (day_directory(roots) / "price-128.i32").exists()
+    assert not (day_directory(roots) / "ticks.bin").exists()
 
     assert run(roots, "--day", DAY, "--force") == 0
-    assert (day_directory(roots) / "price-128.i32").exists()
+    assert (day_directory(roots) / "ticks.bin").exists()
     again = read_index(roots.tiles, **KEY, day=DAY_DATE)
     assert again["content_hash"] == first["content_hash"]
     assert again["input_hash"] == first["input_hash"]
@@ -351,8 +321,10 @@ def test_theta_without_carry_over_is_a_missing_theta(lake):
         "0.01000000",
         "0.02000000",
     ]
-    for w in LEVELS:
-        assert len(tile_bytes(roots, f"dir-{w}.u8")) == 4 * w
+    # El θ sin carry-over no aporta eventos: `events.bin` trae los de los otros cuatro.
+    assert sum(t["events"] for t in index["thetas"]) * 13 == len(
+        tile_bytes(roots, "events.bin")
+    )
     (missing,) = [f for f in findings_of(roots) if f["check_type"] == "input_missing"]
     assert missing["details"]["what"] == "carry_over"
     assert missing["details"]["theta"] == "0.00500000"
@@ -426,16 +398,11 @@ def test_chain_moving_the_candidate_out_of_the_month_rebuilds_the_day(lake):
     assert again["content_hash"] != first["content_hash"]
     assert all(t["provisional_from_s"] is None for t in again["thetas"])
 
-    # Con el candidato fuera del mes, todo tick posterior a la confirmación del
-    # pendiente (que sube) es overshoot de alza: estado 2.
-    w = 4096
-    t0 = day_start_us(DAY_DATE)
-    confirm = int(pending[THETA_UP]["row"]["confirm_agg_trade_id"])
-    last_in_column = {(t["time"] - t0) * w // DAY_US: t["id"] for t in ticks}
-    after = [col for col, x in last_in_column.items() if x > confirm]
-    assert after
-    block = block_of(roots, w, 4)
-    assert {int(block[col]) for col in after} == {2}
+    # Con el candidato fuera del mes, el pendiente (que sube) ya no es provisional y
+    # su extremo cae después del día: sale recortado al borde.
+    *_, (_, _, extreme_ms, flags) = events_of(roots, 4)
+    assert extreme_ms == DAY_MS
+    assert flags & FLAG_EXTREME_CLIPPED and not flags & FLAG_PROVISIONAL
 
     # Sin más cambios, la siguiente corrida salta el día.
     assert run(roots, "--day", DAY) == 0
@@ -489,10 +456,12 @@ def test_closed_chain_uses_the_definitive_extreme(lake):
     # Los demás θ siguen con su cola provisional.
     assert by_theta["0.00100000"]["provisional_from_s"] is not None
 
-    # El último tick del día es overshoot de alza del evento ya cerrado.
-    w = 4096
-    last_col = (ticks[-1]["time"] - day_start_us(DAY_DATE)) * w // DAY_US
-    assert block_of(roots, w, 4)[last_col] == 2
+    # El evento ya cerrado termina en su extremo definitivo, un segundo después del último tick.
+    *_, (_, _, extreme_ms, flags) = events_of(roots, 4)
+    assert (
+        extreme_ms == (ticks[-1]["time"] + 1_000_000 - day_start_us(DAY_DATE)) // 1000
+    )
+    assert not flags & (FLAG_PROVISIONAL | FLAG_EXTREME_CLIPPED)
     assert again["content_hash"] != first["content_hash"]
 
 

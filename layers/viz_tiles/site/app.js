@@ -1,25 +1,22 @@
-/* Vista de un día (TRD-viz §6.6, §6.7, §6.11 a §6.13, §7). Sin red: los tiles llegan en window.VIZ_DATA,
- * en base64 bajo su nombre. El navegador solo decodifica y hace las dos conversiones
- * de §7.3 (t / 1000 y p / price_scale, o null en el centinela); los tiempos de los eventos
- * (ms) los pasa a segundos para el eje X. Lo demás sale de los tiles tal cual: los conteos
- * y las confirmaciones multiescala llegan precalculados, el navegador no cuenta nada de
- * eso. Solo agrupa los eventos exactos de un θ por píxel (la marca de densidad).
+/* Vista de un día (TRD-viz §6.6, §6.7, §6.11 a §6.14, §7). Sin red: los dos archivos del día llegan en
+ * window.VIZ_DATA, en base64 bajo su nombre. `ticks.bin` (§7.3) son todos los ticks del día en tramos
+ * de tres secciones de varint; `events.bin` (§7.4), los eventos exactos de cada θ. El navegador los decodifica
+ * una sola vez a arreglos tipados y, en cada dibujo, deriva de ellos lo que se ve: por cada píxel de
+ * ancho de la escala actual, el precio (un punto por tick, o el segmento del mínimo al máximo), el volumen
+ * (suma de la cantidad) y las confirmaciones (θ que confirman, y máximo en el mismo instante). Lo que se
+ * dibuja es un tick o la envolvente exacta de los ticks de un píxel, a cualquier zoom (ADR-VZ-14).
  * Sin telemetría: las métricas van a la consola. */
 (function () {
   "use strict";
 
   var DAY_S = 86400;
-  var EMPTY = -2147483648; // centinela de p en una columna sin ticks (§7.3)
-  var KNOWN_MAJOR = 1;
-  // Desde este ancho (px CSS por columna) se dibujan, sobre el segmento mín–máx de una columna
-  // con 3 ticks o más, sus puntos M4 (primero, mínimo, máximo y último: ticks reales) en su
-  // instante exacto.
-  var DOT_MIN_COL_PX = 5;
-  var DOT_PX = 3; // lado de un punto, en px CSS
+  var KNOWN_MAJOR = 2;
+  var QTY_SCALE = 1e8; // la cantidad de ticks.bin está en unidades de 10⁻⁸ (§7.3)
+  var DOT_PX = 3; // lado de un punto de precio, en px CSS
   var MONO = 'ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace';
   var C = {
-    text: "#d7dee6",
     muted: "#9aa7b4",
+    mutedLine: "rgba(154, 167, 180, 0.6)",
     grid: "rgba(154, 167, 180, 0.16)",
     price: "#e6edf3",
     volume: "rgba(110, 138, 168, 0.85)",
@@ -29,15 +26,7 @@
     up: "63, 185, 80",
     down: "248, 81, 73",
   };
-  // Estados de dirección (§7.4): solo para el tooltip. Las franjas salen de los eventos exactos.
-  var STATES = {
-    0: { text: "sin evento" },
-    1: { text: "confirmación alza" },
-    2: { text: "overshoot alza" },
-    3: { text: "confirmación baja" },
-    4: { text: "overshoot baja" },
-  };
-  // Banderas de un evento (§7.5).
+  // Banderas de un evento (§7.4).
   var F_UP = 1;
   var F_PROVISIONAL = 2;
   var F_REF_CLIPPED = 4;
@@ -53,17 +42,17 @@
   var FIT_MARGIN = 0.05;
   // Reparto vertical (§6.11): precio, confirmaciones, volumen.
   var SPLIT = { price: 0.65, confirms: 0.15, volume: 0.2 };
-  // Marca del hueco (columnas sin ticks): línea punteada de 1 px a media altura. Ninguna franja
-  // DC es punteada, así de fina ni va al centro: un hueco nunca se lee como una confirmación.
-  var GAP_MARK = { px: 1, dash: [4, 3] };
   var TIP_MAX_LINES = 12;
 
   var started = performance.now();
   var metrics = (window.VIZ_METRICS = {
     decoded_bytes: 0,
     decode_ms: 0,
+    ticks: 0,
     first_paint_ms: null,
     theta_change_ms: [],
+    draw_ms: 0,
+    frame: null,
   });
 
   function $(id) {
@@ -75,7 +64,7 @@
   if (dataScript) dataScript.remove(); // el texto base64 deja de vivir también en el DOM
 
   if (!data || !data.index) {
-    $("panels").textContent = "Sin datos: la página no trae tiles.";
+    $("panels").textContent = "Sin datos: la página no trae el día.";
     return;
   }
 
@@ -83,7 +72,6 @@
   var files = data.files;
   var scale = index.price_scale;
   var decimals = Math.round(Math.log10(scale));
-  var levels = index.levels.slice().sort(function (a, b) { return a - b; });
   var thetas = index.thetas;
   var missingThetas = index.missing_thetas;
 
@@ -110,7 +98,7 @@
   document.title = "viz · " + index.day;
 
   var major = parseInt(String(data.tiles_version).split(".")[0], 10);
-  if (!(major <= KNOWN_MAJOR)) {
+  if (major !== KNOWN_MAJOR) {
     setReason("version", "tiles_version " + data.tiles_version + " no soportada: se rechaza el día");
     renderStatus();
     $("panels").textContent = "Versión de tiles no soportada (" + data.tiles_version + ").";
@@ -120,28 +108,12 @@
     setReason("missing", missingThetas.length + " θ sin datos en L2");
   }
 
-  // Nombre del tile de un tipo y nivel; undefined si el índice no lo lista (tiles anteriores a 1.2.0).
-  function nameOf(kind, w) {
-    var byLevel = index[kind];
-    return byLevel ? byLevel[w] : undefined;
-  }
-
-  // Un tile que el índice lista y la página no trae es un hueco visible, no un nivel que se omite en silencio.
-  levels.forEach(function (w) {
-    ["price", "volume", "dir", "count", "confirms", "simul"].forEach(function (kind) {
-      if (kind === "dir" && !thetas.length) return;
-      var name = nameOf(kind, w);
-      if (name === undefined) setReason("tile:" + kind + "-" + w, "el índice no lista " + kind + " del nivel " + w);
-      else if (files[name] === undefined) setReason("tile:" + name, "falta " + name);
-    });
-  });
-
-  /* ---------- Decodificación: una pasada por tile ---------- */
+  /* ---------- Decodificación: una sola vez, al abrir ---------- */
 
   function bytesOf(name) {
     var text = files[name];
     if (text === undefined) {
-      setReason("tile:" + name, "falta " + name);
+      setReason("file:" + name, "falta " + name);
       return null;
     }
     delete files[name]; // el base64 se suelta apenas se decodifica: un solo dato vivo
@@ -153,55 +125,110 @@
   }
 
   function bad(name, why) {
-    setReason("tile:" + name, name + ": " + why);
+    setReason("file:" + name, name + ": " + why);
     return null;
   }
 
-  function decodePrice(name, w) {
+  // Los ticks (§7.3): una secuencia de tramos de hasta `ticks_chunk` ticks. Cada tramo trae una cabecera
+  // de cuatro uint32 little-endian (ticks y bytes del Δtiempo, del Δprecio y de la cantidad) y sus tres
+  // secciones de enteros varint (LEB128). El Δtiempo y el Δprecio del primer tick de un tramo son relativos
+  // al último del anterior: los acumuladores siguen de un tramo al otro. Tiempo en ms desde el inicio del
+  // día (Int32Array), precio en unidades de 1 / price_scale (Int32Array) y cantidad (Float64Array).
+  var ticks = null; // { n, t, p, q }
+  var CHUNK_HEADER = 16;
+
+  function decodeTicks(name, n) {
     var bytes = bytesOf(name);
     if (!bytes) return null;
-    if (bytes.length !== 32 * w) return bad(name, "tamaño inesperado");
-    var n = 4 * w;
-    var t = new Uint32Array(bytes.buffer, 0, n); // ms desde el inicio del día
-    var p = new Int32Array(bytes.buffer, 16 * w, n); // unidades de 1 / price_scale
-    var x = new Float64Array(n);
-    var y = new Array(n);
-    for (var i = 0; i < n; i++) {
-      x[i] = t[i] / 1000;
-      y[i] = p[i] === EMPTY ? null : p[i] / scale;
+    var len = bytes.length;
+    var view = new DataView(bytes.buffer, bytes.byteOffset, len);
+    var maxChunk = index.ticks_chunk;
+    var pos = 0;
+    var end = 0; // fin de la sección en curso
+    var overrun = false;
+    // Aritmética de coma flotante y no operadores de bits: la cantidad pasa de 2³² (1 000 BTC).
+    function varint() {
+      if (pos >= end) {
+        overrun = true;
+        return 0;
+      }
+      var b = bytes[pos++];
+      if (b < 128) return b;
+      var r = b & 127;
+      var m = 128;
+      do {
+        if (pos >= end) {
+          overrun = true;
+          return 0;
+        }
+        b = bytes[pos++];
+        r += (b & 127) * m;
+        m *= 128;
+      } while (b >= 128);
+      return r;
     }
-    return { x: x, y: y };
+    var t = new Int32Array(n);
+    var p = new Int32Array(n);
+    var q = new Float64Array(n);
+    var at = 0; // ticks ya decodificados
+    var accT = 0;
+    var accP = 0;
+    var i;
+    while (pos < len) {
+      if (len - pos < CHUNK_HEADER) return bad(name, "tamaño inesperado (cabecera de tramo truncada)");
+      var count = view.getUint32(pos, true);
+      var size = [view.getUint32(pos + 4, true), view.getUint32(pos + 8, true), view.getUint32(pos + 12, true)];
+      pos += CHUNK_HEADER;
+      if (count === 0 || count > maxChunk || at + count > n) return bad(name, "tamaño inesperado (tramo fuera de lo declarado)");
+      if (size[0] + size[1] + size[2] > len - pos) return bad(name, "tamaño inesperado (tramo truncado)");
+      var stop = at + count;
+      end = pos + size[0];
+      for (i = at; i < stop; i++) {
+        accT += varint();
+        t[i] = accT;
+      }
+      if (overrun || pos !== end) return bad(name, "tamaño inesperado (sección de tramo)");
+      end = pos + size[1];
+      for (i = at; i < stop; i++) {
+        var z = varint();
+        accP += z % 2 === 0 ? z / 2 : -(z + 1) / 2; // zigzag
+        p[i] = accP;
+      }
+      if (overrun || pos !== end) return bad(name, "tamaño inesperado (sección de tramo)");
+      end = pos + size[2];
+      for (i = at; i < stop; i++) q[i] = varint() / QTY_SCALE;
+      if (overrun || pos !== end) return bad(name, "tamaño inesperado (sección de tramo)");
+      at = stop;
+    }
+    if (at !== n) return bad(name, "tamaño inesperado");
+    return { n: n, t: t, p: p, q: q };
   }
 
-  function decodeVolume(name, w) {
-    var bytes = bytesOf(name);
-    if (!bytes) return null;
-    if (bytes.length !== 4 * w) return bad(name, "tamaño inesperado");
-    return new Float32Array(bytes.buffer, 0, w);
+  function loadTicks() {
+    var t0 = performance.now();
+    ticks = decodeTicks(index.ticks_file, index.ticks);
+    var ms = performance.now() - t0;
+    metrics.decode_ms += ms;
+    if (ticks) {
+      metrics.ticks = ticks.n;
+      console.info(
+        "viz: ticks decodificados en " + ms.toFixed(1) + " ms (" + ticks.n + " ticks, " +
+          metrics.decoded_bytes + " B decodificados)"
+      );
+    }
+    renderStatus();
   }
 
-  function decodeCount(name, w) {
-    var bytes = bytesOf(name);
-    if (!bytes) return null;
-    if (bytes.length !== 4 * w) return bad(name, "tamaño inesperado");
-    return new Uint32Array(bytes.buffer, 0, w);
-  }
-
-  function decodeBytes(name, w, perColumn) {
-    var bytes = bytesOf(name);
-    if (!bytes) return null;
-    if (bytes.length !== perColumn * w) return bad(name, "tamaño inesperado");
-    return bytes;
-  }
-
-  // Eventos exactos de todos los θ del día (§7.5): cuatro secciones de N valores. El θ k ocupa
+  // Eventos exactos de todos los θ del día (§7.4): cuatro secciones de N valores. El θ k ocupa
   // de events_offset a events_offset + events - 1 en cada una.
   var ev = null;
+  // Las confirmaciones de todos los θ en orden de hora: confT (ms) y confK (índice del θ).
+  var conf = null;
 
   function loadEvents() {
     var name = index.events;
     if (!name) {
-      setReason("events", "el índice no lista los eventos exactos (tiles_version " + data.tiles_version + ")");
+      setReason("events", "el índice no lista los eventos exactos");
       return;
     }
     var bytes = bytesOf(name);
@@ -219,92 +246,64 @@
       ext: new Int32Array(bytes.buffer, 8 * total, total),
       flags: new Uint8Array(bytes.buffer, 12 * total, total),
     };
+    buildConfirmations();
   }
 
-  var cache = {}; // w -> nivel decodificado
-
-  // cache[w] === false marca un nivel que no se pudo decodificar: se salta como uno ausente.
-  function hasLevel(w) {
-    if (cache[w] !== undefined) return cache[w] !== false;
-    return files[nameOf("price", w)] !== undefined;
-  }
-
-  function loadLevel(w) {
-    if (cache[w] !== undefined) return cache[w] || null;
-    var t0 = performance.now();
-    var price = decodePrice(nameOf("price", w), w);
-    if (!price) {
-      cache[w] = false;
-      return null;
+  // Las confirmaciones de los θ juntas y ordenadas por hora: la clave `hora * 256 + θ` cabe en un
+  // Float64 exacto y se ordena con el sort numérico nativo, sin comparador.
+  function buildConfirmations() {
+    var keys = [];
+    thetas.forEach(function (t, k) {
+      for (var i = 0; i < t.events; i++) {
+        var e = t.events_offset + i;
+        if (!(ev.flags[e] & F_CONFIRM_CLIPPED)) keys.push(ev.conf[e] * 256 + k);
+      }
+    });
+    var sorted = Float64Array.from(keys).sort();
+    var n = sorted.length;
+    conf = { n: n, t: new Int32Array(n), k: new Uint8Array(n) };
+    for (var j = 0; j < n; j++) {
+      conf.k[j] = sorted[j] % 256;
+      conf.t[j] = (sorted[j] - conf.k[j]) / 256;
     }
-    var vol = decodeVolume(nameOf("volume", w), w);
-    var dir = thetas.length ? decodeBytes(nameOf("dir", w), w, thetas.length) : null;
-    var cnt = decodeCount(nameOf("count", w), w);
-    var confirms = decodeBytes(nameOf("confirms", w), w, 1);
-    var simul = decodeBytes(nameOf("simul", w), w, 1);
-    var colStart = new Float64Array(w);
-    for (var c = 0; c < w; c++) colStart[c] = (c * DAY_S) / w; // posición de la columna
-    // Sin un tile no hay barras: nulls, nunca ceros (principio 6).
-    var nulls = function () { return new Array(w).fill(null); };
-    var level = {
-      w: w,
-      colDur: DAY_S / w,
-      price: price,
-      vol: vol,
-      dir: dir,
-      cnt: cnt,
-      confirms: confirms,
-      simul: simul,
-      priceData: [price.x, price.y],
-      volData: [colStart, vol || nulls()],
-      confData: [colStart, confirms || nulls(), simul || nulls()],
-    };
-    cache[w] = level;
-    var ms = performance.now() - t0;
-    metrics.decode_ms += ms;
-    console.info(
-      "viz: nivel " + w + " decodificado en " + ms.toFixed(1) + " ms; total " +
-        metrics.decoded_bytes + " B decodificados"
-    );
-    renderStatus();
-    return level;
   }
 
-  /* ---------- Elección de nivel ---------- */
+  /* ---------- Búsquedas ---------- */
 
-  var panels = $("panels");
-  var AXIS_W = 76;
-
-  var cur = null; // nivel en pantalla
-  var price = null;
-  var conf = null;
-  var vol = null;
-  var plots = [];
-  var hovered = null; // panel bajo el puntero: el único que muestra el tooltip
-
-  function plotPx() {
-    if (price && price.bbox) return price.bbox.width / (window.devicePixelRatio || 1);
-    return Math.max(200, (panels.clientWidth || 1200) - AXIS_W - 12);
-  }
-
-  // El nivel más fino que se necesita es el primero cuyas columnas visibles
-  // alcanzan los píxeles del gráfico; si ninguno alcanza, el más fino que hay.
-  function pickLevel(spanS) {
-    var need = (plotPx() * DAY_S) / spanS;
-    var last = null;
-    for (var i = 0; i < levels.length; i++) {
-      var w = levels[i];
-      if (!hasLevel(w)) continue;
-      last = w;
-      if (w >= need) return w;
+  // Primer índice con arr[i] >= value (arr no decreciente).
+  function lowerBoundAll(arr, n, value) {
+    var lo = 0;
+    var hi = n;
+    while (lo < hi) {
+      var mid = (lo + hi) >> 1;
+      if (arr[mid] < value) lo = mid + 1;
+      else hi = mid;
     }
-    return last;
+    return lo;
+  }
+
+  // El bloque del θ k en `ev`: {off, n}, o null si no hay θ con bloque o faltan los eventos.
+  function block(k) {
+    if (!ev || k < 0 || !thetas[k]) return null;
+    return { off: thetas[k].events_offset, n: thetas[k].events };
+  }
+
+  // Primer evento i del bloque con arr[off + i] >= value (los tres tiempos crecen con i).
+  function lowerBound(arr, b, value) {
+    var lo = 0;
+    var hi = b.n;
+    while (lo < hi) {
+      var mid = (lo + hi) >> 1;
+      if (arr[b.off + mid] < value) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo;
   }
 
   /* ---------- Selección de θ ---------- */
 
   var select = $("theta");
-  var sel = { kind: "none", k: -1, theta: null }; // kind: "t" (con bloque), "m" (faltante)
+  var sel = { kind: "none", k: -1, theta: null }; // kind: "t" (con eventos), "m" (faltante)
 
   thetas.forEach(function (t, k) {
     var o = document.createElement("option");
@@ -318,6 +317,10 @@
     o.textContent = "⚠ " + name + " · sin datos";
     select.appendChild(o);
   });
+
+  function activeBlock() {
+    return sel.kind === "t" ? block(sel.k) : null;
+  }
 
   function selectTheta(value) {
     var kind = value.charAt(0);
@@ -345,6 +348,18 @@
     return pad2(h) + ":" + pad2(m) + ":" + tail;
   }
 
+  // Hora de un instante en ms desde el inicio del día, con enteros: sin errores de redondeo en los ms.
+  function clockMs(ms, dec) {
+    var v = Math.max(0, Math.round(ms));
+    var h = Math.floor(v / 3600000);
+    var m = Math.floor((v % 3600000) / 60000);
+    var s = Math.floor((v % 60000) / 1000);
+    var f = v % 1000;
+    var out = pad2(h) + ":" + pad2(m) + ":" + pad2(s);
+    if (dec) out += "." + (f < 100 ? "0" : "") + (f < 10 ? "0" : "") + f;
+    return out;
+  }
+
   function fixed(v) {
     return v.toFixed(decimals);
   }
@@ -353,78 +368,142 @@
     return n + " " + (n === 1 ? one : many);
   }
 
-  /* ---------- Eventos exactos del θ activo ---------- */
+  /* ---------- Lo que se ve: el marco de un dibujo ---------- */
 
-  // El bloque del θ activo en `ev`: {off, n}, o null si no hay θ con bloque o faltan los eventos.
-  function block(k) {
-    if (!ev || k < 0 || !thetas[k]) return null;
-    return { off: thetas[k].events_offset, n: thetas[k].events };
+  // Un marco son los números por píxel de la escala x actual, calculados en un recorrido lineal sobre
+  // los ticks visibles (con búsqueda binaria para el primero) y sobre las confirmaciones visibles. Lo
+  // comparten los tres paneles: precio, volumen y confirmaciones salen del mismo recorrido.
+  //  - cnt, lo, hi, vol: ticks, precio mínimo y máximo (unidades de 1/price_scale) y cantidad total de
+  //    los ticks del píxel;
+  //  - cc, cs: θ que confirman en el píxel y máximo de θ que confirman en el mismo instante.
+  // El píxel de un tick es una función de su ms: los ticks de un mismo instante nunca se separan.
+  var frame = null;
+
+  function plotPx(u) {
+    var dpr = window.devicePixelRatio || 1;
+    if (u && u.bbox && u.bbox.width) return Math.max(1, Math.round(u.bbox.width / dpr));
+    return Math.max(200, (panels.clientWidth || 1200) - AXIS_W - 12);
   }
 
-  function activeBlock() {
-    return sel.kind === "t" ? block(sel.k) : null;
+  function getFrame(u) {
+    var xs = u.scales.x;
+    var lo = isFinite(xs.min) ? xs.min : 0;
+    var hi = isFinite(xs.max) ? xs.max : DAY_S;
+    var cols = plotPx(u);
+    if (frame && frame.xmin === lo && frame.xmax === hi && frame.cols === cols) return frame;
+    frame = computeFrame(lo, hi, cols);
+    return frame;
   }
 
-  // Primer evento i del bloque con arr[off + i] >= value (los tres tiempos crecen con i).
-  function lowerBound(arr, b, value) {
-    var lo = 0;
-    var hi = b.n;
-    while (lo < hi) {
-      var mid = (lo + hi) >> 1;
-      if (arr[b.off + mid] < value) lo = mid + 1;
-      else hi = mid;
+  function computeFrame(xmin, xmax, cols) {
+    var t0 = performance.now();
+    var a = xmin * 1000;
+    var z = xmax * 1000;
+    var k = cols / Math.max(z - a, 1e-6); // px CSS por ms
+    var f = {
+      xmin: xmin,
+      xmax: xmax,
+      cols: cols,
+      a: a,
+      z: z,
+      k: k,
+      cnt: new Uint32Array(cols),
+      lo: new Int32Array(cols),
+      hi: new Int32Array(cols),
+      vol: new Float64Array(cols),
+      cc: new Uint16Array(cols),
+      cs: new Uint16Array(cols),
+      n: 0,
+      pMin: 0,
+      pMax: 0,
+      volMax: 0,
+      ccMax: 0,
+      ms: 0,
+    };
+    if (ticks) {
+      var T = ticks.t;
+      var P = ticks.p;
+      var Q = ticks.q;
+      var i = lowerBoundAll(T, ticks.n, Math.ceil(a));
+      var first = i;
+      var pMin = Infinity;
+      var pMax = -Infinity;
+      for (; i < ticks.n; i++) {
+        var t = T[i];
+        if (t > z) break;
+        var px = ((t - a) * k) | 0; // no negativo y menor que 2³¹: igual que floor, sin la búsqueda global de Math
+        if (px >= cols) px = cols - 1;
+        var p = P[i];
+        if (f.cnt[px] === 0) {
+          f.lo[px] = p;
+          f.hi[px] = p;
+        } else {
+          if (p < f.lo[px]) f.lo[px] = p;
+          if (p > f.hi[px]) f.hi[px] = p;
+        }
+        f.cnt[px]++;
+        f.vol[px] += Q[i];
+        if (p < pMin) pMin = p;
+        if (p > pMax) pMax = p;
+      }
+      f.n = i - first;
+      if (f.n === 0) {
+        // Sin ticks en la vista: el último precio conocido (o el primero que sigue) centra el eje.
+        var near = first > 0 ? P[first - 1] : first < ticks.n ? P[first] : 0;
+        pMin = near;
+        pMax = near;
+      }
+      f.pMin = pMin;
+      f.pMax = pMax;
+      for (var c = 0; c < cols; c++) {
+        if (f.vol[c] > f.volMax) f.volMax = f.vol[c];
+      }
     }
-    return lo;
+    if (conf) {
+      var stampPx = new Int32Array(thetas.length); // último píxel (+1) en que contó cada θ
+      var stampT = new Float64Array(thetas.length); // último instante (+1) en que contó cada θ
+      var lastT = -1;
+      var run = 0;
+      for (var j = lowerBoundAll(conf.t, conf.n, Math.ceil(a)); j < conf.n; j++) {
+        var ct = conf.t[j];
+        if (ct > z) break;
+        var cx = ((ct - a) * k) | 0;
+        if (cx >= cols) cx = cols - 1;
+        var th = conf.k[j];
+        if (stampPx[th] !== cx + 1) {
+          stampPx[th] = cx + 1;
+          f.cc[cx]++;
+        }
+        if (ct !== lastT) {
+          lastT = ct;
+          run = 0;
+        }
+        if (stampT[th] !== ct + 1) {
+          stampT[th] = ct + 1;
+          run++;
+          if (run > f.cs[cx]) f.cs[cx] = run;
+        }
+      }
+      for (var d = 0; d < cols; d++) {
+        if (f.cc[d] > f.ccMax) f.ccMax = f.cc[d];
+      }
+    }
+    f.ms = performance.now() - t0;
+    metrics.frame = { cols: cols, ticks: f.n, ms: f.ms, pixels_with_ticks: countFilled(f) };
+    return f;
   }
 
-  function emptyColumn(level, c) {
-    return level.price.y[4 * c] === null;
+  function countFilled(f) {
+    var n = 0;
+    for (var c = 0; c < f.cols; c++) if (f.cnt[c]) n++;
+    return n;
   }
 
-  /* ---------- Dibujo de las regiones (en el lienzo de uPlot, bajo la serie) ---------- */
+  /* ---------- Dibujo de las regiones (en el lienzo de uPlot, bajo las marcas) ---------- */
 
   function vline(ctx, x, b, dpr, style) {
     ctx.fillStyle = style;
     ctx.fillRect(Math.round(x - dpr / 2), b.top, dpr, b.height);
-  }
-
-  // Huecos: columnas sin ticks. Marcador y texto; nunca se rellena.
-  function drawGaps(u, ctx, b, dpr) {
-    var level = cur;
-    var xs = u.scales.x;
-    var c0 = Math.max(0, Math.floor(xs.min / level.colDur));
-    var c1 = Math.min(level.w - 1, Math.ceil(xs.max / level.colDur) - 1);
-    var c = c0;
-    while (c <= c1) {
-      if (!emptyColumn(level, c)) {
-        c++;
-        continue;
-      }
-      var end = c;
-      while (end + 1 <= c1 && emptyColumn(level, end + 1)) end++;
-      var x0 = u.valToPos(c * level.colDur, "x", true);
-      var x1 = u.valToPos((end + 1) * level.colDur, "x", true);
-      var wpx = Math.max(1, x1 - x0);
-      ctx.fillStyle = "rgba(227, 179, 65, 0.10)";
-      ctx.fillRect(x0, b.top, wpx, b.height);
-      ctx.strokeStyle = C.amber;
-      ctx.lineWidth = GAP_MARK.px * dpr;
-      ctx.setLineDash([GAP_MARK.dash[0] * dpr, GAP_MARK.dash[1] * dpr]);
-      ctx.beginPath();
-      ctx.moveTo(x0, b.top + b.height / 2);
-      ctx.lineTo(x0 + wpx, b.top + b.height / 2);
-      ctx.stroke();
-      ctx.setLineDash([]);
-      ctx.fillStyle = C.amber;
-      if (wpx > 70 * dpr) {
-        ctx.textAlign = "center";
-        ctx.fillText("◇ sin ticks", x0 + wpx / 2, b.top + b.height - 8 * dpr);
-      } else if (wpx > 14 * dpr) {
-        ctx.textAlign = "center";
-        ctx.fillText("◇", x0 + wpx / 2, b.top + b.height - 8 * dpr);
-      }
-      c = end + 1;
-    }
   }
 
   // Una franja de un evento: relleno del tramo y franja del borde (arriba el alza, abajo la baja).
@@ -491,12 +570,10 @@
       var xc = Math.min(v.xc, x1);
       band(ctx, b, dpr, v.x0, xc, up, false);
       band(ctx, b, dpr, xc, x1, up, true);
-      // Confirmación: línea del color del evento. Extremo: frontera de 1 px compartida con el
-      // evento que sigue (el tick extremo cierra su evento; el siguiente arranca en el tick que
-      // lo sigue). Ni una ni otra se dibujan si el tiempo quedó recortado al borde del día; el
-      // extremo provisional lo marca la línea ámbar de abajo.
+      // Confirmación: línea del color del evento. El extremo no lleva línea: el cambio de color
+      // entre franjas ya lo marca, porque los eventos alternan siempre. No se dibuja si el tiempo
+      // quedó recortado al borde del día.
       if (!(f & F_CONFIRM_CLIPPED)) vline(ctx, xc, b, dpr, "rgb(" + (up ? C.up : C.down) + ")");
-      if (!(f & (F_EXTREME_CLIPPED | F_PROVISIONAL))) vline(ctx, x1, b, dpr, C.text);
     });
 
     // Marca de densidad: un rectángulo neutro con el número, en vez de franjas indistinguibles.
@@ -510,9 +587,7 @@
       var width = Math.max(minW, grp.last - grp.anchor + 2 * dpr);
       ctx.fillStyle = "rgba(215, 222, 230, 0.26)";
       ctx.fillRect(left, b.top, width, b.height);
-      vline(ctx, left, b, dpr, C.text);
-      vline(ctx, left + width, b, dpr, C.text);
-      ctx.fillStyle = C.text;
+      ctx.fillStyle = C.muted;
       ctx.fillText(grp.n + " eventos", left + width + 4 * dpr, b.top + (22 + 14 * (row % 3)) * dpr);
       row++;
       out.groups++;
@@ -520,12 +595,13 @@
       if (grp.n > out.max) out.max = grp.n;
     });
 
-    // El evento elegido con la navegación: un marco sobre su intervalo.
+    // El evento elegido con la navegación: un marco sobre su intervalo, tenue (el precio es el
+    // único trazo claro del panel).
     if (nav.k >= 0 && nav.k < tr.n) {
       var s = tr.off + nav.k;
       var sx0 = u.valToPos(ev.ref[s] / 1000, "x", true);
       var sx1 = u.valToPos(ev.ext[s] / 1000, "x", true);
-      ctx.strokeStyle = C.text;
+      ctx.strokeStyle = C.mutedLine;
       ctx.lineWidth = 2 * dpr;
       ctx.strokeRect(sx0, b.top + dpr, Math.max(minW, sx1 - sx0), b.height - 2 * dpr);
     }
@@ -544,7 +620,6 @@
     ctx.font = 12 * dpr + "px " + MONO;
     ctx.textBaseline = "alphabetic";
 
-    drawGaps(u, ctx, b, dpr);
     metrics.density = drawEvents(u, ctx, b, dpr);
 
     // Cola provisional del θ activo (RVZ-02): marcador con texto, no solo color.
@@ -567,118 +642,118 @@
     ctx.restore();
   }
 
-  /* ---------- Serie de precio: puntos o segmentos, nunca velas ---------- */
+  /* ---------- Las marcas por píxel ---------- */
 
-  // Lo que se dibuja es un tick o la envolvente exacta de ticks (§6.4):
-  //  - columna con 1 o 2 ticks: M4 son todos sus ticks, un punto por tick;
-  //  - columna con 3 ticks o más: siempre el segmento del mínimo al máximo, la unión de los
-  //    píxeles que ocuparían sus puntos; si mínimo y máximo son iguales, el tramo horizontal del
-  //    primer al último tick;
-  //  - y, si además es ancha (>= DOT_MIN_COL_PX), sus cuatro puntos M4 (ticks reales) en su
-  //    instante exacto, sobre el segmento: nunca solo cuatro puntos aislados, que se leerían
-  //    como "4 ticks" en una columna de miles.
-  // Nada une una columna con la vecina: nadie midió lo que hay entre ellas (principio 6).
-  var drawMode = "segments"; // "segments" | "points"
-
-  // Ancho en pantalla de una columna del nivel actual, en px CSS.
-  function columnPx(u) {
-    var xs = u.scales.x;
-    return (u.bbox.width / (window.devicePixelRatio || 1)) * (cur.colDur / (xs.max - xs.min));
+  // Posición vertical (px del lienzo) de un valor en la escala `key` del panel.
+  function yPos(u, key, v) {
+    var s = u.scales[key];
+    var b = u.bbox;
+    return b.top + ((s.max - v) / (s.max - s.min)) * b.height;
   }
 
-  function setDrawMode(mode, drawn) {
-    metrics.price_draw = { mode: mode, segments: drawn.segments, points: drawn.points };
-    if (mode === drawMode) return;
-    drawMode = mode;
-    console.info("viz: precio en " + (mode === "points" ? "segmentos mín–máx y puntos M4 por columna" : "segmentos mín–máx por columna"));
-    renderFooter();
-  }
-
-  function pricePaths(u, seriesIdx, idx0, idx1) {
-    var level = cur;
+  // Precio: por cada píxel de ancho, un punto por tick (con 1 o 2 ticks) o el segmento del mínimo al
+  // máximo (con 3 o más) y nada más. Nada une un píxel con el vecino: nadie midió lo que hay entre
+  // ellos (principio 6). Los ticks de un mismo instante comparten píxel: un solo segmento.
+  function drawPrice(u) {
+    var f = getFrame(u);
+    var ctx = u.ctx;
+    var b = u.bbox;
     var dpr = window.devicePixelRatio || 1;
-    var xs = u.scales.x;
-    var y = level.price.y;
-    var t = level.price.x;
-    var wide = columnPx(u) >= DOT_MIN_COL_PX;
-    var c0 = Math.max(0, Math.floor(xs.min / level.colDur));
-    var c1 = Math.min(level.w - 1, Math.ceil(xs.max / level.colDur) - 1);
+    var colW = b.width / f.cols;
     var half = (DOT_PX * dpr) / 2;
-    var path = new Path2D();
-    var drawn = { segments: 0, points: 0 };
-
-    function dot(tt, pp) {
-      var px = u.valToPos(tt, "x", true);
-      var py = u.valToPos(pp, "p", true);
-      path.rect(px - half, py - half, 2 * half, 2 * half);
-      drawn.points++;
-    }
-
-    // Los puntos M4 de la columna que empieza en el índice k, sin repetir los que coinciden.
-    function m4Dots(k) {
-      for (var j = 0; j < 4; j++) {
-        var dup = false;
-        for (var q = 0; q < j; q++) {
-          if (t[k + q] === t[k + j] && y[k + q] === y[k + j]) dup = true;
-        }
-        if (!dup) dot(t[k + j], y[k + j]);
-      }
-    }
-
-    for (var c = c0; c <= c1; c++) {
-      if (emptyColumn(level, c)) continue; // hueco: lo marca drawRegions, aquí no se dibuja nada
-      var k = 4 * c;
-      var n = level.cnt ? level.cnt[c] : 3; // sin el tile de conteo no se sabe si M4 son todos los ticks
+    var line = Math.max(1, Math.round(dpr)); // ancho del segmento: 1 px CSS
+    var dots = 0;
+    var segments = 0;
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(b.left, b.top, b.width, b.height);
+    ctx.clip();
+    ctx.fillStyle = C.price;
+    for (var c = 0; c < f.cols; c++) {
+      var n = f.cnt[c];
+      if (!n) continue;
+      var x = b.left + (c + 0.5) * colW;
+      var yLo = yPos(u, "p", f.lo[c] / scale); // el precio menor queda más abajo
+      var yHi = yPos(u, "p", f.hi[c] / scale);
       if (n <= 2) {
-        m4Dots(k);
-        continue;
-      }
-      var lo = Infinity;
-      var hi = -Infinity;
-      for (var m = k; m < k + 4; m++) {
-        if (y[m] < lo) lo = y[m];
-        if (y[m] > hi) hi = y[m];
-      }
-      if (lo === hi) {
-        // Todos los ticks al mismo precio: del primero al último, a ese precio.
-        var yy = u.valToPos(lo, "p", true);
-        path.moveTo(u.valToPos(t[k], "x", true), yy);
-        path.lineTo(Math.max(u.valToPos(t[k + 3], "x", true), u.valToPos(t[k], "x", true) + dpr), yy);
-      } else {
-        var xc = u.valToPos((c + 0.5) * level.colDur, "x", true);
-        var yTop = u.valToPos(hi, "p", true);
-        var yBottom = u.valToPos(lo, "p", true);
-        if (yBottom - yTop < dpr) {
-          yTop -= dpr / 2;
-          yBottom += dpr / 2; // al menos un píxel: un rango no se vuelve invisible
+        ctx.fillRect(Math.round(x - half), Math.round(yLo - half), 2 * half, 2 * half);
+        dots++;
+        if (n === 2 && f.lo[c] !== f.hi[c]) {
+          ctx.fillRect(Math.round(x - half), Math.round(yHi - half), 2 * half, 2 * half);
+          dots++;
         }
-        path.moveTo(xc, yTop);
-        path.lineTo(xc, yBottom);
-        drawn.segments++;
+      } else {
+        // Al menos un píxel de alto: un rango no se vuelve invisible.
+        ctx.fillRect(Math.round(x - line / 2), Math.round(yHi), line, Math.max(line, Math.round(yLo - yHi)));
+        segments++;
       }
-      if (wide) m4Dots(k);
     }
-    setDrawMode(wide ? "points" : "segments", drawn);
-    return { stroke: path, fill: null, clip: null, band: null, gaps: null, flags: 3 };
+    ctx.restore();
+    metrics.price_draw = { dots: dots, segments: segments };
+    renderFooter(f);
+  }
+
+  // Barras por píxel (volumen y θ que confirman): una barra por píxel con ticks y, con zoom
+  // suficiente, una por tick; un instante compartido suma.
+  function drawBars(u, key, values, max, color, f) {
+    var ctx = u.ctx;
+    var b = u.bbox;
+    var dpr = window.devicePixelRatio || 1;
+    var colW = b.width / f.cols;
+    // A zoom fuerte un instante ocupa varios píxeles: la barra se ensancha sin juntarse con la vecina.
+    var width = Math.max(1, Math.min(4, Math.floor(f.k * 0.6))) * dpr;
+    var base = b.top + b.height;
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(b.left, b.top, b.width, b.height);
+    ctx.clip();
+    ctx.fillStyle = color;
+    for (var c = 0; c < f.cols; c++) {
+      var v = values[c];
+      if (!v) continue;
+      var y = yPos(u, key, v);
+      var x = b.left + (c + 0.5) * colW;
+      ctx.fillRect(Math.round(x - width / 2), Math.round(y), Math.max(1, Math.round(width)), Math.max(1, Math.round(base - y)));
+    }
+    ctx.restore();
+  }
+
+  // Rótulo corto arriba a la izquierda de un panel inferior.
+  function drawLabel(u, text) {
+    var b = u.bbox;
+    var dpr = window.devicePixelRatio || 1;
+    var ctx = u.ctx;
+    ctx.save();
+    ctx.font = 12 * dpr + "px " + MONO;
+    ctx.textAlign = "left";
+    ctx.textBaseline = "alphabetic";
+    ctx.fillStyle = C.muted;
+    ctx.fillText(text, b.left + 6 * dpr, b.top + 14 * dpr);
+    ctx.restore();
+  }
+
+  function drawVolume(u) {
+    if (stale(u)) return;
+    var f = getFrame(u);
+    drawBars(u, "v", f.vol, f.volMax, C.volume, f);
+    drawLabel(u, "Volumen");
+    if (!ticks) drawNote(u, "⚠ faltan los ticks del día");
+  }
+
+  function drawConfirms(u) {
+    if (stale(u)) return;
+    var f = getFrame(u);
+    drawBars(u, "c", f.cc, f.ccMax, C.confirms, f);
+    drawBars(u, "c", f.cs, f.ccMax, C.simul, f);
+    drawLabel(u, "θ que confirman");
+    if (!ev) drawNote(u, "⚠ faltan los eventos exactos");
   }
 
   function drawMessages(u) {
     var msg = null;
     if (sel.kind === "m") msg = "⚠ θ " + sel.theta + ": sin datos en L2 (hueco, no se rellena)";
     else if (sel.kind === "t" && !ev) msg = "⚠ faltan los eventos exactos: no se dibujan franjas";
-    else if (sel.kind === "t" && !cur.dir) msg = "⚠ falta el tile de dirección de este nivel";
     if (msg) drawNote(u, msg);
-  }
-
-  function drawVolumeMessage(u) {
-    if (!cur.vol) drawNote(u, "⚠ falta el tile de volumen de este nivel");
-  }
-
-  function drawConfirmsMessage(u) {
-    var missing = [];
-    if (!cur.confirms) missing.push("confirms");
-    if (!cur.simul) missing.push("simul");
-    if (missing.length) drawNote(u, "⚠ falta el tile " + missing.join(" y ") + " de este nivel");
   }
 
   function drawNote(u, msg) {
@@ -693,101 +768,114 @@
     ctx.restore();
   }
 
-  /* ---------- Tooltip por cubeta ---------- */
+  /* ---------- Tooltip por píxel ---------- */
 
   var tip = $("tip");
 
-  // Las confirmaciones de todos los θ dentro de la cubeta [a, b) segundos, a partir de los
-  // eventos exactos: [{theta, ms}] en orden de hora.
-  function confirmsIn(a, b) {
-    var out = [];
-    if (!ev) return out;
-    var lo = Math.ceil(a * 1000);
-    var hi = Math.ceil(b * 1000);
-    thetas.forEach(function (t, k) {
-      var tr = block(k);
-      for (var i = lowerBound(ev.conf, tr, lo); i < tr.n; i++) {
-        var e = tr.off + i;
-        if (ev.conf[e] >= hi) break;
-        if (!(ev.flags[e] & F_CONFIRM_CLIPPED)) out.push({ theta: t.theta, ms: ev.conf[e] });
-      }
-    });
-    out.sort(function (p, q) { return p.ms - q.ms || (p.theta < q.theta ? -1 : 1); });
-    return out;
+  // El píxel `c` del marco y su rango de ticks [i0, i1) y de ms [a, z).
+  function pixelRange(f, c) {
+    var a = f.a + c / f.k;
+    var z = c === f.cols - 1 ? f.z : f.a + (c + 1) / f.k;
+    return { a: a, z: z };
   }
 
-  function bucketLines(level, c, dec) {
-    var lines = [clock(c * level.colDur, dec) + " – " + clock((c + 1) * level.colDur, dec) + " UTC"];
-    if (emptyColumn(level, c)) {
-      lines.push("◇ sin ticks en la cubeta (hueco)");
-    } else {
-      var y = level.price.y;
-      var lo = Infinity;
-      var hi = -Infinity;
-      for (var k = 4 * c; k < 4 * c + 4; k++) {
-        if (y[k] === null) continue;
-        if (y[k] < lo) lo = y[k];
-        if (y[k] > hi) hi = y[k];
-      }
-      lines.push("mín " + fixed(lo) + "   máx " + fixed(hi));
-      lines.push(level.vol ? "vol " + level.vol[c].toFixed(4) : "vol: ⚠ falta el tile");
+  function pixelLines(f, c) {
+    var r = pixelRange(f, c);
+    var dec = 1 / f.k >= 1000 ? 0 : 3; // ms, la resolución de los datos; sin fracción desde 1 s por píxel
+    var lines = [clockMs(r.a, dec) + " – " + clockMs(r.z, dec) + " UTC"];
+    var n = f.cnt[c];
+    if (!n) {
+      lines.push("sin ticks");
+      return lines;
     }
-    lines.push(level.cnt ? plural(level.cnt[c], "tick", "ticks") : "ticks: ⚠ falta el tile");
+    var i0 = lowerBoundAll(ticks.t, ticks.n, Math.ceil(r.a));
+    var i1 = c === f.cols - 1 ? lowerBoundAll(ticks.t, ticks.n, Math.floor(r.z) + 1) : lowerBoundAll(ticks.t, ticks.n, Math.ceil(r.z));
+    // Un ms es la cubeta mínima: si todos comparten instante, el rótulo lo dice; si el píxel abarca
+    // más de 1 ms, "este ms" no tiene referente y se nombra el instante.
+    var sameMs = ticks.t[i0] === ticks.t[i1 - 1];
+    var at = "";
+    if (sameMs) at = r.z - r.a > 1 ? " a las " + clockMs(ticks.t[i0], 3) : n >= 2 ? " en este ms" : "";
+    lines.push(n + " " + (n === 1 ? "tick" : "ticks") + at);
+    if (f.lo[c] === f.hi[c]) lines.push("precio " + fixed(f.lo[c] / scale));
+    else lines.push("mín " + fixed(f.lo[c] / scale) + "   máx " + fixed(f.hi[c] / scale));
+    lines.push("vol " + f.vol[c].toFixed(4));
     return lines;
   }
 
-  function thetaLines(level, c) {
-    var lines = [];
-    if (sel.kind === "t" && !level.dir) {
-      lines.push("θ " + sel.theta + ": ⚠ falta el tile de dirección");
-    } else if (sel.kind === "t") {
-      var code = level.dir[sel.k * level.w + c];
-      lines.push("θ " + sel.theta + ": " + (STATES[code] ? STATES[code].text : "reservado (" + code + ")"));
-    } else if (sel.kind === "m") {
-      lines.push("θ " + sel.theta + ": sin datos");
-    }
+  // El evento del θ activo que contiene el instante `ms`, o -1: (referencia, extremo]; el tick extremo
+  // pertenece al evento que cierra (ADR-VZ-12).
+  function eventAt(ms) {
     var tr = activeBlock();
-    if (tr) {
-      // Los eventos enteros dentro de la cubeta (de su referencia a su extremo): con varios, una
-      // franja por columna no los distingue.
-      var a = Math.ceil(c * level.colDur * 1000);
-      var z = Math.ceil((c + 1) * level.colDur * 1000);
-      var first = lowerBound(ev.ref, tr, a);
-      var n = Math.min(lowerBound(ev.ref, tr, z), lowerBound(ev.ext, tr, z)) - first;
-      if (n > 0) lines.push("eventos del θ dentro de la cubeta: " + n);
+    if (!tr || !tr.n) return -1;
+    var i = lowerBound(ev.ref, tr, ms) - 1; // último evento con referencia < ms
+    return i >= 0 && ms <= ev.ext[tr.off + i] ? i : -1;
+  }
+
+  // Todo lo que se sabe de un evento, para el tooltip: la franja de estado no lo repite.
+  function eventLines(i) {
+    var tr = activeBlock();
+    var e = tr.off + i;
+    var f = ev.flags[e];
+    var w = windowOf(i);
+    var lines = [
+      "θ " + sel.theta + " · evento " + (i + 1) + " / " + tr.n + " · " + ((f & F_UP) !== 0 ? "alza" : "baja"),
+      "referencia " + clockMs(ev.ref[e], 3),
+      "confirmación " + clockMs(ev.conf[e], 3),
+      "extremo " + clockMs(ev.ext[e], 3),
+      "ventana " + clock(w.start, 3) + " a " + clock(w.end, 3),
+    ];
+    return lines.concat(w.notes);
+  }
+
+  function thetaLines(f, c) {
+    var lines = [];
+    if (sel.kind === "m") {
+      lines.push("θ " + sel.theta + ": sin datos");
+    } else if (sel.kind === "t" && ev) {
+      var r = pixelRange(f, c);
+      var i = eventAt(Math.floor((r.a + r.z) / 2));
+      if (i >= 0) lines = lines.concat(eventLines(i));
+      else lines.push("θ " + sel.theta + ": fuera de un evento");
     }
     return lines;
   }
 
-  function confirmLines(level, c, dec) {
-    var lines = [clock(c * level.colDur, dec) + " – " + clock((c + 1) * level.colDur, dec) + " UTC"];
-    lines.push(
-      level.confirms ? "θ que confirman: " + level.confirms[c] : "θ que confirman: ⚠ falta el tile"
-    );
-    lines.push(
-      level.simul ? "máx. en el mismo instante: " + level.simul[c] : "máx. en el mismo instante: ⚠ falta el tile"
-    );
-    var list = confirmsIn(c * level.colDur, (c + 1) * level.colDur);
-    list.slice(0, TIP_MAX_LINES).forEach(function (it) {
-      lines.push("θ " + it.theta + "  " + clock(it.ms / 1000, 3));
-    });
-    if (list.length > TIP_MAX_LINES) lines.push("… y " + (list.length - TIP_MAX_LINES) + " más");
+  function confirmLines(f, c) {
+    var r = pixelRange(f, c);
+    var dec = 1 / f.k >= 1000 ? 0 : 3;
+    var lines = [clockMs(r.a, dec) + " – " + clockMs(r.z, dec) + " UTC"];
+    if (!conf) {
+      lines.push("θ que confirman: ⚠ faltan los eventos");
+      return lines;
+    }
+    lines.push("θ que confirman: " + f.cc[c]);
+    lines.push("máx. en el mismo instante: " + f.cs[c]);
+    var j = lowerBoundAll(conf.t, conf.n, Math.ceil(r.a));
+    var end = c === f.cols - 1 ? Math.floor(r.z) + 1 : Math.ceil(r.z);
+    var shown = 0;
+    var total = 0;
+    for (; j < conf.n && conf.t[j] < end; j++) {
+      total++;
+      if (shown < TIP_MAX_LINES) {
+        lines.push("θ " + thetas[conf.k[j]].theta + "  " + clockMs(conf.t[j], 3));
+        shown++;
+      }
+    }
+    if (total > shown) lines.push("… y " + (total - shown) + " más");
     return lines;
   }
 
   function onCursor(u) {
     var left = u.cursor.left;
-    if (left == null || left < 0) {
+    if (left == null || left < 0 || !ticks) {
       tip.hidden = true;
       return;
     }
     if (u !== hovered) return; // el cursor sincronizado: lo atiende el panel con el puntero
-    var level = cur;
-    var sec = u.posToVal(left, "x");
-    var c = Math.min(level.w - 1, Math.max(0, Math.floor(sec / level.colDur)));
-    var dec = Number.isInteger(level.colDur) ? 0 : 3;
-    var lines =
-      u === conf ? confirmLines(level, c, dec) : bucketLines(level, c, dec).concat(thetaLines(level, c));
+    var f = getFrame(u);
+    var css = u.bbox.width / (window.devicePixelRatio || 1);
+    var c = Math.min(f.cols - 1, Math.max(0, Math.floor((left * f.cols) / css)));
+    var lines = u === confP ? confirmLines(f, c) : pixelLines(f, c).concat(thetaLines(f, c));
     tip.textContent = lines.join("\n");
     tip.hidden = false;
     var box = u.over.getBoundingClientRect();
@@ -808,7 +896,7 @@
   var navInfo = $("ev-info");
 
   function setX(min, max) {
-    price.setScale("x", { min: min, max: max });
+    pricePlot.setScale("x", { min: min, max: max });
   }
 
   // La ventana del evento k: de la referencia del anterior al extremo del siguiente, para ver las
@@ -838,6 +926,7 @@
     };
   }
 
+  // La franja de estado solo dice dónde se está: el detalle del evento va al tooltip.
   function renderNav(w) {
     var tr = activeBlock();
     var has = !!tr && tr.n > 0;
@@ -850,15 +939,9 @@
     } else if (!tr.n) {
       navInfo.textContent = "el θ no tiene eventos en el día";
     } else if (nav.k < 0 || !w) {
-      navInfo.textContent = plural(tr.n, "evento", "eventos") + " en el día";
+      navInfo.textContent = plural(tr.n, "evento", "eventos");
     } else {
-      var e = tr.off + nav.k;
-      var up = (ev.flags[e] & F_UP) !== 0;
-      navInfo.textContent =
-        "evento " + (nav.k + 1) + " de " + tr.n + " · " + (up ? "alza" : "baja") + " · referencia " +
-        clock(ev.ref[e] / 1000, 3) + " · confirmación " + clock(ev.conf[e] / 1000, 3) + " · extremo " +
-        clock(ev.ext[e] / 1000, 3) + " · ventana " + clock(w.start, 3) + " a " + clock(w.end, 3) +
-        (w.notes.length ? " · " + w.notes.join(" · ") : "");
+      navInfo.textContent = "evento " + (nav.k + 1) + " / " + tr.n;
     }
     metrics.nav = { k: nav.k, window: w ? [w.start, w.end] : null };
   }
@@ -870,13 +953,13 @@
     if (!tr || k < 0 || k >= tr.n) return;
     nav.k = k;
     var w = windowOf(k);
-    var x = price.scales.x;
+    var x = pricePlot.scales.x;
     var span = Math.min(DAY_S, x.max - x.min);
     var min = (w.start + w.end) / 2 - span / 2;
     min = Math.min(Math.max(0, min), DAY_S - span);
     renderNav(w);
     setX(min, min + span);
-    price.redraw(false);
+    pricePlot.redraw(false);
   }
 
   // Sin evento elegido, "siguiente" va al primero que arranca después del centro de la vista y
@@ -885,7 +968,7 @@
     var tr = activeBlock();
     if (!tr || !tr.n) return;
     if (nav.k >= 0) return goTo(nav.k + delta);
-    var x = price.scales.x;
+    var x = pricePlot.scales.x;
     var centerMs = ((x.min + x.max) / 2) * 1000;
     var after = lowerBound(ev.ref, tr, Math.floor(centerMs) + 1); // primer evento con referencia > centro
     goTo(delta > 0 ? Math.min(after, tr.n - 1) : Math.max(after - 1, 0));
@@ -913,13 +996,39 @@
 
   /* ---------- Los tres paneles ---------- */
 
+  var panels = $("panels");
+  var AXIS_W = 76;
+  var pricePlot = null;
+  var confP = null;
+  var volP = null;
+  var plots = [];
+  var hovered = null; // panel bajo el puntero: el único que muestra el tooltip
   var syncing = false;
-  var levelQueued = false;
+
+  // Redibujo de la vista: del cambio (zoom, θ o tamaño) al último panel que ese cambio repinta.
+  // Cada panel avisa al terminar; cuando están todos se publica el total (marco incluido).
+  var redraw = { t0: null, pending: [] };
+
+  function redrawStart(keys) {
+    redraw.t0 = performance.now();
+    redraw.pending = keys.slice();
+  }
+
+  function redrawPanelDone(u) {
+    if (redraw.t0 === null || stale(u)) return;
+    metrics.draw_ms = performance.now() - redraw.t0;
+    var i = redraw.pending.indexOf(yKey(u));
+    if (i >= 0) redraw.pending.splice(i, 1);
+    if (redraw.pending.length) return;
+    redraw.t0 = null;
+    console.info("viz: redibujo en " + metrics.draw_ms.toFixed(1) + " ms (" + metrics.frame.ticks + " ticks en la vista)");
+  }
 
   function onScale(u, key) {
     if (key !== "x" || plots.length < 3) return;
     var s = u.scales.x;
     if (!syncing) {
+      redrawStart(["p", "c", "v"]);
       syncing = true;
       plots.forEach(function (other) {
         var t = other.scales.x;
@@ -927,38 +1036,35 @@
       });
       syncing = false;
     }
-    queueLevel();
+    // Fuera del commit en curso: un setScale dentro de su hook no se aplica.
+    queueMicrotask(function () { applyY(u); });
   }
 
-  function queueLevel() {
-    if (levelQueued) return;
-    levelQueued = true;
-    queueMicrotask(ensureLevel);
+  // El eje Y de cada panel sale del marco, o sea de lo que hay en la vista. uPlot calcula sus rangos
+  // con la x anterior, así que aquí se fijan a mano, ya con la x nueva: la primera pasada de dibujo
+  // de un cambio se salta (`stale`) y la que sigue pinta con el rango bueno.
+  var Y = { p: yPrice, c: yConfirms, v: yVolume };
+
+  function yKey(u) {
+    return u === pricePlot ? "p" : u === confP ? "c" : "v";
   }
 
-  function ensureLevel() {
-    levelQueued = false;
-    var x = price.scales.x;
-    var span = x.max - x.min;
-    if (!(span > 0)) return;
-    var w = pickLevel(span);
-    var level = null;
-    while (w !== null && w !== cur.w && level === null) {
-      level = loadLevel(w);
-      if (level === null) w = pickLevel(span); // el nivel quedó inutilizable: el siguiente
-    }
-    if (level === null) return;
-    // Al hacer zoom: el nivel más fino que cubre el rango visible, ya en memoria.
-    cur = level;
-    price.setData(level.priceData, false);
-    conf.setData(level.confData, false);
-    vol.setData(level.volData, false);
-    plots.forEach(function (u) { u.setScale("x", { min: x.min, max: x.max }); });
-    renderFooter();
+  function stale(u) {
+    var key = yKey(u);
+    var r = Y[key](u);
+    var s = u.scales[key];
+    return s.min !== r[0] || s.max !== r[1];
+  }
+
+  function applyY(u) {
+    var key = yKey(u);
+    var r = Y[key](u);
+    var s = u.scales[key];
+    if (s.min !== r[0] || s.max !== r[1]) u.setScale(key, { min: r[0], max: r[1] });
   }
 
   function resetZoom() {
-    price.setScale("x", { min: 0, max: DAY_S });
+    pricePlot.setScale("x", { min: 0, max: DAY_S });
   }
 
   function sizes() {
@@ -969,19 +1075,24 @@
     return { w: w, hp: h - hv - hc, hc: hc, hv: hv };
   }
 
-  function yPrice(u, min, max) {
-    if (!isFinite(min) || !isFinite(max)) return [0, 1];
-    var pad = (max - min) * 0.05 || 1;
-    return [min - pad, max + pad];
+  // Los ejes Y salen del marco: lo que hay en la vista, no de una serie de uPlot.
+  function yPrice(u) {
+    var f = getFrame(u);
+    var lo = f.pMin / scale;
+    var hi = f.pMax / scale;
+    var pad = (hi - lo) * 0.05 || 1;
+    return [lo - pad, hi + pad];
   }
 
-  function yVolume(u, min, max) {
-    return [0, isFinite(max) && max > 0 ? max * 1.08 : 1];
+  function yVolume(u) {
+    var f = getFrame(u);
+    return [0, f.volMax > 0 ? f.volMax * 1.08 : 1];
   }
 
   // Enteros pequeños: el eje parte de 0 y llega al máximo con un poco de aire.
-  function yConfirms(u, min, max) {
-    return [0, isFinite(max) && max > 0 ? Math.ceil(max * 1.15) : 1];
+  function yConfirms(u) {
+    var f = getFrame(u);
+    return [0, f.ccMax > 0 ? Math.ceil(f.ccMax * 1.15) : 1];
   }
 
   function axisBase() {
@@ -993,7 +1104,11 @@
     };
   }
 
-  var X_INCRS = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200, 10800, 14400, 21600, 43200];
+  // Desde 1 ms: la resolución de los datos. A un ms de ventana el eje marca cada ms.
+  var X_INCRS = [
+    0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5,
+    1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200, 10800, 14400, 21600, 43200,
+  ];
 
   function xAxis(labels) {
     var a = axisBase();
@@ -1004,7 +1119,9 @@
     a.values = function (u, splits, axisIdx, space, incr) {
       return splits.map(function (v) {
         if (!labels) return "";
-        return incr >= 60 ? clock(v, 0).slice(0, 5) : clock(v, 0);
+        if (incr >= 60) return clock(v, 0).slice(0, 5);
+        if (incr >= 1) return clock(v, 0);
+        return clock(v, incr >= 0.1 ? 1 : incr >= 0.01 ? 2 : 3);
       });
     };
     return a;
@@ -1030,22 +1147,40 @@
     };
   }
 
+  // uPlot pone los ejes, la selección y el cursor; las marcas las dibujan los hooks. Cada panel
+  // lleva una serie sin trazo y dos puntos: lo mínimo para que sus escalas existan.
+  function stub() {
+    return [[0, DAY_S], [0, 1]];
+  }
+
+  function series(scaleKey) {
+    return [{}, { scale: scaleKey, show: true, paths: function () { return null; }, points: { show: false } }];
+  }
+
   function build() {
     var s = sizes();
     var shared = { legend: { show: false }, cursor: cursorOpts() };
 
-    price = new uPlot(
+    // El rango inicial es el del día completo, con el ancho que se estima antes de que exista el panel.
+    var whole = { scales: { x: { min: 0, max: DAY_S } } };
+    var yp = yPrice(whole);
+    var yc = yConfirms(whole);
+    var yv = yVolume(whole);
+
+    pricePlot = new uPlot(
       Object.assign({}, shared, {
         width: s.w,
         height: s.hp,
         padding: [8, 12, 0, 0],
-        scales: { x: { time: false, auto: false, min: 0, max: DAY_S }, p: { range: yPrice } },
+        scales: { x: { time: false, auto: false, min: 0, max: DAY_S }, p: { auto: false, min: yp[0], max: yp[1] } },
         axes: [xAxis(false), yAxis("p", fixed)],
-        series: [{}, { scale: "p", stroke: C.price, width: 1.5, points: { show: false }, paths: pricePaths }],
+        series: series("p"),
         hooks: {
           drawClear: [drawRegions],
           draw: [
             function (u) {
+              if (stale(u)) return; // el eje Y se está poniendo al día: la pasada que sigue pinta
+              drawPrice(u);
               drawMessages(u);
               var now = performance.now();
               if (metrics.first_paint_ms === null) {
@@ -1055,6 +1190,7 @@
                     (now - started).toFixed(1) + " ms desde que arrancó el script)"
                 );
               }
+              redrawPanelDone(u);
               if (thetaT0 !== null) {
                 var dt = now - thetaT0;
                 thetaT0 = null;
@@ -1067,19 +1203,18 @@
           setScale: [onScale],
         },
       }),
-      cur.priceData,
+      stub(),
       $("price")
     );
 
-    // Confirmaciones multiescala: la barra completa son los θ que confirman en la columna y la
-    // marca intensa el máximo de θ que confirman en el mismo instante. Se lee por longitud.
-    var bars = uPlot.paths.bars({ size: [0.9, Infinity, 1], align: 1 });
-    conf = new uPlot(
+    // Confirmaciones: la barra completa son los θ que confirman en el píxel y la marca intensa el
+    // máximo de θ que confirman en el mismo instante. Se lee por longitud.
+    confP = new uPlot(
       Object.assign({}, shared, {
         width: s.w,
         height: s.hc,
         padding: [4, 12, 0, 0],
-        scales: { x: { time: false, auto: false, min: 0, max: DAY_S }, c: { range: yConfirms } },
+        scales: { x: { time: false, auto: false, min: 0, max: DAY_S }, c: { auto: false, min: yc[0], max: yc[1] } },
         axes: [
           xAxis(false),
           Object.assign(
@@ -1089,47 +1224,33 @@
             { incrs: [1, 2, 5, 10, 20, 50, 100] }
           ),
         ],
-        series: [
-          {},
-          { scale: "c", stroke: C.confirms, fill: C.confirms, width: 0, points: { show: false }, paths: bars },
-          { scale: "c", stroke: C.simul, fill: C.simul, width: 0, points: { show: false }, paths: bars },
-        ],
-        hooks: { draw: [drawConfirmsMessage], setCursor: [onCursor], setScale: [onScale] },
+        series: series("c"),
+        hooks: { draw: [drawConfirms, redrawPanelDone], setCursor: [onCursor], setScale: [onScale] },
       }),
-      cur.confData,
+      stub(),
       $("confirms")
     );
 
-    vol = new uPlot(
+    volP = new uPlot(
       Object.assign({}, shared, {
         width: s.w,
         height: s.hv,
         padding: [4, 12, 0, 0],
-        scales: { x: { time: false, auto: false, min: 0, max: DAY_S }, v: { range: yVolume } },
+        scales: { x: { time: false, auto: false, min: 0, max: DAY_S }, v: { auto: false, min: yv[0], max: yv[1] } },
         axes: [
           xAxis(true),
           yAxis("v", function (v) {
             return v >= 10 ? v.toFixed(0) : v.toFixed(2);
           }),
         ],
-        series: [
-          {},
-          {
-            scale: "v",
-            stroke: C.volume,
-            fill: C.volume,
-            width: 0,
-            points: { show: false },
-            paths: bars,
-          },
-        ],
-        hooks: { draw: [drawVolumeMessage], setCursor: [onCursor], setScale: [onScale] },
+        series: series("v"),
+        hooks: { draw: [drawVolume, redrawPanelDone], setCursor: [onCursor], setScale: [onScale] },
       }),
-      cur.volData,
+      stub(),
       $("volume")
     );
 
-    plots = [price, conf, vol];
+    plots = [pricePlot, confP, volP];
     plots.forEach(function (u) {
       u.over.addEventListener("dblclick", resetZoom);
       u.over.addEventListener("mouseenter", function () { hovered = u; });
@@ -1138,38 +1259,31 @@
     renderNav(null);
   }
 
-  function renderFooter() {
-    var dur = cur.colDur;
-    $("f-level").textContent =
-      "nivel " + cur.w + " · " + (Number.isInteger(dur) ? dur : dur.toFixed(2)) + " s por columna" +
-      " · puntos M4 sobre el segmento desde " + DOT_MIN_COL_PX + " px por columna · precio: " +
-      (drawMode === "points" ? "segmentos y puntos" : "segmentos mín–máx");
+  function renderFooter(f) {
+    var perPx = 1 / f.k;
+    var text =
+      plural(f.n, "tick", "ticks") + " en la vista · " +
+      (perPx >= 1 ? perPx.toFixed(perPx >= 100 ? 0 : 1) + " ms" : (perPx * 1000).toFixed(0) + " µs") + " por píxel";
+    $("f-view").textContent = text;
   }
 
   /* ---------- Arranque ---------- */
 
-  loadEvents();
   var thetaT0 = null;
-  var first = pickLevel(DAY_S);
-  cur = null;
-  while (first !== null && cur === null) {
-    cur = loadLevel(first);
-    if (cur === null) first = pickLevel(DAY_S); // el nivel quedó inutilizable: el siguiente
-  }
-  if (!cur) {
-    setReason("tiles", "no hay ningún nivel de precio utilizable");
-    renderStatus();
-    panels.textContent = "Sin tiles de precio: el día no se puede dibujar.";
+  loadTicks();
+  loadEvents();
+  renderStatus();
+  if (!ticks) {
+    panels.textContent = "Sin ticks: el día no se puede dibujar.";
     return;
   }
-  renderStatus();
-  renderFooter();
   build();
 
   select.addEventListener("change", function () {
     thetaT0 = performance.now();
+    redrawStart(["p"]);
     selectTheta(select.value);
-    price.redraw(false); // solo repinta: el bloque de θ ya está en memoria
+    pricePlot.redraw(false); // solo repinta: los eventos de los θ ya están en memoria
   });
 
   document.addEventListener("keydown", function (e) {
@@ -1178,9 +1292,12 @@
 
   window.addEventListener("resize", function () {
     var s = sizes();
-    price.setSize({ width: s.w, height: s.hp });
-    conf.setSize({ width: s.w, height: s.hc });
-    vol.setSize({ width: s.w, height: s.hv });
-    queueLevel();
+    redrawStart(["p", "c", "v"]);
+    pricePlot.setSize({ width: s.w, height: s.hp });
+    confP.setSize({ width: s.w, height: s.hc });
+    volP.setSize({ width: s.w, height: s.hv });
+    // Los píxeles cambiaron: el marco y los ejes Y se calculan de nuevo con la misma ventana.
+    frame = null;
+    plots.forEach(applyY);
   });
 })();

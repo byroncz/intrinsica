@@ -1,4 +1,4 @@
-"""Capa viz de intrinsica: reduce un día de ticks y eventos DC a tiles M4."""
+"""Capa viz de intrinsica: la página de un día con sus ticks y los eventos DC de sus θ."""
 
 import os
 

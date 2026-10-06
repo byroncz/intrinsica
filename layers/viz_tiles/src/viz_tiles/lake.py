@@ -13,10 +13,12 @@ import functools
 import hashlib
 import re
 from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
 import google_crc32c
+import numpy as np
 import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.fs as pafs
@@ -28,9 +30,10 @@ EVENTS = "events.parquet"
 CARRY_OVER = "carry_over.parquet"
 
 TICK_COLUMNS = ("agg_trade_id", "price", "quantity", "transact_time")
+# Lo que un día necesita de cada evento: los ids de su referencia y su extremo
+# (qué eventos tocan el día) y los tres tiempos y el sentido (`events.bin`).
 EVENT_COLUMNS = (
     "reference_agg_trade_id",
-    "confirm_agg_trade_id",
     "extreme_agg_trade_id",
     "reference_time",
     "confirm_time",
@@ -263,39 +266,76 @@ def _overlaps(
     return (high is None or bounds[0] <= high) and (low is None or bounds[1] >= low)
 
 
-def read_events(path: str, lo: int, hi: int) -> pa.Table:
-    """Los eventos de `events.parquet` que tocan los ticks de id `[lo, hi]`.
+@dataclass(frozen=True)
+class MonthEvents:
+    """Los eventos de un θ en un mes, en arreglos de NumPy y ordenados por referencia.
 
-    Un evento toca el rango si `reference < hi` y `extreme >= lo`. Salta por sus
-    estadísticas los row groups que no pueden tener uno (el archivo va ordenado
-    por `confirm_time`, y los eventos se encadenan, así que son pocos) y lee solo
-    los demás, uno a la vez.
+    Se leen una sola vez por mes y de ahí salen los de cada día (`touching`): son
+    41 bytes por evento, y un mes de 50 θ trae decenas de miles. Los tiempos son
+    µs UTC; `direction` es 1 (alza) o -1 (baja).
+    """
+
+    reference_id: np.ndarray
+    extreme_id: np.ndarray
+    reference_time: np.ndarray
+    confirm_time: np.ndarray
+    extreme_time: np.ndarray
+    direction: np.ndarray
+
+    def __len__(self) -> int:
+        return len(self.reference_id)
+
+    @classmethod
+    def empty(cls) -> MonthEvents:
+        return cls(*(np.empty(0, np.int64) for _ in range(5)), np.empty(0, np.int8))
+
+    def touching(self, first_id: int, last_id: int) -> MonthEvents:
+        """Los eventos que tocan los ticks de id `[first_id, last_id]`.
+
+        Un evento toca el rango si `reference < last_id` y `extreme >= first_id`.
+        """
+        keep = (self.reference_id < last_id) & (self.extreme_id >= first_id)
+        return MonthEvents(*(column[keep] for column in vars(self).values()))
+
+
+def read_month_events(path: str) -> MonthEvents:
+    """Todos los eventos de `events.parquet`, de una sola lectura, row group a row group.
+
+    Cada row group se pasa a arreglos de NumPy y se suelta antes de leer el que
+    sigue. Lanza `ValueError` si las referencias no son estrictamente crecientes
+    una vez ordenadas (dos eventos con el mismo tick de referencia).
     """
     with open_parquet(path) as parquet:
-        references = column_bounds(parquet, "reference_agg_trade_id")
-        extremes = column_bounds(parquet, "extreme_agg_trade_id")
-        parts = []
+        parts: list[MonthEvents] = []
         for i in range(parquet.num_row_groups):
-            if not _overlaps(references[i], None, hi - 1):
-                continue
-            if not _overlaps(extremes[i], lo, None):
-                continue
             group = parquet.read_row_group(
                 i, columns=list(EVENT_COLUMNS), use_threads=False
             )
-            keep = pc.and_(
-                pc.less(group["reference_agg_trade_id"], hi),
-                pc.greater_equal(group["extreme_agg_trade_id"], lo),
+            parts.append(
+                MonthEvents(
+                    *(
+                        group[name].to_numpy().astype(dtype, copy=False)
+                        for name, dtype in zip(
+                            EVENT_COLUMNS,
+                            (np.int64,) * 5 + (np.int8,),
+                            strict=True,
+                        )
+                    )
+                )
             )
-            parts.append(group.filter(keep))
-        if not parts:
-            return pa.table(
-                {
-                    name: pa.array([], pa.int8() if name == "direction" else pa.int64())
-                    for name in EVENT_COLUMNS
-                }
-            )
-        return pa.concat_tables(parts)
+            del group
+    if not parts:
+        return MonthEvents.empty()
+    events = MonthEvents(
+        *(np.concatenate([getattr(p, name) for p in parts]) for name in vars(parts[0]))
+    )
+    del parts
+    if np.any(np.diff(events.reference_id) <= 0):
+        order = np.argsort(events.reference_id, kind="stable")
+        events = MonthEvents(*(column[order] for column in vars(events).values()))
+        if np.any(np.diff(events.reference_id) <= 0):
+            raise ValueError(f"{path}: hay eventos con la misma referencia")
+    return events
 
 
 def find_extreme(path: str, reference_agg_trade_id: int) -> tuple[int, int] | None:

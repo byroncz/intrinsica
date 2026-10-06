@@ -1,89 +1,51 @@
-"""Constantes del contrato de tiles de viz.
+"""Constantes del contrato de la página de un día de viz.
 
 Contrato en `docs/data-contracts.md` ("Tiles de viz") y TRD-viz §7. Una prueba
 (`tests/test_tiles_contract_doc.py`) rompe el CI si esa sección se desvía de
 estas constantes.
 """
 
-from dataclasses import dataclass
-
-# 1.2.0: el día trae los eventos exactos de cada θ (`events.bin`), los ticks por
-# columna (`count-<w>.u32`) y las confirmaciones multiescala (`confirms-<w>.u8` y
-# `simul-<w>.u8`); el índice los lista y cada θ lleva su `events_offset` (TRD-viz
-# §7.2 a §7.5). Los arreglos de 1.1.0 no cambian.
-TILES_VERSION = "1.2.0"
+# 2.0.0: la página del día lleva los ticks (`ticks.bin`, deltas en varint) y los
+# eventos exactos (`events.bin`); el navegador deriva precio, volumen y
+# confirmaciones por píxel al dibujar. Desaparecen los arreglos por nivel
+# (`price-<w>`, `volume-<w>`, `dir-<w>`, `count-<w>`, `confirms-<w>`, `simul-<w>`)
+# y la noción de nivel (TRD-viz §7 y ADR-VZ-14).
+TILES_VERSION = "2.0.0"
 
 DAY_US = 86_400_000_000
 DAY_S = 86_400
 DAY_MS = 86_400_000
 
-# Niveles de zoom: columnas en que se divide el día UTC completo (ADR-VZ-08).
-# Potencias de 2 para que la columna de un tick se calcule con enteros y para
-# que M4 sea componible: un nivel grueso sale de dos columnas del fino.
-LEVELS = (128, 256, 512, 1024, 2048, 4096)
-FINEST = LEVELS[-1]
-
 # Escala de price y quantity en L1: DECIMAL(18, 8).
 L1_SCALE = 10**8
 
-# Unidades de precio del tile por unidad de la cotización (`price_scale`): fija
-# por activo e igual a su tick (TRD-viz §7.3). Nunca se elige por día: un precio
-# fuera del tick se redondea al tick más cercano y se avisa (`price_rounded`).
+# Unidades de precio de `ticks.bin` por unidad de la cotización (`price_scale`):
+# fija por activo e igual a su tick (TRD-viz §7.3). Nunca se elige por día: un
+# precio fuera del tick se redondea al tick más cercano y se avisa (`price_rounded`).
 PRICE_SCALE_BY_ASSET = {"BTCUSDT": 100}
 
-# Centinela de `p` en una columna sin ticks (reemplaza al NaN del float).
-EMPTY_PRICE = -(2**31)
 INT32_MAX = 2**31 - 1
 
-# Estados del tile de dirección (uint8).
-STATE_NONE = 0
-STATE_CONFIRM_UP = 1
-STATE_OVERSHOOT_UP = 2
-STATE_CONFIRM_DOWN = 3
-STATE_OVERSHOOT_DOWN = 4
-STATES = {
-    STATE_NONE: "sin evento",
-    STATE_CONFIRM_UP: "confirmación alza",
-    STATE_OVERSHOOT_UP: "overshoot alza",
-    STATE_CONFIRM_DOWN: "confirmación baja",
-    STATE_OVERSHOOT_DOWN: "overshoot baja",
-}
+# `ticks.bin`: una secuencia de tramos de hasta `TICKS_CHUNK` ticks. Cada tramo
+# lleva una cabecera de `TICKS_CHUNK_HEADER` (uint32 little-endian: los ticks del
+# tramo y los bytes de cada una de sus tres secciones) y esas tres secciones de
+# enteros varint (LEB128, 7 bits por byte, el bit alto marca que sigue otro byte),
+# cada una con los valores del tramo y en este orden:
+#   1. Δtiempo en ms desde el tick anterior (el primero del día, desde su inicio).
+#   2. Δprecio en unidades de 1/price_scale, en zigzag (el primero del día, desde 0).
+#   3. cantidad en unidades de 10⁻⁸ (sin signo).
+# El primer tick de un tramo es relativo al último del tramo anterior. Todos los
+# tramos salen llenos salvo el último, así que los bytes no dependen de cómo se
+# partan los lotes. Los ticks van en el orden del consolidado de L1:
+# `transact_time` y, dentro de un mismo instante, `agg_trade_id`.
+TICKS_FILE = "ticks.bin"
+TICK_SECTIONS = ("dt_ms", "dprice_zigzag", "quantity_1e8")
+TICKS_CHUNK = 65_536
+TICKS_CHUNK_HEADER = "<4I"
 
-
-@dataclass(frozen=True)
-class TileFile:
-    """Un tipo de archivo de tile: nombre, tipo de valor y valores por columna."""
-
-    kind: str
-    template: str
-    dtype: str
-    per_column: int
-
-
-# `price-<w>.i32` guarda dos bloques de 4w enteros: el tiempo (uint32, ms desde
-# el inicio del día) y el precio (int32, unidades de 1/price_scale) de los cuatro
-# puntos M4 de cada columna. El tiempo no pasa de 86 400 000, así que uint32 e
-# int32 dan los mismos bytes y el arreglo en RAM es uno solo, `<i4`.
-# `dir-<w>.u8` guarda un bloque de `w` bytes por θ, en el orden de `thetas` del
-# índice: `per_column` es por θ.
-TILE_FILES = (
-    TileFile("price", "price-{w}.i32", "<i4", 8),
-    TileFile("volume", "volume-{w}.f32", "<f4", 1),
-    TileFile("dir", "dir-{w}.u8", "u1", 1),
-    TileFile("count", "count-{w}.u32", "<u4", 1),
-    TileFile("confirms", "confirms-{w}.u8", "u1", 1),
-    TileFile("simul", "simul-{w}.u8", "u1", 1),
-)
-FILE_BY_KIND = {f.kind: f for f in TILE_FILES}
-# Los tipos de tile por nivel, en el orden de TILE_FILES.
-KINDS = tuple(f.kind for f in TILE_FILES)
-
-# `count-<w>.u32` son los ticks de cada columna; `confirms-<w>.u8` y `simul-<w>.u8`
-# las confirmaciones multiescala del día (TRD-viz §7.4): no dependen de un θ.
-# Los eventos exactos de todos los θ del día van en un solo archivo (§7.5): cuatro
-# secciones de `N` valores (referencia, confirmación y extremo en int32 y un byte de
-# banderas), con `N` el total de eventos. El θ `k` ocupa de `events_offset` a
-# `events_offset + events - 1` en cada sección.
+# `events.bin`: cuatro secciones de `N` valores (referencia, confirmación y
+# extremo en int32 y un byte de banderas), con `N` el total de eventos. El θ `k`
+# ocupa de `events_offset` a `events_offset + events - 1` en cada sección.
 EVENTS_FILE = "events.bin"
 EVENT_BYTES = 13
 
@@ -100,7 +62,7 @@ FLAGS = {
     FLAG_CONFIRM_CLIPPED: "confirmación recortada",
     FLAG_EXTREME_CLIPPED: "extremo recortado",
 }
-# Máximo de θ que caben en `confirms` y `simul` (uint8).
+# Máximo de θ de un día: el navegador los guarda en un byte (`Uint8Array`).
 MAX_THETAS = 255
 
 INDEX_FILE = "index.json"
@@ -119,13 +81,10 @@ INDEX_FIELDS = (
     ("t0", "integer"),
     ("price_scale", "integer"),
     ("ticks", "integer"),
-    ("levels", "array"),
-    ("price", "object"),
-    ("volume", "object"),
-    ("dir", "object"),
-    ("count", "object"),
-    ("confirms", "object"),
-    ("simul", "object"),
+    ("ticks_chunk", "integer"),
+    ("first_agg_trade_id", "integer"),
+    ("last_agg_trade_id", "integer"),
+    ("ticks_file", "string"),
     ("events", "string"),
     ("page", "string"),
     ("thetas", "array"),
@@ -138,11 +97,6 @@ INDEX_FIELDS = (
 
 # Campos de `latest.json`.
 LATEST_FIELDS = ("tiles_version", "provider", "market", "asset", "day")
-
-
-def tile_name(kind: str, w: int) -> str:
-    """Nombre del archivo de `kind` en el nivel `w`."""
-    return FILE_BY_KIND[kind].template.format(w=w)
 
 
 def price_scale(asset: str) -> int:
