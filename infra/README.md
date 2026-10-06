@@ -559,8 +559,9 @@ se rechazan. Es una sola tarea que recorre los meses del rango en orden.
 despliega la imagen nueva), *Actions → Run job* con `job` = `viz-render`: mismos
 `from` y `to` (meses `YYYY-MM`, vacíos = el mes anterior) y mismo `force`
 (regenera aunque la huella de la plantilla no haya cambiado; exige `from`);
-`series_start`, `script` y `args` se rechazan. Lee solo los tiles del bucket: un
-día sin `index.json` deja `input_missing` y el job termina en rojo. Un
+`series_start`, `script` y `args` se rechazan. Lee solo los tiles del bucket: en
+un rango, los días sin `index.json` se omiten; `input_missing` (job en rojo) sale
+si un mes no tiene ningún día con tiles o si un día tiene arreglos rotos. Un
 re-render completo del histórico son unas 3 300 lecturas de `index.json` más 18
 arreglos por día y otras tantas escrituras: minutos de cómputo y centavos de
 operaciones, frente a repetir el backfill desde L1 y L2. Un rango que no

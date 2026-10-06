@@ -149,10 +149,12 @@ frente a repetir el backfill desde L1 y L2. Esa diferencia es la razón de
 conservar los tiles como artefacto separado.
 
 Cada día deja un `render_summary` (`skipped`, hash de la plantilla, bytes de la
-página guardados y descomprimidos); un día del rango sin `index.json` deja `input_missing` (`what = tiles`)
-y el job termina con código 1. Un día cuya página ya trae la misma
-`tiles_version` y la misma huella de plantilla se salta, salvo con `force`. Si el
-rango incluye el último día, `latest.html` se actualiza con él.
+página guardados y descomprimidos). En un rango, los días sin `index.json` se
+omiten; `input_missing` (`what = tiles`, código 1) sale si un mes no tiene ningún
+día con tiles o si un día tiene arreglos rotos. Un día suelto sin `index.json`
+solo se detecta con `--day`, que `run-job.yml` no expone. Un día cuya página ya
+trae la misma `tiles_version` y la misma huella de plantilla se salta, salvo con
+`force`. Si el rango incluye el último día, `latest.html` se actualiza con él.
 
 ### uPlot
 
