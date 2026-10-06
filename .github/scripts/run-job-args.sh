@@ -8,7 +8,8 @@
 #   job:   <capa>-<modo>; el modo (--mode) es lo que sigue al primer guion
 #   force: "true" agrega --force; cualquier otro valor, nada
 #   script, args: solo ops-script (ITSC-298); los demás jobs los ignoran
-#   viz-tiles (ITSC-307) rechaza series_start, script y args; to igual a from se omite
+#   viz-tiles (ITSC-307) y viz-render (ITSC-310) rechazan series_start, script y
+#   args; to igual a from se omite
 #
 # --to se omite si es igual a from, salvo en l2-backfill (ITSC-292). En L1 la
 # CLI asume to = from cuando falta, y la de l2-monthly rechaza --to. En
@@ -48,11 +49,11 @@ if [[ "$job" == ops-script ]]; then
   exit 0
 fi
 
-# viz-tiles (ITSC-307): meses YYYY-MM y force, nada más. La CLI no define
-# --series-start y no tiene script: argparse saldría con 2 dentro de Cloud Run y
-# gastaría una ejecución.
-if [[ "$job" == viz-tiles && ( -n "$series_start" || -n "$script" || -n "$script_args" ) ]]; then
-  echo "run-job-args: viz-tiles no usa series_start, script ni args" >&2
+# viz-tiles (ITSC-307) y viz-render (ITSC-310): meses YYYY-MM y force, nada
+# más. La CLI no define --series-start y no tiene script: argparse saldría con 2
+# dentro de Cloud Run y gastaría una ejecución.
+if [[ ( "$job" == viz-tiles || "$job" == viz-render ) && ( -n "$series_start" || -n "$script" || -n "$script_args" ) ]]; then
+  echo "run-job-args: $job no usa series_start, script ni args" >&2
   exit 2
 fi
 

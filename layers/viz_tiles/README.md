@@ -112,6 +112,48 @@ decodificados, primer trazo, cambio de θ) van a la consola.
 La plantilla va en la imagen (`VIZ_TEMPLATE_DIR=/app/site`); en el repo se lee
 de `layers/viz_tiles/site/`.
 
+### Compartir un día
+
+Compartir un día es compartir su `index.html`; no hay exportación aparte (la de
+zip se descartó: la página ya es el archivo exportable). Hay dos caminos:
+
+1. **Abrirlo en el bucket**, con la cuenta de Google del visor (`VIZ_VIEWER`):
+   `https://storage.cloud.google.com/<bucket>/tiles/provider=binance/market=spot/asset=BTCUSDT/day=YYYY-MM-DD/index.html`,
+   o `.../tiles/latest.html` para el último día escrito.
+2. **Descargarlo y enviarlo**:
+
+   ```bash
+   gcloud storage cp \
+     "gs://<bucket>/tiles/provider=binance/market=spot/asset=BTCUSDT/day=YYYY-MM-DD/index.html" .
+   ```
+
+   El archivo descomprimido abre con doble clic en un navegador limpio, sin
+   servidor ni red: lo prueba
+   `test_downloaded_gzip_page_of_the_smoke_day_is_self_contained`.
+
+`<bucket>` es `<proyecto>-viz`. En el bucket la página está en gzip
+(`Content-Encoding: gzip`). Si lo descargado empieza con los bytes `1f 8b` (el
+navegador no lo abre), `gunzip -c index.html > dia.html` lo deja listo para
+enviar. Qué entrega cada herramienta (descomprimido o no) está sin verificar
+contra el bucket real: la primera descarga del humano lo confirma.
+
+### Re-render del histórico
+
+Cuando cambia la plantilla (`site/`: HTML, JS, CSS o uPlot) se sube `VERSION`, se
+despliega la imagen y se corre el job `viz-render` (*Actions → Run job*, ver
+[infra/README.md](../../infra/README.md#stack-viz-tiles-de-visualización)) sobre
+el rango que se quiera rehacer. Lee solo los tiles del bucket, sin L1 ni L2: un
+re-render completo son unas 3 300 lecturas de `index.json` y de 18 arreglos por
+día y otras tantas escrituras, minutos de cómputo y centavos de operaciones,
+frente a repetir el backfill desde L1 y L2. Esa diferencia es la razón de
+conservar los tiles como artefacto separado.
+
+Cada día deja un `render_summary` (`skipped`, hash de la plantilla, bytes de la
+página); un día del rango sin `index.json` deja `input_missing` (`what = tiles`)
+y el job termina con código 1. Un día cuya página ya trae la misma
+`tiles_version` y la misma huella de plantilla se salta, salvo con `force`. Si el
+rango incluye el último día, `latest.html` se actualiza con él.
+
 ### uPlot
 
 `site/vendor/uPlot.iife.min.js` y `uPlot.min.css` son uPlot 1.6.32, de

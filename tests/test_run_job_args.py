@@ -136,3 +136,45 @@ def test_viz_tiles_rechaza_series_start_script_y_args(extra):
     )
     assert out.returncode == 2
     assert "viz-tiles no usa" in out.stderr
+
+
+def test_viz_render_sin_rango_solo_pasa_el_modo():
+    # Vacío, la CLI toma el mes anterior.
+    assert args("viz-render") == "--mode,render"
+
+
+def test_viz_render_un_mes_omite_to_igual_a_from():
+    assert args("viz-render", "2023-03", "2023-03") == "--mode,render,--from=2023-03"
+
+
+def test_viz_render_rango_pasa_to():
+    assert (
+        args("viz-render", "2023-03", "2023-05")
+        == "--mode,render,--from=2023-03,--to=2023-05"
+    )
+
+
+def test_viz_render_force_va_al_final():
+    assert (
+        args("viz-render", "2023-03", "2023-05", "true")
+        == "--mode,render,--from=2023-03,--to=2023-05,--force"
+    )
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        ("2023-03",),  # series_start
+        ("", SCRIPT_URI),  # script
+        ("", "", "--a 1"),  # args
+    ],
+)
+def test_viz_render_rechaza_series_start_script_y_args(extra):
+    out = subprocess.run(
+        [SCRIPT, "viz-render", "2023-03", "", "", *extra],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert out.returncode == 2
+    assert "viz-render no usa" in out.stderr

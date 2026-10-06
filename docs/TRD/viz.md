@@ -541,7 +541,7 @@ El pico de una unidad es **O(lote)**: un row group de L1, o uno de eventos, más
 - **Sin argumentos**, el mes anterior (UTC), como `tiles`; con `--from` y `--to`, los días de cada mes del rango que tengan `index.json`; con `--day`, ese día.
 - **Entradas faltantes**: un `--day` sin `index.json`, un mes pedido sin ningún día con tiles, un arreglo que falta o que no coincide con el `content_hash` del índice dejan `input_missing` con `what = "tiles"` (con `reason` en los dos últimos) y código 1; el día **no se reescribe**.
 - **Memoria**: los 18 arreglos de un día se leen, se codifican y se sueltan de uno en uno (el mayor, `price-4096.i32`, pesa 131 KB); nunca más de un día en RAM.
-- El job `viz-render` y su disparo desde `run-job.yml` los trae la hija 7 (ITSC-310).
+- El job `viz-render` (2 vCPU, 2 GiB, 3 600 s; solo `VIZ_TILES_ROOT` y `VIZ_DQ_ROOT`, sin acceso a L1 ni a L2) y su disparo desde `run-job.yml` los trajo ITSC-310.
 
 ### 8.4 Modo y nombre de job
 
@@ -645,7 +645,7 @@ El backfill de tiles, tal como lo estima la servilleta, suma ≈ 3,9 USD de list
 ## 11. Operaciones
 
 - **Imagen:** una sola, `viz_tiles` (RF-15), con `--mode tiles` y `--mode render`. `layers/viz_tiles/VERSION` sube con todo cambio de código, como en L1 y L2 (`check-layer-versions.sh`); la capa entra en `LAYERS` de `ci.yml`. La **plantilla** de la página (`layers/viz_tiles/site/`) es código de la capa y viaja en la imagen (`/app/site`, `VIZ_TEMPLATE_DIR`): sin ella no hay página que rellenar. Cambiarla sube `VERSION` y se vuelve a aplicar con `--mode render`.
-- **Jobs:** `viz-tiles` y `viz-render`, del módulo `layer` (§8.4). El job `viz-render` y su disparo desde `run-job.yml` son de la hija 7 (ITSC-310).
+- **Jobs:** `viz-tiles` y `viz-render`, del módulo `layer` (§8.4). `viz-render` y su disparo desde `run-job.yml` son de ITSC-310.
 - **Orquestación:** Cloud Workflows lanza `viz-tiles` al terminar `l2-monthly` (sin argumentos: mes anterior). El backfill lo lanza el humano desde `run-job.yml`.
 - **Variables de entorno** (como `L2_*`: raíz local o `gs://…`; un argumento de línea de comandos, cuando exista, gana):
 

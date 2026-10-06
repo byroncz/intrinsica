@@ -117,3 +117,34 @@ def test_viz_tiles_rechaza_script():
     out = run("viz-tiles", "", "", URI)
     assert out.returncode == 2
     assert "no usa script" in out.stderr
+
+
+@pytest.mark.parametrize(
+    ("desde", "hasta"),
+    [("", ""), ("2023-03", ""), ("2023-03", "2023-03"), ("2023-03", "2024-01")],
+)
+def test_viz_render_es_una_sola_unidad_para_todo_el_rango(desde, hasta):
+    # Como viz-tiles: una tarea recorre los meses; vacíos, el mes anterior.
+    assert units("viz-render", desde, hasta) == ["1"]
+
+
+@pytest.mark.parametrize(
+    ("desde", "hasta", "mensaje"),
+    [
+        ("2023-13", "", "from inválido"),
+        ("2023-03-01", "", "from inválido"),
+        ("2023-03", "2023-3", "to inválido"),
+        ("2023-05", "2023-03", "menor que from"),
+        ("", "2023-03", "to exige from"),
+    ],
+)
+def test_viz_render_rechaza_rangos_invalidos(desde, hasta, mensaje):
+    out = run("viz-render", desde, hasta)
+    assert out.returncode == 2
+    assert mensaje in out.stderr
+
+
+def test_viz_render_rechaza_script():
+    out = run("viz-render", "", "", URI)
+    assert out.returncode == 2
+    assert "viz-render no usa script" in out.stderr

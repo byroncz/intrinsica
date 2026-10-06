@@ -100,9 +100,8 @@ def test_page_embeds_the_arrays_byte_for_byte(tmp_path):
     assert len(files) == 18 and index["page"] == PAGE_FILE
 
 
-def test_page_is_one_self_contained_document(tmp_path):
-    _, _, directory = day_files(tmp_path)
-    html = (directory / PAGE_FILE).read_text()
+def assert_self_contained(html: str) -> None:
+    """La página no referencia nada fuera de sí misma: se abre por `file://` sin servidor."""
     # Los marcadores de la plantilla se reemplazaron todos.
     assert "@@" not in html
     # Lo único con una URL es el rótulo de licencia de uPlot, un comentario.
@@ -112,6 +111,11 @@ def test_page_is_one_self_contained_document(tmp_path):
     )
     assert html.count("<script") == 3 and html.count("<style") == 1
     assert html.lstrip().lower().startswith("<!doctype html>")
+
+
+def test_page_is_one_self_contained_document(tmp_path):
+    _, _, directory = day_files(tmp_path)
+    assert_self_contained((directory / PAGE_FILE).read_text())
 
 
 def test_page_closing_tag_cannot_appear_inside_the_data(tmp_path):
@@ -432,3 +436,20 @@ def test_page_is_served_unchanged_by_a_static_http_server(tmp_path):
             assert response.headers["Content-Type"].startswith("text/html")
         server.shutdown()
     assert served == (directory / PAGE_FILE).read_bytes()
+
+
+def test_downloaded_gzip_page_of_the_smoke_day_is_self_contained(lake):
+    """Lo que se baja de un bucket (`gcloud storage cp`) es el gzip del día del humo.
+
+    Compartir un día es enviar ese archivo: descomprimido, abre desde disco sin
+    pedir nada fuera de sí mismo, y trae los 18 arreglos del día.
+    """
+    directory = day_path(lake)
+    index = json.loads((directory / "index.json").read_text())
+    arrays = [(n, (directory / n).read_bytes()) for n in render.expected_names(index)]
+    page = render.render_day(index, arrays, compress=True)
+    assert page[:2] == b"\x1f\x8b"
+    html = gzip.decompress(page).decode()
+    assert_self_contained(html)
+    data = embedded(html)
+    assert len(data["files"]) == 18 and data["index"] == index

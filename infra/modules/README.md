@@ -20,7 +20,10 @@ el Cloud Run Job `<layer>-<modo>` (args por defecto `--mode <modo>`, misma
 imagen, CPU, RAM y env) y la service account `<layer>-<modo>` con solo su
 acceso. Hay un job por modo porque la service account se fija en la plantilla
 del Job, no en la ejecución: la única forma de dar a cada modo su propia
-identidad y permisos mínimos (TRD-L1 §11) es un job por modo. Los outputs
+identidad y permisos mínimos (TRD-L1 §11) es un job por modo. Un modo puede
+sobrescribir `timeout`, `cpu` y `memory` (opcionales; sin ellos usa los del
+módulo) y `env`, que reemplaza al `env` del módulo en vez de mezclarse: así un
+modo que no lee un bucket tampoco recibe su ruta (ITSC-310). Los outputs
 `job_names` y `service_account_emails` son mapas indexados por modo.
 
 ## Qué no contiene
