@@ -3,6 +3,7 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 
 import numpy as np
+import pyarrow.fs as pafs
 import pytest
 from viz_helpers import DOWN, UP, events, ticks_batch
 from viz_tiles.contract import (
@@ -175,6 +176,40 @@ def test_latest_of_another_series_is_not_overwritten(tmp_path):
         )
     assert (tmp_path / "latest.json").read_text() == before
     assert not (tmp_path / "provider=binance/market=spot/asset=ETHUSDT").exists()
+
+
+class BucketFS:
+    """Imita GCS con rol por prefijo: `create_dir` pide `storage.buckets.get` y falla;
+    escribir un objeto crea su ruta implícita."""
+
+    def __init__(self) -> None:
+        self._fs = pafs.LocalFileSystem()
+
+    def create_dir(self, path, **kwargs):
+        raise PermissionError("storage.buckets.get denegado")
+
+    def open_output_stream(self, path, **kwargs):
+        self._fs.create_dir(str(Path(path).parent), recursive=True)
+        return self._fs.open_output_stream(path)
+
+    def __getattr__(self, name):
+        return getattr(self._fs, name)
+
+
+def test_write_day_does_not_create_directories_outside_local_disk(
+    tmp_path, monkeypatch
+):
+    import viz_tiles.write as module
+
+    real = module.resolve_fs
+    monkeypatch.setattr(
+        module, "resolve_fs", lambda root: (BucketFS(), real(root)[1]), raising=True
+    )
+    write(tmp_path)
+    directory = Path(day_dir(tmp_path, **KEY, day=DAY))
+    # 18 arreglos, `index.json` e `index.html`; `latest.*` van en la raíz.
+    assert len(list(directory.iterdir())) == 20
+    assert (tmp_path / "latest.json").exists() and (tmp_path / "latest.html").exists()
 
 
 def test_index_is_replaced_not_appended_on_rewrite(tmp_path):
