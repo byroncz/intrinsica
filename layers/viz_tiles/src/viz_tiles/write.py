@@ -8,7 +8,7 @@ medias, el día queda sin índice y la siguiente corrida lo rehace. La página
 
 import hashlib
 import json
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -28,7 +28,7 @@ from viz_tiles.contract import (
     TILES_VERSION,
 )
 from viz_tiles.events import EventsBuffer
-from viz_tiles.render import Template, render_day
+from viz_tiles.render import Template, render_day_to
 from viz_tiles.ticks import DayTicks, day_start_us
 
 # Metadatos de cada clase de objeto (TRD-viz §7.2). Los binarios son inmutables;
@@ -111,6 +111,27 @@ def write_page(fs: pafs.FileSystem, path: str, page: bytes) -> None:
     """Escribe una página ya renderizada (con `compress` igual a `compresses_pages(fs)`)."""
     meta = PAGE_META | (GZIP_META if compresses_pages(fs) else {})
     _put_whole(fs, path, page, meta)
+
+
+def stream_page(
+    fs: pafs.FileSystem,
+    path: str,
+    index: dict,
+    arrays: Iterator[tuple[str, Sequence[memoryview]]],
+    template: Template | None,
+) -> None:
+    """Renderiza la página directo al objeto de salida, sin armarla en RAM.
+
+    Mismos metadatos y misma regla de "entero o nada" que `write_page`.
+    """
+    compress = compresses_pages(fs)
+    meta = PAGE_META | (GZIP_META if compress else {})
+    local = isinstance(fs, pafs.LocalFileSystem)
+    target = f"{path}.tmp" if local else path
+    with fs.open_output_stream(target, metadata=meta) as out:
+        render_day_to(out, index, arrays, template=template, compress=compress)
+    if local:
+        fs.move(target, path)
 
 
 def _exists(fs: pafs.FileSystem, path: str) -> bool:
@@ -208,12 +229,16 @@ def write_day(
         "image_version": image_version,
     }
     index = {name: values[name] for name, _ in INDEX_FIELDS}
+
     # La página lleva los mismos bytes: se codifican por tramos desde los buffers
-    # que ya están en RAM, y se escribe antes del índice (marca de commit).
-    page = render_day(index, parts(), template=template, compress=compresses_pages(fs))
-    write_page(fs, f"{directory}/{PAGE_FILE}", page)
+    # que ya están en RAM y salen directo al objeto, sin armar la página entera;
+    # se escribe antes del índice (marca de commit).
+    def write_page_to(path: str) -> None:
+        stream_page(fs, path, index, parts(), template)
+
+    write_page_to(f"{directory}/{PAGE_FILE}")
     _put_json(fs, index_path, index)
-    _advance_latest(fs, base, index, page)
+    _advance_latest(fs, base, index, write_page_to)
     return index
 
 
@@ -238,19 +263,24 @@ def _read_latest(fs: pafs.FileSystem, base: str, series: dict) -> dict | None:
 
 
 def _advance_latest(
-    fs: pafs.FileSystem, base: str, index: dict, page: bytes | None = None
+    fs: pafs.FileSystem,
+    base: str,
+    index: dict,
+    write_page_to: Callable[[str], None] | None = None,
 ) -> None:
     """Escribe `latest.json` y `latest.html` si el día no es anterior al que apunta.
 
-    `latest.html` es la copia de la página del día; va primero para que el puntero
-    no apunte a una página que todavía no existe.
+    `latest.html` es la copia de la página del día (`write_page_to` la vuelve a
+    renderizar en esa ruta: así no se guarda la página entre una escritura y la
+    otra); va primero para que el puntero no apunte a una página que todavía no
+    existe.
     """
     series = {k: index[k] for k in ("provider", "market", "asset")}
     current = _read_latest(fs, base, series)
     if current is not None and current["day"] > index["day"]:
         return
-    if page is not None:
-        write_page(fs, f"{base}/{LATEST_PAGE_FILE}", page)
+    if write_page_to is not None:
+        write_page_to(f"{base}/{LATEST_PAGE_FILE}")
     _put_json(
         fs, f"{base}/{LATEST_FILE}", {name: index[name] for name in LATEST_FIELDS}
     )

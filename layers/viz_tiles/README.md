@@ -229,6 +229,10 @@ en varint y se suelta; de un día solo viven los bytes codificados (≈ 5 B por 
 el propio `ticks.bin`) y se escriben por tramos, sin juntar sus tres secciones.
 Los `events.parquet` se leen una vez por mes y quedan como arreglos de NumPy (41 B
 por evento). En RAM: un row group, los bytes del día en curso y los eventos del mes.
+La página sale directo al objeto (`render_day_to`, gzip en streaming): nunca está entera
+en RAM. Lo que sigue siendo O(día) son las tres secciones de `ticks.bin` (≈ 5 MB con un
+millón de ticks), una excepción a «O(lote)» que **espera la aceptación explícita del
+humano** (TRD-viz §8.1, ITSC-317).
 
 ## Imagen
 
@@ -279,6 +283,8 @@ write_day(
   `index.json` (marca de commit); `latest.json` y `latest.html` solo avanzan.
 - `render_day(index, arrays)` arma el `index.html` de un día: `arrays` entrega
   `(nombre, tramos)` en orden de nombre y cada uno se codifica por tramos y se suelta.
+  `render_day_to(out, index, arrays)` hace lo mismo pero escribe en `out` tramo a tramo,
+  sin devolver la página: es lo que usa `write_day`.
 
 ## Pruebas
 

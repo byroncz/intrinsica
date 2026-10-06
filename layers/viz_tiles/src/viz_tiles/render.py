@@ -23,6 +23,7 @@ import zlib
 from collections.abc import Buffer, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import BinaryIO
 
 from viz_tiles.contract import PAGE_FILE
 
@@ -172,15 +173,32 @@ def render_day(
     lo que se guarda en un bucket con `Content-Encoding: gzip`; en disco local el
     archivo va sin comprimir para que abra por `file://`.
     """
+    out = bytearray()
+    render_day_to(_Sink(out), index, arrays, template=template, compress=compress)
+    return bytes(out)
+
+
+def render_day_to(
+    out: BinaryIO,
+    index: Mapping,
+    arrays: Iterable[tuple[str, Sequence[Buffer]]],
+    *,
+    template: Template | None = None,
+    compress: bool = False,
+) -> None:
+    """Igual que `render_day`, pero escribe la página en `out` tramo a tramo.
+
+    La página entera nunca está en RAM: a `out` (un flujo de salida del bucket o del
+    disco) llega cada tramo ya codificado y, con `compress`, ya comprimido.
+    """
     template = template or load_template()
     chunks = (chunk.encode() for chunk in page_chunks(index, arrays, template))
     if not compress:
-        return b"".join(chunks)
-    out = bytearray()
-    with gzip.GzipFile(fileobj=_Sink(out), mode="wb", mtime=0, compresslevel=9) as gz:
+        out.writelines(chunks)
+        return
+    with gzip.GzipFile(fileobj=out, mode="wb", mtime=0, compresslevel=9) as gz:
         for chunk in chunks:
             gz.write(chunk)
-    return bytes(out)
 
 
 class _Sink:
@@ -192,6 +210,10 @@ class _Sink:
     def write(self, data: bytes) -> int:
         self._out += data
         return len(data)
+
+    def writelines(self, chunks: Iterable[bytes]) -> None:
+        for chunk in chunks:
+            self._out += chunk
 
     def flush(self) -> None:
         pass

@@ -166,6 +166,15 @@ def test_gzip_page_is_deterministic_and_equals_the_plain_one(tmp_path):
     assert len(zipped) < len(plain)
 
 
+@pytest.mark.parametrize("compress", [False, True])
+def test_a_streamed_page_is_the_same_bytes_as_the_returned_one(tmp_path, compress):
+    index, files, _ = day_files(tmp_path)
+    streamed = pa.BufferOutputStream()
+    render.render_day_to(streamed, index, parts(files), compress=compress)
+    whole = render.render_day(index, parts(files), compress=compress)
+    assert streamed.getvalue().to_pybytes() == whole
+
+
 def test_arrays_must_match_the_index(tmp_path):
     index, files, _ = day_files(tmp_path)
     arrays = parts(files)
