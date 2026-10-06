@@ -308,6 +308,8 @@ viz hereda y no contradice:
 |**Costo asumido**|Los 33 % del base64, un documento ≈ 5 veces mayor que el de la 1.2 y esperar un par de segundos al abrir el día. El tiempo de apertura es el de decodificar la página; ya no cabe «cero cálculo en el navegador» (la antigua prioridad 1): se paga con un recorrido lineal que mide el humano (< 100 ms al redibujar).|
 |**Cuándo reabrir**|Si un activo o un día supera los 10 MB de página en gzip, o si aparece un segundo usuario que necesite comparar días lado a lado (§6.1).|
 
+-----
+
 ## 7. Contrato de datos
 
 ### 7.1 Entradas
@@ -742,8 +744,8 @@ No hay card de logging: es esta sección y el criterio 8 de §13 ("emite hallazg
 |RVZ-08|La vista muestra un precio que nunca se negoció (redondeo del formato).|Alto|Precio en enteros con `price_scale` fijo por activo igual al tick, y tiempo en ms enteros (§7.3). Un precio fuera del tick se redondea al tick más cercano y deja `price_rounded` (§9.3): el redondeo existe pero nunca es en silencio, y el día no se pierde. `price_unrepresentable` es solo la guarda para un precio mayor que `INT32_MAX / price_scale`.|
 |RVZ-09|Agregar un θ en L2 regenera todos los días del mes.|Bajo|Conocido; el costo es el de repetir el backfill de ese rango, hoy de céntimos (§7.8, §10.3). Si molesta, se compara por archivo antes de reescribir (§14 ítem 9).|
 |RVZ-10|Los paneles se acumulan hasta que nadie mira ninguno.|Medio|Evaluación ergonómica obligatoria en todo PR que cambie la vista; `pr-review` rechaza si falta o si una métrica empeora sin justificación (§6.7).|
-|RVZ-12|La página de un día pesa más de lo previsto (más ticks por día, p. ej. en un día de pánico) y abre despacio.|Medio|Presupuesto de 4 MB en gzip el 2026-09-30 y reapertura de la decisión por encima de 10 MB (§6.14); la sonda de cada día deja `page_bytes` en `tiles_summary` (§9.3).|
 |RVZ-11|Aparece un usuario sin acceso IAM al proyecto.|Bajo|El HTML del día es un solo archivo que se descarga y abre en cualquier navegador; la opción B se abre como card (§6.5).|
+|RVZ-12|La página de un día pesa más de lo previsto (más ticks por día, p. ej. en un día de pánico) y abre despacio.|Medio|Presupuesto de 4 MB en gzip el 2026-09-30 y reapertura de la decisión por encima de 10 MB (§6.14); la sonda de cada día deja `page_bytes` en `tiles_summary` (§9.3).|
 
 -----
 

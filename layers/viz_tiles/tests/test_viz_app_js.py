@@ -363,12 +363,8 @@ def test_volume_is_one_bar_per_pixel_with_the_sum_of_its_ticks(normal):
         )
 
 
-def test_volume_of_a_pixel_is_the_sum_of_the_quantity_of_its_ticks(day_dir, tmp_path):
+def test_volume_of_a_pixel_is_the_sum_of_the_quantity_of_its_ticks(tmp_path):
     """Con cantidades distintas por tick, la barra es la suma, no el conteo."""
-    from test_viz_events import (
-        SCALE as scale,  # noqa: F401  (documenta la escala del día)
-    )
-
     flash = write_flash_day(tmp_path)
     result = view(flash, "--zoom", f"{BURST - 0.001},{BURST + 0.001}")
     zoom = step(result, f"zoom:{BURST - 0.001},{BURST + 0.001}")

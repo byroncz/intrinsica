@@ -51,6 +51,7 @@
     ticks: 0,
     first_paint_ms: null,
     theta_change_ms: [],
+    draw_ms: 0,
     frame: null,
   });
 
@@ -587,7 +588,6 @@
     var ctx = u.ctx;
     var b = u.bbox;
     var dpr = window.devicePixelRatio || 1;
-    drawStart = performance.now();
 
     ctx.save();
     ctx.beginPath();
@@ -619,8 +619,6 @@
   }
 
   /* ---------- Las marcas por píxel ---------- */
-
-  var drawStart = 0;
 
   // Posición vertical (px del lienzo) de un valor en la escala `key` del panel.
   function yPos(u, key, v) {
@@ -668,8 +666,6 @@
     }
     ctx.restore();
     metrics.price_draw = { dots: dots, segments: segments };
-    var total = performance.now() - drawStart + f.ms;
-    metrics.draw_ms = total;
     renderFooter(f);
   }
 
@@ -770,8 +766,12 @@
     }
     var i0 = lowerBoundAll(ticks.t, ticks.n, Math.ceil(r.a));
     var i1 = c === f.cols - 1 ? lowerBoundAll(ticks.t, ticks.n, Math.floor(r.z) + 1) : lowerBoundAll(ticks.t, ticks.n, Math.ceil(r.z));
+    // Un ms es la cubeta mínima: si todos comparten instante, el rótulo lo dice; si el píxel abarca
+    // más de 1 ms, "este ms" no tiene referente y se nombra el instante.
     var sameMs = ticks.t[i0] === ticks.t[i1 - 1];
-    lines.push(n + " " + (n === 1 ? "tick" : "ticks") + (sameMs ? " en este ms" : ""));
+    var at = "";
+    if (sameMs) at = r.z - r.a > 1 ? " a las " + clockMs(ticks.t[i0], 3) : n >= 2 ? " en este ms" : "";
+    lines.push(n + " " + (n === 1 ? "tick" : "ticks") + at);
     if (f.lo[c] === f.hi[c]) lines.push("precio " + fixed(f.lo[c] / scale));
     else lines.push("mín " + fixed(f.lo[c] / scale) + "   máx " + fixed(f.hi[c] / scale));
     lines.push("vol " + f.vol[c].toFixed(4));
@@ -981,10 +981,30 @@
   var hovered = null; // panel bajo el puntero: el único que muestra el tooltip
   var syncing = false;
 
+  // Redibujo de la vista: del cambio (zoom, θ o tamaño) al último panel que ese cambio repinta.
+  // Cada panel avisa al terminar; cuando están todos se publica el total (marco incluido).
+  var redraw = { t0: null, pending: [] };
+
+  function redrawStart(keys) {
+    redraw.t0 = performance.now();
+    redraw.pending = keys.slice();
+  }
+
+  function redrawPanelDone(u) {
+    if (redraw.t0 === null || stale(u)) return;
+    metrics.draw_ms = performance.now() - redraw.t0;
+    var i = redraw.pending.indexOf(yKey(u));
+    if (i >= 0) redraw.pending.splice(i, 1);
+    if (redraw.pending.length) return;
+    redraw.t0 = null;
+    console.info("viz: redibujo en " + metrics.draw_ms.toFixed(1) + " ms (" + metrics.frame.ticks + " ticks en la vista)");
+  }
+
   function onScale(u, key) {
     if (key !== "x" || plots.length < 3) return;
     var s = u.scales.x;
     if (!syncing) {
+      redrawStart(["p", "c", "v"]);
       syncing = true;
       plots.forEach(function (other) {
         var t = other.scales.x;
@@ -1146,9 +1166,7 @@
                     (now - started).toFixed(1) + " ms desde que arrancó el script)"
                 );
               }
-              console.info(
-                "viz: redibujo en " + metrics.draw_ms.toFixed(1) + " ms (" + metrics.frame.ticks + " ticks en la vista)"
-              );
+              redrawPanelDone(u);
               if (thetaT0 !== null) {
                 var dt = now - thetaT0;
                 thetaT0 = null;
@@ -1183,7 +1201,7 @@
           ),
         ],
         series: series("c"),
-        hooks: { draw: [drawConfirms], setCursor: [onCursor], setScale: [onScale] },
+        hooks: { draw: [drawConfirms, redrawPanelDone], setCursor: [onCursor], setScale: [onScale] },
       }),
       stub(),
       $("confirms")
@@ -1202,7 +1220,7 @@
           }),
         ],
         series: series("v"),
-        hooks: { draw: [drawVolume], setCursor: [onCursor], setScale: [onScale] },
+        hooks: { draw: [drawVolume, redrawPanelDone], setCursor: [onCursor], setScale: [onScale] },
       }),
       stub(),
       $("volume")
@@ -1239,6 +1257,7 @@
 
   select.addEventListener("change", function () {
     thetaT0 = performance.now();
+    redrawStart(["p"]);
     selectTheta(select.value);
     pricePlot.redraw(false); // solo repinta: los eventos de los θ ya están en memoria
   });
@@ -1249,7 +1268,7 @@
 
   window.addEventListener("resize", function () {
     var s = sizes();
-    var x = pricePlot.scales.x;
+    redrawStart(["p", "c", "v"]);
     pricePlot.setSize({ width: s.w, height: s.hp });
     confP.setSize({ width: s.w, height: s.hc });
     volP.setSize({ width: s.w, height: s.hv });
