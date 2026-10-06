@@ -153,7 +153,10 @@ def write_day(
     # Antes de escribir nada: un día de otra serie no se deja a medias en la raíz.
     _read_latest(fs, base, {"provider": provider, "market": market, "asset": asset})
     directory = day_dir(root, provider, market, asset, day)
-    fs.create_dir(directory)
+    if isinstance(fs, pafs.LocalFileSystem):
+        # En GCS no hay directorios y `create_dir` pide `storage.buckets.get`, que
+        # el rol por prefijo no da; `open_output_stream` crea la ruta al escribir.
+        fs.create_dir(directory)
     index_path = f"{directory}/{INDEX_FILE}"
     if _exists(fs, index_path):
         fs.delete_file(index_path)

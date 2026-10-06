@@ -168,6 +168,8 @@ class RecordingFS:
 
     def open_output_stream(self, path, **kwargs):
         self.metadata[Path(path).name] = kwargs.get("metadata")
+        # Como un bucket: escribir un objeto crea su ruta.
+        self._fs.create_dir(str(Path(path).parent), recursive=True)
         return self._fs.open_output_stream(path)
 
     def __getattr__(self, name):
