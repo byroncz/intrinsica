@@ -9,7 +9,7 @@ de los archivos, en [`docs/data-contracts.md`](../../docs/data-contracts.md)
 La imagen corre `python -m viz_tiles --mode tiles`: lee un mes de L1 y los
 eventos de L2 (en disco o en `gs://`), construye los tiles de cada día pedido y
 los escribe junto a una página `index.html` autocontenida del día: la plantilla de
-[`site/`](site/), uPlot y los 18 arreglos en base64 dentro de un solo documento,
+[`site/`](site/), uPlot y los 37 arreglos en base64 dentro de un solo documento,
 sin peticiones de red (el porqué, en [TRD-viz §6.5](../../docs/TRD/viz.md#65-adr-vz-05--entrega-solo-bucket-sin-servidor)).
 `--mode render` vuelve a armar esas páginas desde los tiles ya escritos, sin leer
 L1 ni L2, cuando cambia la plantilla.
@@ -143,7 +143,7 @@ Cuando cambia la plantilla (`site/`: HTML, JS, CSS o uPlot) se sube `VERSION`, s
 despliega la imagen y se corre el job `viz-render` (*Actions → Run job*, ver
 [infra/README.md](../../infra/README.md#stack-viz-tiles-de-visualización)) sobre
 el rango que se quiera rehacer. Lee solo los tiles del bucket, sin L1 ni L2: un
-re-render completo son unas 3 300 lecturas de `index.json` y de 18 arreglos por
+re-render completo son unas 3 300 lecturas de `index.json` y de 37 arreglos por
 día y otras tantas escrituras, minutos de cómputo y centavos de operaciones,
 frente a repetir el backfill desde L1 y L2. Esa diferencia es la razón de
 conservar los tiles como artefacto separado.
@@ -167,17 +167,32 @@ la huella de la plantilla cambia sola y `--mode render` rehace las páginas.
 
 ### Vista
 
-Panel de precio (serie M4) con las regiones de los eventos DC del θ activo, panel
-de volumen en barras con eje X y cursor compartidos, franja de estado fija (día,
-θ, última actualización, datos completos o incompletos) y tooltip por cubeta. El
-precio es una línea mientras una columna ocupa menos de 5 px y, desde 5 px, una
-barra de rango por columna (mínimo a máximo, con muescas en el primero y el
-último). Cada muesca mide `min(8, px/2 − 1)` px y el trazo 1,5 px: entre 5 y
-≈ 7 px por columna la muesca es del tamaño del trazo y se ve como un punto pegado
-a la barra; se lee como muesca desde ≈ 7 px (mide ≥ 2,5 px). El humano valida ese
-ancho frente a la pantalla; si no basta, se sube `BAR_MIN_COL_PX`. Una columna sin
-ticks se marca con una línea punteada ámbar de 1 px a media altura y `◇` (las
-franjas de dirección van al borde y son sólidas). Los
+Tres paneles con eje X y cursor compartidos (precio 65 %, confirmaciones 15 %,
+volumen 20 %), franja de estado fija (día, θ, navegación por eventos, última
+actualización, datos completos o incompletos) y tooltip por cubeta.
+
+- **Precio**, nunca velas: una columna con 1 o 2 ticks es un punto por tick; con
+  más ticks, siempre el segmento de su mínimo a su máximo (la envolvente exacta
+  de sus ticks) y, desde 5 px por columna, además sus cuatro puntos M4 (ticks
+  reales) en su instante exacto, sobre el segmento. Nada une una columna con la
+  vecina. Una
+  columna sin ticks se marca con una línea punteada ámbar de 1 px a media altura
+  y `◇`.
+- **Franjas del θ activo**, dibujadas desde `events.bin` en los instantes exactos
+  de cada evento a cualquier zoom: confirmación tenue y fina, overshoot intenso y
+  grueso, una línea de 1 px en cada extremo (frontera compartida con el evento
+  que sigue) y otra del color del evento en cada confirmación. Donde varios
+  eventos enteros caen en un mismo píxel, una marca gris con el número ("4
+  eventos"); `DENSE_PX` fija el ancho de ese píxel.
+- **Navegación**: "Evento anterior" y "Evento siguiente" desplazan la vista a la
+  ventana `[referencia(k−1), extremo(k+1)]` sin cambiar la escala; "Ajustar a la
+  ventana" pone la escala en esa ventana con 5 % de margen. Funciona dentro del
+  día: lo que sale del día se recorta y la vista lo dice.
+- **Confirmaciones**: barra con los θ que confirman en la columna y marca intensa
+  con el máximo de θ que confirman en el mismo instante; el tooltip lista cuáles
+  y a qué hora.
+
+Los
 principios y la Evaluación ergonómica que cada cambio de vista debe traer están en
 [TRD-viz §6.7](../../docs/TRD/viz.md#67-adr-vz-07--nueve-principios-de-ergonomía-y-evaluación-ergonómica-obligatoria).
 

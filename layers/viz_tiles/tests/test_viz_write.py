@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 import pyarrow.fs as pafs
 import pytest
-from viz_helpers import DOWN, UP, events, ticks_batch
+from viz_helpers import DOWN_T, UP, UP_T, events, ticks_batch, timed_events
 from viz_tiles.contract import (
     INDEX_FIELDS,
     LATEST_FIELDS,
@@ -14,6 +14,12 @@ from viz_tiles.contract import (
     price_scale,
 )
 from viz_tiles.direction import direction_tiles
+from viz_tiles.events import (
+    ConfirmAccumulator,
+    Confirmations,
+    EventsBuffer,
+    event_rows,
+)
 from viz_tiles.reduce import day_start_us, reduce_day
 from viz_tiles.write import ThetaTiles, day_dir, read_index, write_day
 
@@ -24,25 +30,40 @@ ROWS = [(11, 1, 100, 1), (21, 30, 102, "0.5"), (31, 70, 103, 1), (56, 80, 104, 1
 WHEN = datetime(2026, 10, 5, 17, 0, tzinfo=UTC)
 
 
-def theta(name: str, reduction, pending=None) -> ThetaTiles:
+def theta(
+    name: str,
+    reduction,
+    acc: ConfirmAccumulator,
+    buffer: EventsBuffer,
+    pending=None,
+) -> ThetaTiles:
+    table = timed_events(DAY, UP_T, DOWN_T)
+    rows, confirm_us = event_rows(table, pending, False, day_start_us(DAY))
+    acc.add(confirm_us)
+    buffer.add(rows)
     return ThetaTiles(
         theta=name,
-        events=2,
+        events=len(rows),
         provisional_from_s=None,
-        direction=direction_tiles(reduction.last_ids, events(UP, DOWN), pending),
+        direction=direction_tiles(reduction.last_ids, table, pending),
     )
 
 
 def write(root, day=DAY, rows=ROWS, **kwargs):
     reduction = reduce_day([ticks_batch(day, rows)], day, SCALE)
+    acc = ConfirmAccumulator()
+    buffer = EventsBuffer()
+    thetas = [
+        theta("0.00010000", reduction, acc, buffer),
+        theta("0.05000000", reduction, acc, buffer),
+    ]
     args = {
         **KEY,
         "day": day,
         "reduction": reduction,
-        "thetas": [
-            theta("0.00010000", reduction),
-            theta("0.05000000", reduction),
-        ],
+        "confirmations": acc.finish(),
+        "events": buffer,
+        "thetas": thetas,
         "input_hash": "ab" * 32,
         "image_version": "0.1.0+test",
         "generated_at": WHEN,
@@ -59,7 +80,7 @@ def test_round_trip_returns_identical_arrays(tmp_path):
     )
     on_disk = read_index(tmp_path, **KEY, day=DAY)
     assert on_disk == index
-    block = direction_tiles(reduction.last_ids, events(UP, DOWN))
+    block = direction_tiles(reduction.last_ids, events(UP, DOWN_T[:4]))
     for w in LEVELS:
         price = np.fromfile(f"{directory}/{index['price'][str(w)]}", dtype="<i4")
         volume = np.fromfile(f"{directory}/{index['volume'][str(w)]}", dtype="<f4")
@@ -106,15 +127,25 @@ def test_index_has_every_contract_field_in_order(tmp_path):
     assert index["price_scale"] == SCALE
     assert index["price"]["128"] == "price-128.i32"
     assert index["dir"]["2048"] == "dir-2048.u8"
-    assert set(index["thetas"][0]) == {"theta", "events", "provisional_from_s"}
+    assert index["count"]["4096"] == "count-4096.u32"
+    assert index["confirms"]["128"] == "confirms-128.u8"
+    assert index["simul"]["128"] == "simul-128.u8"
+    assert index["events"] == "events.bin"
+    assert set(index["thetas"][0]) == {
+        "theta",
+        "events",
+        "events_offset",
+        "provisional_from_s",
+    }
+    assert [t["events_offset"] for t in index["thetas"]] == [0, 2]
 
 
 def test_a_day_has_one_file_per_level_and_kind(tmp_path):
     write(tmp_path)
     directory = day_dir(tmp_path, **KEY, day=DAY)
     names = sorted(p.name for p in Path(directory).iterdir())
-    # 20 objetos por día (arreglos, página e índice), con cualquier número de θ.
-    assert len(names) == 6 + 6 + 6 + 2
+    # 39 objetos por día (arreglos, página e índice), con cualquier número de θ.
+    assert len(names) == 6 * 6 + 1 + 2
     assert "index.json" in names and "index.json.tmp" not in names
     assert "dir-128.u8" in names and "dir-128-0.05000000.u8" not in names
 
@@ -126,6 +157,7 @@ def test_dir_file_with_no_thetas_is_empty_but_present(tmp_path):
         **KEY,
         day=DAY,
         reduction=reduction,
+        confirmations=Confirmations.empty(),
         thetas=[],
         input_hash="x",
         image_version="v",
@@ -170,6 +202,7 @@ def test_latest_of_another_series_is_not_overwritten(tmp_path):
             **{**KEY, "asset": "ETHUSDT"},
             day=date(2026, 9, 2),
             reduction=reduction,
+            confirmations=Confirmations.empty(),
             thetas=[],
             input_hash="ab" * 32,
             image_version="0.1.0+test",
@@ -207,8 +240,8 @@ def test_write_day_does_not_create_directories_outside_local_disk(
     )
     write(tmp_path)
     directory = Path(day_dir(tmp_path, **KEY, day=DAY))
-    # 18 arreglos, `index.json` e `index.html`; `latest.*` van en la raíz.
-    assert len(list(directory.iterdir())) == 20
+    # 37 arreglos, `index.json` e `index.html`; `latest.*` van en la raíz.
+    assert len(list(directory.iterdir())) == 39
     assert (tmp_path / "latest.json").exists() and (tmp_path / "latest.html").exists()
 
 
@@ -247,6 +280,7 @@ def test_wrong_tile_length_is_rejected(tmp_path):
             **KEY,
             day=DAY,
             reduction=reduction,
+            confirmations=Confirmations.empty(),
             thetas=[bad],
             input_hash="x",
             image_version="v",

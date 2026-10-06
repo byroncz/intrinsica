@@ -51,15 +51,31 @@ body {
 #status select:focus-visible { outline: 2px solid var(--text); outline-offset: 1px; }
 #s-data-box.incomplete b { color: var(--amber); }
 
+/* Navegación por eventos: botones de texto, sin glifos. */
+#nav { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
+#nav button {
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  font: inherit;
+  padding: 1px 8px;
+  cursor: pointer;
+}
+#nav button:hover:not(:disabled) { border-color: var(--muted); }
+#nav button:disabled { color: var(--muted); cursor: default; opacity: 0.6; }
+#nav button:focus-visible { outline: 2px solid var(--text); outline-offset: 1px; }
+#ev-info { max-width: 60em; }
+
 #panels {
   display: flex;
   flex-direction: column;
   min-height: 0;
   min-width: 0;
 }
-#price, #volume { min-width: 0; }
+#price, #confirms, #volume { min-width: 0; }
 /* uPlot es inline-block: sin esto queda un hueco bajo cada panel. */
-#price .uplot, #volume .uplot { display: block; }
+#price .uplot, #confirms .uplot, #volume .uplot { display: block; }
 
 #hint {
   display: flex;

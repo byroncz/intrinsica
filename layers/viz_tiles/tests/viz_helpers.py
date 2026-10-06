@@ -66,3 +66,36 @@ def read_ticks_csv() -> list[dict[str, str]]:
     """Las filas de `ticks.csv` (agg_trade_id, price, transact_time) como texto."""
     with open(FIXTURES / "ticks.csv") as f:
         return list(csv.DictReader(f))
+
+
+TIMED_EVENT_SCHEMA = pa.schema(
+    [
+        *EVENT_SCHEMA,
+        pa.field("reference_time", pa.int64()),
+        pa.field("confirm_time", pa.int64()),
+        pa.field("extreme_time", pa.int64()),
+    ]
+)
+
+
+def timed_events(day, *rows: tuple) -> pa.Table:
+    """Eventos `(ref_id, confirm_id, extremo_id, dirección, ref_s, confirm_s, extremo_s)`.
+
+    Los tres últimos son segundos desde el inicio del día (pueden salirse de él).
+    """
+    t0 = day_start_us(day)
+    us = [[t0 + round(r[i] * 1_000_000) for r in rows] for i in (4, 5, 6)]
+    base = [[r[i] for r in rows] for i in range(4)]
+    columns = [*base, *us]
+    return pa.Table.from_arrays(
+        [
+            pa.array(col, f.type)
+            for col, f in zip(columns, TIMED_EVENT_SCHEMA, strict=True)
+        ],
+        schema=TIMED_EVENT_SCHEMA,
+    )
+
+
+# Los eventos UP y DOWN con tiempos: el alza de 0,5 s a 50 s y la baja de 50 s a 85 s.
+UP_T = (*UP, 0.5, 20, 50)
+DOWN_T = (*DOWN, 50, 60, 85)

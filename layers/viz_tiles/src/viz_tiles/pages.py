@@ -5,7 +5,7 @@ uPlot) y hay que regenerar las páginas sin repetir la reducción. Un día se sa
 si su página ya trae la misma `tiles_version` y la misma huella de plantilla
 (guardadas en su `<meta name="viz-render">`).
 
-Memoria: los 18 arreglos de un día se leen, se codifican y se sueltan de uno en
+Memoria: los 37 arreglos de un día se leen, se codifican y se sueltan de uno en
 uno; nunca hay más de un día a la vez.
 """
 
@@ -180,6 +180,14 @@ def _render_day(
     out: list[Finding],
 ) -> None:
     directory = day_dir(ctx.tiles_root, ctx.provider, ctx.market, ctx.asset, day)
+    try:
+        expected_names(index)
+    except KeyError as exc:
+        # Tiles de una versión anterior: no traen todos los archivos de la actual.
+        raise TilesCorrupt(
+            f"el índice no trae {exc} (tiles_version {index.get('tiles_version')}): "
+            "el día se rehace con --mode tiles, no con render"
+        ) from exc
     page_path = f"{directory}/{PAGE_FILE}"
     latest_path = f"{base}/{LATEST_PAGE_FILE}"
     is_latest = latest == day.isoformat()

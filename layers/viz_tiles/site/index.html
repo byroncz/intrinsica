@@ -17,16 +17,25 @@
     <label class="label" for="theta">θ</label>
     <select id="theta" aria-label="θ activo"></select>
   </span>
+  <span class="item" id="nav">
+    <button type="button" id="ev-prev" disabled>Evento anterior</button>
+    <button type="button" id="ev-next" disabled>Evento siguiente</button>
+    <button type="button" id="ev-fit" disabled>Ajustar a la ventana</button>
+    <span id="ev-info" class="label"></span>
+  </span>
   <span class="item"><span class="label">Actualizado</span> <b id="s-updated">…</b></span>
   <span class="item" id="s-data-box"><span class="label">Datos</span> <b id="s-data">…</b></span>
 </header>
 <main id="panels">
   <div id="price"></div>
+  <div id="confirms"></div>
   <div id="volume"></div>
 </main>
 <footer id="hint">
   <span id="f-level"></span>
   <span id="f-legend">tenue: confirmación · intenso: overshoot · franja arriba: alza · abajo: baja · fina: confirmación · gruesa: overshoot</span>
+  <span id="f-events">línea clara: extremo, frontera entre eventos · línea de color: confirmación · marca gris con número: eventos enteros dentro del mismo píxel</span>
+  <span id="f-confirms">panel central: barra, θ que confirman en la columna · marca intensa, máximo de θ que confirman en el mismo instante</span>
   <span>◇ sin ticks</span>
   <span>arrastrar: ampliar · doble clic o Esc: día completo</span>
 </footer>

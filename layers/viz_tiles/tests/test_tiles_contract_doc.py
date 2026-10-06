@@ -6,6 +6,9 @@ from pathlib import Path
 import numpy as np
 from viz_tiles.contract import (
     DAY_S,
+    EVENT_BYTES,
+    EVENTS_FILE,
+    FLAGS,
     INDEX_FIELDS,
     LATEST_FIELDS,
     LEVELS,
@@ -53,13 +56,14 @@ def test_levels_doc_matches_code():
         (
             str(w),
             duration(w),
-            size("price", w),
-            size("volume", w),
-            size("dir", w),
+            *(
+                size(kind, w)
+                for kind in ("price", "volume", "dir", "count", "confirms", "simul")
+            ),
         )
         for w in LEVELS
     ]
-    pattern = r"^\| (\d+) \| ([\d,]+) \| (\d+) \| (\d+) \| (\d+) \|"
+    pattern = r"^\| (\d+) \| ([\d,]+) \| (\d+) \| (\d+) \| (\d+) \| (\d+) \| (\d+) \| (\d+) \|"
     assert _table("Niveles", pattern) == expected
 
 
@@ -102,6 +106,7 @@ def test_file_names_in_the_doc_tree_match_code():
     tree = _section().split("### Disposición")[1].split("### Archivos")[0]
     for f in TILE_FILES:
         assert f.template.replace("{w}", "<w>") in tree
+    assert EVENTS_FILE in tree
     assert "index.json" in tree
     assert "latest.json" in tree
 
@@ -109,3 +114,17 @@ def test_file_names_in_the_doc_tree_match_code():
 def test_price_scale_doc_matches_code():
     expected = [(asset, str(scale)) for asset, scale in PRICE_SCALE_BY_ASSET.items()]
     assert _table("Escala de precio", r"^\| `(\w+)` \| (\d+) \|") == expected
+
+
+def test_event_flags_doc_matches_code():
+    expected = [(str(bit), label) for bit, label in FLAGS.items()]
+    assert _table("Eventos exactos", r"^\| `(\d+)` \| ([^|]+?) \|") == expected
+
+
+def test_events_file_doc_matches_code():
+    text = _section().split("### Eventos exactos")[1].split("\n### ")[0]
+    assert f"`{EVENTS_FILE}`" in text
+    assert f"{EVENT_BYTES} bytes por evento" in text
+    # 3 secciones int32 y una de banderas de un byte.
+    assert EVENT_BYTES == 3 * 4 + 1
+    assert "`events_offset`" in _section().split("### Campos de `index.json`")[1]

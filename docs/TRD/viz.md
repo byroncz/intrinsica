@@ -7,7 +7,7 @@
 |Campo        |Valor                                                                           |
 |-------------|--------------------------------------------------------------------------------|
 |Documento    |TRD-viz — Capa transversal de visualización                                     |
-|Versión      |**1.2**                                                                         |
+|Versión      |**1.3**                                                                         |
 |Estado       |Línea base. Fija el contrato de tiles y de la página por día que implementan las hijas 2 a 7 de la Épica E6 (ITSC-303). |
 |Fecha        |Octubre de 2026                                                                 |
 |Documento padre|TRD maestro v2.5                                                              |
@@ -22,6 +22,7 @@
 |1.0|Oct 2026|Línea base (ITSC-304). Recoge la decisión [Decisión: principios de diseño de la capa de visualización](https://app.notion.com/p/3f027957d23d81b8b12ad2217ffa96fb) (2026-10-05) y fija el contrato de tiles por día: disposición en el bucket, formato binario (tiempo y precio en enteros exactos, dirección de los 50 θ empaquetada por nivel), niveles de zoom con su presupuesto de bytes, regla de estado por columna, procedencia de los eventos de un día e idempotencia. Fija también modos, variables, hallazgos de DQ, costos y observabilidad. Es la fuente única para las hijas 2 a 7: ninguna reabre lo que aquí se fija. |
 |1.1|Oct 2026|Corrección de arquitectura (ITSC-305), antes de implementar el contrato. El `price_scale` ya no se elige por día (la mayor potencia de 10 que deja exactos todos los `price_int`): con una escala fina, un solo trade con cinco decimales hacía que el precio no cupiera en `int32` y borraba el día entero de BTCUSDT, lo que contradecía la política de §9.1 (continuar con hallazgo y hueco visible). Ahora es **fijo por activo**, igual al tick de la cotización (100 para BTCUSDT) y declarado en el código; un `price_int` fuera del tick se redondea al tick más cercano (mitad al par) al escribir, sobre acumuladores M4 calculados con el `price_int` crudo, y deja el hallazgo `price_rounded`. El día siempre se escribe; `price_unrepresentable` queda solo como guarda para un precio mayor que `INT32_MAX / price_scale`. Cambian §7.2, §7.3, §8.1, §9.1 a §9.3, RVZ-08, la prueba 2 de §13 y el ítem 10 de §14. |
 |1.2|Oct 2026|Corrección de arquitectura (ITSC-308): la entrega ya no es una página que descarga tiles con `fetch` más un zip exportable, sino **un HTML autocontenido por día** que lleva los tiles dentro. La prueba del humano en `storage.cloud.google.com` descartó el `fetch` (Google sirve cada archivo privado desde un dominio bloqueado de un solo uso: §6.5). Cambian §6.5 (con la evidencia), §7.2 (el `index.html` y `latest.html`, los metadatos de cada objeto y `page` en el índice: `tiles_version` 1.1.0), §7.3 (presupuesto de la apertura), §7.8 (criterio del `input_hash`, abajo), §7.9 (el HTML es el exportable: no hay zip), §8.3 (modo `render` en lugar de `export`), §8.4, §9, §10, §11 (sin `site/` ni `exports/`, sin `VIZ_SITE_ROOT` ni `VIZ_EXPORTS_ROOT`), §12, §13 y §14 (ítem 5 cerrado). **Corrección heredada de ITSC-306 (PR #94):** en §7.8 el `input_hash` de un día incluye la cadena de carry-overs desde el día del candidato del `carry_over.parquet` **del propio mes**, no desde el del último carry-over de la cadena. Con el criterio de la 1.1, cuando `M+1` mueve el candidato fuera de `M` el hash de esos días no cambiaba y la cola provisional vieja nunca se rehacía; el código de ITSC-306 ya implementaba el criterio correcto y tiene prueba, y el documento se alinea al código. |
+|1.3|Oct 2026|Evidencia del análisis del humano con el arquitecto (ITSC-316, 2026-10-06): L2 está bien y la vista no. Con `viz_check_day.py` sobre 2026-09-30 y θ = 0,00509931 (378 eventos en el mes, 0 violaciones de invariantes) un flash crash de cuatro eventos DC en 0,93 s cae entero en una columna de 84 s que se pinta de un solo estado, y con θ = 0,0001 hay 0,93 eventos por columna. Las muescas de primero y último de la vista 1.1 eran una vela. **`tiles_version` 1.2.0**: eventos exactos de cada θ (`events.bin`), ticks por columna (`count-<w>.u32`) y confirmaciones multiescala (`confirms-<w>.u8`, `simul-<w>.u8`). Cambian §6.4 y §6.6 (reparto de tres paneles), §6.9 (alcance nuevo del estado por columna), §6.10, §6.11 a §6.13 (ADR nuevos: precio sin velas, navegación por eventos y pertenencia del tick extremo, confirmaciones multiescala), §7.2 a §7.5, §7.3 (presupuesto), §7.9, §10, §13 y §14 (ítems 13 a 17). |
 
 -----
 
@@ -134,6 +135,10 @@ viz hereda y no contradice:
 |RF-VZ-13 |Encadenamiento tras L2          |Al terminar `l2-monthly`, Cloud Workflows lanza `viz-tiles` sin intervención (hija 5).                                                          |S    |
 |RF-VZ-14 |Backfill de tiles               |El humano lanza el histórico desde `run-job.yml`, por rangos de meses (§8.2, §10.3).                                                             |S    |
 |RF-VZ-15 |Primera vista                   |Precio crudo del último día disponible con regiones DC de dos tonos por θ, filtro de θ, tooltip de cubeta y volumen en barras con eje X y cursor compartidos (§6.6).|M    |
+|RF-VZ-16 |Eventos exactos por θ          |`events.bin`: por evento que toca el día, referencia, confirmación y extremo en ms desde el inicio del día, sentido y banderas (cola provisional, valores recortados) (§7.5).|M    |
+|RF-VZ-17 |Franjas, densidad y navegación |Franjas en los instantes exactos de cada evento a cualquier zoom, marca con el número donde varios eventos caen en un píxel y navegación evento por evento con ventana `[referencia(k−1), extremo(k+1)]` (§6.12).|M    |
+|RF-VZ-18 |Conteo de ticks                 |`count-<w>.u32`: ticks por columna y nivel; el tooltip dice "n ticks" (§7.4).|M    |
+|RF-VZ-19 |Confirmaciones multiescala      |`confirms-<w>.u8` y `simul-<w>.u8` precalculados en el job y un tercer panel de barras (§6.13, §7.4).|M    |
 
 -----
 
@@ -185,20 +190,20 @@ viz hereda y no contradice:
 
 |Campo|Contenido|
 |---|---|
-|**Decisión**|Un job `viz-tiles`, encadenado tras `l2-monthly`, reduce cada día a tiles por nivel de zoom con **M4** (Jugel et al., 2014): por cada columna de píxeles se conservan el primer, el último, el mínimo y el máximo precio. Por nivel, tres tiles: precio (independiente de θ), volumen por cubeta y dirección, que **empaqueta los 50 θ** en un solo archivo. El navegador solo descarga y pinta.|
+|**Decisión**|Un job `viz-tiles`, encadenado tras `l2-monthly`, reduce cada día a tiles por nivel de zoom con **M4** (Jugel et al., 2014): por cada columna de píxeles se conservan el primer, el último, el mínimo y el máximo precio. Por nivel, seis tiles: precio (independiente de θ), volumen por cubeta, ticks por columna, confirmaciones multiescala (dos) y dirección, que **empaqueta los 50 θ** en un solo archivo; y por día, un archivo con los eventos exactos de todos los θ (§7.5). El navegador solo descarga y pinta.|
 |**Justificación — por qué M4**|M4 garantiza que la imagen a resolución de píxel es idéntica a la de la serie completa con cuatro puntos por columna. El costo se paga una vez, en el job, no en cada apertura.|
 |**Justificación — por qué el precio no depende de θ**|Los 50 θ comparten la misma serie de precio: un tile de precio por nivel y no 50. Cambiar θ nunca vuelve a bajar el precio (invariante de la Épica).|
-|**Justificación — por qué la dirección va empaquetada por nivel y no un archivo por θ**|Con un archivo por θ un día son 313 objetos; empaquetado, 19. (1) **Costo**: las escrituras son operaciones Clase A, una por objeto; el backfill pasa de 1,03 M operaciones (≈ 5,2 USD, al tope del presupuesto de 5 USD) a 63 k (≈ 0,3 USD) (§10.3). (2) **Interacción**: cambiar θ no hace **ninguna** petición, porque los 50 θ del nivel ya están en memoria; es la lectura literal de la decisión ("sin red adicional"), sin caché que pueda fallar. (3) **Lo que cuesta**: la apertura típica pasa de ≈ 0,30 MB a ≈ 0,60 MB, bajo el límite de 1 MB, y el techo absoluto (el día entero) no cambia (§7.3). La dirección de los 50 θ no es una precarga especulativa: el filtro de θ es parte de la vista del día y sus bloques son lo que dibuja al moverlo; la prioridad 1 pide no transferir lo que no se dibuja, y esto se dibuja con un clic, sin red.|
+|**Justificación — por qué la dirección va empaquetada por nivel y no un archivo por θ**|Con un archivo por θ un día son 333 objetos; empaquetado, 39. (1) **Costo**: las escrituras son operaciones Clase A, una por objeto; el backfill pasa de 1,10 M operaciones (≈ 5,5 USD, por encima del presupuesto de 5 USD) a 129 k (≈ 0,64 USD) (§10.3). (2) **Interacción**: cambiar θ no hace **ninguna** petición, porque los 50 θ del nivel ya están en memoria; es la lectura literal de la decisión ("sin red adicional"), sin caché que pueda fallar. (3) **Lo que cuesta**: la página del día lleva los 50 θ de cada nivel: con los eventos pesa ≈ 0,4 a 0,6 MB en gzip (§7.3), bajo el límite de 1 MB, y el techo absoluto (el día entero) no cambia. La dirección de los 50 θ no es una precarga especulativa: el filtro de θ es parte de la vista del día y sus bloques son lo que dibuja al moverlo; la prioridad 1 pide no transferir lo que no se dibuja, y esto se dibuja con un clic, sin red.|
 |**Justificación — por qué por día**|El día es la unidad de la vista (un día en pantalla) y la de la regeneración: un día es independiente de los demás, a diferencia de los meses de L2, que se encadenan por carry-over. Los días se pueden generar en cualquier orden y en paralelo.|
 
 ### 6.5 ADR-VZ-05 — Entrega: solo bucket, sin servidor
 
 |Campo|Contenido|
 |---|---|
-|**Decisión**|El navegador recibe **un solo documento por día**: `index.html`, con la plantilla, uPlot y los 18 arreglos del día (base64, bajo su nombre, en `window.VIZ_DATA`) dentro (§7.9). Lo escribe el job `viz-tiles` junto a los tiles del día y copia el del último día a `tiles/latest.html`; `viz-render` lo regenera cuando cambia la plantilla. Vive en el bucket privado declarado en el stack `data` y se abre por `storage.cloud.google.com/<bucket>/tiles/latest.html` (o el `index.html` de un día): Google pide iniciar sesión y sirve el documento si la cuenta tiene `objectViewer`. Costo fijo cero, ninguna superficie de autenticación propia, **ninguna publicación por Terraform** y ninguna petición de red después de la carga.|
+|**Decisión**|El navegador recibe **un solo documento por día**: `index.html`, con la plantilla, uPlot y los 37 arreglos del día (base64, bajo su nombre, en `window.VIZ_DATA`) dentro (§7.9). Lo escribe el job `viz-tiles` junto a los tiles del día y copia el del último día a `tiles/latest.html`; `viz-render` lo regenera cuando cambia la plantilla. Vive en el bucket privado declarado en el stack `data` y se abre por `storage.cloud.google.com/<bucket>/tiles/latest.html` (o el `index.html` de un día): Google pide iniciar sesión y sirve el documento si la cuenta tiene `objectViewer`. Costo fijo cero, ninguna superficie de autenticación propia, **ninguna publicación por Terraform** y ninguna petición de red después de la carga.|
 |**Evidencia (prueba del humano, 2026-10-05)**|Se probó la versión anterior, una página que descargaba sus tiles con `fetch`, abierta desde `storage.cloud.google.com`. Google sirve cada archivo privado desde un **dominio bloqueado de un solo uso** (`<hash>-apidata.googleusercontent.com`, con un token `jk` en la URL): una petición relativa a ese documento recibe «Bad Locked Domain» y una absoluta a otro origen la bloquea el navegador por CORS. El inicio de sesión de Google sirve **un documento completo por URL, no sus recursos**. De ahí la decisión: todo lo que la página necesita viaja dentro del documento. Registrada en la card ITSC-308 y en el punto 5 de la decisión de diseño de viz.|
 |**Justificación**|La prioridad 1 es eficiencia, y la pieza más eficiente es la que no se construye. Un servicio de Cloud Run con validación de Google Sign-In agrega imagen, stack, autenticación propia y logs para un problema que no existe con un solo usuario; y un sitio estático con tiles aparte exige un origen que sirva recursos, que es justo lo que `storage.cloud.google.com` no entrega. Con los datos dentro, abrir un día es **una petición** y cambiar θ, **ninguna**; el mismo archivo abre desde disco (`file://`), desde un servidor estático o adjunto en un correo.|
-|**Costo asumido**|El base64 infla 33 % (los arreglos de un día, ≈ 0,70 MB, pasan a ≈ 0,93 MB) y el documento lleva los seis niveles aunque la primera vista decodifique uno. Con `Content-Encoding: gzip` en el objeto el día viaja en una fracción (los bloques de dirección se comprimen casi a nada; medición en §7.3), de modo que **el presupuesto de 1 MB ahora sí depende del gzip** (§7.3, §14 ítem 4). Los binarios siguen escritos junto a la página (los usa `render` y sirven de auditoría): el almacenamiento del día crece con ella (§7.3, §14 ítem 11).|
+|**Costo asumido**|El base64 infla 33 % (los arreglos por nivel de un día, ≈ 0,74 MB, más `events.bin`, pasan a ≈ 0,99 MB más los eventos) y el documento lleva los seis niveles aunque la primera vista decodifique uno. Con `Content-Encoding: gzip` en el objeto el día viaja en una fracción (los bloques de dirección se comprimen casi a nada; medición en §7.3), de modo que **el presupuesto de 1 MB ahora sí depende del gzip** (§7.3, §14 ítem 4). Los binarios siguen escritos junto a la página (los usa `render` y sirven de auditoría): el almacenamiento del día crece con ella (§7.3, §14 ítem 11).|
 |**Opción B**|Cloud Run service con validación de Google Sign-In. Se abre como card solo cuando aparezca un usuario sin acceso IAM al proyecto; mientras tanto, el HTML del día cubre al asesor (es un archivo que se descarga y abre).|
 |**Alternativas descartadas**|**Página que descarga tiles con `fetch` desde el bucket (versión previa de ITSC-308)**: descartada por la evidencia de arriba. **Zip exportable (`viz-export`, versión 1.0 y 1.1 de este documento)**: ya no hace falta, el HTML es el exportable (§7.9). **Cloud Run service para servir el tablero (hoy)**: ver la justificación. **Looker Studio**: conecta a BigQuery, no a Parquet en bucket; obligaría a una copia del dato y rompe la prioridad 1. **Grafana**: servidor siempre encendido, base propia y pluginería para Parquet; uPlot es su motor sin el resto. **Streamlit, Dash, Panel**: cada interacción vuelve al servidor Python, con latencia de cientos de ms y cómputo en caliente, contrario a la prioridad 1 y al principio 8. **Plotly**: dibuja en SVG/WebGL con un bundle de más de 3 MB; con cientos de miles de puntos el navegador se arrastra. **Stack del legacy (HoloViews, Bokeh, Datashader, Panel)**: resolvía el volumen con rasterización en servidor; aquí el volumen se resuelve una vez, en el job de tiles, y el servidor desaparece.|
 
@@ -206,9 +211,9 @@ viz hereda y no contradice:
 
 |Campo|Contenido|
 |---|---|
-|**Decisión**|El volumen es un panel inferior de barras (20 a 25 % de la altura), con eje X y cursor compartidos con el precio.|
+|**Decisión**|El volumen es un panel inferior de barras (20 % de la altura desde la 1.3), con eje X y cursor compartidos con el precio y con el panel de confirmaciones, que va entre ambos (§6.13).|
 |**Justificación**|Cleveland y McGill (1984) muestran que el ojo compara longitudes alineadas con precisión y áreas con error sistemático; además, una burbuja gruesa tapa el precio que está debajo.|
-|**Primera vista acordada**|Serie cruda de precio contra tiempo del último día disponible. Regiones verticales de fondo por evento DC, en dos tonos: tenue para la fase de confirmación e intenso para el overshoot (sobre fondo oscuro, menos opacidad se ve más oscuro); verde para alza, rojo para baja; la dirección y la fase se repiten en una franja del borde (arriba alza, abajo baja; fina confirmación, gruesa overshoot), sin glifos (ITSC-315). La serie es la línea M4 mientras una columna ocupa menos de 5 px y, desde 5 px, una barra de rango por columna. Filtro de θ que cambia solo el tile de dirección. Tooltip sobre la cubeta: hora, mínimo y máximo del cubo M4, estado DC. Volumen como panel inferior.|
+|**Primera vista acordada**|Serie cruda de precio contra tiempo del último día disponible. Regiones verticales de fondo por evento DC, en dos tonos: tenue para la fase de confirmación e intenso para el overshoot (sobre fondo oscuro, menos opacidad se ve más oscuro); verde para alza, rojo para baja; la dirección y la fase se repiten en una franja del borde (arriba alza, abajo baja; fina confirmación, gruesa overshoot), sin glifos (ITSC-315). La serie es la de §6.11 (puntos y envolventes M4, nunca velas) y las regiones salen de los eventos exactos (§6.12). Filtro de θ que cambia la dirección de la columna (para el tooltip) y elige los eventos de las franjas (§6.12). Tooltip sobre la cubeta: hora, mínimo y máximo del cubo M4, estado DC. Volumen como panel inferior.|
 
 ### 6.7 ADR-VZ-07 — Nueve principios de ergonomía y Evaluación ergonómica obligatoria
 
@@ -244,7 +249,7 @@ viz hereda y no contradice:
 |---|---|
 |**Decisión**|El ancho `w` de un nivel es el **número de columnas en que se divide el día UTC completo**. Los niveles son `w ∈ {128, 256, 512, 1024, 2048, 4096}`: potencias de 2, de la columna más gruesa (675 s) a la más fina (21,09 s). Detalle y presupuesto en §7.3.|
 |**Por qué potencias de 2**|Dos razones. (1) Todo `w ≤ 8192` divide el día (86 400 000 000 µs) en columnas de duración **entera** en µs, así que la columna de un tick se calcula con enteros, sin redondeo. (2) M4 es **componible**: el primero de una columna gruesa es el primero de su primera columna fina **no vacía**, el último es el último de la última **no vacía** de las dos, y el mínimo y el máximo son el mínimo de mínimos y el máximo de máximos, que **ignoran las columnas vacías**. Si las dos están vacías, la gruesa también. Basta recorrer los ticks una vez, a `w = 4096`, y derivar los demás niveles de ese, sin releer ni guardar ticks (§8.1).|
-|**Por qué 4 096 como techo**|El ancho útil del gráfico en un monitor de escritorio es del orden de 1 500 px: `w = 2048` cubre el día completo con una columna por píxel o menos, y `w = 4096` deja ~2,7 veces de zoom antes de que una columna pase de un píxel. Los niveles de 128 a 1 024 sirven al primer trazo (11 KB) y a pantallas angostas. El techo lo fija el almacenamiento: cada duplicación del nivel más fino suma ~0,70 MB por día y duplica el total (tabla de §10.1).|
+|**Por qué 4 096 como techo**|El ancho útil del gráfico en un monitor de escritorio es del orden de 1 500 px: `w = 2048` cubre el día completo con una columna por píxel o menos, y `w = 4096` deja ~2,7 veces de zoom antes de que una columna pase de un píxel. Los niveles de 128 a 1 024 sirven a pantallas angostas (el 128 pesa 11 776 B); en 1 500 px el primer trazo decodifica el 2 048 (188 416 B con 50 θ) y `events.bin` una vez (§7.3). El techo lo fija el almacenamiento: cada duplicación del nivel más fino suma ~0,74 MB por día y duplica el total (tabla de §10.1).|
 |**Consecuencia asumida**|La resolución máxima es una columna de 21,09 s. Un evento DC de θ muy pequeño que dure menos que eso no se distingue en pantalla: la vista de un día sirve para juzgar el detector y el pipeline, no para auditar un tick. Si esa resolución no alcanza, la salida es un nivel más fino (con su costo) o un tile por rango horario; ambas se evalúan antes de agregar paneles (§14 ítem 8).|
 
 ### 6.9 ADR-VZ-09 — Estado de una columna: el del último tick de la cubeta
@@ -252,6 +257,7 @@ viz hereda y no contradice:
 |Campo|Contenido|
 |---|---|
 |**Decisión**|El estado DC de una columna es el que tiene **el último tick de la cubeta**. Una columna sin ticks tiene estado 0 y su precio es el sentinela de vacío (§7.3, §7.5). El estado de un tick se decide por su `agg_trade_id` contra los intervalos de los eventos (§7.5).|
+|**Alcance desde la 1.3**|El estado por columna **solo** responde "¿en qué estado terminó esta cubeta?": alimenta el tooltip. **Ya no dibuja las regiones**: las franjas salen de los eventos exactos (§6.12). Una columna es un estado, y un estado no puede representar varios eventos: 2026-09-30, θ = 0,00509931, w = 1 024 (84 s por columna): los cuatro eventos de 12:40:26,051 a 12:40:26,982 caen en la columna 540, cuyo último tick es del quinto evento, alcista, y la columna se pintaba verde; con θ = 0,0001 hay 3 829 eventos para 4 096 columnas (0,93 por columna) y aparecían franjas del mismo color seguidas y fases fuera de orden, imposibles en DC. El tile de dirección no se elimina: cambiar su contrato es otra decisión y se toma con la evidencia de esta (§14 ítem 14).|
 |**Justificación — último tick**|El estado es una propiedad del instante, no de un intervalo. De los cuatro puntos M4, el último es el que cierra la columna; usar su estado deja el tile de dirección alineado con el de precio y evita decidir qué hacer cuando la cubeta cruza una frontera de fase. El costo es que una frontera de fase dentro de una columna se atribuye entera a la fase del último tick: un error de a lo sumo una columna (21,09 s en el nivel más fino).|
 |**Justificación — `agg_trade_id` y no tiempo**|Varios ticks comparten `transact_time`, pero `agg_trade_id` es estrictamente creciente (contrato de L1) y cada punto de un evento de L2 lo lleva. Compararlo con ids evita el caso del extremo que comparte instante con un tick posterior.|
 |**Justificación — no rellenar columnas vacías**|Una columna sin ticks podría heredar el estado vecino, pero sería inventar un dato (principio 6). Se escribe 0 y la columna se ve como hueco.|
@@ -261,7 +267,37 @@ viz hereda y no contradice:
 |Campo|Contenido|
 |---|---|
 |**Decisión**|Un día se escribe en este orden: se borra su `index.json` si existía, se escriben los archivos de tile y **al final** se escribe el `index.json`. El `index.json` es la marca de commit: un día sin él no existe para el tablero. Cada día lleva en su índice el `input_hash` de sus archivos de entrada y la `tiles_version`; si ambos coinciden con los calculados, el día se salta (§7.8).|
-|**Justificación**|Cada objeto de GCS se publica entero o no se publica, pero un día son 20 objetos y no hay transacción entre ellos. L2 resolvió el mismo problema con la escritura atómica (temporal más `commit`) y el orden "primero eventos, luego carry-over". Aquí el índice es el último escrito: un lector que lo ve sabe que todos los tiles que lista ya están. Un tile no necesita su propio temporal más renombre: ahorra una operación Clase A por objeto (§10.3). Si el job muere a medias, el día queda sin índice (visible como degradado) y la siguiente corrida lo rehace.|
+|**Justificación**|Cada objeto de GCS se publica entero o no se publica, pero un día son 39 objetos y no hay transacción entre ellos. L2 resolvió el mismo problema con la escritura atómica (temporal más `commit`) y el orden "primero eventos, luego carry-over". Aquí el índice es el último escrito: un lector que lo ve sabe que todos los tiles que lista ya están. Un tile no necesita su propio temporal más renombre: ahorra una operación Clase A por objeto (§10.3). Si el job muere a medias, el día queda sin índice (visible como degradado) y la siguiente corrida lo rehace.|
+
+### 6.11 ADR-VZ-11 — El precio se dibuja como puntos y envolventes exactas, nunca como velas
+
+|Campo|Contenido|
+|---|---|
+|**Decisión**|La vista dibuja solo dos cosas: un **tick** (un punto) o la **envolvente exacta de los ticks de una columna** (el segmento del mínimo al máximo). Con 1 o 2 ticks en la columna (`count-<w>.u32`), M4 son todos sus ticks y se dibuja un punto por tick. Con 3 ticks o más, **siempre** el segmento de su mínimo a su máximo, que es la unión de los píxeles que ocuparían sus puntos (si mínimo y máximo coinciden, el tramo horizontal del primer al último tick). Desde 5 px por columna se agregan, sobre ese segmento, sus cuatro puntos M4 en su instante exacto: ticks reales, nunca una barra en el centro de una columna ancha y nunca cuatro puntos aislados que se lean como "4 ticks" en una columna de miles. **Nada une una columna con la vecina** y no hay muescas de primero ni de último.|
+|**Por qué no velas**|Las muescas de primero y último de la vista 1.1 eran una vela. El proyecto abandona las velas porque enmascaran datos (la apertura y el cierre de una vela no son los extremos de nada en DC), y la vista no puede reintroducirlas. Además inducían una lectura errónea: una barra ascendente con franja roja es legítima en DC (el contra-movimiento menor que θ dentro de un evento: 286 columnas el 2026-09-30), pero la vela invita a leerla como una contradicción.|
+|**Por qué es exacto**|M4 garantiza que la imagen a resolución de píxel es idéntica a la de la serie completa (ADR-VZ-04). Lo que se dibuja es esa imagen o un tick: no se agrega nada que ningún tick haya medido (principio 6).|
+|**Consecuencia asumida**|El nivel más fino tiene 4 096 columnas de 21,09 s y solo conserva cuatro puntos por columna: una columna con 3 o más ticks no muestra "un punto por tick", sino su envolvente mín–máx y, desde 5 px, sus puntos M4 sobre ella. Con 6 500 ticks por columna en promedio, ver cada tick exige un nivel más fino o un tile por rango horario (§14 ítem 8). La vista lo dice en el pie (`puntos M4 sobre el segmento desde 5 px por columna`). Una primera versión de esta decisión dibujaba solo los cuatro puntos desde 5 px; se corrigió porque la card (ITSC-316) pide el segmento mín–máx salvo con una columna por tick o menos.|
+
+### 6.12 ADR-VZ-12 — Las franjas salen de los eventos exactos; navegación por eventos; el tick extremo pertenece al evento que cierra
+
+|Campo|Contenido|
+|---|---|
+|**Decisión**|(1) La vista dibuja la confirmación y el overshoot de cada evento con las fronteras reales (`events.bin`, §7.5), a cualquier zoom. (2) El **tick extremo pertenece al evento que cierra**: la franja del evento `k` termina en el instante del extremo, inclusive, y la del `k+1` arranca en el tick siguiente; a resolución de milisegundo comparten una línea vertical de 1 px en ese instante (la frontera). Otra línea vertical, del color del evento, marca cada confirmación. (3) Donde varios eventos **enteros** (de su referencia a su extremo) caben en un mismo píxel (extremos a menos de 3 px entre sí), la vista dibuja una marca gris con el número ("4 eventos") en vez de franjas indistinguibles: ningún evento queda invisible, o se ve o se cuenta; un evento angosto que está solo se ensancha hasta 3 px. Se calcula en el navegador, a partir de los eventos exactos del θ elegido y por el ancho de píxel actual. (4) **"Evento anterior" y "evento siguiente"** para el θ elegido: la ventana del evento `k` es `[referencia(k−1), extremo(k+1)]`, el evento completo con su predecesor y su sucesor completos, para ver las dos transiciones enteras. La navegación **desplaza** la ventana y conserva la escala que fijó el humano; **"ajustar a la ventana"** es una acción explícita y separada que pone la escala en ese intervalo con 5 % de margen a cada lado. (5) Funciona dentro del día: sin vecino dentro del día, o con una referencia o un extremo recortado al borde, la vista lo dice y recorta la ventana al borde; si el evento `k+1` es la cola pendiente del carry-over, su extremo es el candidato vigente y la vista lo marca como provisional. Cargar los días vecinos queda para otra card.|
+|**Por qué el extremo es del evento que cierra**|Es el dilema de la frontera compartida de `DC_FRAMEWORK.md` §3.2: el extremo de `k` es también la referencia de `k+1`, y un tick solo puede estar en uno. `direction.py` ya usa `(referencia, extremo]` (§7.5): la vista adopta la misma pertenencia, así que el estado del tooltip y la franja nunca discrepan en el tick de la frontera.|
+|**Por qué la ventana es `[ref(k−1), ext(k+1)]`**|Un evento DC solo se entiende contra sus vecinos: la confirmación de `k` es el desenlace de la transición que cerró `k−1` y el extremo de `k` es la referencia de la transición de `k+1`. Con la ventana de tres eventos se ven las dos transiciones enteras; una ventana solo de `k` esconde las dos.|
+|**Por qué navegar no cambia la escala**|Principio 5 (escalas estables): el eje solo cambia con una acción explícita del humano. Navegar desplaza el centro y conserva el ancho; "ajustar" es la acción que cambia el ancho, y es reversible (doble clic o Esc).|
+|**Por qué se cuentan los eventos enteros y no los que terminan en el píxel**|El extremo de un evento largo coincide con la referencia del siguiente: contar por extremo sumaría a la marca el evento largo que llega al píxel, cuyo cuerpo sí se ve como franja. Contar los enteros agrupa solo lo que una franja no puede mostrar. El caso de aceptación (2026-09-30, 12:40:26) da "4 eventos".|
+|**Alternativa descartada**|Rebanar el almacenamiento por número de eventos en vez de por días: el conteo depende de θ, daría 50 particiones del mismo precio y no resuelve la resolución de pantalla. La navegación por eventos cubre la necesidad sin tocar el almacenamiento.|
+
+### 6.13 ADR-VZ-13 — Confirmaciones multiescala precalculadas, tercer panel y reparto vertical
+
+|Campo|Contenido|
+|---|---|
+|**Decisión**|El job precalcula, por nivel, dos `uint8` por columna: `confirms` (número de θ con al menos una confirmación dentro de la columna) y `simul` (máximo número de θ que comparten **un mismo** `confirm_time` dentro de la columna) (§7.4). Un tercer panel, entre el precio y el volumen y con el eje X y el cursor compartidos, los muestra como **barras verticales**: la barra completa para `confirms` y una marca intensa para `simul`. El tooltip lista qué θ confirmaron en la columna y a qué hora, a partir de los eventos exactos. El navegador no cuenta nada.|
+|**Por qué es una pregunta de la tesis**|Un salto brusco cruza varios θ en el mismo instante: es la coherencia multiescala del detector. `confirm_time` es el último tick del grupo de empate (ADR-L2-03), así que dos θ que confirman por el mismo tick comparten **exactamente** el mismo `confirm_time`: igualdad de enteros, no una tolerancia.|
+|**Por qué en el job y no en el navegador**|Memoria ante todo: los conteos son acumuladores de tamaño fijo por nivel, como M4 (los eventos de cada θ se leen y se sueltan, y los del día quedan en un solo buffer de 13 B por evento, el de `events.bin`). `confirms` no se deriva del nivel fino (un θ que confirma en dos columnas finas cuenta una vez en la gruesa), así que se acumula por nivel; `simul` agrupa los θ por instante exacto y solo retiene los tiempos de confirmación del día (8 B por evento) hasta cerrar el día.|
+|**Por qué barras y no una franja de calor**|Enteros pequeños se leen por longitud (Cleveland y McGill, 1984) y el color no codifica magnitud (principio 2). Barra completa y marca intensa son del mismo tono: lo que cambia es la longitud y la opacidad, que para una marca superpuesta solo distingue "ambas" de "la barra".|
+|**Reparto vertical**|Punto de partida: precio 65 %, confirmaciones 15 %, volumen 20 %. El volumen pasa del 20 a 25 % anterior a un 20 % fijo y el precio cede el resto: con ~800 px de panel son 520 px de precio, 120 de confirmaciones (un máximo de 50 θ legible a ~2 px por unidad) y 160 de volumen. Lo valida la Evaluación ergonómica de la card; si el volumen no justifica su lugar, cede (principio 9).|
 
 -----
 
@@ -288,13 +324,17 @@ tiles/provider=<p>/market=<m>/asset=<a>/day=YYYY-MM-DD/
 ├── price-<w>.i32                  # 6 archivos: w = 128 … 4096
 ├── volume-<w>.f32                 # 6 archivos
 ├── dir-<w>.u8                     # 6 archivos: los θ del día empaquetados, en el orden de index.json
-├── index.html                     # la página del día: plantilla, uPlot y los 18 arreglos (§7.9)
+├── count-<w>.u32                  # 6 archivos: ticks por columna
+├── confirms-<w>.u8                # 6 archivos: θ que confirman en la columna
+├── simul-<w>.u8                   # 6 archivos: máximo de θ con el mismo confirm_time en la columna
+├── events.bin                     # los eventos exactos de todos los θ del día (§7.5)
+├── index.html                     # la página del día: plantilla, uPlot y los 37 arreglos (§7.9)
 └── index.json                     # se escribe al final: marca de commit
 tiles/latest.json                  # último día con index.json
 tiles/latest.html                  # copia de la página de ese día
 ```
 
-Un día completo son **20 objetos** (6 + 6 + 6 + 2): **≈ 0,70 MB** de arreglos más la página (§7.3 trae el tamaño). Los θ son los del catálogo que L2 tenía en ese mes ([TRD-L2 §7.3](l2.md#73-el-catálogo-de-θ)); su orden dentro de `dir-<w>.u8` es el de `thetas` en el índice (§7.4).
+Un día completo son **39 objetos** (6 × 6 + 1 + 2): **≈ 0,74 MB** de arreglos por nivel, más `events.bin` y la página (§7.3 trae el tamaño). Los θ son los del catálogo que L2 tenía en ese mes ([TRD-L2 §7.3](l2.md#73-el-catálogo-de-θ)); su orden dentro de `dir-<w>.u8` es el de `thetas` en el índice (§7.4).
 
 **Metadatos de cada objeto**, fijados al escribirlo (`write_day`): los binarios, `Content-Type: application/octet-stream` y `Cache-Control: private, max-age=31536000, immutable`; `index.json` y `latest.json`, `application/json` y `Cache-Control: no-cache`; las páginas (`index.html`, `latest.html`), `text/html; charset=utf-8`, `Content-Encoding: gzip` y `Cache-Control: no-cache`. En disco local los metadatos no existen y la página se escribe **sin comprimir**, para que abra por `file://`. Nadie descarga los binarios desde el navegador (la página los lleva dentro): ya no hace falta el parámetro `?h=` de la versión 1.1, y un día regenerado cambia el contenido de `index.html`, que se revalida en cada apertura (`no-cache`).
 
@@ -304,7 +344,7 @@ El `index.html` se escribe **antes** del `index.json` (§7.8): un índice implic
 
 ```json
 {
-  "tiles_version": "1.1.0",
+  "tiles_version": "1.2.0",
   "provider": "binance", "market": "spot", "asset": "BTCUSDT",
   "day": "2026-08-31",
   "t0": 1788134400000000,
@@ -314,10 +354,14 @@ El `index.html` se escribe **antes** del `index.json` (§7.8): un índice implic
   "price": {"128": "price-128.i32", "…": "…", "4096": "price-4096.i32"},
   "volume": {"128": "volume-128.f32", "…": "…", "4096": "volume-4096.f32"},
   "dir": {"128": "dir-128.u8", "…": "…", "4096": "dir-4096.u8"},
+  "count": {"128": "count-128.u32", "…": "…", "4096": "count-4096.u32"},
+  "confirms": {"128": "confirms-128.u8", "…": "…", "4096": "confirms-4096.u8"},
+  "simul": {"128": "simul-128.u8", "…": "…", "4096": "simul-4096.u8"},
+  "events": "events.bin",
   "page": "index.html",
   "thetas": [
-    {"theta": "0.00010000", "events": 11873, "provisional_from_s": null},
-    {"theta": "0.05000000", "events": 4, "provisional_from_s": 41234.5}
+    {"theta": "0.00010000", "events": 11873, "events_offset": 0, "provisional_from_s": null},
+    {"theta": "0.05000000", "events": 4, "events_offset": 11873, "provisional_from_s": 41234.5}
   ],
   "missing_thetas": [],
   "input_hash": "9f2c…(sha256 en hex)",
@@ -329,7 +373,7 @@ El `index.html` se escribe **antes** del `index.json` (§7.8): un índice implic
 
 |Campo|Significado|
 |---|---|
-|`tiles_version`|semver del **formato** de los tiles y del índice (no la de la imagen). Cambia con cualquier modificación de §7.2 a §7.5 (la 1.1.0 agregó `page`); la página rechaza (modo degradado) una versión mayor que no conoce.|
+|`tiles_version`|semver del **formato** de los tiles y del índice (no la de la imagen). Cambia con cualquier modificación de §7.2 a §7.5 (la 1.1.0 agregó `page`; la 1.2.0, `count`, `confirms`, `simul`, `events` y `events_offset`); la página rechaza (modo degradado) una versión mayor que no conoce.|
 |`t0`|Inicio del día UTC en µs desde la época: el origen del tiempo relativo de los tiles.|
 |`price_scale`|Unidades de precio del tile por unidad de la cotización: el precio en USDT es `p / price_scale`. **Fijo por activo**, igual al tick de la cotización: 100 para BTCUSDT (tick de 0,01). Nunca se elige por día (§7.3).|
 |`input_hash`|Huella de los archivos de entrada (§7.8).|
@@ -337,10 +381,12 @@ El `index.html` se escribe **antes** del `index.json` (§7.8): un índice implic
 |`generated_at`|Momento de generación (UTC). Alimenta "última actualización" de la franja de estado (principio 3). Es lo único del índice que cambia entre dos corridas idénticas; `render` lo conserva (no es la hora de la regeneración de la página).|
 |`ticks`|Ticks del día en L1.|
 |`levels`|Los `w` presentes. El tablero no asume la lista: lee esta.|
-|`price`, `volume`, `dir`|Nombre del archivo de cada tipo por nivel: `{"128": "price-128.i32", …}`.|
+|`price`, `volume`, `dir`, `count`, `confirms`, `simul`|Nombre del archivo de cada tipo por nivel: `{"128": "price-128.i32", …}`.|
+|`events`|Nombre del archivo de eventos exactos del día, `events.bin` (§7.5).|
 |`page`|Nombre de la página autocontenida del día, `index.html` (§7.9).|
 |`thetas`|Los θ con bloque en `dir-<w>.u8`, en el orden de los bloques: el θ en la posición `k` ocupa los bytes `k·w` a `(k+1)·w − 1` (§7.4). `theta` es el mismo texto de ancho fijo que la partición de L2 (`"0." + 8 decimales`), ordenado de menor a mayor.|
 |`thetas[].events`|Filas de eventos que tocan el día, incluida la cola pendiente si la hay.|
+|`thetas[].events_offset`|Índice del primer evento del θ en cada sección de `events.bin` (§7.5): la suma de los `events` de los θ anteriores.|
 |`thetas[].provisional_from_s`|Segundos desde el inicio del día a partir de los cuales el estado de ese θ es provisional hasta el final del día; `null` si todo el día es definitivo (§7.6).|
 |`missing_thetas`|θ del catálogo sin entrada completa en L2 ese mes; no tienen bloque en `dir-<w>.u8` (§9.3). El tablero los muestra como hueco.|
 
@@ -348,7 +394,7 @@ El `index.html` se escribe **antes** del `index.json` (§7.8): un índice implic
 
 - `t0` lo escribe `write_day` (`write.py`) y lo leen las pruebas (`test_viz_write.py`) y `data-contracts.md`; la página no lo lee. Renombrarlo a `day_start_us` no rompería ningún lector de producción, pero se conserva porque es el nombre de las fórmulas de §7.3 (`rel_us = transact_time − t0`) y renombrarlo obligaría a cambiar este TRD, `data-contracts.md` y las pruebas sin ganar nada.
 - `content_hash` lo verifica `render` (`pages.py`) antes de escribir la página, y la prueba de reproducibilidad de §7.9 lo compara con los arreglos embebidos; la página no lo lee.
-- Los mapas `price`, `volume` y `dir` son redundantes con la plantilla `<tipo>-<w>.<ext>`, pero se conservan: la página sí los lee (`index.price[w]`, `index.volume[w]`, `index.dir[w]`) y no asume la plantilla, igual que lee `levels`.
+- Los mapas `price`, `volume`, `dir`, `count`, `confirms` y `simul` son redundantes con la plantilla `<tipo>-<w>.<ext>`, pero se conservan: la página sí los lee (`index.price[w]`, …) y no asume la plantilla, igual que lee `levels`. Un índice sin `events` (tiles anteriores a 1.2.0) se ve como datos incompletos, no como un día sin eventos.
 
 Dos pruebas rompen el CI si algo se desvía: la de `data-contracts.md` compara su tabla de campos con `INDEX_FIELDS`, y la de este TRD compara con `INDEX_FIELDS` el índice de ejemplo de arriba.
 
@@ -377,46 +423,51 @@ Los puntos `i = 4·col + k` (`k = 0..3`) son los cuatro puntos M4 de la columna 
 
 **Niveles de zoom y bytes** (la dirección con los 50 θ empaquetados, §7.4):
 
-|`w`|Duración de columna|`price`|`volume`|`dir` (50 θ)|Total por nivel|
-|---|---|---|---|---|---|
-|128|675 s|4 096 B|512 B|6 400 B|11 008 B|
-|256|337,5 s|8 192 B|1 024 B|12 800 B|22 016 B|
-|512|168,75 s|16 384 B|2 048 B|25 600 B|44 032 B|
-|1 024|84,38 s|32 768 B|4 096 B|51 200 B|88 064 B|
-|2 048|42,19 s|65 536 B|8 192 B|102 400 B|176 128 B|
-|4 096|21,09 s|131 072 B|16 384 B|204 800 B|352 256 B|
-|**Suma**||258 048 B|32 256 B|403 200 B|693 504 B|
+|`w`|Duración de columna|`price`|`volume`|`dir` (50 θ)|`count`|`confirms`|`simul`|Total por nivel|
+|---|---|---|---|---|---|---|---|---|
+|128|675 s|4 096 B|512 B|6 400 B|512 B|128 B|128 B|11 776 B|
+|256|337,5 s|8 192 B|1 024 B|12 800 B|1 024 B|256 B|256 B|23 552 B|
+|512|168,75 s|16 384 B|2 048 B|25 600 B|2 048 B|512 B|512 B|47 104 B|
+|1 024|84,38 s|32 768 B|4 096 B|51 200 B|4 096 B|1 024 B|1 024 B|94 208 B|
+|2 048|42,19 s|65 536 B|8 192 B|102 400 B|8 192 B|2 048 B|2 048 B|188 416 B|
+|4 096|21,09 s|131 072 B|16 384 B|204 800 B|16 384 B|4 096 B|4 096 B|376 832 B|
+|**Suma**||258 048 B|32 256 B|403 200 B|32 256 B|8 064 B|8 064 B|741 888 B|
 
-**Presupuesto por apertura (< 1 MB).** Costo por columna: 32 B de precio (4 puntos × (4 B de tiempo + 4 B de precio)) + 4 B de volumen + 50 B de dirección (1 B por θ). La página lleva el día entero, así que abrir un día es **una sola petición**: el `index.html`.
+**Presupuesto por apertura (< 1 MB).** Costo por columna: 32 B de precio (4 puntos × (4 B de tiempo + 4 B de precio)) + 4 B de volumen + 50 B de dirección (1 B por θ) + 4 B de conteo + 2 B de confirmaciones; más, por día, 13 B por evento de `events.bin` (§7.5). La página lleva el día entero, así que abrir un día es **una sola petición**: el `index.html`.
 
 |Concepto|Bytes|Base|
 |---|---|---|
-|Arreglos del día (6 niveles, 50 θ)|693 504 B|tabla de arriba|
-|En base64 (+ 33 %)|≈ 0,92 MB|aritmética|
-|Plantilla, `app.js`, CSS y uPlot 1.6.32|78 035 B|medido|
-|**HTML sin comprimir, 50 θ**|**≈ 1,0 MB**|suma|
-|HTML en gzip, día del humo (5 θ, 4 735 ticks)|191 811 B (520 577 B sin comprimir)|medido, nivel 9|
-|Dirección en gzip, por θ|≈ 2,5 KB|medido: 12 762 B de diferencia entre 5 θ y ninguno|
-|**HTML en gzip, 50 θ**|**≈ 0,3 a 0,4 MB**|estimación: 179 KB del día del humo sin dirección más 50 × 2,5 KB; el precio de un día real tiene más ticks y comprime algo menos|
+|Arreglos por nivel del día (6 niveles, 50 θ)|741 888 B|tabla de arriba|
+|`events.bin` (50 θ)|≈ 0,3 a 0,6 MB|estimación: 13 B por evento; 3 829 eventos de θ = 0,0001 el 2026-09-30 son 49,8 KB; el catálogo completo se mide con un día real (ítem 13 de §14)|
+|En base64 (+ 33 %)|≈ 1,4 a 1,7 MB|aritmética|
+|Plantilla, `app.js`, CSS y uPlot 1.6.32|≈ 94 KB|medido|
+|**HTML sin comprimir, 50 θ**|**≈ 1,5 a 1,8 MB**|suma: ya no cabe en 1 MB, depende del gzip|
+|HTML en gzip, día del humo (5 θ, 4 735 ticks, 1 419 eventos)|217 571 B (632 254 B sin comprimir); eran 191 811 B (520 577 B) en la 1.2|medido, nivel 9: +25,8 KB (+13 %)|
+|`events.bin` en gzip, día del humo|4 395 B de 18 447 B (3,1 B por evento)|medido|
+|**HTML en gzip, 50 θ**|**≈ 0,4 a 0,6 MB**|estimación: 0,3 a 0,4 MB de la 1.2 más 70 a 140 KB de eventos en gzip (3,1 B por evento sobre 23 000 a 46 000 eventos, la misma estimación de `events.bin`) y ≈ 15 KB de conteos; < 1 MB. Se confirma con un día real en la Evaluación ergonómica|
 |Cambiar θ|0 B, 0 peticiones|el bloque ya está en memoria|
 
-Sin gzip la página de un día de 50 θ ronda el límite de 1 MB; en un bucket va comprimida (`Content-Encoding: gzip`, §7.2), y los navegadores piden gzip siempre, así que **el presupuesto ahora depende de él** (antes no, §14 ítem 4). La primera vista decodifica **un solo nivel**, el que cubre el ancho de la ventana (en 1 500 px, el 2 048: 176 128 B de arreglos con 50 θ); un zoom decodifica el siguiente desde la misma página (sin red). Lo que mide el humano (primer trazo, cambio de θ) se escribe en la card y en el runbook de la hija 7.
+Sin gzip la página de un día de 50 θ pesa 1,5 a 1,8 MB, por encima del límite de 1 MB; en un bucket va comprimida (`Content-Encoding: gzip`, §7.2), y los navegadores piden gzip siempre, así que **el presupuesto ahora depende de él** (antes no, §14 ítem 4). La primera vista decodifica **un solo nivel**, el que cubre el ancho de la ventana (en 1 500 px, el 2 048: 188 416 B de arreglos con 50 θ), y los eventos del día una vez (`events.bin`); un zoom decodifica el siguiente desde la misma página (sin red). Lo que mide el humano (primer trazo, cambio de θ) se escribe en la card y en el runbook de la hija 7.
 
-**Presupuesto por día y por histórico.** Por día: precio 258 048 B + volumen 32 256 B + dirección 50 × 8 064 = 403 200 B = **693 504 B**, más ~4 KB de `index.json` ≈ **0,70 MB**. El histórico de L1 y L2 va del 2017-08-17 al 2026-08-31, el último mes cerrado a la fecha (109 meses): **3 302 días**.
+**Presupuesto por día y por histórico.** Por día: precio 258 048 B + volumen 32 256 B + dirección 50 × 8 064 = 403 200 B + conteo 32 256 B + confirmaciones 16 128 B = **741 888 B**, más `events.bin` (≈ 0,3 a 0,6 MB con los 50 θ, estimado) y ~4 KB de `index.json` ≈ **1,1 a 1,4 MB**. El histórico de L1 y L2 va del 2017-08-17 al 2026-08-31, el último mes cerrado a la fecha (109 meses): **3 302 días**.
 
 |Concepto|Cálculo|Resultado|
 |---|---|---|
-|Almacenamiento del histórico|3 302 días × ~0,70 MB|**≈ 2,31 GB (2,15 GiB)**|
-|Objetos del histórico|3 302 días × 20|**≈ 66 mil**|
-|Almacenamiento de las páginas|3 302 días × ≈ 0,35 MB en gzip (estimado: 0,3 a 0,4 MB)|≈ 1,16 GB|
-|**Total (tiles y páginas)**||**≈ 3,5 GB (3,2 GiB)**|
-|Crecimiento en estado estacionario|~30 días × (0,70 + 0,35) MB|≈ 32 MB por mes|
+|Almacenamiento del histórico|3 302 días × ~1,25 MB|**≈ 4,1 GB (3,8 GiB)**|
+|Objetos del histórico|3 302 días × 39|**≈ 129 mil**|
+|Almacenamiento de las páginas|3 302 días × ≈ 0,55 MB en gzip (estimado: 0,5 a 0,6 MB)|≈ 1,8 GB|
+|**Total (tiles y páginas)**||**≈ 5,9 GB (5,5 GiB)**|
+|Crecimiento en estado estacionario|~30 días × (1,25 + 0,55) MB|≈ 54 MB por mes|
 
-Los ≈ 3,5 GB caben **dentro de los 5 GB** del cupo gratis de Cloud Storage tomados por sí solos. **Pero el cupo no es de viz:** es uno por billing account y el medallion medido ya lo excede (L1 38,4 GiB + L2 21,14 GiB, maestro §7.1 y §9.1). El almacenamiento de viz se paga: ≈ 0,07 USD/mes a 0,02 USD/GB-mes. §10.3 recoge el efecto en el costo. La página guarda los arreglos que ya están en los binarios: esa duplicación es deliberada y se revisa en §14 ítem 11.
+Los ≈ 5,9 GB **superan el cupo gratis de 5 GB** de Cloud Storage tomados por sí solos. **Y el cupo no es de viz:** es uno por billing account y el medallion medido ya lo excede (L1 38,4 GiB + L2 21,14 GiB, maestro §7.1 y §9.1). El almacenamiento de viz se paga: ≈ 0,12 USD/mes a 0,02 USD/GB-mes (era ≈ 0,07). §10.3 recoge el efecto en el costo. La página guarda los arreglos que ya están en los binarios: esa duplicación es deliberada y se revisa en §14 ítem 11.
 
-### 7.4 Tile de dirección
+### 7.4 Tiles por columna: dirección, conteo y confirmaciones multiescala
 
-**`dir-<w>.u8`**: `n·w` bytes, con `n` el número de entradas de `thetas` en el índice (50 con el catálogo completo). Son `n` bloques consecutivos de `w` bytes, uno por θ en el orden de `thetas`: el θ en la posición `k` ocupa los bytes `k·w` a `(k+1)·w − 1`, y el navegador lo lee con `new Uint8Array(buffer, k·w, w)`, sin copiar. Cada byte es el estado DC del θ en esa columna (regla de §7.5). Un θ de `missing_thetas` no tiene bloque. Por qué un archivo por nivel y no uno por θ: ADR-VZ-04.
+**`count-<w>.u32`**: `w` valores `uint32` little-endian, los **ticks** de cada columna; 0 si está vacía. Es un acumulador de tamaño fijo más del paso M4 (suma por columna, y los niveles gruesos suman de a dos). La suma de un nivel es `ticks` del índice. El tooltip dice "n ticks" en la columna.
+
+**`confirms-<w>.u8`** y **`simul-<w>.u8`**: `w` bytes cada uno, **independientes de θ**, calculados en el job con los 50 θ del día (ADR-VZ-13). Para la columna `c`: `confirms[c]` es el número de θ con al menos una confirmación (`confirm_time`) dentro de la columna, de 0 a 50 (un θ que confirma varias veces en la columna cuenta una); `simul[c]` es el máximo número de θ que comparten **un mismo** `confirm_time` (µs) dentro de ella, de modo que `simul ≤ confirms`. Cuentan las confirmaciones de los eventos que tocan el día y caen dentro de él, incluida la del evento pendiente. Un θ ausente (`missing_thetas`) no cuenta. **El tooltip tiene resolución de ms:** lista las confirmaciones desde `events.bin`, que las guarda truncadas a ms, y corta la cubeta en `⌈borde·1000⌉` ms. En los niveles 2 048 y 4 096 el borde de una columna cae en fracción de ms (42 187,5 y 21 093,75 ms); una confirmación que ocurre en esa fracción, entre el borde y el ms siguiente, la cuenta el tile en la columna `c+1` (se calcula en µs) y el tooltip la lista en `c`, así que su lista puede diferir de `confirms[c]` en un evento del borde. Lo dibujado y el tile mandan; la lista es una ayuda de lectura.
+
+**`dir-<w>.u8`**: `n·w` bytes, con `n` el número de entradas de `thetas` en el índice (50 con el catálogo completo). Son `n` bloques consecutivos de `w` bytes, uno por θ en el orden de `thetas`: el θ en la posición `k` ocupa los bytes `k·w` a `(k+1)·w − 1`, y el navegador lo lee con `new Uint8Array(buffer, k·w, w)`, sin copiar. Cada byte es el estado DC del θ en esa columna (regla de §7.5). Un θ de `missing_thetas` no tiene bloque. Por qué un archivo por nivel y no uno por θ: ADR-VZ-04. Desde la 1.3 el estado por columna solo alimenta el tooltip: las franjas salen de los eventos exactos (§7.5, ADR-VZ-09).
 
 |Valor|Estado|Tono en la vista|
 |---|---|---|
@@ -429,15 +480,21 @@ Los ≈ 3,5 GB caben **dentro de los 5 GB** del cupo gratis de Cloud Storage tom
 
 Los tonos son una indicación; el color y la forma los fija la vista bajo el principio 2.
 
-### 7.5 Regla de estado por columna
+### 7.5 Eventos exactos y regla de estado por columna
 
-El estado de una columna es el de su **último tick** (ADR-VZ-09). El estado de un tick con id `x` sale de los eventos del θ:
+**`events.bin`**: los eventos de **todos** los θ del día en un solo archivo, sin cabecera y little-endian: **cuatro secciones** consecutivas de `N` valores, con `N` la suma de `thetas[].events`. Secciones: referencia, confirmación y extremo en `int32` (milisegundos desde `t0`, `⌊µs / 1000⌋`, recortados a `[0, 86 400 000]`) y un `uint8` de banderas; **13 B por evento**. El θ en la posición `k` ocupa de `events_offset` a `events_offset + events − 1` en cada sección y el navegador lo lee con `new Int32Array(buffer, 0, N)`, `new Int32Array(buffer, 4N, N)`, `new Int32Array(buffer, 8N, N)` y `new Uint8Array(buffer, 12N, N)`, sin copiar. Las banderas son `1` alza (sin el bit, baja), `2` provisional, `4` referencia recortada, `8` confirmación recortada y `16` extremo recortado.
+
+Los eventos son los de `events.parquet` que tocan el día (§7.6), con los tiempos de L2, más la cola pendiente del carry-over con su candidato como extremo, marcada provisional si su cadena sigue abierta y el candidato cae dentro del día o antes. Un tiempo fuera del día se recorta al borde y se marca; los ticks posteriores al candidato de una cola provisional no llevan evento (todavía no hay quien los cierre): la vista deja ahí el marcador "provisional". Los tiempos de un θ no decrecen y el extremo de un evento es la referencia del siguiente.
+
+*Por qué un archivo por día y no uno por θ (decisión):* 50 archivos más por día suben los objetos de 39 a 89 y las operaciones Clase A del backfill a 294 k (≈ 1,5 USD) sin ganar nada: la página lleva todos los arreglos de todos modos (§7.9) y el navegador decodifica un solo bloque base64. Las secciones separadas alinean cada `Int32Array` sin copiar y comprimen mejor (tiempos parecidos juntos). **Presupuesto:** ≈ 12 B por evento más el byte de banderas; 2026-09-30 a θ = 0,0001 son ≈ 50 KB y el catálogo de 50 θ del orden de 150 a 200 KB en gzip (estimación de la card), que se mide en la Evaluación ergonómica; si supera 300 KB en gzip, se decide antes de mergear (§14 ítem 13).
+
+**Regla de estado por columna.** El estado de una columna es el de su **último tick** (ADR-VZ-09). El estado de un tick con id `x` sale de los eventos del θ:
 
 1. Si existe un evento `e` con `e.reference_agg_trade_id < x ≤ e.extreme_agg_trade_id`, el tick está en `e`. Es **confirmación** si `x ≤ e.confirm_agg_trade_id` y **overshoot** si `x > e.confirm_agg_trade_id`. Se usa el último id del grupo de empate, así que todo tick del instante de confirmación es de la fase DC ([ADR-L2-03](l2.md#63-adr-l2-03--regla-conservadora-de-empates-y-validación-un-dc-tiene-al-menos-un-tick-porta-kernelpy-de-la-v0)). El valor es 1 o 2 si `e.direction = 1` y 3 o 4 si `e.direction = −1`.
 2. Si no existe tal evento y el tick cae en la cola del mes (§7.6), el estado lo da la cola.
 3. En cualquier otro caso, 0.
 
-Los eventos de un θ se encadenan sin huecos —la referencia de uno es el extremo del anterior—, así que un tick posterior a la referencia del primer evento tiene exactamente un estado. Los niveles gruesos se derivan de los finos: el estado de una columna de `w` es el de la última columna **no vacía** de las dos de `2w` que la forman.
+Los eventos de un θ se encadenan sin huecos —la referencia de uno es el extremo del anterior—, así que un tick posterior a la referencia del primer evento tiene exactamente un estado. Los niveles gruesos se derivan de los finos: el estado de una columna de `w` es el de la última columna **no vacía** de las dos de `2w` que la forman. Un tick extremo es del evento que cierra: `(referencia, extremo]` (ADR-VZ-12).
 
 ### 7.6 De dónde salen los eventos de un día
 
@@ -485,7 +542,7 @@ Apunta al **último día con `index.json` escrito**. Se escribe después del `in
 
 1. Calcular `input_hash`. Si el `index.json` del día existe con el mismo `input_hash` y la misma `tiles_version`, **saltar** (`tiles_summary` con `details.skipped = true`), salvo `--force`.
 2. Si existe con otro hash, **borrarlo**: el día pasa a "no disponible" mientras se rehace.
-3. Escribir los 18 archivos de tile y, después, la página `index.html` (lleva los mismos arreglos).
+3. Escribir los 37 archivos de tile y, después, la página `index.html` (lleva los mismos arreglos).
 4. Escribir `index.json`: **la marca de commit**.
 5. Escribir `latest.html` y `latest.json` si el día no es anterior al apuntado.
 
@@ -495,13 +552,13 @@ Si el job muere entre 2 y 4, el día queda sin índice (el tablero lo muestra co
 
 ### 7.9 La página del día (el exportable)
 
-`index.html` es **un solo documento**, sin peticiones de red: ninguna URL apunta fuera de él (sin CDN, sin fuentes externas, sin `fetch`). Es también el exportable: ya no hay zip. Se arma así (`render_day` del paquete, a partir del `index.json` y los 18 arreglos del día):
+`index.html` es **un solo documento**, sin peticiones de red: ninguna URL apunta fuera de él (sin CDN, sin fuentes externas, sin `fetch`). Es también el exportable: ya no hay zip. Se arma así (`render_day` del paquete, a partir del `index.json` y los 37 arreglos del día):
 
 |Parte|Contenido|
 |---|---|
 |`<meta name="viz-render">`|Al comienzo del documento: `tiles_version=<semver>;template=<SHA-256 de la plantilla>`. El modo `render` lo lee para saltar lo que ya está al día (§8.3).|
 |`<style>` y `<script>`|`style.css` y `vendor/uPlot.min.css`; `vendor/uPlot.iife.min.js` (uPlot **1.6.32**, MIT); `app.js`. Todo de `layers/viz_tiles/site/`, que entra en la imagen.|
-|`window.VIZ_DATA`|`{"tiles_version", "generated_at", "files": {<nombre del arreglo>: <base64>}, "index": <index.json>}`. Los 18 arreglos van codificados de uno en uno y en orden de nombre; el `<` se escapa para que ningún dato cierre el `<script>`.|
+|`window.VIZ_DATA`|`{"tiles_version", "generated_at", "files": {<nombre del arreglo>: <base64>}, "index": <index.json>}`. Los 37 arreglos van codificados de uno en uno y en orden de nombre; el `<` se escapa para que ningún dato cierre el `<script>`.|
 
 **Reproducibilidad.** Los arreglos embebidos reproducen byte a byte el `content_hash` del índice (una prueba los decodifica y los compara). Misma plantilla, mismos tiles y mismo `generated_at` dan el mismo documento; en un bucket va en gzip sin marca de tiempo, también determinista.
 
@@ -520,10 +577,10 @@ El orden del núcleo respeta la eficiencia de memoria: el día nunca está enter
 1. **Hash y decisión** (§7.8, paso 1). Si se salta, no se lee ningún tick.
 2. **Pasada 1 sobre los ticks**: abrir `consolidated.parquet` de `M` y leer **solo los row groups cuyo rango de `transact_time` toca el día** (estadísticas de columna; el archivo viene ordenado), row group por row group. Por tick: calcular la columna en `w = 4096` y actualizar, por columna, los acumuladores M4 (primero, mínimo, máximo, último, con su `t` y su `price_int` enteros), la suma entera de `quantity` y el `agg_trade_id` del último tick; y, para todo el día, el conteo de ticks fuera del tick y su mayor distancia al tick más cercano (§7.3, `price_rounded`). Liberar el row group antes del siguiente. La memoria de esta pasada es **fija**: un row group más 4 096 columnas × unos 100 B, ~0,4 MB.
 3. **Derivar** los niveles 2 048 a 128 a partir del nivel 4 096 (M4 es componible, ADR-VZ-08), redondear el precio al tick del activo (`price_scale`), escribir `price-<w>.i32` y `volume-<w>.f32` y liberar los acumuladores de precio y volumen.
-4. **Pasada 2 por θ** (un θ a la vez, en el orden de `thetas`): leer del `events.parquet` de `M` los row groups que tocan el día (estadísticas de `reference_agg_trade_id` y `extreme_agg_trade_id`), más la cola de §7.6, y recorrer **a la vez** esos eventos y los 4 096 ids de último tick en una sola barrida (ambos ordenados por `agg_trade_id`): sale el estado de cada columna del nivel 4 096. Derivar los niveles gruesos (§7.5) y copiar cada nivel en el bloque del θ dentro de los seis buffers de salida (`n·w` bytes cada uno, §7.4). Liberar los eventos antes del θ siguiente. Tras el último θ, escribir los seis `dir-<w>.u8` y liberar los buffers. La memoria de esta pasada es **un row group de eventos** (hasta 32 768 filas) más los buffers de salida, de tamaño fijo: 50 × 8 064 B ≈ 0,4 MB.
-5. **Escribir** la página `index.html` (los 18 arreglos se vuelven a armar de uno en uno y se codifican; nunca están dos veces en RAM), después `index.json` y `latest.html` y `latest.json` (§7.8, pasos 3 a 5), y **emitir** `tiles_summary`.
+4. **Pasada 2 por θ** (un θ a la vez, en el orden de `thetas`): leer del `events.parquet` de `M` los row groups que tocan el día (estadísticas de `reference_agg_trade_id` y `extreme_agg_trade_id`), más la cola de §7.6, y recorrer **a la vez** esos eventos y los 4 096 ids de último tick en una sola barrida (ambos ordenados por `agg_trade_id`): sale el estado de cada columna del nivel 4 096. Derivar los niveles gruesos (§7.5) y copiar cada nivel en el bloque del θ dentro de los seis buffers de salida (`n·w` bytes cada uno, §7.4). Volcar además las filas de eventos del θ (referencia, confirmación y extremo en ms, y banderas) en el `EventsBuffer` del día y liberar la tabla y las filas antes del θ siguiente: el buffer es la **única** representación de los eventos del día, 13 B por evento, y es el mismo que `events.bin` (al escribir, `packed` junta sus cuatro secciones dentro de él, sin concatenar ni copiar a otro buffer). Tras el último θ, escribir los seis `dir-<w>.u8` y liberar los buffers. La memoria de esta pasada es **un row group de eventos** (hasta 32 768 filas) más los buffers de salida, de tamaño fijo (50 × 8 064 B ≈ 0,4 MB), más los 13 B por evento del día que ya pasó por el buffer.
+5. **Escribir** la página `index.html` (los 37 arreglos se vuelven a armar de uno en uno y se codifican; nunca están dos veces en RAM), después `index.json` y `latest.html` y `latest.json` (§7.8, pasos 3 a 5), y **emitir** `tiles_summary`.
 
-El pico de una unidad es **O(lote)**: un row group de L1, o uno de eventos, más acumuladores de tamaño fijo. No depende de los ticks del día ni de los eventos de un θ pequeño. Nunca conviven el tile y los ticks de los que salió.
+El pico de una unidad es **O(lote)**: un row group de L1, o uno de eventos, más acumuladores de tamaño fijo. No depende de los ticks del día. Sí crece con los eventos del día, a 13 B por evento y una sola vez (`EventsBuffer`, ADR-VZ-13): decenas de miles de eventos, del orden de 0,3 a 0,6 MB con 50 θ, no el row group entero de cada θ. Nunca conviven el tile y los ticks de los que salió, ni dos copias de los eventos.
 
 ### 8.2 Modo `tiles`
 
@@ -543,12 +600,12 @@ El pico de una unidad es **O(lote)**: un row group de L1, o uno de eventos, más
 
 ### 8.3 Modo `render`
 
-`--mode render [--day YYYY-MM-DD | --from YYYY-MM [--to YYYY-MM]] [--force]`. **No lee L1 ni L2**: lee del bucket (`VIZ_TILES_ROOT`) el `index.json` y los 18 arreglos de cada día pedido y vuelve a escribir su `index.html` (y `latest.html` si es el último día). Es para cuando cambia la plantilla (HTML, JS, CSS o uPlot) y hay que regenerar las páginas sin repetir la reducción.
+`--mode render [--day YYYY-MM-DD | --from YYYY-MM [--to YYYY-MM]] [--force]`. **No lee L1 ni L2**: lee del bucket (`VIZ_TILES_ROOT`) el `index.json` y los 37 arreglos de cada día pedido y vuelve a escribir su `index.html` (y `latest.html` si es el último día). Es para cuando cambia la plantilla (HTML, JS, CSS o uPlot) y hay que regenerar las páginas sin repetir la reducción. Un día con tiles de una versión anterior (un índice sin `events`, `count`, `confirms` ni `simul`, p. ej. 1.1.0) **no se rehace con `render`**: deja `input_missing` (`what = tiles`) con la razón, y se rehace con `--mode tiles` (el cambio de `tiles_version` lo detecta solo, §7.8).
 
 - **Idempotente por `tiles_version` más hash de la plantilla**, guardados en el `<meta name="viz-render">` de la propia página (§7.9): si ambos coinciden, el día se salta (`render_summary` con `skipped = true`) y no se escribe nada; `--force` lo ignora. Para leerlo basta el comienzo del archivo (sea texto o gzip).
 - **Sin argumentos**, el mes anterior (UTC), como `tiles`; con `--from` y `--to`, los días de cada mes del rango que tengan `index.json`; con `--day`, ese día.
 - **Entradas faltantes**: un `--day` sin `index.json`, un mes pedido sin ningún día con tiles, un arreglo que falta o que no coincide con el `content_hash` del índice dejan `input_missing` con `what = "tiles"` (con `reason` en los dos últimos) y código 1; el día **no se reescribe**.
-- **Memoria**: los 18 arreglos de un día se leen, se codifican y se sueltan de uno en uno (el mayor, `price-4096.i32`, pesa 131 KB); nunca más de un día en RAM.
+- **Memoria**: los 37 arreglos de un día se leen, se codifican y se sueltan de uno en uno (el mayor, `events.bin` con los 50 θ, pesa del orden de 0,3 a 0,6 MB; el de un nivel, `price-4096.i32`, 131 KB); nunca más de un día en RAM.
 - El job `viz-render` (2 vCPU, 2 GiB, 3 600 s; solo `VIZ_TILES_ROOT` y `VIZ_DQ_ROOT`, sin acceso a L1 ni a L2) y su disparo desde `run-job.yml` los trajo ITSC-310.
 
 ### 8.4 Modo y nombre de job
@@ -571,7 +628,7 @@ Los tiles no son fuente de verdad y se regeneran. Por eso, a diferencia de L2 (c
 |Día con ticks|El día tiene al menos un tick en L1.|
 |Precio representable|Con el `price_scale` del activo, el precio máximo cabe en `int32` (§7.3).|
 |Precio en el tick|Todo `price_int` del día cae en el tick del activo; si no, se redondea y se avisa (`price_rounded`, §7.3).|
-|Tiles de entrada (render)|El día tiene `index.json` y sus 18 arreglos en `tiles/`, y estos coinciden con el `content_hash` del índice.|
+|Tiles de entrada (render)|El día tiene `index.json` y sus 37 arreglos en `tiles/`, y estos coinciden con el `content_hash` del índice.|
 
 ### 9.3 Tipos de chequeo (`check_type`)
 
@@ -601,7 +658,7 @@ La misma función `emit_findings()` de `/shared/dq` que usa L2: log de consola c
 flowchart LR
     L1[(GCS landing<br/>consolidated.parquet)] -->|row groups del día| TL[viz-tiles]
     L2[(GCS dc-events<br/>events + carry_over)] -->|row groups del día| TL
-    TL -->|20 objetos por día<br/>18 tiles + index.html + index.json| T[(bucket viz<br/>tiles/)]
+    TL -->|39 objetos por día<br/>37 tiles + index.html + index.json| T[(bucket viz<br/>tiles/)]
     TL -->|hallazgos| DQ[(lago DQ<br/>prefijo viz/)]
     WF[Cloud Workflows] -->|tras l2-monthly| TL
     T -->|tiles del día| RN[viz-render<br/>sin leer L1 ni L2]
@@ -614,9 +671,9 @@ flowchart LR
 
 |Niveles|Columnas por día|Bytes por día|Histórico (3 302 días)|
 |---|---|---|---|
-|128 a 4 096 (adoptado)|8 064|≈ 0,70 MB|≈ 2,31 GB|
-|256 a 8 192|16 128|≈ 1,39 MB|≈ 4,59 GB|
-|512 a 16 384|32 256|≈ 2,78 MB|≈ 9,17 GB|
+|128 a 4 096 (adoptado)|8 064|≈ 0,74 MB|≈ 2,45 GB|
+|256 a 8 192|16 128|≈ 1,48 MB|≈ 4,90 GB|
+|512 a 16 384|32 256|≈ 2,97 MB|≈ 9,80 GB|
 
 ### 10.2 Dimensionamiento
 
@@ -630,7 +687,7 @@ Todo cae en el nivel gratuito permanente de Google Cloud, distinto del crédito 
 
 |Recurso|Gratis cada mes|Estimación viz|Base|
 |---|---|---|---|
-|Almacenamiento GCS (región US)|5 GB|3 a 4 GB para 9 años|~0,7 MB por día de arreglos (precio M4 en 6 niveles, dirección de los 50 θ empaquetada, volumen) más la página en gzip (≈ 0,35 MB, estimado). **Aritmética de §7.3: ≈ 3,5 GB.**|
+|Almacenamiento GCS (región US)|5 GB|4 a 6 GB para 9 años|~0,74 MB por día de arreglos por nivel (precio M4 en 6 niveles, dirección de los 50 θ empaquetada, volumen, conteo y confirmaciones) más `events.bin` (0,3 a 0,6 MB, estimado) y la página en gzip (≈ 0,55 MB, estimado). **Aritmética de §7.3: ≈ 5,9 GB.**|
 |Lecturas GCS (clase B)|50 000|< 100|Un día abierto descarga **un** objeto: su `index.html` (o `latest.html`)|
 |Egreso de red|100 GB|< 1 GB|Un usuario, pocos días por semana|
 |Job `viz-tiles`|180 000 vCPU-s y 360 000 GiB-s (compartido con L1 y L2)|~60 vCPU-s por día nuevo|Comparable al costo fijo medido en L2 (~20 s por mes)|
@@ -639,14 +696,14 @@ Todo cae en el nivel gratuito permanente de Google Cloud, distinto del crédito 
 
 |Concepto|Cálculo|Resultado|
 |---|---|---|
-|El cupo de 5 GB no es de viz|Es por billing account y el medallion medido (L1 38,4 + L2 21,14 GiB) ya lo excede. ≈ 3,2 GiB × 0,02 USD/GB-mes|≈ 0,07 USD/mes (se paga)|
-|Operaciones **Clase A** (escritura) del backfill|3 302 días × 20 objetos = 66 040 objetos × 0,005 USD por 1 000. Un tile se escribe directo, sin temporal más renombre (ADR-VZ-10), así que es 1 operación por objeto. Con un archivo de dirección por θ (314 objetos por día) eran 1,04 M operaciones y ≈ 5,2 USD: por eso se empaqueta (ADR-VZ-04)|≈ 0,33 USD **una vez**|
-|Operaciones Clase A en estado estacionario|~30 días × 20 = 600 al mes × 0,005 USD por 1 000|< 0,01 USD/mes|
+|El cupo de 5 GB no es de viz|Es por billing account y el medallion medido (L1 38,4 + L2 21,14 GiB) ya lo excede. ≈ 5,5 GiB × 0,02 USD/GB-mes|≈ 0,12 USD/mes (se paga)|
+|Operaciones **Clase A** (escritura) del backfill|3 302 días × 39 objetos = 128 778 objetos × 0,005 USD por 1 000. Un tile se escribe directo, sin temporal más renombre (ADR-VZ-10), así que es 1 operación por objeto. Con un archivo de dirección por θ (333 objetos por día) serían 1,10 M operaciones y ≈ 5,5 USD: por eso se empaqueta (ADR-VZ-04)|≈ 0,64 USD **una vez**|
+|Operaciones Clase A en estado estacionario|~30 días × 39 = 1 170 al mes × 0,005 USD por 1 000|< 0,01 USD/mes|
 |Cómputo del backfill|3 302 días × ~60 vCPU-s = ~198 000 vCPU-s, frente a 180 000 gratis y compartidos con L1 y L2. A 0,000018 USD por vCPU-s|≤ 3,6 USD de lista, una vez|
-|Un θ nuevo en el catálogo de L2|Regenera todos los días del mes (§7.8): hasta repetir el backfill, ~0,33 USD de operaciones más su cómputo|Conocido (§12)|
-|Un cambio de la plantilla|`--mode render` regenera las páginas desde los tiles, sin leer L1 ni L2: 3 302 escrituras (≈ 0,02 USD) y lecturas de ≈ 0,7 MB por día|Barato; es la razón del modo|
+|Un θ nuevo en el catálogo de L2|Regenera todos los días del mes (§7.8): hasta repetir el backfill, ~0,64 USD de operaciones más su cómputo|Conocido (§12)|
+|Un cambio de la plantilla|`--mode render` regenera las páginas desde los tiles, sin leer L1 ni L2: 3 302 escrituras (≈ 0,02 USD) y lecturas de ≈ 1,0 a 1,3 MB por día (los 37 arreglos: 0,74 MB más `events.bin`)|Barato; es la razón del modo|
 
-El backfill de tiles, tal como lo estima la servilleta, suma ≈ 3,9 USD de lista una vez (0,33 de operaciones y hasta 3,6 de cómputo, que en parte cae en el cupo gratis): cabe por sí solo en el presupuesto `intrinsica-mensual` de 5 USD, pero junto al gasto ordinario del mes deja poco margen. Es una corrida única que lanza el humano; si la medición de la hija 5 lo pide, la salida es **repartirla en dos meses calendario** (`--from` y `--to`) o acotar el rango, y la decisión es suya (§14 ítem 2). El estado estacionario cuesta ≈ 0,07 USD/mes de almacenamiento, operaciones despreciables y el cómputo dentro del cupo.
+El backfill de tiles, tal como lo estima la servilleta, suma ≈ 4,2 USD de lista una vez (0,64 de operaciones y hasta 3,6 de cómputo, que en parte cae en el cupo gratis): cabe por sí solo en el presupuesto `intrinsica-mensual` de 5 USD, pero junto al gasto ordinario del mes deja poco margen. Es una corrida única que lanza el humano; si la medición de la hija 5 lo pide, la salida es **repartirla en dos meses calendario** (`--from` y `--to`) o acotar el rango, y la decisión es suya (§14 ítem 2). El estado estacionario cuesta ≈ 0,07 USD/mes de almacenamiento, operaciones despreciables y el cómputo dentro del cupo.
 
 -----
 
@@ -700,7 +757,7 @@ No hay card de logging: es esta sección y el criterio 8 de §13 ("emite hallazg
 |RVZ-01|Un lector ve un día a medias (tiles de dos corridas, o sin todos sus archivos).|Alto|`index.json` al final como marca de commit; se borra antes de rehacer; la página se escribe antes del índice y la abre un solo objeto, que es consistente por sí mismo (§7.2, §7.9, ADR-VZ-10).|
 |RVZ-02|La cola provisional se toma por definitiva y el humano juzga mal el detector.|Alto|`provisional_from_s` en el índice, marcador visible con texto en la vista (principios 2 y 6) y regeneración cuando L2 cierra el evento, aunque tarde varios meses (§7.6).|
 |RVZ-03|Una frontera de fase dentro de una columna se atribuye entera al último tick, y la resolución de 21,09 s no distingue eventos más cortos de θ pequeños.|Medio|Declarado como consecuencia de ADR-VZ-08 y ADR-VZ-09. Palanca: un nivel más fino o tiles por rango horario, evaluados con su costo (§10.1, §14 ítem 8).|
-|RVZ-04|El backfill rompe el presupuesto `intrinsica-mensual` por el cómputo, sumado al gasto ordinario del mes.|Bajo|La dirección empaquetada por nivel baja las operaciones Clase A a ≈ 0,3 USD (ADR-VZ-04) y los tiles se escriben sin temporal más renombre. Si la medición lo pide, repartirlo en dos meses calendario o acotar el rango; el humano lo lanza (§10.3, §14 ítem 2).|
+|RVZ-04|El backfill rompe el presupuesto `intrinsica-mensual` por el cómputo, sumado al gasto ordinario del mes.|Bajo|La dirección empaquetada por nivel baja las operaciones Clase A a ≈ 0,64 USD (ADR-VZ-04) y los tiles se escriben sin temporal más renombre. Si la medición lo pide, repartirlo en dos meses calendario o acotar el rango; el humano lo lanza (§10.3, §14 ítem 2).|
 |RVZ-05|La página no abre desde disco porque `fetch` sobre `file://` está bloqueado.|Alto|La página no usa `fetch`: los tiles van incrustados en un `<script>` (§7.9). Una prueba lo verifica: sin peticiones, y los arreglos embebidos reproducen el `content_hash`; lo confirma el criterio 3 de la Épica.|
 |RVZ-06|`storage.cloud.google.com` no sirve el HTML como el diseño supone (tipo de contenido, descarga en vez de render, o los recursos de la página).|Alto|**Materializado y resuelto en la 1.2**: servía el documento pero no sus recursos (§6.5, evidencia), así que la página lleva todo dentro. Queda por confirmar la primera apertura tras el despliegue, con `Content-Type: text/html` y `Content-Encoding: gzip` (§14 ítem 12); si falla, se abre la opción B (§6.5) con una card.|
 |RVZ-07|Los tiles quedan desfasados de L2 tras relanzar L2 o resolverse un evento pendiente.|Medio|`input_hash` sobre los archivos de entrada (incluye la cadena de carry-over y el `events.parquet` de `M+k` en los días con cola); revisión de los días provisionales de todos los meses con cola (§7.6, §7.8).|
@@ -713,7 +770,7 @@ No hay card de logging: es esta sección y el criterio 8 de §13 ("emite hallazg
 
 ## 13. Criterios de aceptación
 
-1. Un día de tiles es **un conjunto de 20 objetos** (18 tiles, `index.html` e `index.json`) con la disposición de §7.2, y su `index.json` es el último escrito. Matar el job entre dos tiles deja el día sin índice y la corrida siguiente lo completa.
+1. Un día de tiles es **un conjunto de 39 objetos** (37 tiles, `index.html` e `index.json`) con la disposición de §7.2, y su `index.json` es el último escrito. Matar el job entre dos tiles deja el día sin índice y la corrida siguiente lo completa.
 2. `price-<w>.i32` cumple M4: sobre un día sintético y uno real, cada columna conserva el primero, el último, el mínimo y el máximo de sus ticks, en orden de tiempo, con `INT32_MIN` en `p` y el inicio de la columna en `t` en las columnas vacías. Cada `p / price_scale` es **igual** al `price` de L1 del tick cuando este cae en el tick; un día sintético con un precio fuera del tick se escribe igual, con ese precio redondeado al tick más cercano (mitad al par), M4 calculado sobre el precio crudo y el hallazgo `price_rounded` con su `count` y `max_abs_delta_int`; y uno cuyo precio es mayor que `INT32_MAX / price_scale` lanza `price_unrepresentable` y no se escribe. Los niveles gruesos coinciden **exactamente** con M4 calculado directo sobre los ticks.
 3. `volume-<w>.f32` suma `quantity` por columna y la suma de las columnas de un nivel es igual en los seis niveles.
 4. `dir-<w>.u8` trae un bloque de `w` bytes por θ en el orden de `thetas` del índice y cada bloque sigue §7.5: sobre un día sintético con eventos conocidos, cada columna toma el estado del último tick; la cola de un mes con evento pendiente sale provisional; al cerrarse el evento en `M+1` queda definitiva; y si el evento sigue pendiente más de un mes (cadena de carry-over de dos o más meses), la cola sigue provisional hasta `M+k` y entonces la corrida sin argumentos la corrige sin intervención del humano.
@@ -724,7 +781,11 @@ No hay card de logging: es esta sección y el criterio 8 de §13 ("emite hallazg
 9. El pico de memoria de una unidad se mide y queda muy por debajo del día entero (§8.1).
 10. El `index.html` de un día abre **desde disco** (`file://`) y desde un servidor estático, sin peticiones de red, y sus arreglos embebidos reproducen byte a byte el `content_hash` del índice. `--mode render` lo regenera desde los tiles sin leer L1 ni L2 y se salta lo que ya está al día.
 11. Todo PR que cambia la vista trae la sección "Evaluación ergonómica" (§6.7) y `pr-review` la verificó.
-12. Este documento no cambia ningún `VERSION`: `check-layer-versions.sh` no exige nada.
+12. Un cambio solo de este documento no exige subir ningún `VERSION` (`check-layer-versions.sh` no cuenta `docs/`); uno que cambia el contrato de tiles sube `tiles_version` y el `VERSION` de la capa (la 1.3 los subió a 1.2.0 y 0.5.0).
+13. `events.bin` trae, por θ y en orden, los eventos que tocan el día con sus tiempos en ms recortados al día y sus banderas, y la cola pendiente con su candidato marcada provisional; los tiempos coinciden con los de `events.parquet` y `carry_over.parquet` (prueba contra un oráculo del fixture de dc_core).
+14. `count-<w>.u32` suma `ticks` en los seis niveles; `confirms-<w>.u8` y `simul-<w>.u8` coinciden con un cálculo directo por fuerza bruta sobre las confirmaciones de los 50 θ (un θ cuenta una vez por columna; `simul` agrupa por `confirm_time` exacto).
+15. La vista dibuja el precio como puntos o envolventes exactas, sin muescas ni unión entre columnas (§6.11); las franjas, la frontera de 1 px y la línea de confirmación en los instantes de `events.bin` (§6.12); la marca de densidad con el número de eventos enteros del píxel; y navega por eventos con la ventana `[referencia(k−1), extremo(k+1)]` sin cambiar la escala y con "ajustar a la ventana" aparte.
+16. Caso de aceptación (2026-09-30, θ = 0,00509931, 12:40:26): en la vista del día completo la columna muestra la marca de densidad con el conteo correcto, y al navegar al evento y ajustar a la ventana se ven las franjas alternando con sus líneas de transición.
 
 -----
 
@@ -733,17 +794,22 @@ No hay card de logging: es esta sección y el criterio 8 de §13 ("emite hallazg
 |# |Ítem|Estado|Quién lo cierra|
 |--|----|------|---------------|
 |1 |**"Cambiar θ sin red adicional".** La decisión pide un cambio de θ bajo 100 ms "sin red adicional", y la Épica pide que cambiar θ descargue **un** tile de dirección.|**Cerrado** en la lectura literal de la decisión: la dirección de los 50 θ va empaquetada por nivel (ADR-VZ-04, §7.4), así que cambiar θ hace **cero** peticiones. El tile de dirección se descarga una vez por nivel, con el nivel; la Épica se lee así. Los 100 ms los mide el humano en el navegador (ITSC-308).|Humano (medición).|
-|2 |**Costo del backfill**: operaciones Clase A (≈ 0,3 USD con la dirección empaquetada; eran ≈ 5,2 USD con un archivo por θ) y cómputo (≤ 3,6 USD de lista). No estaban en la estimación de la decisión (§10.3).|**Abierto, de menor alcance.** ≈ 3,9 USD cabe en el presupuesto de 5 USD, con poco margen junto al gasto del mes. Salida si la medición lo pide: repartirlo en dos meses calendario o acotar el rango.|El humano decide el reparto; la hija 5 mide el costo real.|
+|2 |**Costo del backfill**: operaciones Clase A (≈ 0,64 USD con la dirección empaquetada y 39 objetos por día; serían ≈ 5,5 USD con un archivo por θ) y cómputo (≤ 3,6 USD de lista). No estaban en la estimación de la decisión (§10.3).|**Abierto, de menor alcance.** ≈ 4,2 USD cabe en el presupuesto de 5 USD, con poco margen junto al gasto del mes. Salida si la medición lo pide: repartirlo en dos meses calendario o acotar el rango.|El humano decide el reparto; la hija 5 mide el costo real.|
 |3 |**Dimensionamiento** de `viz-tiles` y `viz-render` (vCPU, memoria, timeouts) y **paralelismo del backfill** (los días son independientes: una tarea por mes es posible).|**Abierto.** Sin medir.|Hijas 2, 3 y 5.|
-|4 |**`Content-Encoding: gzip`** para la página.|**Cerrado en 1.2: se adopta**, solo para `index.html` y `latest.html` en un bucket (los binarios no lo llevan). Con la página embebiendo los arreglos en base64 el documento ronda 1 MB sin comprimir con 50 θ y ≈ 0,3 a 0,4 MB en gzip (§7.3): el presupuesto de 1 MB depende de él.|ITSC-308.|
+|4 |**`Content-Encoding: gzip`** para la página.|**Cerrado en 1.2: se adopta**, solo para `index.html` y `latest.html` en un bucket (los binarios no lo llevan). Con la página embebiendo los arreglos en base64 el documento ronda 1,5 a 1,8 MB sin comprimir con 50 θ (1.3, con `events.bin`) y ≈ 0,4 a 0,6 MB en gzip (§7.3): el presupuesto de 1 MB depende de él.|ITSC-308.|
 |5 |**Servicio del HTML desde `storage.cloud.google.com`** con sesión de Google (RVZ-06).|**Cerrado con la evidencia de la prueba del humano (2026-10-05)**: Google sirve el documento completo por URL, pero cada recurso desde un dominio bloqueado de un solo uso («Bad Locked Domain» en relativas, CORS en absolutas). El diseño cambió a un HTML autocontenido por día (§6.5, §7.9). Lo que queda por confirmar, la primera apertura del HTML autocontenido tras el despliegue, es el ítem 12.|ITSC-308.|
 |6 |**Multi-activo**: `latest.json` está en la raíz de `tiles/` (§7.7).|Diferido hasta que haya un segundo activo.|Futuro.|
 |7 |**Hueco de una columna vacía en uPlot** (§7.3): que el arreglo de Y con `null` (armado en la misma pasada de carga que convierte X a segundos y suelta el buffer) corte la línea y deje estable el cursor compartido.|**Cerrado en la implementación, a falta de la prueba visual.** La vista arma Y con `null` y el uPlot 1.6.32 real corre en pruebas (Node) con esos datos sin error, con el cursor y el zoom sincronizados entre paneles; que la línea se corte en el hueco lo confirma el humano en la Evaluación ergonómica de ITSC-308.|ITSC-308 y el humano.|
-|8 |**Resolución más fina que 21,09 s** (ADR-VZ-08, RVZ-03): un nivel más fino (cada duplicación suma ~0,70 MB por día, §10.1) o un tile por rango horario.|Diferido. Solo se abre si la vista de un día no alcanza para juzgar un θ pequeño.|El humano, con la evidencia de uso de la hija 7.|
-|9 |**Comparar por archivo antes de reescribir** tras agregar un θ en L2 (RVZ-09): evita regenerar precio y volumen, que no cambian (§7.8).|Diferido. Hoy se acepta repetir el backfill del rango (~0,3 USD de operaciones más su cómputo, §10.3).|Futuro, si el costo molesta.|
+|8 |**Resolución más fina que 21,09 s** (ADR-VZ-08, RVZ-03): un nivel más fino (cada duplicación suma ~0,74 MB por día, §10.1) o un tile por rango horario.|Diferido. Solo se abre si la vista de un día no alcanza para juzgar un θ pequeño.|El humano, con la evidencia de uso de la hija 7.|
+|9 |**Comparar por archivo antes de reescribir** tras agregar un θ en L2 (RVZ-09): evita regenerar precio y volumen, que no cambian (§7.8).|Diferido. Hoy se acepta repetir el backfill del rango (~0,64 USD de operaciones más su cómputo, §10.3).|Futuro, si el costo molesta.|
 |10|**Precios fuera del tick** (§7.3, `price_rounded`): el tickSize no acota los trades históricos, así que algunos ticks del backfill pueden redondearse al tick. Con el `price_scale` fijo el día nunca se pierde, pero el tooltip muestra el precio redondeado.|**Cerrado en 1.1** como contrato: `price_scale` fijo por activo, redondeo al tick y hallazgo `price_rounded`. **Abierto** solo el dato: cuántos ticks y días del histórico emiten `price_rounded` y con qué `max_abs_delta_int`. Si fueran muchos, se evalúa un `price_scale` más fino para ese activo; cambiarlo modifica §7.3 y sube `tiles_version` (§7.2).|Hija 2 o hija 5 (medición sobre L1).|
-|11|**Los binarios duplican lo que lleva la página**: cada día guarda los 18 arreglos sueltos y otra vez dentro del `index.html` (≈ 0,35 MB en gzip por día, ≈ 1,2 GB del histórico, §7.3). Los sueltos los usa `render` y sirven de auditoría; el navegador no los lee.|Diferido. Si el almacenamiento molesta, el modo `render` puede pasar a leer los arreglos de la propia página y los binarios dejar de escribirse (un cambio de contrato que sube `tiles_version`).|Futuro, con el costo real.|
+|11|**Los binarios duplican lo que lleva la página**: cada día guarda los 37 arreglos sueltos y otra vez dentro del `index.html` (≈ 0,55 MB en gzip por día, ≈ 1,8 GB del histórico, §7.3). Los sueltos los usa `render` y sirven de auditoría; el navegador no los lee.|Diferido. Si el almacenamiento molesta, el modo `render` puede pasar a leer los arreglos de la propia página y los binarios dejar de escribirse (un cambio de contrato que sube `tiles_version`).|Futuro, con el costo real.|
 |12|**Primera apertura del HTML en `storage.cloud.google.com`** tras el despliegue: que el objeto se sirva con `Content-Type: text/html; charset=utf-8` y `Content-Encoding: gzip` (los metadatos los fija el job al escribir con el sistema de archivos de Arrow sobre GCS, que no se pudo ejercer desde el entorno de desarrollo), que se vea la página y que la transferencia sea la medida de §7.3.|**Abierto**, hasta el despliegue del stack `data` y la primera corrida de `viz-tiles` en GCS.|El humano (con la hija 7, runbook).|
+|13|**Presupuesto de `events.bin` con los 50 θ** (§7.5): ≈ 13 B por evento, ≈ 50 KB para θ = 0,0001 el 2026-09-30 y 70 a 140 KB en gzip para el catálogo completo (3,1 B por evento medidos), estimado. Si supera 300 KB en gzip, se decide antes de mergear.|**Abierto**: se mide con un día real tras el backfill (Evaluación ergonómica de ITSC-316).|El humano (con la card).|
+|14|**Contrato del tile de dirección** (ADR-VZ-09): desde la 1.3 solo alimenta el tooltip. Quitarlo, o cambiarlo por la fase del último tick tomada de `events.bin`, es otra decisión.|**Abierto.** No se cambia en la 1.3; se decide con la evidencia de la vista nueva.|El humano, con otra card.|
+|15|**La ventana `[referencia(k−1), extremo(k+1)]` cubre tres eventos** (ADR-VZ-12): para ver cuatro eventos seguidos del flash crash hay que navegar dos veces; "ajustar" muestra el evento elegido con su anterior y su siguiente.|**Abierto**, a validar con el humano frente a la vista.|El humano.|
+|16|**Backfill de los tiles del histórico** a `tiles_version` 1.2.0: los días se rehacen solos por el cambio de versión (§7.8); lo lanza el humano con `viz-tiles` por rangos y lo registra en la card.|**Abierto.**|El humano.|
+|17|**`viz_check_day.py`** (validación de invariantes de eventos por θ y día) vive en `gs://intrinsica-dc-ops/scripts/` y no está versionado en el repo; conviene llevarlo a `layers/ops_tools/scripts/`.|**Abierto**: no se pudo leer desde el entorno de la card.|Una card de operación.|
 
 -----
 
@@ -761,7 +827,7 @@ No hay card de logging: es esta sección y el criterio 8 de §13 ("emite hallazg
 |Cola provisional|Tramo final de un mes cuyo evento aún no se cierra en L2; sus estados se dibujan con el extremo candidato y se corrigen cuando L2 cierra el evento (§7.6).|
 |Modo degradado|Estado de la vista cuando falta un tile o un día: el hueco se muestra con marcador y texto (principio 6).|
 |Evaluación ergonómica|Sección obligatoria del PR de toda card que cambie la vista (§6.7).|
-|Página del día|El `index.html` autocontenido de un día: plantilla, uPlot y los 18 arreglos en base64 en un solo documento, sin peticiones de red (§7.9).|
+|Página del día|El `index.html` autocontenido de un día: plantilla, uPlot y los 37 arreglos en base64 en un solo documento, sin peticiones de red (§7.9).|
 |Plantilla|Los archivos de `layers/viz_tiles/site/` (HTML, JS, CSS y uPlot) con que `viz-tiles` y `viz-render` arman la página; su huella SHA-256 queda en el HTML.|
 
 ### 15.2 Referencias

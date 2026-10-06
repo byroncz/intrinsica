@@ -143,6 +143,9 @@ def test_read_events_without_matches_is_an_empty_table(tmp_path):
         "reference_agg_trade_id",
         "confirm_agg_trade_id",
         "extreme_agg_trade_id",
+        "reference_time",
+        "confirm_time",
+        "extreme_time",
         "direction",
     ]
 
@@ -151,8 +154,9 @@ def test_find_extreme_returns_the_closed_event(tmp_path):
     roots, _, _ = build_lake(tmp_path)
     path = str(events_path(roots, 100_000, MONTH, EVENTS))
     row = read_events()[100_000][5]
-    assert find_extreme(path, int(row["reference_agg_trade_id"])) == int(
-        row["extreme_agg_trade_id"]
+    assert find_extreme(path, int(row["reference_agg_trade_id"])) == (
+        int(row["extreme_agg_trade_id"]),
+        int(row["extreme_time"]),
     )
     assert find_extreme(path, 1) is None
 

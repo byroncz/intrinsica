@@ -18,9 +18,11 @@ import pyarrow.fs as pafs
 from pyutils.fs import resolve_fs
 
 from viz_tiles.contract import (
+    EVENTS_FILE,
     FILE_BY_KIND,
     INDEX_FIELDS,
     INDEX_FILE,
+    KINDS,
     LATEST_FIELDS,
     LATEST_FILE,
     LATEST_PAGE_FILE,
@@ -29,6 +31,7 @@ from viz_tiles.contract import (
     TILES_VERSION,
     tile_name,
 )
+from viz_tiles.events import Confirmations, EventsBuffer
 from viz_tiles.reduce import DayReduction, day_start_us
 from viz_tiles.render import Template, render_day
 
@@ -49,7 +52,11 @@ class SeriesMismatch(ValueError):
 
 @dataclass(frozen=True)
 class ThetaTiles:
-    """Tiles de dirección de un θ: `direction[w]` es el arreglo uint8 del nivel `w`."""
+    """Tiles de un θ: dirección por nivel y cuántos eventos suyos tocan el día.
+
+    `direction[w]` es el arreglo uint8 del nivel `w`. Los eventos mismos no viajan
+    aquí: van al `EventsBuffer` del día, `events` por θ y en el orden de `thetas`.
+    """
 
     theta: str
     events: int
@@ -134,6 +141,8 @@ def write_day(
     asset: str,
     day: date,
     reduction: DayReduction,
+    confirmations: Confirmations,
+    events: EventsBuffer | None = None,
     thetas: Sequence[ThetaTiles],
     missing_thetas: Sequence[str] = (),
     input_hash: str,
@@ -161,19 +170,28 @@ def write_day(
     if _exists(fs, index_path):
         fs.delete_file(index_path)
 
-    # Nombre de archivo -> (tipo, nivel). Precio y volumen se hashean y se
-    # escriben desde una vista del arreglo que ya está en RAM; la dirección de
-    # un nivel se arma al escribirlo, un nivel a la vez.
-    names = {
-        kind: {str(w): tile_name(kind, w) for w in LEVELS}
-        for kind in ("price", "volume", "dir")
-    }
-    files: dict[str, tuple[str, int]] = {}
+    # Nombre de archivo -> (tipo, nivel). Los arreglos se hashean y se escriben
+    # desde una vista del que ya está en RAM; la dirección de un nivel se arma al
+    # escribirlo, un nivel a la vez. `events.bin` (nivel 0) va aparte: no es por nivel.
+    names = {kind: {str(w): tile_name(kind, w) for w in LEVELS} for kind in KINDS}
+    files: dict[str, tuple[str, int]] = {EVENTS_FILE: ("events", 0)}
     for kind, by_level in names.items():
         for w in LEVELS:
             files[by_level[str(w)]] = (kind, w)
 
+    events = events if events is not None else EventsBuffer()
+    declared = sum(t.events for t in thetas)
+    if len(events) != declared:
+        raise ValueError(
+            f"los θ declaran {declared} eventos pero el buffer trae {len(events)} filas"
+        )
+    offsets = np.cumsum([0] + [t.events for t in thetas])
+
     def array_of(kind: str, w: int) -> np.ndarray:
+        if kind == "count":
+            return reduction.count[w]
+        if kind in ("confirms", "simul"):
+            return getattr(confirmations, kind)[w]
         if kind == "dir":
             # n bloques de w bytes, en el orden de `thetas` del índice.
             blocks = [t.direction[w] for t in thetas]
@@ -190,15 +208,19 @@ def write_day(
         {
             "theta": theta.theta,
             "events": theta.events,
+            "events_offset": int(offset),
             "provisional_from_s": theta.provisional_from_s,
         }
-        for theta in thetas
+        for theta, offset in zip(thetas, offsets[:-1], strict=True)
     ]
 
     def views() -> Iterator[tuple[str, memoryview]]:
         """Los arreglos en orden de nombre (el de `content_hash`), de uno en uno."""
         for name in sorted(files):
             kind, w = files[name]
+            if kind == "events":
+                yield name, events.packed()
+                continue
             yield (
                 name,
                 _tile_view(
@@ -226,6 +248,10 @@ def write_day(
         "price": names["price"],
         "volume": names["volume"],
         "dir": names["dir"],
+        "count": names["count"],
+        "confirms": names["confirms"],
+        "simul": names["simul"],
+        "events": EVENTS_FILE,
         "page": PAGE_FILE,
         "thetas": theta_docs,
         "missing_thetas": list(missing_thetas),

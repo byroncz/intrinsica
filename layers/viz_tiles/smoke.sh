@@ -190,7 +190,7 @@ grep -q 'sonda: unit=2017-08-18 ticks=4735 ' "$data/run.log" \
 grep -q '"check_type": "tiles_summary"' "$data/run.log" \
   || { echo "::error::falta el hallazgo tiles_summary en el log"; exit 1; }
 
-# El índice, los 20 objetos con su tamaño y el Parquet de hallazgos.
+# El índice, los 39 objetos con su tamaño y el Parquet de hallazgos.
 docker run --rm -v "$data:/data" --entrypoint python "$image" - <<'PY'
 import base64
 import gzip
@@ -204,20 +204,26 @@ import pyarrow.parquet as pq
 day = Path("/data/tiles/provider=binance/market=spot/asset=BTCUSDT/day=2017-08-18")
 index = json.loads((day / "index.json").read_text())
 assert index["ticks"] == 4735, index["ticks"]
-assert index["tiles_version"] == "1.1.0", index["tiles_version"]
+assert index["tiles_version"] == "1.2.0", index["tiles_version"]
 assert index["page"] == "index.html", index["page"]
 assert len(index["thetas"]) == 5 and index["missing_thetas"] == [], index["thetas"]
 assert all(t["provisional_from_s"] is not None for t in index["thetas"]), "cola provisional"
 files = sorted(p.name for p in day.iterdir())
-assert len(files) == 20, files  # 18 arreglos, index.json e index.html
+assert len(files) == 39, files  # 37 arreglos, index.json e index.html
 for w in index["levels"]:
     assert (day / f"price-{w}.i32").stat().st_size == 32 * w
     assert (day / f"volume-{w}.f32").stat().st_size == 4 * w
     assert (day / f"dir-{w}.u8").stat().st_size == 5 * w
+    assert (day / f"count-{w}.u32").stat().st_size == 4 * w
+    assert (day / f"confirms-{w}.u8").stat().st_size == w
+    assert (day / f"simul-{w}.u8").stat().st_size == w
+total = sum(t["events"] for t in index["thetas"])
+assert (day / index["events"]).stat().st_size == 13 * total, total
+assert [t["events_offset"] for t in index["thetas"]][0] == 0
 latest = json.loads(Path("/data/tiles/latest.json").read_text())
 assert latest["day"] == "2017-08-18", latest
 
-# La página: un solo documento con los 18 arreglos dentro, que reproducen el
+# La página: un solo documento con los 37 arreglos dentro, que reproducen el
 # content_hash del índice, y su copia latest.html.
 html = (day / "index.html").read_text()
 assert (Path("/data/tiles/latest.html")).read_text() == html
@@ -225,7 +231,7 @@ assert "@@" not in html and 'name="viz-render"' in html
 match = re.search(r"window\.VIZ_DATA=(\{.*\});\n</script>", html, re.S)
 data = json.loads(match.group(1))
 assert data["index"] == index and data["tiles_version"] == index["tiles_version"]
-assert len(data["files"]) == 18, len(data["files"])
+assert len(data["files"]) == 37, len(data["files"])
 digest = hashlib.sha256()
 for name in sorted(data["files"]):
     raw = base64.b64decode(data["files"][name])

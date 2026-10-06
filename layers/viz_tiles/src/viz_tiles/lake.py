@@ -32,6 +32,9 @@ EVENT_COLUMNS = (
     "reference_agg_trade_id",
     "confirm_agg_trade_id",
     "extreme_agg_trade_id",
+    "reference_time",
+    "confirm_time",
+    "extreme_time",
     "direction",
 )
 CARRY_COLUMNS = (
@@ -39,6 +42,8 @@ CARRY_COLUMNS = (
     "has_pending_event",
     "pending_reference_agg_trade_id",
     "pending_confirm_agg_trade_id",
+    "pending_reference_time",
+    "pending_confirm_time",
     "ext_high_agg_trade_id",
     "ext_high_time",
     "ext_low_agg_trade_id",
@@ -293,11 +298,11 @@ def read_events(path: str, lo: int, hi: int) -> pa.Table:
         return pa.concat_tables(parts)
 
 
-def find_extreme(path: str, reference_agg_trade_id: int) -> int | None:
-    """El `extreme_agg_trade_id` del evento de esa referencia en `events.parquet`.
+def find_extreme(path: str, reference_agg_trade_id: int) -> tuple[int, int] | None:
+    """El extremo `(agg_trade_id, time en µs)` del evento de esa referencia.
 
     Es el evento que estaba pendiente al cierre del mes anterior y ya cerró:
-    TRD-viz §7.6. `None` si el archivo no lo trae.
+    TRD-viz §7.6. `None` si `events.parquet` no lo trae.
     """
     with open_parquet(path) as parquet:
         references = column_bounds(parquet, "reference_agg_trade_id")
@@ -308,12 +313,19 @@ def find_extreme(path: str, reference_agg_trade_id: int) -> int | None:
                 continue
             group = parquet.read_row_group(
                 i,
-                columns=["reference_agg_trade_id", "extreme_agg_trade_id"],
+                columns=[
+                    "reference_agg_trade_id",
+                    "extreme_agg_trade_id",
+                    "extreme_time",
+                ],
                 use_threads=False,
             )
             hit = group.filter(
                 pc.equal(group["reference_agg_trade_id"], reference_agg_trade_id)
             )
             if hit.num_rows:
-                return int(hit["extreme_agg_trade_id"][0].as_py())
+                return (
+                    int(hit["extreme_agg_trade_id"][0].as_py()),
+                    int(hit["extreme_time"][0].as_py()),
+                )
     return None
