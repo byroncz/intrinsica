@@ -71,7 +71,7 @@ function element(tag) {
               if (k === "fillText") textLog.push(args[0]);
             };
           },
-          set(t, k, v) { t[k] = v; if (k === "fillStyle") drawLog.push(["fillStyle", v]); return true; },
+          set(t, k, v) { t[k] = v; if (["fillStyle", "strokeStyle", "lineWidth"].includes(k)) drawLog.push([k, v]); return true; },
         }
       );
     },
@@ -233,6 +233,7 @@ function snapshot(label) {
   out.options = byId.theta.options.map((o) => o.textContent);
   out.steps.push(snapshot("inicio"));
   // Los textos del primer trazo de los dos paneles, antes de que algo limpie el registro.
+  out.firstDraw = drawLog.filter((c) => ["fillStyle", "fillRect", "strokeStyle", "lineWidth", "setLineDash", "moveTo", "lineTo"].includes(c[0]));
   out.firstMessages = drawLog.filter((c) => c[0] === "fillText").map((c) => c[1]);
   out.panelHeights = plots().price ? [plots().price.height, plots().vol.height] : null;
 

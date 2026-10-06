@@ -139,6 +139,37 @@ def test_no_glyphs_mark_the_regions_or_the_tooltip(day_dir):
     )
 
 
+AMBER = "#e3b341"
+
+
+def test_a_gap_is_a_dashed_midline_no_dc_band_looks_like(normal):
+    """Hueco y confirmación baja no comparten forma: uno es un trazo, la otra una franja."""
+    draw = normal["firstDraw"]
+    plot = step(normal, "inicio")["plot"]
+    mid = plot["top"] + plot["height"] / 2
+    fill, rects, gap_ys, i = None, [], [], 0
+    while i < len(draw):
+        name, *args = draw[i]
+        if name == "fillStyle":
+            fill = args[0]
+        elif name == "fillRect":
+            rects.append((fill, *args))
+        elif name == "setLineDash" and args[0] == [4, 3]:  # marca del hueco
+            assert draw[i - 1] == ["lineWidth", 1], draw[i - 1]  # 1 px
+            assert draw[i + 1][0] == "moveTo"
+            gap_ys.append(draw[i + 1][2])
+        i += 1
+    assert gap_ys, "la fixture tiene huecos y deben dibujarse"
+    assert all(y == pytest.approx(mid, abs=1) for y in gap_ys)  # a media altura
+    # Ninguna franja es ámbar: el ámbar solo marca lo anómalo, y con un trazo.
+    assert not [r for r in rects if r[0] == AMBER]
+    # Las franjas DC miden 3 o 8 px y van pegadas al borde de arriba o de abajo.
+    bands = [r for r in rects if r[0].startswith("rgb(") and r[4] != plot["height"]]
+    assert {r[4] for r in bands} == {3, 8}
+    top, bottom = plot["top"], plot["top"] + plot["height"]
+    assert all(r[2] == top or r[2] + r[4] == bottom for r in bands)
+
+
 def test_decodes_the_level_that_covers_the_viewport(normal, day_dir):
     start = step(normal, "inicio")
     # 1 500 px de ancho: el nivel 2 048 (el primero con columnas ≥ píxeles).

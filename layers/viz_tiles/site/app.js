@@ -34,6 +34,9 @@
   };
   // Franja del borde, en px CSS: fina en la confirmación, gruesa en el overshoot.
   var BAND_PX = { thin: 3, thick: 8 };
+  // Marca del hueco (columnas sin ticks): línea punteada de 1 px a media altura. Ninguna franja
+  // DC es punteada, así de fina ni va al centro: un hueco nunca se lee como una confirmación.
+  var GAP_MARK = { px: 1, dash: [4, 3] };
 
   var started = performance.now();
   var metrics = (window.VIZ_METRICS = {
@@ -335,8 +338,15 @@
         // Hueco: columnas sin ticks. Marcador y texto; nunca se rellena.
         ctx.fillStyle = "rgba(227, 179, 65, 0.10)";
         ctx.fillRect(x0, b.top, wpx, b.height);
+        ctx.strokeStyle = C.amber;
+        ctx.lineWidth = GAP_MARK.px * dpr;
+        ctx.setLineDash([GAP_MARK.dash[0] * dpr, GAP_MARK.dash[1] * dpr]);
+        ctx.beginPath();
+        ctx.moveTo(x0, b.top + b.height / 2);
+        ctx.lineTo(x0 + wpx, b.top + b.height / 2);
+        ctx.stroke();
+        ctx.setLineDash([]);
         ctx.fillStyle = C.amber;
-        ctx.fillRect(x0, b.top + b.height - 3 * dpr, wpx, 3 * dpr);
         if (wpx > 70 * dpr) {
           ctx.textAlign = "center";
           ctx.fillText("◇ sin ticks", x0 + wpx / 2, b.top + b.height - 8 * dpr);
