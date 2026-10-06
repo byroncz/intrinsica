@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viz-render" content="@@RENDER_META@@">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>viz · día</title>
+<style>
+@@UPLOT_CSS@@
+@@STYLE_CSS@@
+</style>
+</head>
+<body>
+<header id="status">
+  <span class="item"><span class="label">Día</span> <b id="s-day">…</b> <span class="label">UTC</span></span>
+  <span class="item">
+    <label class="label" for="theta">θ</label>
+    <select id="theta" aria-label="θ activo"></select>
+  </span>
+  <span class="item"><span class="label">Actualizado</span> <b id="s-updated">…</b></span>
+  <span class="item" id="s-mode-box"><span class="label">Modo</span> <b id="s-mode">…</b></span>
+  <span class="item" id="s-reasons"></span>
+</header>
+<main id="panels">
+  <div id="price"></div>
+  <div id="volume"></div>
+</main>
+<footer id="hint">
+  <span id="f-level"></span>
+  <span>▲ alza · ▼ baja · tono claro: confirmación · tono fuerte: overshoot · ◇ sin ticks</span>
+  <span>arrastrar: ampliar · doble clic o Esc: día completo</span>
+</footer>
+<div id="tip" hidden></div>
+<noscript><p class="nojs">Esta página necesita JavaScript para dibujar el día.</p></noscript>
+<script>
+@@UPLOT_JS@@
+</script>
+<script id="viz-data">
+window.VIZ_DATA=@@VIZ_DATA@@;
+</script>
+<script>
+@@APP_JS@@
+</script>
+</body>
+</html>

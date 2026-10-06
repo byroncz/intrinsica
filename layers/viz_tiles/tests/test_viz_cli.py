@@ -194,7 +194,7 @@ def test_day_builds_tiles_from_the_fixture(lake, caplog):
     assert summary["metric_value"] == 4735
     details = summary["details"]
     assert details["day"] == DAY and details["skipped"] is False
-    assert details["objects"] == 19
+    assert details["objects"] == 20
     assert details["bytes"] == sum(
         p.stat().st_size for p in day_directory(roots).iterdir()
     )
@@ -257,7 +257,7 @@ def test_second_run_skips_and_writes_nothing(lake, caplog):
     assert first["details"]["skipped"] is False
     assert second["details"]["skipped"] is True
     assert second["details"]["content_hash"] == first["details"]["content_hash"]
-    assert second["details"]["objects"] == 19
+    assert second["details"]["objects"] == 20
 
 
 def test_force_rewrites_with_the_same_content(lake):

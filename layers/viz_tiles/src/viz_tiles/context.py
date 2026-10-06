@@ -8,10 +8,12 @@ from pathlib import Path
 class RunContext:
     run_id: str
     image_version: str
-    landing_root: str | Path
-    events_root: str | Path
     tiles_root: str | Path
     dq_root: str | Path
+    # El modo `render` no lee L1 ni L2 y no los necesita.
+    landing_root: str | Path | None = None
+    events_root: str | Path | None = None
+    mode: str = "tiles"
     asset: str = "BTCUSDT"
     provider: str = "binance"
     market: str = "spot"

@@ -1,13 +1,14 @@
-"""Escritura de un día de tiles: arreglos planos, `index.json` y `latest.json`.
+"""Escritura de un día de tiles: arreglos planos, la página, `index.json` y `latest.json`.
 
 TRD-viz §7.2, §7.7 y ADR-VZ-10. El `index.json` se escribe al final y es la
 marca de commit: un día sin él no existe para el tablero. Si el job muere a
-medias, el día queda sin índice y la siguiente corrida lo rehace.
+medias, el día queda sin índice y la siguiente corrida lo rehace. La página
+`index.html` entra antes que el índice, así que un índice implica su página.
 """
 
 import hashlib
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -22,11 +23,24 @@ from viz_tiles.contract import (
     INDEX_FILE,
     LATEST_FIELDS,
     LATEST_FILE,
+    LATEST_PAGE_FILE,
     LEVELS,
+    PAGE_FILE,
     TILES_VERSION,
     tile_name,
 )
 from viz_tiles.reduce import DayReduction, day_start_us
+from viz_tiles.render import Template, render_day
+
+# Metadatos de cada clase de objeto (TRD-viz §7.2). Los binarios son inmutables;
+# el índice, `latest.json` y las páginas se revalidan en cada apertura.
+BINARY_META = {
+    "Content-Type": "application/octet-stream",
+    "Cache-Control": "private, max-age=31536000, immutable",
+}
+JSON_META = {"Content-Type": "application/json", "Cache-Control": "no-cache"}
+PAGE_META = {"Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-cache"}
+GZIP_META = {"Content-Encoding": "gzip"}
 
 
 class SeriesMismatch(ValueError):
@@ -69,20 +83,43 @@ def _tile_view(kind: str, w: int, array: np.ndarray, blocks: int = 1) -> memoryv
     return memoryview(np.ascontiguousarray(array.astype(spec.dtype, copy=False)))
 
 
-def _put(fs: pafs.FileSystem, path: str, data: bytes | memoryview) -> None:
-    with fs.open_output_stream(path) as out:
+def _put(
+    fs: pafs.FileSystem,
+    path: str,
+    data: bytes | memoryview,
+    metadata: dict[str, str] | None = None,
+) -> None:
+    """Escribe un objeto con sus metadatos; el disco local los ignora."""
+    with fs.open_output_stream(path, metadata=metadata) as out:
         out.write(data)
 
 
-def _put_json(fs: pafs.FileSystem, path: str, doc: dict) -> None:
-    """Escribe un JSON; en disco local, entero o nada (temporal y renombre)."""
-    data = (json.dumps(doc, indent=2, ensure_ascii=False) + "\n").encode()
+def _put_whole(
+    fs: pafs.FileSystem, path: str, data: bytes, metadata: dict[str, str]
+) -> None:
+    """Escribe un archivo entero o nada: en disco local, temporal y renombre."""
     if isinstance(fs, pafs.LocalFileSystem):
         tmp = f"{path}.tmp"
-        _put(fs, tmp, data)
+        _put(fs, tmp, data, metadata)
         fs.move(tmp, path)
     else:
-        _put(fs, path, data)
+        _put(fs, path, data, metadata)
+
+
+def _put_json(fs: pafs.FileSystem, path: str, doc: dict) -> None:
+    data = (json.dumps(doc, indent=2, ensure_ascii=False) + "\n").encode()
+    _put_whole(fs, path, data, JSON_META)
+
+
+def compresses_pages(fs: pafs.FileSystem) -> bool:
+    """Si las páginas van en gzip: en un bucket sí; en disco no, para abrir por `file://`."""
+    return not isinstance(fs, pafs.LocalFileSystem)
+
+
+def write_page(fs: pafs.FileSystem, path: str, page: bytes) -> None:
+    """Escribe una página ya renderizada (con `compress` igual a `compresses_pages(fs)`)."""
+    meta = PAGE_META | (GZIP_META if compresses_pages(fs) else {})
+    _put_whole(fs, path, page, meta)
 
 
 def _exists(fs: pafs.FileSystem, path: str) -> bool:
@@ -102,13 +139,15 @@ def write_day(
     input_hash: str,
     image_version: str,
     generated_at: datetime | None = None,
+    template: Template | None = None,
 ) -> dict:
     """Escribe los tiles del día y devuelve el `index.json` que dejó.
 
-    Orden: se borra el índice previo, se escriben los arreglos y al final el
-    índice (marca de commit); después `latest.json`, que solo avanza. El
-    `input_hash` lo calcula quien llama (TRD-viz §7.8); `content_hash` sale de
-    los bytes de los arreglos y no depende de `generated_at`.
+    Orden: se borra el índice previo, se escriben los arreglos, la página
+    `index.html` y al final el índice (marca de commit); después `latest.html` y
+    `latest.json`, que solo avanzan. El `input_hash` lo calcula quien llama
+    (TRD-viz §7.8); `content_hash` sale de los bytes de los arreglos y no depende
+    de `generated_at`.
     """
     fs, base = resolve_fs(root)
     # Antes de escribir nada: un día de otra serie no se deja a medias en la raíz.
@@ -152,16 +191,23 @@ def write_day(
         }
         for theta in thetas
     ]
-    # El resumen de contenido recorre los archivos en orden de nombre.
+
+    def views() -> Iterator[tuple[str, memoryview]]:
+        """Los arreglos en orden de nombre (el de `content_hash`), de uno en uno."""
+        for name in sorted(files):
+            kind, w = files[name]
+            yield (
+                name,
+                _tile_view(
+                    kind, w, array_of(kind, w), len(thetas) if kind == "dir" else 1
+                ),
+            )
+
     digest = hashlib.sha256()
-    for name in sorted(files):
-        kind, w = files[name]
-        view = _tile_view(
-            kind, w, array_of(kind, w), len(thetas) if kind == "dir" else 1
-        )
+    for name, view in views():
         digest.update(name.encode() + b"\0")
         digest.update(view)
-        _put(fs, f"{directory}/{name}", view)
+        _put(fs, f"{directory}/{name}", view, BINARY_META)
 
     when = generated_at or datetime.now(UTC)
     values = {
@@ -177,6 +223,7 @@ def write_day(
         "price": names["price"],
         "volume": names["volume"],
         "dir": names["dir"],
+        "page": PAGE_FILE,
         "thetas": theta_docs,
         "missing_thetas": list(missing_thetas),
         "input_hash": input_hash,
@@ -185,8 +232,12 @@ def write_day(
         "image_version": image_version,
     }
     index = {name: values[name] for name, _ in INDEX_FIELDS}
+    # La página lleva los mismos arreglos: se vuelven a armar de uno en uno en vez
+    # de retenerlos, y se escribe antes del índice (marca de commit).
+    page = render_day(index, views(), template=template, compress=compresses_pages(fs))
+    write_page(fs, f"{directory}/{PAGE_FILE}", page)
     _put_json(fs, index_path, index)
-    _advance_latest(fs, base, index)
+    _advance_latest(fs, base, index, page)
     return index
 
 
@@ -210,12 +261,20 @@ def _read_latest(fs: pafs.FileSystem, base: str, series: dict) -> dict | None:
     return current
 
 
-def _advance_latest(fs: pafs.FileSystem, base: str, index: dict) -> None:
-    """Escribe `latest.json` si el día es posterior al que apunta (o no existe)."""
+def _advance_latest(
+    fs: pafs.FileSystem, base: str, index: dict, page: bytes | None = None
+) -> None:
+    """Escribe `latest.json` y `latest.html` si el día no es anterior al que apunta.
+
+    `latest.html` es la copia de la página del día; va primero para que el puntero
+    no apunte a una página que todavía no existe.
+    """
     series = {k: index[k] for k in ("provider", "market", "asset")}
     current = _read_latest(fs, base, series)
     if current is not None and current["day"] > index["day"]:
         return
+    if page is not None:
+        write_page(fs, f"{base}/{LATEST_PAGE_FILE}", page)
     _put_json(
         fs, f"{base}/{LATEST_FILE}", {name: index[name] for name in LATEST_FIELDS}
     )

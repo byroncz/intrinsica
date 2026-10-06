@@ -1,7 +1,8 @@
 """Hallazgos de DQ de viz (TRD-viz §9.3), emitidos con `shared/dq`.
 
-Todos llevan `layer = "viz"`, `mode = "tiles"` y `stage = "canonical"`: viz solo
-lee el consolidado de L1 (ADR-L2-09). El día va en `details.day`, no en una columna.
+Todos llevan `layer = "viz"`, `mode` igual al modo de la corrida (`tiles` o
+`render`) y `stage = "canonical"`: viz solo lee el consolidado de L1 (ADR-L2-09).
+El día va en `details.day`, no en una columna.
 """
 
 from datetime import date
@@ -11,7 +12,6 @@ from dq import Finding, Severity, Stage, Status, emit_findings
 from viz_tiles.context import RunContext
 
 LAYER = "viz"
-MODE = "tiles"
 
 
 def finding(
@@ -26,7 +26,7 @@ def finding(
 ) -> Finding:
     return Finding(
         layer=LAYER,
-        mode=MODE,
+        mode=ctx.mode,
         check_type=check_type,
         severity=severity,
         stage=Stage.CANONICAL,
@@ -84,8 +84,36 @@ def tiles_summary(
     )
 
 
+def render_summary(
+    ctx: RunContext,
+    day: date,
+    *,
+    skipped: bool,
+    tiles_version: str,
+    template_hash: str,
+    page_bytes: int,
+    content_hash: str,
+) -> Finding:
+    """Uno por día del modo `render`, regenerado o ya al día. `metric_value` son los bytes de la página."""
+    return finding(
+        ctx,
+        day,
+        "render_summary",
+        severity=Severity.INFO,
+        status=Status.PASS,
+        metric_value=float(page_bytes),
+        details={
+            "skipped": skipped,
+            "tiles_version": tiles_version,
+            "template_hash": template_hash,
+            "content_hash": content_hash,
+            "page_bytes": page_bytes,
+        },
+    )
+
+
 def input_missing(ctx: RunContext, day: date, what: str, **details: object) -> Finding:
-    """Falta una entrada (`what`: `l1`, `events`, `carry_over` o `ticks`).
+    """Falta una entrada (`what`: `l1`, `events`, `carry_over`, `ticks` o `tiles`).
 
     Es un hecho del mes y no del día, salvo `ticks`: el hallazgo lleva el primer
     día pedido en `details.day` y cuántos días afecta en `details.days`.

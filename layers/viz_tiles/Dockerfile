@@ -23,15 +23,19 @@ FROM python:3.14-slim
 
 # VERSION viene del archivo layers/viz_tiles/VERSION; lo pasa el CI.
 # ARROW_DEFAULT_MEMORY_POOL y MALLOC_MMAP_THRESHOLD_ mantienen el RSS de la
-# unidad O(lote): ver viz_tiles/memory.py.
+# unidad O(lote): ver viz_tiles/memory.py. VIZ_TEMPLATE_DIR es la plantilla de la
+# página del día (site/), que el job rellena con los tiles: no es un paquete
+# Python, así que viaja aparte del entorno.
 ARG VERSION=unknown
 ARG GIT_SHA=unknown
 ENV IMAGE_VERSION=${VERSION}+${GIT_SHA} \
     PATH=/app/.venv/bin:$PATH \
+    VIZ_TEMPLATE_DIR=/app/site \
     PYTHONUNBUFFERED=1 \
     ARROW_DEFAULT_MEMORY_POOL=system \
     MALLOC_MMAP_THRESHOLD_=16384
 
 COPY --from=build /app/.venv /app/.venv
+COPY --from=build /app/layers/viz_tiles/site /app/site
 
 ENTRYPOINT ["python", "-m", "viz_tiles"]

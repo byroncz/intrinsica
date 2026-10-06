@@ -112,8 +112,8 @@ def test_a_day_has_one_file_per_level_and_kind(tmp_path):
     write(tmp_path)
     directory = day_dir(tmp_path, **KEY, day=DAY)
     names = sorted(p.name for p in Path(directory).iterdir())
-    # 19 objetos por día, con cualquier número de θ.
-    assert len(names) == 6 + 6 + 6 + 1
+    # 20 objetos por día (arreglos, página e índice), con cualquier número de θ.
+    assert len(names) == 6 + 6 + 6 + 2
     assert "index.json" in names and "index.json.tmp" not in names
     assert "dir-128.u8" in names and "dir-128-0.05000000.u8" not in names
 
@@ -190,11 +190,11 @@ def test_index_is_written_last(tmp_path, monkeypatch):
     calls = []
     real = module._put
 
-    def failing(fs, path, data):
+    def failing(fs, path, data, metadata=None):
         calls.append(path)
         if len(calls) == 5:
             raise OSError("disco lleno")
-        real(fs, path, data)
+        real(fs, path, data, metadata)
 
     write(tmp_path)
     monkeypatch.setattr(module, "_put", failing)

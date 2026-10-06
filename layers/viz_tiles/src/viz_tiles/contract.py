@@ -7,7 +7,9 @@ estas constantes.
 
 from dataclasses import dataclass
 
-TILES_VERSION = "1.0.0"
+# 1.1.0: el índice lista la página del día (`page`) y el día trae `index.html`
+# (TRD-viz §7.2); los arreglos y su `content_hash` no cambian.
+TILES_VERSION = "1.1.0"
 
 DAY_US = 86_400_000_000
 DAY_S = 86_400
@@ -71,6 +73,9 @@ FILE_BY_KIND = {f.kind: f for f in TILE_FILES}
 
 INDEX_FILE = "index.json"
 LATEST_FILE = "latest.json"
+# La página autocontenida del día y su copia para el último día (TRD-viz §6.5).
+PAGE_FILE = "index.html"
+LATEST_PAGE_FILE = "latest.html"
 
 # Campos de `index.json` en orden de escritura, con su tipo JSON.
 INDEX_FIELDS = (
@@ -86,6 +91,7 @@ INDEX_FIELDS = (
     ("price", "object"),
     ("volume", "object"),
     ("dir", "object"),
+    ("page", "string"),
     ("thetas", "array"),
     ("missing_thetas", "array"),
     ("input_hash", "string"),
