@@ -136,12 +136,12 @@ def theta_month(
     events_file = rel(later, EVENTS)
     chain.append(events_file)
     path = join(events_root, events_file)
-    extreme = (
+    found = (
         find_extreme(path, tail.reference_agg_trade_id)
         if index.has(later, theta, EVENTS)
         else None
     )
-    if extreme is None:
+    if found is None:
         raise InputError(
             "events",
             f"{path}: no trae el evento pendiente de {theta} (referencia "
@@ -153,7 +153,10 @@ def theta_month(
     resolved = PendingEvent(
         tail.reference_agg_trade_id,
         tail.confirm_agg_trade_id,
-        extreme,
+        found[0],
         tail.direction,
+        tail.reference_time,
+        tail.confirm_time,
+        found[1],
     )
     return ThetaMonth(theta, resolved, own_time, last_time, True, tuple(chain))

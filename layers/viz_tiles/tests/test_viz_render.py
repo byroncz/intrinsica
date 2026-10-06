@@ -84,7 +84,7 @@ def test_template_hash_changes_with_any_file(tmp_path):
 def day_files(tmp_path, **kwargs) -> tuple[dict, dict[str, bytes], Path]:
     _, index = write(tmp_path, **kwargs)
     directory = Path(day_dir(tmp_path, **KEY, day=WRITE_DAY))
-    names = [n for kind in ("price", "volume", "dir") for n in index[kind].values()]
+    names = render.expected_names(index)
     return index, {n: (directory / n).read_bytes() for n in names}, directory
 
 
@@ -98,7 +98,7 @@ def test_page_embeds_the_arrays_byte_for_byte(tmp_path):
     assert data["index"] == json.loads((directory / "index.json").read_text())
     assert data["tiles_version"] == index["tiles_version"] == TILES_VERSION
     assert data["generated_at"] == index["generated_at"]
-    assert len(files) == 18 and index["page"] == PAGE_FILE
+    assert len(files) == 37 and index["page"] == PAGE_FILE
 
 
 def assert_self_contained(html: str) -> None:
@@ -186,9 +186,8 @@ def test_every_object_is_written_with_its_metadata(tmp_path, monkeypatch):
     )
     _, index = write(tmp_path)
     meta = recorder.metadata
-    for kind in ("price", "volume", "dir"):
-        for name in index[kind].values():
-            assert meta[name] == BINARY_META, name
+    for name in render.expected_names(index):
+        assert meta[name] == BINARY_META, name
     assert meta["index.json"] == JSON_META
     assert meta["latest.json"] == JSON_META
     # Un bucket recibe la página en gzip, con su tipo y sin caché.
@@ -224,7 +223,7 @@ def test_index_lists_the_page_and_the_page_exists_before_it(tmp_path):
     assert index["page"] == PAGE_FILE
     assert (directory / index["page"]).is_file()
     assert sorted(p.name for p in directory.iterdir()).count(PAGE_FILE) == 1
-    assert len(list(directory.iterdir())) == 3 * len(LEVELS) + 2
+    assert len(list(directory.iterdir())) == 6 * len(LEVELS) + 3
 
 
 # -- modo render -------------------------------------------------------------
@@ -499,7 +498,7 @@ def test_downloaded_gzip_page_of_the_smoke_day_is_self_contained(lake):
     """Lo que se baja de un bucket (`gcloud storage cp`) es el gzip del día del humo.
 
     Compartir un día es enviar ese archivo: descomprimido, abre desde disco sin
-    pedir nada fuera de sí mismo, y trae los 18 arreglos del día.
+    pedir nada fuera de sí mismo, y trae los 37 arreglos del día.
     """
     directory = day_path(lake)
     index = json.loads((directory / "index.json").read_text())
@@ -509,4 +508,4 @@ def test_downloaded_gzip_page_of_the_smoke_day_is_self_contained(lake):
     html = gzip.decompress(page).decode()
     assert_self_contained(html)
     data = embedded(html)
-    assert len(data["files"]) == 18 and data["index"] == index
+    assert len(data["files"]) == 37 and data["index"] == index

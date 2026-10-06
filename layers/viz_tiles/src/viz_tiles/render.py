@@ -1,7 +1,7 @@
 """La página HTML autocontenida de un día (TRD-viz §6.5 y §7.9).
 
 Una plantilla (`layers/viz_tiles/site/`: HTML, JS y CSS propios más uPlot) se
-rellena con los 18 arreglos del día en base64, bajo su nombre, dentro de un
+rellena con los 37 arreglos del día en base64, bajo su nombre, dentro de un
 `<script>` (`window.VIZ_DATA`). El documento no pide nada a la red: Google sirve
 cada archivo privado de un bucket desde un dominio bloqueado de un solo uso, así
 que una página que descarga sus tiles con `fetch` no funciona (RVZ-06).
@@ -22,7 +22,7 @@ from collections.abc import Buffer, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from viz_tiles.contract import PAGE_FILE
+from viz_tiles.contract import KINDS, PAGE_FILE
 
 # Archivos de la plantilla, en el orden en que entran al hash.
 TEMPLATE_FILES = (
@@ -104,7 +104,7 @@ def _json(doc: object) -> str:
 def expected_names(index: Mapping) -> list[str]:
     """Los archivos de tile que el índice lista, en orden de nombre."""
     return sorted(
-        name for kind in ("price", "volume", "dir") for name in index[kind].values()
+        [index["events"]] + [name for kind in KINDS for name in index[kind].values()]
     )
 
 
@@ -143,7 +143,7 @@ def render_day(
     template: Template | None = None,
     compress: bool = False,
 ) -> bytes:
-    """El `index.html` de un día: la plantilla con `index` y los 18 arreglos dentro.
+    """El `index.html` de un día: la plantilla con `index` y los 37 arreglos dentro.
 
     `arrays` entrega `(nombre, bytes)` en orden de nombre (el de `content_hash`).
     Con `compress` el resultado es un gzip determinista (sin marca de tiempo): es

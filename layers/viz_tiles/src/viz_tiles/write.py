@@ -9,7 +9,7 @@ medias, el día queda sin índice y la siguiente corrida lo rehace. La página
 import hashlib
 import json
 from collections.abc import Iterator, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from pathlib import Path
 
@@ -18,9 +18,11 @@ import pyarrow.fs as pafs
 from pyutils.fs import resolve_fs
 
 from viz_tiles.contract import (
+    EVENTS_FILE,
     FILE_BY_KIND,
     INDEX_FIELDS,
     INDEX_FILE,
+    KINDS,
     LATEST_FIELDS,
     LATEST_FILE,
     LATEST_PAGE_FILE,
@@ -29,6 +31,7 @@ from viz_tiles.contract import (
     TILES_VERSION,
     tile_name,
 )
+from viz_tiles.events import Confirmations, EventRows, pack_events
 from viz_tiles.reduce import DayReduction, day_start_us
 from viz_tiles.render import Template, render_day
 
@@ -49,12 +52,17 @@ class SeriesMismatch(ValueError):
 
 @dataclass(frozen=True)
 class ThetaTiles:
-    """Tiles de dirección de un θ: `direction[w]` es el arreglo uint8 del nivel `w`."""
+    """Tiles de un θ: dirección por nivel y eventos exactos del día.
+
+    `direction[w]` es el arreglo uint8 del nivel `w`; `rows`, los `events` eventos
+    que tocan el día (`EventRows`).
+    """
 
     theta: str
     events: int
     provisional_from_s: float | None
     direction: Mapping[int, np.ndarray]  # un bloque de `w` bytes por nivel
+    rows: EventRows = field(default_factory=EventRows.empty)
 
 
 def day_dir(root: str | Path, provider: str, market: str, asset: str, day: date) -> str:
@@ -134,6 +142,7 @@ def write_day(
     asset: str,
     day: date,
     reduction: DayReduction,
+    confirmations: Confirmations,
     thetas: Sequence[ThetaTiles],
     missing_thetas: Sequence[str] = (),
     input_hash: str,
@@ -161,19 +170,27 @@ def write_day(
     if _exists(fs, index_path):
         fs.delete_file(index_path)
 
-    # Nombre de archivo -> (tipo, nivel). Precio y volumen se hashean y se
-    # escriben desde una vista del arreglo que ya está en RAM; la dirección de
-    # un nivel se arma al escribirlo, un nivel a la vez.
-    names = {
-        kind: {str(w): tile_name(kind, w) for w in LEVELS}
-        for kind in ("price", "volume", "dir")
-    }
-    files: dict[str, tuple[str, int]] = {}
+    # Nombre de archivo -> (tipo, nivel). Los arreglos se hashean y se escriben
+    # desde una vista del que ya está en RAM; la dirección de un nivel se arma al
+    # escribirlo, un nivel a la vez. `events.bin` (nivel 0) va aparte: no es por nivel.
+    names = {kind: {str(w): tile_name(kind, w) for w in LEVELS} for kind in KINDS}
+    files: dict[str, tuple[str, int]] = {EVENTS_FILE: ("events", 0)}
     for kind, by_level in names.items():
         for w in LEVELS:
             files[by_level[str(w)]] = (kind, w)
 
+    for theta in thetas:
+        if len(theta.rows) != theta.events:
+            raise ValueError(
+                f"{theta.theta}: events={theta.events} pero trae {len(theta.rows)} filas"
+            )
+    offsets = np.cumsum([0] + [t.events for t in thetas])
+
     def array_of(kind: str, w: int) -> np.ndarray:
+        if kind == "count":
+            return reduction.count[w]
+        if kind in ("confirms", "simul"):
+            return getattr(confirmations, kind)[w]
         if kind == "dir":
             # n bloques de w bytes, en el orden de `thetas` del índice.
             blocks = [t.direction[w] for t in thetas]
@@ -190,15 +207,19 @@ def write_day(
         {
             "theta": theta.theta,
             "events": theta.events,
+            "events_offset": int(offset),
             "provisional_from_s": theta.provisional_from_s,
         }
-        for theta in thetas
+        for theta, offset in zip(thetas, offsets[:-1], strict=True)
     ]
 
     def views() -> Iterator[tuple[str, memoryview]]:
         """Los arreglos en orden de nombre (el de `content_hash`), de uno en uno."""
         for name in sorted(files):
             kind, w = files[name]
+            if kind == "events":
+                yield name, pack_events([t.rows for t in thetas])
+                continue
             yield (
                 name,
                 _tile_view(
@@ -226,6 +247,10 @@ def write_day(
         "price": names["price"],
         "volume": names["volume"],
         "dir": names["dir"],
+        "count": names["count"],
+        "confirms": names["confirms"],
+        "simul": names["simul"],
+        "events": EVENTS_FILE,
         "page": PAGE_FILE,
         "thetas": theta_docs,
         "missing_thetas": list(missing_thetas),

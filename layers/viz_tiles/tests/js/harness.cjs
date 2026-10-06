@@ -7,6 +7,9 @@
 //   --pick-last: elige la última opción del selector de θ (un θ sin datos).
 //   --zoom <min>,<max>: al final, un zoom explícito a ese rango (en segundos); se puede repetir.
 //   --sweep: pasa el cursor por todo el ancho con cada θ y devuelve los textos de θ del tooltip.
+//   --nav <k>: con el θ de la opción k, "evento siguiente" dos veces, "anterior" y "ajustar a la ventana".
+//   --nav-at <seg>: antes de navegar, un zoom de 600 s centrado en ese segundo (la escala "fijada" por el humano).
+//   --hover <seg>: pone el cursor del panel de confirmaciones en ese segundo y devuelve su tooltip.
 "use strict";
 const fs = require("fs");
 const vm = require("vm");
@@ -88,8 +91,8 @@ function element(tag) {
 }
 
 const byId = {};
-for (const id of ["s-day", "theta", "s-updated", "s-data-box", "s-data", "panels", "price", "volume", "f-level", "tip", "viz-data"]) {
-  byId[id] = element(id === "theta" ? "select" : "div");
+for (const id of ["s-day", "theta", "s-updated", "s-data-box", "s-data", "panels", "price", "confirms", "volume", "f-level", "tip", "viz-data", "ev-prev", "ev-next", "ev-fit", "ev-info"]) {
+  byId[id] = element(id === "theta" ? "select" : id.startsWith("ev-") && id !== "ev-info" ? "button" : "div");
 }
 byId.tip.hidden = true;
 
@@ -125,7 +128,8 @@ const sandbox = {
     constructor() { this.ops = []; }
     moveTo(x, y) { this.ops.push(["moveTo", x, y]); }
     lineTo(x, y) { this.ops.push(["lineTo", x, y]); }
-    rect() {} closePath() {} addPath() {} arc() {}
+    rect(x, y, w, h) { this.ops.push(["rect", x, y, w, h]); }
+    closePath() {} addPath() {} arc() {}
   },
   requestAnimationFrame: (fn) => setTimeout(fn, 0),
   cancelAnimationFrame: clearTimeout,
@@ -181,18 +185,21 @@ run(appJs, "app");
 const tick = () => new Promise((r) => setTimeout(r, 5));
 
 function plots() {
-  const [price, vol] = sandbox.__instances;
-  return { price, vol };
+  const [price, conf, vol] = sandbox.__instances;
+  return { price, conf, vol };
 }
 
 function snapshot(label) {
-  const { price, vol } = plots();
+  const { price, conf, vol } = plots();
   const info = { label };
   if (price) {
     info.priceLen = price.data[0].length;
     info.volLen = vol.data[0].length;
+    info.confLen = conf.data[0].length;
+    info.confData = [Array.from(conf.data[1]), Array.from(conf.data[2])];
     info.x = [price.scales.x.min, price.scales.x.max];
     info.vx = [vol.scales.x.min, vol.scales.x.max];
+    info.cx = [conf.scales.x.min, conf.scales.x.max];
     info.y = [price.scales.p.min, price.scales.p.max];
     const ys = price.data[1].filter((v) => v !== null);
     info.data = {
@@ -209,17 +216,17 @@ function snapshot(label) {
   info.level = byId["f-level"].textContent;
   info.metrics = JSON.parse(JSON.stringify(sandbox.VIZ_METRICS || {}));
   if (price) {
-    // La geometría de lo que uPlot trazó para la serie: la línea (muchos tramos por píxel) o,
-    // en barras, tres tramos por columna. `ops` y los ejes bastan para reconstruir cada barra.
+    // La geometría de lo que uPlot trazó para la serie: un segmento por columna (mín–máx) o
+    // los puntos M4 como cuadrados. `ops` y los ejes bastan para reconstruir cada marca.
     const paths = price.series[1]._paths;
     info.plotW = price.bbox.width / sandbox.devicePixelRatio;
     info.plot = { left: price.bbox.left, top: price.bbox.top, width: price.bbox.width, height: price.bbox.height };
     info.yScale = [price.scales.p.min, price.scales.p.max];
     const ops = paths && paths.stroke ? paths.stroke.ops : null;
-    const bars = info.metrics.price_draw && info.metrics.price_draw.mode === "bars";
     info.pathOpCount = ops ? ops.length : 0;
-    info.pathOps = bars ? ops : null; // la línea tiene miles de tramos: solo se cuentan
+    info.pathOps = ops && ops.length <= 6000 ? ops : null; // el día completo tiene miles: solo se cuentan
   }
+  info.nav = { info: byId["ev-info"].textContent, prev: !!byId["ev-prev"].disabled, next: !!byId["ev-next"].disabled, fit: !!byId["ev-fit"].disabled };
   return info;
 }
 
@@ -235,7 +242,8 @@ function snapshot(label) {
   // Los textos del primer trazo de los dos paneles, antes de que algo limpie el registro.
   out.firstDraw = drawLog.filter((c) => ["fillStyle", "fillRect", "strokeStyle", "lineWidth", "setLineDash", "moveTo", "lineTo"].includes(c[0]));
   out.firstMessages = drawLog.filter((c) => c[0] === "fillText").map((c) => c[1]);
-  out.panelHeights = plots().price ? [plots().price.height, plots().vol.height] : null;
+  out.panelHeights = plots().price ? [plots().price.height, plots().conf.height, plots().vol.height] : null;
+  out.regionDraw = drawLog.filter((c) => ["fillStyle", "fillRect", "strokeRect", "lineWidth", "strokeStyle"].includes(c[0]));
 
   if (plots().price) {
     const { price } = plots();
@@ -256,6 +264,29 @@ function snapshot(label) {
       out.steps.push(before, snapshot("después-θ"));
       out.regionFills = drawLog.filter((c) => c[0] === "fillRect").length;
     }
+    // Navegación por eventos con el θ pedido.
+    if (flag("--nav") >= 0) {
+      const k = Number(args[flag("--nav") + 1]);
+      byId.theta.value = byId.theta.options[k].value;
+      byId.theta.dispatch("change");
+      await tick();
+      if (flag("--nav-at") >= 0) {
+        const at = Number(args[flag("--nav-at") + 1]);
+        price.setScale("x", { min: at - 300, max: at + 300 });
+        await tick();
+        await tick();
+      }
+      out.steps.push(snapshot("nav-0"));
+      for (const [label, id] of [["nav-1", "ev-next"], ["nav-2", "ev-next"], ["nav-3", "ev-prev"], ["nav-fit", "ev-fit"]]) {
+        drawLog.length = 0;
+        byId[id].dispatch("click");
+        await tick();
+        await tick();
+        out.steps.push(snapshot(label));
+        if (label === "nav-fit") out.fitDraw = drawLog.filter((c) => ["fillStyle", "fillRect", "strokeRect"].includes(c[0]));
+      }
+      out.navTexts = [...new Set(textLog)];
+    }
     // Cursor sobre una cubeta: el tooltip se arma desde los tiles.
     byId.price.listeners = byId.price.listeners || {};
     const over = price.over;
@@ -265,6 +296,16 @@ function snapshot(label) {
     out.tooltip = byId.tip.hidden ? null : byId.tip.textContent;
     over.dispatch("mouseleave");
     out.tooltipHidden = byId.tip.hidden;
+    // Cursor del panel de confirmaciones en un segundo del día.
+    if (flag("--hover") >= 0) {
+      const sec = Number(args[flag("--hover") + 1]);
+      const { conf } = plots();
+      conf.over.dispatch("mouseenter");
+      conf.setCursor({ left: conf.valToPos(sec, "x"), top: 20 });
+      await tick();
+      out.confTooltip = byId.tip.hidden ? null : byId.tip.textContent;
+      conf.over.dispatch("mouseleave");
+    }
     // Zoom explícito a una hora: sube el nivel y el rango visible se conserva.
     price.setScale("x", { min: 36000, max: 39600 });
     await tick();

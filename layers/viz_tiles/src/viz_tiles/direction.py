@@ -31,6 +31,10 @@ _UP = (STATE_CONFIRM_UP, STATE_OVERSHOOT_UP)
 _DOWN = (STATE_CONFIRM_DOWN, STATE_OVERSHOOT_DOWN)
 
 
+def _optional_int(value: object) -> int | None:
+    return None if value is None else int(value)
+
+
 @dataclass(frozen=True)
 class PendingEvent:
     """Evento pendiente al cierre del mes, de `carry_over.parquet` (TRD-viz §7.6).
@@ -46,6 +50,11 @@ class PendingEvent:
     confirm_agg_trade_id: int
     extreme_agg_trade_id: int
     direction: int
+    # Tiempos (µs UTC) de los tres puntos: los usa el tile de eventos exactos
+    # (`events.py`); el estado de dirección solo necesita los ids.
+    reference_time: int | None = None
+    confirm_time: int | None = None
+    extreme_time: int | None = None
 
     @classmethod
     def from_carry_over(cls, row: Mapping[str, object]) -> PendingEvent | None:
@@ -59,6 +68,9 @@ class PendingEvent:
             confirm_agg_trade_id=int(row["pending_confirm_agg_trade_id"]),
             extreme_agg_trade_id=int(row[f"{extreme}_agg_trade_id"]),
             direction=direction,
+            reference_time=_optional_int(row.get("pending_reference_time")),
+            confirm_time=_optional_int(row.get("pending_confirm_time")),
+            extreme_time=_optional_int(row.get(f"{extreme}_time")),
         )
 
 

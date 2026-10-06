@@ -5,7 +5,7 @@ uPlot) y hay que regenerar las páginas sin repetir la reducción. Un día se sa
 si su página ya trae la misma `tiles_version` y la misma huella de plantilla
 (guardadas en su `<meta name="viz-render">`).
 
-Memoria: los 18 arreglos de un día se leen, se codifican y se sueltan de uno en
+Memoria: los 37 arreglos de un día se leen, se codifican y se sueltan de uno en
 uno; nunca hay más de un día a la vez.
 """
 

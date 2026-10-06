@@ -7,9 +7,11 @@ estas constantes.
 
 from dataclasses import dataclass
 
-# 1.1.0: el índice lista la página del día (`page`) y el día trae `index.html`
-# (TRD-viz §7.2); los arreglos y su `content_hash` no cambian.
-TILES_VERSION = "1.1.0"
+# 1.2.0: el día trae los eventos exactos de cada θ (`events.bin`), los ticks por
+# columna (`count-<w>.u32`) y las confirmaciones multiescala (`confirms-<w>.u8` y
+# `simul-<w>.u8`); el índice los lista y cada θ lleva su `events_offset` (TRD-viz
+# §7.2 a §7.5). Los arreglos de 1.1.0 no cambian.
+TILES_VERSION = "1.2.0"
 
 DAY_US = 86_400_000_000
 DAY_S = 86_400
@@ -68,8 +70,38 @@ TILE_FILES = (
     TileFile("price", "price-{w}.i32", "<i4", 8),
     TileFile("volume", "volume-{w}.f32", "<f4", 1),
     TileFile("dir", "dir-{w}.u8", "u1", 1),
+    TileFile("count", "count-{w}.u32", "<u4", 1),
+    TileFile("confirms", "confirms-{w}.u8", "u1", 1),
+    TileFile("simul", "simul-{w}.u8", "u1", 1),
 )
 FILE_BY_KIND = {f.kind: f for f in TILE_FILES}
+# Los tipos de tile por nivel, en el orden de TILE_FILES.
+KINDS = tuple(f.kind for f in TILE_FILES)
+
+# `count-<w>.u32` son los ticks de cada columna; `confirms-<w>.u8` y `simul-<w>.u8`
+# las confirmaciones multiescala del día (TRD-viz §7.4): no dependen de un θ.
+# Los eventos exactos de todos los θ del día van en un solo archivo (§7.5): cuatro
+# secciones de `N` valores (referencia, confirmación y extremo en int32 y un byte de
+# banderas), con `N` el total de eventos. El θ `k` ocupa de `events_offset` a
+# `events_offset + events - 1` en cada sección.
+EVENTS_FILE = "events.bin"
+EVENT_BYTES = 13
+
+# Banderas de un evento (uint8).
+FLAG_UP = 1  # alza; sin el bit, baja
+FLAG_PROVISIONAL = 2  # cola del carry-over: su extremo es un candidato vigente
+FLAG_REF_CLIPPED = 4  # la referencia es anterior al día: se recortó a 0
+FLAG_CONFIRM_CLIPPED = 8  # la confirmación cae fuera del día: se recortó a su borde
+FLAG_EXTREME_CLIPPED = 16  # el extremo cae fuera del día: se recortó a su borde
+FLAGS = {
+    FLAG_UP: "alza",
+    FLAG_PROVISIONAL: "provisional",
+    FLAG_REF_CLIPPED: "referencia recortada",
+    FLAG_CONFIRM_CLIPPED: "confirmación recortada",
+    FLAG_EXTREME_CLIPPED: "extremo recortado",
+}
+# Máximo de θ que caben en `confirms` y `simul` (uint8).
+MAX_THETAS = 255
 
 INDEX_FILE = "index.json"
 LATEST_FILE = "latest.json"
@@ -91,6 +123,10 @@ INDEX_FIELDS = (
     ("price", "object"),
     ("volume", "object"),
     ("dir", "object"),
+    ("count", "object"),
+    ("confirms", "object"),
+    ("simul", "object"),
+    ("events", "string"),
     ("page", "string"),
     ("thetas", "array"),
     ("missing_thetas", "array"),

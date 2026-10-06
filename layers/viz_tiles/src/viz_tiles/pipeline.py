@@ -25,6 +25,7 @@ from viz_tiles.chain import ThetaMonth, theta_month
 from viz_tiles.context import RunContext
 from viz_tiles.contract import DAY_US, FINEST, TILES_VERSION, price_scale
 from viz_tiles.direction import direction_tiles
+from viz_tiles.events import ConfirmAccumulator, event_rows
 from viz_tiles.lake import (
     CARRY_OVER,
     EVENTS,
@@ -199,8 +200,10 @@ class _Month:
         ids = reduction.last_ids[FINEST]
         valid = ids[ids >= 0]
         lo, hi = int(valid.min()), int(valid.max())
+        confirmations = ConfirmAccumulator()
         thetas = [
-            self._theta_tiles(state, day, reduction, lo, hi) for state in self.ready
+            self._theta_tiles(state, day, reduction, lo, hi, confirmations)
+            for state in self.ready
         ]
         write_day(
             ctx.tiles_root,
@@ -209,6 +212,7 @@ class _Month:
             asset=ctx.asset,
             day=day,
             reduction=reduction,
+            confirmations=confirmations.finish(),
             thetas=thetas,
             missing_thetas=self.missing,
             input_hash=digest,
@@ -222,7 +226,13 @@ class _Month:
         return landing_rel(c.provider, c.market, c.asset, self.month)
 
     def _theta_tiles(
-        self, state: ThetaMonth, day: date, reduction: DayReduction, lo: int, hi: int
+        self,
+        state: ThetaMonth,
+        day: date,
+        reduction: DayReduction,
+        lo: int,
+        hi: int,
+        confirmations: ConfirmAccumulator,
     ) -> ThetaTiles:
         c = self.ctx
         path = join(
@@ -236,11 +246,18 @@ class _Month:
             tail if tail is not None and tail.reference_agg_trade_id < hi else None
         )
         directions = direction_tiles(reduction.last_ids, events, pending)
+        provisional_from_s = state.provisional_from_s(day)
+        rows, confirm_us = event_rows(
+            events, pending, provisional_from_s is not None, day_start_us(day)
+        )
+        del events  # las filas del θ ya son los tiles: la tabla no se necesita más
+        confirmations.add(confirm_us)
         return ThetaTiles(
             theta=state.theta,
-            events=events.num_rows + (pending is not None),
-            provisional_from_s=state.provisional_from_s(day),
+            events=len(rows),
+            provisional_from_s=provisional_from_s,
             direction=directions,
+            rows=rows,
         )
 
 

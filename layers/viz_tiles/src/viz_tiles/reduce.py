@@ -92,6 +92,7 @@ class _Level:
     last_p: np.ndarray
     last_id: np.ndarray
     volume: np.ndarray
+    count: np.ndarray
 
     @classmethod
     def empty(cls, w: int) -> _Level:
@@ -138,6 +139,7 @@ class _Level:
             )
         pick["last_id"] = np.where(rp, right["last_id"], left["last_id"])
         pick["volume"] = left["volume"] + right["volume"]
+        pick["count"] = left["count"] + right["count"]
         return _Level(**pick)
 
 
@@ -216,6 +218,7 @@ class M4Accumulator:
         acc.last_p[cols] = price[ends]
         acc.last_id[cols] = ids[ends]
         acc.volume[cols] += np.add.reduceat(quantity, starts)
+        acc.count[cols] += np.diff(np.r_[starts, len(col)])
         acc.present[cols] = True
 
     def finish(self) -> DayReduction:
@@ -230,10 +233,11 @@ class M4Accumulator:
             rounded_max = int(_round_to_tick(np.int64(max_price_int), self._factor))
             if rounded_max > INT32_MAX:
                 raise PriceUnrepresentable(self.price_scale, max_price_int)
-        price, volume, last_ids = {}, {}, {}
+        price, volume, count, last_ids = {}, {}, {}, {}
         for w in reversed(LEVELS):
             price[w] = _price_tile(level, self._factor)
             volume[w] = _volume_tile(level)
+            count[w] = level.count.astype("<u4")
             last_ids[w] = level.last_id
             if w != LEVELS[0]:
                 level = level.coarsen()
@@ -244,6 +248,7 @@ class M4Accumulator:
             max_abs_delta_int=self.max_abs_delta_int,
             price={w: price[w] for w in LEVELS},
             volume={w: volume[w] for w in LEVELS},
+            count={w: count[w] for w in LEVELS},
             last_ids={w: last_ids[w] for w in LEVELS},
         )
 
@@ -254,7 +259,8 @@ class DayReduction:
 
     `price[w]` es el arreglo de `8w` int32 del archivo (bloque de tiempos en ms
     y bloque de precios en unidades de `1/price_scale`, `EMPTY_PRICE` en una
-    columna vacía); `volume[w]`, de `w` float32. `last_ids[w]` es el
+    columna vacía); `volume[w]`, de `w` float32; `count[w]`, de `w` uint32: los
+    ticks de cada columna (0 si está vacía). `last_ids[w]` es el
     `agg_trade_id` del último tick de cada columna (-1 si está vacía): con él
     se resuelve el estado de dirección (`direction.direction_tile`).
     `rounded` y `max_abs_delta_int` alimentan el hallazgo `price_rounded`
@@ -267,6 +273,7 @@ class DayReduction:
     max_abs_delta_int: int
     price: dict[int, np.ndarray]
     volume: dict[int, np.ndarray]
+    count: dict[int, np.ndarray]
     last_ids: dict[int, np.ndarray]
 
 
