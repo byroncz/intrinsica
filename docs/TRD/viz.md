@@ -344,7 +344,13 @@ El `index.html` se escribe **antes** del `index.json` (§7.8): un índice implic
 |`thetas[].provisional_from_s`|Segundos desde el inicio del día a partir de los cuales el estado de ese θ es provisional hasta el final del día; `null` si todo el día es definitivo (§7.6).|
 |`missing_thetas`|θ del catálogo sin entrada completa en L2 ese mes; no tienen bloque en `dir-<w>.u8` (§9.3). El tablero los muestra como hueco.|
 
-**Una sola fuente para los campos.** Los campos, su orden y su tipo JSON son los de `INDEX_FIELDS` (`layers/viz_tiles/src/viz_tiles/contract.py`), que `write_day` escribe. El TRD se alinea al código y no al revés (ITSC-312): `t0` es lo que ya leen la página y las pruebas, y renombrarlo a `day_start_us` rompería a esos lectores sin ganar nada. `content_hash` entra porque `render` y la página lo usan para verificar los arreglos (§7.8, §7.9). Los mapas `price`, `volume` y `dir` son redundantes con la plantilla `<tipo>-<w>.<ext>`, pero se conservan: el lector no asume la plantilla y lee el nombre del índice, igual que lee `levels`. Dos pruebas rompen el CI si algo se desvía: la de `data-contracts.md` compara su tabla de campos con `INDEX_FIELDS`, y la de este TRD compara con `INDEX_FIELDS` el índice de ejemplo de arriba.
+**Una sola fuente para los campos.** Los campos, su orden y su tipo JSON son los de `INDEX_FIELDS` (`layers/viz_tiles/src/viz_tiles/contract.py`), que `write_day` escribe. El TRD se alinea al código y no al revés (ITSC-312). La tabla de arriba explica solo los campos que no se entienden solos; la lista completa es el ejemplo.
+
+- `t0` lo escribe `write_day` (`write.py`) y lo leen las pruebas (`test_viz_write.py`) y `data-contracts.md`; la página no lo lee. Renombrarlo a `day_start_us` no rompería ningún lector de producción, pero se conserva porque es el nombre de las fórmulas de §7.3 (`rel_us = transact_time − t0`) y renombrarlo obligaría a cambiar este TRD, `data-contracts.md` y las pruebas sin ganar nada.
+- `content_hash` lo verifica `render` (`pages.py`) antes de escribir la página, y la prueba de reproducibilidad de §7.9 lo compara con los arreglos embebidos; la página no lo lee.
+- Los mapas `price`, `volume` y `dir` son redundantes con la plantilla `<tipo>-<w>.<ext>`, pero se conservan: la página sí los lee (`index.price[w]`, `index.volume[w]`, `index.dir[w]`) y no asume la plantilla, igual que lee `levels`.
+
+Dos pruebas rompen el CI si algo se desvía: la de `data-contracts.md` compara su tabla de campos con `INDEX_FIELDS`, y la de este TRD compara con `INDEX_FIELDS` el índice de ejemplo de arriba.
 
 ### 7.3 Tiles de precio y volumen; niveles de zoom y presupuesto
 
