@@ -60,7 +60,14 @@ from viz_tiles.ticks import (
     TicksAccumulator,
     day_start_us,
 )
-from viz_tiles.write import ThetaEvents, TicksFile, day_sizes, find_index, write_day
+from viz_tiles.write import (
+    ThetaEvents,
+    TicksFile,
+    advance_latest_from_files,
+    day_sizes,
+    find_index,
+    write_day,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -533,6 +540,7 @@ def _process(
     chain = stats.fetch(chain_paths)
 
     pending: list[tuple[date, str]] = []
+    skipped: list[dict] = []
     month_state = _Month(ctx, month, ready, missing, out)
     for day in days:
         files = dict(base)
@@ -550,8 +558,14 @@ def _process(
         ):
             logger.info("unidad %s: al día (input_hash %s), se salta", day, digest[:12])
             month_state.summary(day, index, True, started)
+            skipped.append(index)
         else:
             pending.append((day, digest))
+    if skipped:
+        # Un día al día no pasa por `write_day`: si un run anterior cayó antes de
+        # avanzar `latest.*`, nadie más lo haría (ITSC-318). Solo avanza, y solo si
+        # está atrasado.
+        advance_latest_from_files(ctx.tiles_root, max(skipped, key=lambda i: i["day"]))
     if not pending:
         return
 

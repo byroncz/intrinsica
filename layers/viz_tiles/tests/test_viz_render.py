@@ -215,6 +215,11 @@ class RecordingFS:
         self.metadata[Path(dest).name] = self.metadata.pop(Path(src).name)
         self._fs.move(src, dest)
 
+    def copy_file(self, src, dest):
+        # Igual que `move`: la copia en el servidor conserva los metadatos.
+        self.metadata[Path(dest).name] = self.metadata[Path(src).name]
+        self._fs.copy_file(src, dest)
+
     def __getattr__(self, name):
         return getattr(self._fs, name)
 

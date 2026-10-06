@@ -8,6 +8,7 @@ medias, el día queda sin índice y la siguiente corrida lo rehace. La página
 
 import hashlib
 import json
+import logging
 from collections.abc import Buffer, Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
@@ -28,8 +29,10 @@ from viz_tiles.contract import (
     TILES_VERSION,
 )
 from viz_tiles.events import EventsBuffer
-from viz_tiles.render import Template, render_day_to
+from viz_tiles.render import Template, expected_names, render_day_to
 from viz_tiles.ticks import DayTicks, day_start_us
+
+logger = logging.getLogger(__name__)
 
 # Metadatos de cada clase de objeto (TRD-viz §7.2). Los binarios son inmutables;
 # el índice, `latest.json` y las páginas se revalidan en cada apertura.
@@ -113,6 +116,32 @@ def write_page(fs: pafs.FileSystem, path: str, page: bytes) -> None:
     _put_whole(fs, path, page, meta)
 
 
+def _publish_page(
+    fs: pafs.FileSystem,
+    tmp: str,
+    index: dict,
+    arrays: Iterator[tuple[str, Iterable[Buffer]]],
+    template: Template | None,
+    publish: Callable[[str], None],
+) -> None:
+    """Renderiza la página en `tmp`, la publica con `publish(tmp)` y borra `tmp`.
+
+    Mismos metadatos que `write_page`. El temporal va también en un bucket: si el
+    render falla a medias, el `with` cierra el flujo y GCS publica lo escrito
+    (pyarrow no tiene `abort`); así cae en el temporal, que se borra, y no sobre la
+    página vigente. El temporal se borra también si falla `publish`, no solo el render.
+    """
+    compress = compresses_pages(fs)
+    meta = PAGE_META | (GZIP_META if compress else {})
+    try:
+        with fs.open_output_stream(tmp, metadata=meta) as out:
+            render_day_to(out, index, arrays, template=template, compress=compress)
+        publish(tmp)
+    finally:
+        if _exists(fs, tmp):
+            fs.delete_file(tmp)
+
+
 def stream_page(
     fs: pafs.FileSystem,
     path: str,
@@ -120,24 +149,40 @@ def stream_page(
     arrays: Iterator[tuple[str, Iterable[Buffer]]],
     template: Template | None,
 ) -> None:
-    """Renderiza la página en un temporal, sin armarla en RAM, y lo renombra al final.
+    """Renderiza la página de un día en un temporal, sin armarla en RAM, y lo renombra.
 
-    Mismos metadatos que `write_page`. El temporal va también en un bucket: si el
-    render falla a medias, el `with` cierra el flujo y GCS publica lo escrito
-    (pyarrow no tiene `abort`); así cae en el temporal, que se borra, y no sobre la
-    página vigente. En GCS `move` es copia más borrado y conserva los metadatos.
+    En GCS `move` es copia más borrado y conserva los metadatos; consulta el padre
+    del destino, así que solo sirve para rutas bajo `day=…/` (ver `stream_latest_page`).
     """
-    compress = compresses_pages(fs)
-    meta = PAGE_META | (GZIP_META if compress else {})
-    tmp = f"{path}.tmp"
-    try:
-        with fs.open_output_stream(tmp, metadata=meta) as out:
-            render_day_to(out, index, arrays, template=template, compress=compress)
-    except BaseException:
-        if _exists(fs, tmp):
-            fs.delete_file(tmp)
-        raise
-    fs.move(tmp, path)
+    _publish_page(
+        fs, f"{path}.tmp", index, arrays, template, lambda tmp: fs.move(tmp, path)
+    )
+
+
+def stream_latest_page(
+    fs: pafs.FileSystem,
+    base: str,
+    directory: str,
+    index: dict,
+    arrays: Iterator[tuple[str, Iterable[Buffer]]],
+    template: Template | None,
+) -> None:
+    """Escribe `latest.html` en la raíz sin que ninguna operación consulte la raíz.
+
+    `fs.move` a `<base>/latest.html` pregunta por el padre del destino, el objeto
+    `tiles` (sin barra), fuera del prefijo `tiles/` en que la cuenta tiene permiso
+    (ITSC-318). El temporal va en el directorio del día, cuyo padre sí cae bajo el
+    prefijo, y `copy_file` lo copia al destino (copia en el servidor: atómica y con
+    los mismos metadatos); el temporal se borra siempre.
+    """
+    _publish_page(
+        fs,
+        f"{directory}/{LATEST_PAGE_FILE}.tmp",
+        index,
+        arrays,
+        template,
+        lambda tmp: fs.copy_file(tmp, f"{base}/{LATEST_PAGE_FILE}"),
+    )
 
 
 def _exists(fs: pafs.FileSystem, path: str) -> bool:
@@ -154,6 +199,14 @@ def read_blocks(fs: pafs.FileSystem, path: str) -> Iterator[bytes]:
     with fs.open_input_stream(path) as src:
         while block := src.read(READ_BLOCK):
             yield block
+
+
+def day_blocks(
+    fs: pafs.FileSystem, directory: str, index: dict
+) -> Iterator[tuple[str, Iterator[bytes]]]:
+    """Los archivos del día en orden de nombre, de uno en uno y por bloques."""
+    for name in expected_names(index):
+        yield name, read_blocks(fs, f"{directory}/{name}")
 
 
 class TicksFile:
@@ -316,12 +369,14 @@ def write_day(
     # La página lleva los mismos bytes: `ticks.bin` se vuelve a leer por bloques y
     # cada archivo se codifica y sale directo al objeto, sin armar la página entera;
     # se escribe antes del índice (marca de commit).
-    def write_page_to(path: str) -> None:
-        stream_page(fs, path, index, parts(), template)
-
-    write_page_to(f"{directory}/{PAGE_FILE}")
+    stream_page(fs, f"{directory}/{PAGE_FILE}", index, parts(), template)
     _put_json(fs, index_path, index)
-    _advance_latest(fs, base, index, write_page_to)
+    _advance_latest(
+        fs,
+        base,
+        index,
+        lambda: stream_latest_page(fs, base, directory, index, parts(), template),
+    )
     return index
 
 
@@ -349,23 +404,62 @@ def _advance_latest(
     fs: pafs.FileSystem,
     base: str,
     index: dict,
-    write_page_to: Callable[[str], None] | None = None,
+    write_latest_page: Callable[[], None] | None = None,
+    *,
+    only_if_stale: bool = False,
 ) -> None:
     """Escribe `latest.json` y `latest.html` si el día no es anterior al que apunta.
 
-    `latest.html` es la copia de la página del día (`write_page_to` la vuelve a
-    renderizar en esa ruta: así no se guarda la página entre una escritura y la
-    otra); va primero para que el puntero no apunte a una página que todavía no
-    existe.
+    `latest.html` es la copia de la página del día (`write_latest_page` la vuelve a
+    renderizar: así no se guarda la página entre una escritura y la otra); va
+    primero para que el puntero no apunte a una página que todavía no existe. Con
+    `only_if_stale` no hace nada si `latest.json` ya dice lo mismo que el índice.
     """
     series = {k: index[k] for k in ("provider", "market", "asset")}
     current = _read_latest(fs, base, series)
+    latest = {name: index[name] for name in LATEST_FIELDS}
     if current is not None and current["day"] > index["day"]:
         return
-    if write_page_to is not None:
-        write_page_to(f"{base}/{LATEST_PAGE_FILE}")
-    _put_json(
-        fs, f"{base}/{LATEST_FILE}", {name: index[name] for name in LATEST_FIELDS}
+    if only_if_stale and current == latest:
+        return
+    _discard_legacy_tmp(fs, base)
+    if write_latest_page is not None:
+        write_latest_page()
+    _put_json(fs, f"{base}/{LATEST_FILE}", latest)
+
+
+def _discard_legacy_tmp(fs: pafs.FileSystem, base: str) -> None:
+    """Borra el `latest.html.tmp` de la raíz que dejó el `move` fallido (ITSC-318).
+
+    Es limpieza de mejor esfuerzo: si no se puede borrar, se avisa y el job sigue.
+    """
+    path = f"{base}/{LATEST_PAGE_FILE}.tmp"
+    try:
+        if _exists(fs, path):
+            fs.delete_file(path)
+            logger.info("se borró el temporal huérfano %s", path)
+    except OSError as exc:
+        logger.warning("no se pudo borrar el temporal huérfano %s: %s", path, exc)
+
+
+def advance_latest_from_files(root: str | Path, index: dict) -> None:
+    """Avanza `latest.*` al día de `index`, ya escrito, si están atrasados.
+
+    Para un día que el job salta por estar al día: su página y sus archivos ya
+    existen, pero `latest.*` pudo quedar atrás (un fallo a mitad de un run). La
+    página se renderiza desde los archivos del día, como en `write_day`.
+    """
+    fs, base = resolve_fs(root)
+    day = date.fromisoformat(index["day"])
+    directory = day_dir(root, index["provider"], index["market"], index["asset"], day)
+    _advance_latest(
+        fs,
+        base,
+        index,
+        lambda: stream_latest_page(
+            fs, base, directory, index, day_blocks(fs, directory, index), None
+        ),
+        only_if_stale=True,
     )
 
 
