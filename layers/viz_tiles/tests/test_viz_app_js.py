@@ -202,7 +202,7 @@ def test_decoded_series_equals_the_tile_files(normal, day_dir):
 
 
 def test_three_panels_split_the_height_65_15_20(normal):
-    """Reparto de TRD-viz §6.11: precio 65 %, confirmaciones 15 %, volumen 20 %."""
+    """Reparto de TRD-viz §6.13: precio 65 %, confirmaciones 15 %, volumen 20 %."""
     price, confirms, volume = normal["panelHeights"]
     total = price + confirms + volume
     assert price / total == pytest.approx(0.65, abs=0.01)
@@ -359,7 +359,7 @@ def px_y(step_, value):
 
 
 def test_the_template_draws_no_candles():
-    """Sin muescas de primero y último: eso es una vela (TRD-viz §6.12)."""
+    """Sin muescas de primero y último: eso es una vela (TRD-viz §6.11)."""
     app = APP_JS.read_text(encoding="utf-8")
     assert "notch" not in app.lower() and "BAR_NOTCH" not in app
     assert "muesca" not in app.lower() and "vela" not in app.lower().replace(

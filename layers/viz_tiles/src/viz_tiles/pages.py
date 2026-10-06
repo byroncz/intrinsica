@@ -180,6 +180,14 @@ def _render_day(
     out: list[Finding],
 ) -> None:
     directory = day_dir(ctx.tiles_root, ctx.provider, ctx.market, ctx.asset, day)
+    try:
+        expected_names(index)
+    except KeyError as exc:
+        # Tiles de una versión anterior: no traen todos los archivos de la actual.
+        raise TilesCorrupt(
+            f"el índice no trae {exc} (tiles_version {index.get('tiles_version')}): "
+            "el día se rehace con --mode tiles, no con render"
+        ) from exc
     page_path = f"{directory}/{PAGE_FILE}"
     latest_path = f"{base}/{LATEST_PAGE_FILE}"
     is_latest = latest == day.isoformat()

@@ -469,6 +469,24 @@ def test_render_refuses_a_day_with_a_missing_tile(lake, fresh_template):
     )
 
 
+def test_render_refuses_tiles_of_an_older_version_and_says_to_rebuild_them(
+    lake, fresh_template
+):
+    """Un índice 1.1.0 no trae `events`, `count`…: render no lo rehace, lo dice."""
+    index_path = day_path(lake) / "index.json"
+    index = json.loads(index_path.read_text())
+    for key in ("count", "confirms", "simul", "events"):
+        del index[key]
+    index["tiles_version"] = "1.1.0"
+    index_path.write_text(json.dumps(index))
+    page = day_path(lake) / PAGE_FILE
+    before = page.read_bytes()
+    assert (
+        cli.main(["--mode", "render", "--day", DAY, "--force"], render_env(lake)) == 1
+    )
+    assert page.read_bytes() == before
+
+
 def test_tiles_mode_still_rejects_export(lake):
     assert cli.main(["--mode", "export", "--day", DAY], lake.env()) == 2
 

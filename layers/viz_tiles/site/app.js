@@ -1,4 +1,4 @@
-/* Vista de un día (TRD-viz §6.6, §6.7, §6.11, §7). Sin red: los tiles llegan en window.VIZ_DATA,
+/* Vista de un día (TRD-viz §6.6, §6.7, §6.11 a §6.13, §7). Sin red: los tiles llegan en window.VIZ_DATA,
  * en base64 bajo su nombre. El navegador solo decodifica y hace las dos conversiones
  * de §7.3 (t / 1000 y p / price_scale, o null en el centinela); los tiempos de los eventos
  * (ms) los pasa a segundos para el eje X. Lo demás sale de los tiles tal cual: los conteos

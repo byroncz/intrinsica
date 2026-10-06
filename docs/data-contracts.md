@@ -547,11 +547,14 @@ En GCS usa Application Default Credentials; no hay credenciales en código.
 ## Tiles de viz
 
 Contrato hacia el tablero: por día y nivel de zoom, arreglos binarios planos
-con la serie reducida a M4, más un índice JSON. Fuente de diseño:
+con la serie reducida a M4 y sus conteos, un archivo con los eventos exactos de
+cada θ y un índice JSON. Fuente de diseño:
 [TRD-viz §7](TRD/viz.md#7-contrato-de-datos). Fuente en código:
 [`contract.py`](../layers/viz_tiles/src/viz_tiles/contract.py) (constantes),
 [`reduce.py`](../layers/viz_tiles/src/viz_tiles/reduce.py) (precio y volumen),
 [`direction.py`](../layers/viz_tiles/src/viz_tiles/direction.py) (dirección por θ),
+[`events.py`](../layers/viz_tiles/src/viz_tiles/events.py) (eventos exactos y
+confirmaciones multiescala),
 [`write.py`](../layers/viz_tiles/src/viz_tiles/write.py) (escritura) y
 [`render.py`](../layers/viz_tiles/src/viz_tiles/render.py) (la página del día). Una
 prueba (`layers/viz_tiles/tests/test_tiles_contract_doc.py`) rompe el CI si
@@ -567,13 +570,17 @@ binarios son sin cabecera y little-endian.
 ├── price-<w>.i32
 ├── volume-<w>.f32
 ├── dir-<w>.u8              # uno por nivel: un bloque de w bytes por θ
-├── index.html              # la página del día: plantilla, uPlot y los 18 arreglos
+├── count-<w>.u32           # uno por nivel: ticks por columna
+├── confirms-<w>.u8         # uno por nivel: θ que confirman en la columna
+├── simul-<w>.u8            # uno por nivel: máximo de θ con el mismo confirm_time
+├── events.bin              # los eventos exactos de todos los θ del día
+├── index.html              # la página del día: plantilla, uPlot y los 37 arreglos
 └── index.json              # se escribe al final: marca de commit
 <raíz>/latest.json          # último día con index.json
 <raíz>/latest.html          # copia de la página de ese día
 ```
 
-Un día son 20 objetos (6 + 6 + 6 + 2), con cualquier número de θ. El día es
+Un día son 39 objetos (6 × 6 + 1 + 2), con cualquier número de θ. El día es
 UTC. `write_day` borra el `index.json` previo, escribe los arreglos y la página y
 deja el índice al final: un día sin `index.json` no existe para el lector.
 `latest.json` y `latest.html` solo avanzan; un día anterior regenerado no los
@@ -588,7 +595,7 @@ disco local van sin comprimir, para abrir por `file://`).
 ### Página del día
 
 `index.html` es un solo documento sin peticiones de red: lleva dentro la
-plantilla (`layers/viz_tiles/site/`), uPlot y los 18 arreglos en base64 bajo su
+plantilla (`layers/viz_tiles/site/`), uPlot y los 37 arreglos en base64 bajo su
 nombre, en `window.VIZ_DATA = {tiles_version, generated_at, files, index}`.
 `files` mapea el nombre de cada arreglo a su base64; `index` es el `index.json`
 del día. Un `<meta name="viz-render" content="tiles_version=…;template=…">` al
@@ -605,7 +612,10 @@ enteros.
 |---|---|---|---|
 | `price-<w>.i32` | int32 | 8 | Dos bloques de `4w` enteros: los tiempos `t[i]` (`uint32`, milisegundos desde `t0`, `⌊µs / 1000⌋`) y los precios `p[i]` (`int32`, unidades de `1 / price_scale`). Los puntos `i = 4·col + k` son los cuatro M4 de la columna, en orden de tiempo: primero, mínimo, máximo y último, con mínimo y máximo ordenados por su posición. Si dos coinciden se repiten. Empates de precio: gana el tick más antiguo. Una columna sin ticks lleva su inicio (`⌊col · 86 400 000 / w⌋` ms) en los cuatro `t` y `INT32_MIN` (−2 147 483 648) en los cuatro `p` |
 | `volume-<w>.f32` | float32 | 1 | Suma de `quantity` de los ticks de la columna, sumada en enteros de escala 10⁸; 0 si no hay ticks |
-| `dir-<w>.u8` | uint8 | 1 | Por θ, el estado de dirección en la columna (ver Estados). El archivo trae `n` bloques de `w` bytes, uno por θ, en el orden de `thetas` del índice: el θ en la posición `k` ocupa los bytes `k·w` a `(k+1)·w − 1`. Con los 50 θ del catálogo, `50·w` bytes |
+| `dir-<w>.u8` | uint8 | 1 | Por θ, el estado de dirección en la columna (ver Estados). El archivo trae `n` bloques de `w` bytes, uno por θ, en el orden de `thetas` del índice: el θ en la posición `k` ocupa los bytes `k·w` a `(k+1)·w − 1`. Con los 50 θ del catálogo, `50·w` bytes. Solo alimenta el tooltip: las franjas salen de los eventos exactos |
+| `count-<w>.u32` | uint32 | 1 | Ticks de cada columna, `4w` bytes; 0 en una columna sin ticks. La suma de las columnas es `ticks` del índice, en los seis niveles |
+| `confirms-<w>.u8` | uint8 | 1 | Número de θ con al menos una confirmación (`confirm_time`) dentro de la columna, de 0 al número de θ del día (hasta 50 con el catálogo completo). Un θ que confirma varias veces en la columna cuenta una |
+| `simul-<w>.u8` | uint8 | 1 | Máximo número de θ que comparten **un mismo** `confirm_time` (µs exactos) dentro de la columna; 0 sin confirmaciones. Nunca supera a `confirms` en la misma columna |
 
 El tiempo cabe en `uint32` con holgura (máximo 86 400 000) y, al ser menor que
 2³¹, `uint32` e `int32` dan los mismos bytes. Un lector entero lee el mismo
@@ -642,14 +652,51 @@ componible, así que los niveles gruesos se derivan del más fino sin releer
 ticks. Bytes de cada archivo del nivel (`dir` es el bloque de un θ: el archivo
 tiene uno por θ):
 
-| `w` | Duración de columna (s) | `price` (B) | `volume` (B) | `dir` (B por θ) |
-|---|---|---|---|---|
-| 128 | 675 | 4096 | 512 | 128 |
-| 256 | 337,5 | 8192 | 1024 | 256 |
-| 512 | 168,75 | 16384 | 2048 | 512 |
-| 1024 | 84,375 | 32768 | 4096 | 1024 |
-| 2048 | 42,1875 | 65536 | 8192 | 2048 |
-| 4096 | 21,09375 | 131072 | 16384 | 4096 |
+| `w` | Duración de columna (s) | `price` (B) | `volume` (B) | `dir` (B por θ) | `count` (B) | `confirms` (B) | `simul` (B) |
+|---|---|---|---|---|---|---|---|
+| 128 | 675 | 4096 | 512 | 128 | 512 | 128 | 128 |
+| 256 | 337,5 | 8192 | 1024 | 256 | 1024 | 256 | 256 |
+| 512 | 168,75 | 16384 | 2048 | 512 | 2048 | 512 | 512 |
+| 1024 | 84,375 | 32768 | 4096 | 1024 | 4096 | 1024 | 1024 |
+| 2048 | 42,1875 | 65536 | 8192 | 2048 | 8192 | 2048 | 2048 |
+| 4096 | 21,09375 | 131072 | 16384 | 4096 | 16384 | 4096 | 4096 |
+
+### Eventos exactos
+
+`events.bin` lleva los eventos de **todos** los θ del día, para que el navegador
+dibuje cada franja en su instante real y no en el borde de una columna. Son los
+eventos de `events.parquet` que tocan el día (los mismos de `thetas[].events`),
+más la cola pendiente del carry-over con su candidato. Sin cabecera, little-endian,
+cuatro secciones consecutivas de `N` valores, con `N` el total de eventos del día
+(la suma de `thetas[].events`); 13 bytes por evento:
+
+| Sección | Tipo | Contenido |
+|---|---|---|
+| referencia | int32 | Milisegundos desde `t0` (`⌊µs / 1000⌋`) del tick de referencia; recortado a `[0, 86 400 000]` |
+| confirmación | int32 | Lo mismo, del tick de confirmación (`confirm_time`) |
+| extremo | int32 | Lo mismo, del tick extremo; en la cola pendiente, el candidato vigente |
+| banderas | uint8 | Suma de bits de la tabla siguiente |
+
+El θ en la posición `k` de `thetas` ocupa de `events_offset` a
+`events_offset + events − 1` en **cada** sección, en orden de referencia. Los
+tiempos de un θ no decrecen, y el extremo de un evento es la referencia del
+siguiente. Un valor fuera del día se recorta al borde y se marca; el tick
+extremo pertenece al evento que cierra, `(referencia, extremo]` como en el
+estado de dirección, así que el evento siguiente arranca en el tick que lo sigue.
+
+| Bit | Bandera |
+|---|---|
+| `1` | alza |
+| `2` | provisional |
+| `4` | referencia recortada |
+| `8` | confirmación recortada |
+| `16` | extremo recortado |
+
+Sin el bit `1` el evento es una baja. `provisional` marca la cola pendiente cuyo
+candidato todavía puede cambiar (`provisional_from_s` no es `null`); si el
+pendiente ya cerró, o su candidato cae después del día, no lleva la bandera. Una
+cola cuyo candidato queda antes del fin del día **no** lleva eventos después de
+él: los ticks posteriores no tienen todavía un evento que los cierre.
 
 ### Estados
 
@@ -693,8 +740,12 @@ prueba del contrato compara esta tabla con `INDEX_FIELDS`.
 | `price` | object | Nombre del archivo `price` por nivel: `{"128": "price-128.i32", …}` |
 | `volume` | object | Nombre del archivo `volume` por nivel |
 | `dir` | object | Nombre del archivo `dir` por nivel: `{"128": "dir-128.u8", …}` |
+| `count` | object | Nombre del archivo `count` por nivel: `{"128": "count-128.u32", …}` |
+| `confirms` | object | Nombre del archivo `confirms` por nivel |
+| `simul` | object | Nombre del archivo `simul` por nivel |
+| `events` | string | Nombre del archivo de eventos exactos, `events.bin` |
 | `page` | string | Nombre de la página autocontenida del día, `index.html` |
-| `thetas` | array | Un objeto por θ con bloque en `dir-<w>.u8`, en el orden de los bloques: `theta` (texto de ancho fijo de la partición de L2, `0.00010000`, de menor a mayor), `events` (filas de eventos que tocan el día, con la cola) y `provisional_from_s` (segundos desde `t0` desde los que el estado es provisional, o `null`) |
+| `thetas` | array | Un objeto por θ con bloque en `dir-<w>.u8`, en el orden de los bloques: `theta` (texto de ancho fijo de la partición de L2, `0.00010000`, de menor a mayor), `events` (filas de eventos que tocan el día, con la cola), `events_offset` (índice de su primer evento en cada sección de `events.bin`) y `provisional_from_s` (segundos desde `t0` desde los que el estado es provisional, o `null`) |
 | `missing_thetas` | array | θ del catálogo sin eventos completos: no tienen bloque en `dir-<w>.u8` |
 | `input_hash` | string | Huella de los archivos de entrada; la calcula quien llama a `write_day` |
 | `content_hash` | string | SHA-256 de los arreglos: por cada archivo en orden de nombre, el nombre, un byte nulo y sus bytes. No depende de `generated_at` |
