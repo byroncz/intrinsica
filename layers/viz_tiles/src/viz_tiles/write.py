@@ -120,18 +120,24 @@ def stream_page(
     arrays: Iterator[tuple[str, Iterable[Buffer]]],
     template: Template | None,
 ) -> None:
-    """Renderiza la página directo al objeto de salida, sin armarla en RAM.
+    """Renderiza la página en un temporal, sin armarla en RAM, y lo renombra al final.
 
-    Mismos metadatos y misma regla de "entero o nada" que `write_page`.
+    Mismos metadatos que `write_page`. El temporal va también en un bucket: si el
+    render falla a medias, el `with` cierra el flujo y GCS publica lo escrito
+    (pyarrow no tiene `abort`); así cae en el temporal, que se borra, y no sobre la
+    página vigente. En GCS `move` es copia más borrado y conserva los metadatos.
     """
     compress = compresses_pages(fs)
     meta = PAGE_META | (GZIP_META if compress else {})
-    local = isinstance(fs, pafs.LocalFileSystem)
-    target = f"{path}.tmp" if local else path
-    with fs.open_output_stream(target, metadata=meta) as out:
-        render_day_to(out, index, arrays, template=template, compress=compress)
-    if local:
-        fs.move(target, path)
+    tmp = f"{path}.tmp"
+    try:
+        with fs.open_output_stream(tmp, metadata=meta) as out:
+            render_day_to(out, index, arrays, template=template, compress=compress)
+    except BaseException:
+        if _exists(fs, tmp):
+            fs.delete_file(tmp)
+        raise
+    fs.move(tmp, path)
 
 
 def _exists(fs: pafs.FileSystem, path: str) -> bool:

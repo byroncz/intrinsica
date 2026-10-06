@@ -229,7 +229,8 @@ en varint dentro del tramo en curso de `ticks.bin` (hasta 65 536 ticks, ≈ 330 
 cuando el tramo se llena se escribe al objeto y se suelta, así que los bytes del día
 nunca viven en RAM. Los `events.parquet` se leen una vez por mes y quedan como arreglos
 de NumPy (41 B por evento). En RAM: un row group, un tramo de ticks y los eventos del
-mes. La página sale directo al objeto (`render_day_to`, gzip en streaming) y lee
+mes. La página sale en streaming a un temporal que se renombra al terminar (`render_day_to`,
+gzip en streaming; si falla a medias, la página vigente queda intacta) y lee
 `ticks.bin` de vuelta por bloques de 1 MB: ni la página ni un archivo del día están
 enteros en RAM. Regla sin excepción (TRD-viz §7.3 y §8.1, ITSC-317).
 

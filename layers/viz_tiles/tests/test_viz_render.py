@@ -210,6 +210,11 @@ class RecordingFS:
         self._fs.create_dir(str(Path(path).parent), recursive=True)
         return self._fs.open_output_stream(path)
 
+    def move(self, src, dest):
+        # En GCS `move` es copia más borrado: el destino hereda los metadatos.
+        self.metadata[Path(dest).name] = self.metadata.pop(Path(src).name)
+        self._fs.move(src, dest)
+
     def __getattr__(self, name):
         return getattr(self._fs, name)
 

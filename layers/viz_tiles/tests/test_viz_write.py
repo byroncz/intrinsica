@@ -15,7 +15,7 @@ from viz_tiles.contract import (
 )
 from viz_tiles.events import EventsBuffer, event_rows
 from viz_tiles.ticks import day_start_us, decode_ticks
-from viz_tiles.write import ThetaEvents, day_dir, read_index, write_day
+from viz_tiles.write import ThetaEvents, day_dir, read_index, stream_page, write_day
 
 DAY = date(2026, 8, 31)
 SCALE = price_scale("BTCUSDT")
@@ -196,6 +196,22 @@ def test_write_day_does_not_create_directories_outside_local_disk(
     # `ticks.bin`, `events.bin`, `index.json` e `index.html`; `latest.*` van en la raíz.
     assert len(list(directory.iterdir())) == 4
     assert (tmp_path / "latest.json").exists() and (tmp_path / "latest.html").exists()
+
+
+def test_a_page_that_fails_midway_leaves_the_previous_one_in_the_bucket(tmp_path):
+    """En un bucket, cerrar el flujo publica lo escrito: el fallo cae en el temporal."""
+    _, index = write(tmp_path)
+    page = Path(day_dir(tmp_path, **KEY, day=DAY)) / "index.html"
+    before = page.read_bytes()
+
+    def broken():
+        yield "events.bin", [b"\0" * (4 * EVENT_BYTES)]
+        raise OSError("se cortó la lectura de ticks.bin")
+
+    with pytest.raises(OSError, match="ticks.bin"):
+        stream_page(BucketFS(), str(page), index, broken(), None)
+    assert page.read_bytes() == before
+    assert not Path(f"{page}.tmp").exists()
 
 
 def test_index_is_replaced_not_appended_on_rewrite(tmp_path):

@@ -646,7 +646,8 @@ decodificado ocupa ≈ 16 B por tick.
 **Memoria del job (regla, sin excepción).** El job codifica un lote de L1 en el tramo en
 curso y, cuando el tramo se llena, lo escribe al objeto y lo suelta: en RAM nunca hay
 más de un tramo (≈ 330 KB) además del lote. La página se arma leyendo `ticks.bin` de
-vuelta por bloques de 1 MB y se transmite al objeto con gzip en streaming.
+vuelta por bloques de 1 MB y se transmite con gzip en streaming a un temporal que se renombra al
+terminar: si el render falla a medias, la página vigente queda intacta (ADR-VZ-10).
 
 `events.bin` se describe en Eventos exactos.
 
