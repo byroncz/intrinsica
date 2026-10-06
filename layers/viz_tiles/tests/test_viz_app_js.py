@@ -678,7 +678,7 @@ def test_missing_confirmation_tiles_are_said(day_dir):
 def test_legend_explains_lines_markers_and_the_confirmations_panel(day_dir):
     page = (day_dir / PAGE_FILE).read_text(encoding="utf-8")
     assert "línea clara: extremo, frontera entre eventos" in page
-    assert "marca gris con número: eventos que terminan en el mismo píxel" in page
+    assert "marca gris con número: eventos enteros dentro del mismo píxel" in page
     assert "panel central: barra, θ que confirman en la columna" in page
     assert "marca intensa, máximo de θ que confirman en el mismo instante" in page
     for label in ("Evento anterior", "Evento siguiente", "Ajustar a la ventana"):

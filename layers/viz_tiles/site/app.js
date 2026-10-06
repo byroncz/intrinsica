@@ -46,7 +46,8 @@
   var EVENT_BYTES = 13;
   // Franja del borde, en px CSS: fina en la confirmación, gruesa en el overshoot.
   var BAND_PX = { thin: 3, thick: 8 };
-  // Eventos cuyos extremos caen a menos de estos px CSS entre sí se cuentan juntos: marca de densidad.
+  // Eventos enteros (de la referencia al extremo) más angostos que estos px CSS que caben juntos en
+  // ese ancho se cuentan en una sola marca de densidad.
   var DENSE_PX = 3;
   // Margen a cada lado de "ajustar a la ventana", como fracción de la ventana.
   var FIT_MARGIN = 0.05;
@@ -440,7 +441,7 @@
   }
 
   // Las franjas de los eventos exactos del θ activo, en sus instantes reales a cualquier zoom, y
-  // la marca de densidad donde varios eventos terminan en un mismo píxel. Devuelve las marcas.
+  // la marca de densidad donde varios eventos enteros caben en un mismo píxel. Devuelve las marcas.
   function drawEvents(u, ctx, b, dpr) {
     var tr = activeBlock();
     var out = { events: 0, groups: 0, grouped: 0, max: 0 };
@@ -466,7 +467,8 @@
       if (!v.compact) {
         g = null; // un evento ancho se ve por sí solo y corta el grupo
       } else if (g && v.x1 - g.anchor < minW) {
-        // Eventos enteros dentro de un mismo píxel (extremos a menos de DENSE_PX del primero).
+        // Eventos enteros dentro de un mismo píxel (cada uno más angosto que DENSE_PX y el extremo a
+        // menos de DENSE_PX del extremo del primero): no cuenta el que solo termina aquí.
         g.n++;
         g.last = v.x1;
         v.g = groups.length - 1;
@@ -588,7 +590,7 @@
     metrics.price_draw = { mode: mode, segments: drawn.segments, points: drawn.points };
     if (mode === drawMode) return;
     drawMode = mode;
-    console.info("viz: precio en " + (mode === "points" ? "puntos M4 por columna" : "segmentos mín–máx por columna"));
+    console.info("viz: precio en " + (mode === "points" ? "segmentos mín–máx y puntos M4 por columna" : "segmentos mín–máx por columna"));
     renderFooter();
   }
 
