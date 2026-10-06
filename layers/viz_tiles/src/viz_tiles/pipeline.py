@@ -561,12 +561,20 @@ def _process(
             skipped.append(index)
         else:
             pending.append((day, digest))
-    if skipped:
+
+    def advance_skipped() -> None:
         # Un día al día no pasa por `write_day`: si un run anterior cayó antes de
-        # avanzar `latest.*`, nadie más lo haría (ITSC-318). Solo avanza, y solo si
-        # está atrasado.
-        advance_latest_from_files(ctx.tiles_root, max(skipped, key=lambda i: i["day"]))
+        # avanzar `latest.*`, nadie más lo haría (ITSC-318). Va después de escribir
+        # los días pendientes, para que un fallo de `latest` no los deje sin escribir;
+        # solo avanza, y solo si está atrasado: si un día pendiente posterior ya lo
+        # adelantó, no renderiza nada.
+        if skipped:
+            advance_latest_from_files(
+                ctx.tiles_root, max(skipped, key=lambda i: i["day"])
+            )
+
     if not pending:
+        advance_skipped()
         return
 
     def close(day: date, digest: str, result, started: float) -> None:
@@ -597,3 +605,4 @@ def _process(
     except BaseException:
         stream.abort()
         raise
+    advance_skipped()

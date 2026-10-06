@@ -212,3 +212,58 @@ def test_a_day_already_up_to_date_does_not_rewrite_a_current_latest(
 
     monkeypatch.setattr("viz_tiles.write.stream_latest_page", boom)
     assert run(roots, "--from", "2017-08") == 0
+
+
+def _count_latest_renders(monkeypatch) -> list:
+    import viz_tiles.write as write_module
+
+    renders = []
+    real = write_module.stream_latest_page
+
+    def counting(*args, **kwargs):
+        renders.append(args[3]["day"])
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(write_module, "stream_latest_page", counting)
+    return renders
+
+
+def _index_path(roots, day: str) -> Path:
+    directory = (
+        Path(roots.tiles) / "provider=binance/market=spot/asset=BTCUSDT" / f"day={day}"
+    )
+    return directory / "index.json"
+
+
+def test_a_skipped_day_before_a_pending_one_renders_latest_once(tmp_path, monkeypatch):
+    roots, _, _ = two_day_lake(tmp_path)
+    assert run(roots, "--from", "2017-08") == 0
+    latest = Path(roots.tiles) / "latest.json"
+    good = json.loads(latest.read_text())
+    latest.write_text(json.dumps({**good, "day": DAY, "tiles_version": "1.2.0"}))
+    _index_path(roots, NEXT_DAY).unlink()
+
+    renders = _count_latest_renders(monkeypatch)
+    assert run(roots, "--from", "2017-08") == 0
+
+    assert renders == [NEXT_DAY]
+    assert json.loads(latest.read_text()) == good
+
+
+def test_a_failing_latest_does_not_stop_the_pending_days(tmp_path, monkeypatch):
+    """El avance de `latest` por un día saltado va después de escribir los pendientes."""
+    roots, _, _ = two_day_lake(tmp_path)
+    assert run(roots, "--from", "2017-08") == 0
+    latest = Path(roots.tiles) / "latest.json"
+    good = json.loads(latest.read_text())
+    latest.write_text(json.dumps({**good, "tiles_version": "1.2.0"}))
+    _index_path(roots, DAY).unlink()
+
+    def boom(*args, **kwargs):
+        raise OSError("latest no se pudo escribir")
+
+    monkeypatch.setattr("viz_tiles.write.stream_latest_page", boom)
+    with pytest.raises(OSError, match="latest no se pudo escribir"):
+        run(roots, "--from", "2017-08")
+
+    assert _index_path(roots, DAY).exists()
