@@ -8,7 +8,7 @@ medias, el día queda sin índice y la siguiente corrida lo rehace. La página
 
 import hashlib
 import json
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Buffer, Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -117,7 +117,7 @@ def stream_page(
     fs: pafs.FileSystem,
     path: str,
     index: dict,
-    arrays: Iterator[tuple[str, Sequence[memoryview]]],
+    arrays: Iterator[tuple[str, Iterable[Buffer]]],
     template: Template | None,
 ) -> None:
     """Renderiza la página directo al objeto de salida, sin armarla en RAM.
@@ -138,6 +138,65 @@ def _exists(fs: pafs.FileSystem, path: str) -> bool:
     return fs.get_file_info(path).type == pafs.FileType.File
 
 
+# Bytes por lectura al volver a leer un archivo del día: ni el archivo ni su
+# base64 están enteros en RAM, solo un bloque a la vez.
+READ_BLOCK = 1 << 20
+
+
+def read_blocks(fs: pafs.FileSystem, path: str) -> Iterator[bytes]:
+    """Los bytes de un archivo, de a `READ_BLOCK`, soltando cada bloque al entregarlo."""
+    with fs.open_input_stream(path) as src:
+        while block := src.read(READ_BLOCK):
+            yield block
+
+
+class TicksFile:
+    """`ticks.bin` de un día, abierto para escribirlo tramo a tramo mientras se lee L1.
+
+    El objeto se abre con el primer tramo: un día sin ticks no deja nada. Al abrirlo
+    se borra el `index.json` previo del día (la marca de commit, TRD-viz §7.8): un
+    `ticks.bin` a medias nunca queda bajo un índice que lo declara completo. Antes
+    se comprueba que la raíz sea de la misma serie.
+    """
+
+    def __init__(
+        self, root: str | Path, provider: str, market: str, asset: str, day: date
+    ) -> None:
+        self._fs, self._base = resolve_fs(root)
+        self._series = {"provider": provider, "market": market, "asset": asset}
+        self.directory = day_dir(root, provider, market, asset, day)
+        self.path = f"{self.directory}/{TICKS_FILE}"
+        self._out = None
+
+    def _open(self) -> None:
+        fs = self._fs
+        _read_latest(fs, self._base, self._series)
+        if isinstance(fs, pafs.LocalFileSystem):
+            # En GCS no hay directorios (ver `write_day`).
+            fs.create_dir(self.directory)
+        index_path = f"{self.directory}/{INDEX_FILE}"
+        if _exists(fs, index_path):
+            fs.delete_file(index_path)
+        self._out = fs.open_output_stream(self.path, metadata=BINARY_META)
+
+    def write(self, data: bytes | memoryview | bytearray) -> int:
+        if self._out is None:
+            self._open()
+        self._out.write(data)
+        return len(data)
+
+    def close(self) -> None:
+        if self._out is not None:
+            self._out.close()
+            self._out = None
+
+    def discard(self) -> None:
+        """Cierra y borra lo escrito: un día que no se escribe no deja su `ticks.bin`."""
+        self.close()
+        if _exists(self._fs, self.path):
+            self._fs.delete_file(self.path)
+
+
 def write_day(
     root: str | Path,
     *,
@@ -156,11 +215,12 @@ def write_day(
 ) -> dict:
     """Escribe los archivos del día y devuelve el `index.json` que dejó.
 
-    Orden: se borra el índice previo, se escriben `events.bin` y `ticks.bin`, la
-    página `index.html` y al final el índice (marca de commit); después
-    `latest.html` y `latest.json`, que solo avanzan. El `input_hash` lo calcula
-    quien llama (TRD-viz §7.8); `content_hash` sale de los bytes de los dos
-    archivos y no depende de `generated_at`.
+    `ticks.bin` ya está escrito (`TicksFile`, tramo a tramo mientras se leía L1, y
+    con él se borró el índice previo). Orden: se escribe `events.bin`, la página
+    `index.html` y al final el índice (marca de commit); después `latest.html` y
+    `latest.json`, que solo avanzan. El `input_hash` lo calcula quien llama
+    (TRD-viz §7.8); `content_hash` sale de los bytes de los dos archivos y no
+    depende de `generated_at`.
     """
     fs, base = resolve_fs(root)
     # Antes de escribir nada: un día de otra serie no se deja a medias en la raíz.
@@ -194,17 +254,33 @@ def write_day(
         for theta, offset in zip(thetas, offsets[:-1], strict=True)
     ]
 
-    def parts() -> Iterator[tuple[str, Sequence[memoryview]]]:
-        """Los archivos en orden de nombre (el de `content_hash`), de uno en uno."""
-        yield EVENTS_FILE, [events.packed()]
-        yield TICKS_FILE, ticks.parts()
+    ticks_path = f"{directory}/{TICKS_FILE}"
+    if not _exists(fs, ticks_path):
+        raise ValueError(f"falta {TICKS_FILE}: se escribe mientras se leen los ticks")
 
+    def parts() -> Iterator[tuple[str, Iterable[Buffer]]]:
+        """Los archivos en orden de nombre (el de `content_hash`), de uno en uno.
+
+        `ticks.bin` ya está en el objeto (se escribió por tramos al leer L1): se vuelve
+        a leer por bloques, así que nunca está entero en RAM.
+        """
+        yield EVENTS_FILE, [events.packed()]
+        yield TICKS_FILE, read_blocks(fs, ticks_path)
+
+    _put(fs, f"{directory}/{EVENTS_FILE}", [events.packed()], BINARY_META)
     digest = hashlib.sha256()
+    sizes = {}
     for name, chunks in parts():
         digest.update(name.encode() + b"\0")
+        sizes[name] = 0
         for chunk in chunks:
             digest.update(chunk)
-        _put(fs, f"{directory}/{name}", chunks, BINARY_META)
+            sizes[name] += len(chunk)
+    if sizes[TICKS_FILE] != ticks.nbytes:
+        raise ValueError(
+            f"{TICKS_FILE} pesa {sizes[TICKS_FILE]} B y el acumulador escribió "
+            f"{ticks.nbytes} B"
+        )
 
     when = generated_at or datetime.now(UTC)
     values = {
@@ -216,6 +292,7 @@ def write_day(
         "t0": day_start_us(day),
         "price_scale": ticks.price_scale,
         "ticks": ticks.ticks,
+        "ticks_chunk": ticks.chunk,
         "first_agg_trade_id": ticks.first_agg_trade_id,
         "last_agg_trade_id": ticks.last_agg_trade_id,
         "ticks_file": TICKS_FILE,
@@ -230,8 +307,8 @@ def write_day(
     }
     index = {name: values[name] for name, _ in INDEX_FIELDS}
 
-    # La página lleva los mismos bytes: se codifican por tramos desde los buffers
-    # que ya están en RAM y salen directo al objeto, sin armar la página entera;
+    # La página lleva los mismos bytes: `ticks.bin` se vuelve a leer por bloques y
+    # cada archivo se codifica y sale directo al objeto, sin armar la página entera;
     # se escribe antes del índice (marca de commit).
     def write_page_to(path: str) -> None:
         stream_page(fs, path, index, parts(), template)

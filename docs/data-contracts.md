@@ -547,7 +547,7 @@ En GCS usa Application Default Credentials; no hay credenciales en código.
 ## Tiles de viz
 
 Contrato hacia el tablero: por día, `ticks.bin` con **todos** los ticks sin
-reducir (deltas en varint), `events.bin` con los eventos exactos de cada θ, un
+reducir (deltas en varint, por tramos de hasta 65 536 ticks), `events.bin` con los eventos exactos de cada θ, un
 índice JSON y la página que los lleva dentro. El navegador deriva de ahí el
 precio, el volumen y las confirmaciones de cada píxel al dibujar. Fuente de
 diseño: [TRD-viz §7](TRD/viz.md#7-contrato-de-datos). Fuente en código:
@@ -560,15 +560,15 @@ prueba (`layers/viz_tiles/tests/test_tiles_contract_doc.py`) rompe el CI si
 las tablas de esta sección se desvían de esas constantes.
 
 Los archivos de un día no son fuente de verdad: se regeneran desde L1 y L2. Todos
-los binarios son sin cabecera. `tiles_version` es `2.0.0`: la 1.x guardaba arreglos
-M4 por nivel de zoom (`price-<w>`, `volume-<w>`, `dir-<w>`, `count-<w>`,
+los binarios son planos: `events.bin` sin cabecera y `ticks.bin` con la cabecera de
+cada tramo. `tiles_version` es `2.0.0`: la 1.x guardaba arreglos M4 por nivel de zoom (`price-<w>`, `volume-<w>`, `dir-<w>`, `count-<w>`,
 `confirms-<w>`, `simul-<w>`) y esa noción de nivel desapareció (ADR-VZ-14).
 
 ### Disposición
 
 ```
 <raíz>/provider=<p>/market=<m>/asset=<a>/day=YYYY-MM-DD/
-├── ticks.bin               # todos los ticks del día: tres secciones de varint
+├── ticks.bin               # todos los ticks del día: tramos de tres secciones de varint
 ├── events.bin              # los eventos exactos de todos los θ del día
 ├── index.html              # la página del día: plantilla, uPlot, ticks.bin y events.bin
 └── index.json              # se escribe al final: marca de commit
@@ -576,9 +576,12 @@ M4 por nivel de zoom (`price-<w>`, `volume-<w>`, `dir-<w>`, `count-<w>`,
 <raíz>/latest.html          # copia de la página de ese día
 ```
 
-Un día son 4 objetos, con cualquier número de θ. El día es UTC. `write_day`
-borra el `index.json` previo, escribe `events.bin`, `ticks.bin` y la página, y
-deja el índice al final: un día sin `index.json` no existe para el lector.
+Un día son 4 objetos, con cualquier número de θ. El día es UTC. El job escribe
+`ticks.bin` **tramo a tramo mientras lee L1** (borra antes el `index.json` previo y
+suelta cada tramo en cuanto lo escribe), y `write_day` escribe `events.bin` y la
+página (que vuelve a leer `ticks.bin` por bloques) y deja el índice al final: un día
+sin `index.json` no existe para el lector. Ningún paso de escritura retiene un
+archivo del día entero en RAM.
 `latest.json` y `latest.html` solo avanzan; un día anterior regenerado no los
 retrocede.
 
@@ -601,25 +604,49 @@ se armó: el modo `render` lo lee para saltar lo que ya está al día.
 ### Archivos
 
 `ticks.bin` guarda todos los ticks del día, en el orden del consolidado de L1
-(`transact_time` y, dentro de un mismo instante, `agg_trade_id`), en **tres
-secciones consecutivas** de `ticks` enteros varint cada una (`ticks` es el campo
-del índice). Un varint es un entero sin signo en LEB128: siete bits por byte,
-del menos al más significativo, y el bit alto de cada byte marca que sigue otro
-(de 1 a 10 bytes). Sin cabecera ni separadores: el lector decodifica `ticks`
-varint de la primera sección, `ticks` de la segunda y `ticks` de la tercera, y los
-tres tramos deben ocupar el archivo entero.
+(`transact_time` y, dentro de un mismo instante, `agg_trade_id`), como una
+secuencia de **tramos**: cada uno trae hasta `ticks_chunk` ticks (65 536; campo del
+índice) y todos salen llenos salvo el último, así que los bytes no dependen de cómo
+se partan los lotes al leer L1. El archivo es la concatenación de los tramos, sin
+separadores, y ocupa el archivo entero.
+
+Cada tramo es una **cabecera** de cuatro `uint32` little-endian (16 bytes) seguida de
+**tres secciones consecutivas** de enteros varint, una por columna:
+
+| Cabecera | Contenido |
+|---|---|
+| Bytes 0–3 | Ticks del tramo (de 1 a `ticks_chunk`): los valores de cada sección |
+| Bytes 4–7 | Bytes de la sección Δtiempo |
+| Bytes 8–11 | Bytes de la sección Δprecio |
+| Bytes 12–15 | Bytes de la sección cantidad |
+
+Un varint es un entero sin signo en LEB128: siete bits por byte, del menos al más
+significativo, y el bit alto de cada byte marca que sigue otro (de 1 a 10 bytes). El
+lector decodifica, en cada tramo, los valores de la primera sección, los de la segunda
+y los de la tercera, y cada sección debe ocupar exactamente los bytes que declara la
+cabecera. **El Δtiempo y el Δprecio del primer tick de un tramo son relativos al
+último tick del tramo anterior** (en el primer tramo del día, al inicio del día y a
+0): el lector arrastra los dos acumuladores de un tramo al siguiente. La suma de los
+ticks de los tramos es `ticks`.
 
 | Sección | Nombre | Contenido |
 |---|---|---|
-| 1 | `dt_ms` | Δtiempo: milisegundos (`⌊µs / 1000⌋`) desde el tick anterior. El primero se mide desde `t0`. Sin signo: los ticks no retroceden. Ticks del mismo milisegundo llevan 0 |
-| 2 | `dprice_zigzag` | Δprecio en unidades de `1 / price_scale`, desde el tick anterior (el primero, desde 0), en zigzag: `(d << 1) ^ (d >> 63)`, que lleva 0, −1, 1, −2… a 0, 1, 2, 3… |
+| 1 | `dt_ms` | Δtiempo: milisegundos (`⌊µs / 1000⌋`) desde el tick anterior. El primero del día se mide desde `t0`. Sin signo: los ticks no retroceden. Ticks del mismo milisegundo llevan 0 |
+| 2 | `dprice_zigzag` | Δprecio en unidades de `1 / price_scale`, desde el tick anterior (el primero del día, desde 0), en zigzag: `(d << 1) ^ (d >> 63)`, que lleva 0, −1, 1, −2… a 0, 1, 2, 3… |
 | 3 | `quantity_1e8` | Cantidad del tick en unidades de 10⁻⁸ (el entero exacto del `DECIMAL(18, 8)` de L1), sin signo. Puede pasar de 2³²: se lee con aritmética de coma flotante, no con operadores de bits de 32 bits |
 
-El tiempo absoluto de un tick es `t0 + Σ dt_ms` y su precio, `Σ dprice / price_scale`.
-Con los 948 740 ticks del 2026-09-30, `ticks.bin` pesa 4,85 MB (≈ 5,1 B por tick).
-Un lector entero decodifica el día a tres arreglos: tiempo y precio en `Int32Array` (el
-tiempo no pasa de 86 400 000 y el precio cabe en `int32` por la guarda de abajo) y cantidad en
-`Float64Array`; el día decodificado ocupa ≈ 16 B por tick.
+El tiempo absoluto de un tick es `t0 + Σ dt_ms` y su precio, `Σ dprice / price_scale`
+(las sumas corren sobre todos los ticks anteriores del día, de un tramo a otro).
+Con los 948 740 ticks del 2026-09-30, `ticks.bin` pesa 4,85 MB (≈ 5,1 B por tick; las
+cabeceras de 15 tramos suman 240 B). Un lector entero decodifica el día a tres
+arreglos: tiempo y precio en `Int32Array` (el tiempo no pasa de 86 400 000 y el precio
+cabe en `int32` por la guarda de abajo) y cantidad en `Float64Array`; el día
+decodificado ocupa ≈ 16 B por tick.
+
+**Memoria del job (regla, sin excepción).** El job codifica un lote de L1 en el tramo en
+curso y, cuando el tramo se llena, lo escribe al objeto y lo suelta: en RAM nunca hay
+más de un tramo (≈ 330 KB) además del lote. La página se arma leyendo `ticks.bin` de
+vuelta por bloques de 1 MB y se transmite al objeto con gzip en streaming.
 
 `events.bin` se describe en Eventos exactos.
 
@@ -699,7 +726,8 @@ prueba del contrato compara esta tabla con `INDEX_FIELDS`.
 | `day` | string | Día UTC, `YYYY-MM-DD` |
 | `t0` | integer | Inicio del día UTC en µs desde la época: el origen del tiempo relativo de `ticks.bin` y `events.bin` |
 | `price_scale` | integer | Unidades de precio de `ticks.bin` por unidad de la cotización (ver Escala de precio); el precio es `p / price_scale` |
-| `ticks` | integer | Ticks del día: los valores de cada sección de `ticks.bin` |
+| `ticks` | integer | Ticks del día: la suma de los ticks de todos los tramos de `ticks.bin` |
+| `ticks_chunk` | integer | Tamaño máximo de un tramo de `ticks.bin`, en ticks (65 536): ningún tramo declara más |
 | `first_agg_trade_id` | integer | `agg_trade_id` del primer tick del día |
 | `last_agg_trade_id` | integer | `agg_trade_id` del último tick del día |
 | `ticks_file` | string | Nombre del archivo de ticks, `ticks.bin` |

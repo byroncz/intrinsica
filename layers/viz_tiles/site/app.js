@@ -1,6 +1,6 @@
 /* Vista de un día (TRD-viz §6.6, §6.7, §6.11 a §6.14, §7). Sin red: los dos archivos del día llegan en
- * window.VIZ_DATA, en base64 bajo su nombre. `ticks.bin` (§7.3) son todos los ticks del día en tres
- * secciones de varint; `events.bin` (§7.4), los eventos exactos de cada θ. El navegador los decodifica
+ * window.VIZ_DATA, en base64 bajo su nombre. `ticks.bin` (§7.3) son todos los ticks del día en tramos
+ * de tres secciones de varint; `events.bin` (§7.4), los eventos exactos de cada θ. El navegador los decodifica
  * una sola vez a arreglos tipados y, en cada dibujo, deriva de ellos lo que se ve: por cada píxel de
  * ancho de la escala actual, el precio (un punto por tick, o el segmento del mínimo al máximo), el volumen
  * (suma de la cantidad) y las confirmaciones (θ que confirman, y máximo en el mismo instante). Lo que se
@@ -129,19 +129,26 @@
     return null;
   }
 
-  // Los ticks (§7.3): tres secciones de `n` enteros varint (LEB128). Tiempo en ms desde el inicio del
+  // Los ticks (§7.3): una secuencia de tramos de hasta `ticks_chunk` ticks. Cada tramo trae una cabecera
+  // de cuatro uint32 little-endian (ticks y bytes del Δtiempo, del Δprecio y de la cantidad) y sus tres
+  // secciones de enteros varint (LEB128). El Δtiempo y el Δprecio del primer tick de un tramo son relativos
+  // al último del anterior: los acumuladores siguen de un tramo al otro. Tiempo en ms desde el inicio del
   // día (Int32Array), precio en unidades de 1 / price_scale (Int32Array) y cantidad (Float64Array).
   var ticks = null; // { n, t, p, q }
+  var CHUNK_HEADER = 16;
 
   function decodeTicks(name, n) {
     var bytes = bytesOf(name);
     if (!bytes) return null;
     var len = bytes.length;
+    var view = new DataView(bytes.buffer, bytes.byteOffset, len);
+    var maxChunk = index.ticks_chunk;
     var pos = 0;
+    var end = 0; // fin de la sección en curso
     var overrun = false;
     // Aritmética de coma flotante y no operadores de bits: la cantidad pasa de 2³² (1 000 BTC).
     function varint() {
-      if (pos >= len) {
+      if (pos >= end) {
         overrun = true;
         return 0;
       }
@@ -150,7 +157,7 @@
       var r = b & 127;
       var m = 128;
       do {
-        if (pos >= len) {
+        if (pos >= end) {
           overrun = true;
           return 0;
         }
@@ -163,20 +170,37 @@
     var t = new Int32Array(n);
     var p = new Int32Array(n);
     var q = new Float64Array(n);
+    var at = 0; // ticks ya decodificados
+    var accT = 0;
+    var accP = 0;
     var i;
-    var acc = 0;
-    for (i = 0; i < n; i++) {
-      acc += varint();
-      t[i] = acc;
+    while (pos < len) {
+      if (len - pos < CHUNK_HEADER) return bad(name, "tamaño inesperado (cabecera de tramo truncada)");
+      var count = view.getUint32(pos, true);
+      var size = [view.getUint32(pos + 4, true), view.getUint32(pos + 8, true), view.getUint32(pos + 12, true)];
+      pos += CHUNK_HEADER;
+      if (count === 0 || count > maxChunk || at + count > n) return bad(name, "tamaño inesperado (tramo fuera de lo declarado)");
+      if (size[0] + size[1] + size[2] > len - pos) return bad(name, "tamaño inesperado (tramo truncado)");
+      var stop = at + count;
+      end = pos + size[0];
+      for (i = at; i < stop; i++) {
+        accT += varint();
+        t[i] = accT;
+      }
+      if (overrun || pos !== end) return bad(name, "tamaño inesperado (sección de tramo)");
+      end = pos + size[1];
+      for (i = at; i < stop; i++) {
+        var z = varint();
+        accP += z % 2 === 0 ? z / 2 : -(z + 1) / 2; // zigzag
+        p[i] = accP;
+      }
+      if (overrun || pos !== end) return bad(name, "tamaño inesperado (sección de tramo)");
+      end = pos + size[2];
+      for (i = at; i < stop; i++) q[i] = varint() / QTY_SCALE;
+      if (overrun || pos !== end) return bad(name, "tamaño inesperado (sección de tramo)");
+      at = stop;
     }
-    acc = 0;
-    for (i = 0; i < n; i++) {
-      var z = varint();
-      acc += z % 2 === 0 ? z / 2 : -(z + 1) / 2; // zigzag
-      p[i] = acc;
-    }
-    for (i = 0; i < n; i++) q[i] = varint() / QTY_SCALE;
-    if (overrun || pos !== len) return bad(name, "tamaño inesperado");
+    if (at !== n) return bad(name, "tamaño inesperado");
     return { n: n, t: t, p: p, q: q };
   }
 

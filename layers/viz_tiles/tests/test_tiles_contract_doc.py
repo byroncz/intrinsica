@@ -10,6 +10,8 @@ from viz_tiles.contract import (
     LATEST_FIELDS,
     PRICE_SCALE_BY_ASSET,
     TICK_SECTIONS,
+    TICKS_CHUNK,
+    TICKS_CHUNK_HEADER,
     TICKS_FILE,
     TILES_VERSION,
 )
@@ -41,6 +43,17 @@ def test_ticks_file_doc_describes_the_encoding():
     assert len(TICK_SECTIONS) == 3 and "tres secciones" in text
 
 
+def test_ticks_chunks_doc_matches_code():
+    """Los tramos de `ticks.bin`: tamaño, cabecera y arrastre del primer delta."""
+    text = " ".join(_section().split("### Archivos")[1].split("\n### ")[0].split())
+    assert TICKS_CHUNK == 65_536 and "65 536" in text
+    assert TICKS_CHUNK_HEADER == "<4I" and "cuatro `uint32` little-endian" in text
+    assert "relativos al último tick del tramo anterior" in text
+    trd = " ".join(TRD.read_text().split("### 7.3 ")[1].split("\n### ")[0].split())
+    assert "65 536" in trd and "cuatro `uint32` little-endian" in trd
+    assert "relativos al último tick del tramo anterior" in trd
+
+
 def test_tiles_version_is_the_one_of_the_doc():
     assert TILES_VERSION == "2.0.0"
     assert f"`tiles_version` es `{TILES_VERSION}`" in _section()
@@ -70,6 +83,7 @@ def test_index_fields_trd_matches_code():
     ]
     assert index["tiles_version"] == TILES_VERSION
     assert index["ticks_file"] == TICKS_FILE and index["events"] == EVENTS_FILE
+    assert index["ticks_chunk"] == TICKS_CHUNK
 
 
 def test_latest_fields_are_listed_in_the_doc():

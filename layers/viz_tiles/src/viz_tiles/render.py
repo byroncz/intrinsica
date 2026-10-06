@@ -7,8 +7,8 @@ la red: Google sirve cada archivo privado de un bucket desde un dominio bloquead
 de un solo uso, así que una página que descarga sus datos con `fetch` no funciona
 (RVZ-06).
 
-Memoria: los archivos entran de uno en uno y por tramos de unos cientos de KB, se
-codifican y se sueltan; nunca vive más de un tramo y su base64, y la salida es un
+Memoria: los archivos entran de uno en uno y por bloques de unos cientos de KB, se
+codifican y se sueltan; nunca vive más de un bloque y su base64, y la salida es un
 solo documento.
 """
 
@@ -20,7 +20,7 @@ import json
 import os
 import re
 import zlib
-from collections.abc import Buffer, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Buffer, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO
@@ -109,13 +109,13 @@ def expected_names(index: Mapping) -> list[str]:
     return sorted([index["events"], index["ticks_file"]])
 
 
-# Bytes por tramo al codificar en base64: múltiplo de 3, así los tramos no dejan
+# Bytes por bloque al codificar en base64: múltiplo de 3, así los bloques no dejan
 # relleno (`=`) en medio del texto.
 B64_STEP = 3 << 18
 
 
-def _base64(parts: Sequence[Buffer]) -> Iterator[str]:
-    """El base64 de los tramos de un archivo, sin juntarlos en un solo buffer."""
+def _base64(parts: Iterable[Buffer]) -> Iterator[str]:
+    """El base64 de los bloques de un archivo, sin juntarlos en un solo buffer."""
     carry = b""
     for part in parts:
         view = memoryview(part)
@@ -130,7 +130,7 @@ def _base64(parts: Sequence[Buffer]) -> Iterator[str]:
 
 def page_chunks(
     index: Mapping,
-    arrays: Iterable[tuple[str, Sequence[Buffer]]],
+    arrays: Iterable[tuple[str, Iterable[Buffer]]],
     template: Template,
 ) -> Iterator[str]:
     """El documento en pedazos: cada archivo se codifica cuando llega y se suelta."""
@@ -160,15 +160,15 @@ def page_chunks(
 
 def render_day(
     index: Mapping,
-    arrays: Iterable[tuple[str, Sequence[Buffer]]],
+    arrays: Iterable[tuple[str, Iterable[Buffer]]],
     *,
     template: Template | None = None,
     compress: bool = False,
 ) -> bytes:
     """El `index.html` de un día: la plantilla con `index` y sus dos archivos dentro.
 
-    `arrays` entrega `(nombre, tramos)` en orden de nombre (el de `content_hash`);
-    los tramos de un archivo, puestos uno tras otro, son sus bytes.
+    `arrays` entrega `(nombre, bloques)` en orden de nombre (el de `content_hash`);
+    los bloques de un archivo, puestos uno tras otro, son sus bytes.
     Con `compress` el resultado es un gzip determinista (sin marca de tiempo): es
     lo que se guarda en un bucket con `Content-Encoding: gzip`; en disco local el
     archivo va sin comprimir para que abra por `file://`.
@@ -181,15 +181,15 @@ def render_day(
 def render_day_to(
     out: BinaryIO,
     index: Mapping,
-    arrays: Iterable[tuple[str, Sequence[Buffer]]],
+    arrays: Iterable[tuple[str, Iterable[Buffer]]],
     *,
     template: Template | None = None,
     compress: bool = False,
 ) -> None:
-    """Igual que `render_day`, pero escribe la página en `out` tramo a tramo.
+    """Igual que `render_day`, pero escribe la página en `out` bloque a bloque.
 
     La página entera nunca está en RAM: a `out` (un flujo de salida del bucket o del
-    disco) llega cada tramo ya codificado y, con `compress`, ya comprimido.
+    disco) llega cada bloque ya codificado y, con `compress`, ya comprimido.
     """
     template = template or load_template()
     chunks = (chunk.encode() for chunk in page_chunks(index, arrays, template))

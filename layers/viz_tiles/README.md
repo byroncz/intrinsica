@@ -1,7 +1,7 @@
 # viz_tiles
 
 Capa viz: codifica un día de ticks de L1 y de eventos de L2 en dos archivos,
-`ticks.bin` (todos los ticks, sin reducir) y `events.bin` (los eventos exactos de
+`ticks.bin` (todos los ticks, sin reducir, por tramos) y `events.bin` (los eventos exactos de
 cada θ), y los lleva dentro de una página que dibuja lo que mide L1: un tick o la
 envolvente exacta de los ticks de un píxel. Diseño en
 [`docs/TRD/viz.md`](../../docs/TRD/viz.md); el contrato de los archivos, en
@@ -225,14 +225,13 @@ mes en menos de 10 minutos).
 Una sola pasada por el `consolidated.parquet` del mes, row group a row group,
 saltando por las estadísticas de `transact_time` los que no tocan los días por
 construir. Un día cierra cuando los ticks pasan al siguiente. Cada lote se codifica
-en varint y se suelta; de un día solo viven los bytes codificados (≈ 5 B por tick,
-el propio `ticks.bin`) y se escriben por tramos, sin juntar sus tres secciones.
-Los `events.parquet` se leen una vez por mes y quedan como arreglos de NumPy (41 B
-por evento). En RAM: un row group, los bytes del día en curso y los eventos del mes.
-La página sale directo al objeto (`render_day_to`, gzip en streaming): nunca está entera
-en RAM. Lo que sigue siendo O(día) son las tres secciones de `ticks.bin` (≈ 5 MB con un
-millón de ticks), una excepción a «O(lote)» que **espera la aceptación explícita del
-humano** (TRD-viz §8.1, ITSC-317).
+en varint dentro del tramo en curso de `ticks.bin` (hasta 65 536 ticks, ≈ 330 KB);
+cuando el tramo se llena se escribe al objeto y se suelta, así que los bytes del día
+nunca viven en RAM. Los `events.parquet` se leen una vez por mes y quedan como arreglos
+de NumPy (41 B por evento). En RAM: un row group, un tramo de ticks y los eventos del
+mes. La página sale directo al objeto (`render_day_to`, gzip en streaming) y lee
+`ticks.bin` de vuelta por bloques de 1 MB: ni la página ni un archivo del día están
+enteros en RAM. Regla sin excepción (TRD-viz §7.3 y §8.1, ITSC-317).
 
 ## Imagen
 
@@ -279,11 +278,11 @@ write_day(
   sondas.
 - `read_month_events` lee un `events.parquet` entero, una vez por mes;
   `MonthEvents.touching` saca los eventos de cada día por `agg_trade_id`.
-- `write_day` escribe `events.bin`, `ticks.bin`, la página y, al final,
+- El job escribe `ticks.bin` tramo a tramo mientras lee L1 (`TicksFile`); `write_day` escribe `events.bin`, la página y, al final,
   `index.json` (marca de commit); `latest.json` y `latest.html` solo avanzan.
 - `render_day(index, arrays)` arma el `index.html` de un día: `arrays` entrega
-  `(nombre, tramos)` en orden de nombre y cada uno se codifica por tramos y se suelta.
-  `render_day_to(out, index, arrays)` hace lo mismo pero escribe en `out` tramo a tramo,
+  `(nombre, bloques)` en orden de nombre y cada uno se codifica por bloques y se suelta.
+  `render_day_to(out, index, arrays)` hace lo mismo pero escribe en `out` bloque a bloque,
   sin devolver la página: es lo que usa `write_day`.
 
 ## Pruebas

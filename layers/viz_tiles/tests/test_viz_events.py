@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 from lake_fixture import DAY, build_lake, read_events
 from test_viz_cli import day_directory, run
-from viz_helpers import month_events, ticks_batch
+from viz_helpers import encode_to, month_events, ticks_batch
 from viz_tiles.chain import PendingEvent
 from viz_tiles.contract import (
     DAY_MS,
@@ -24,10 +24,11 @@ from viz_tiles.contract import (
     FLAG_PROVISIONAL,
     FLAG_REF_CLIPPED,
     FLAG_UP,
+    TICKS_CHUNK,
     price_scale,
 )
 from viz_tiles.events import EventRows, EventsBuffer, event_rows
-from viz_tiles.ticks import day_start_us, decode_ticks, encode_day
+from viz_tiles.ticks import day_start_us, decode_ticks
 from viz_tiles.write import ThetaEvents, write_day
 
 SCALE = price_scale("BTCUSDT")
@@ -235,7 +236,9 @@ def test_events_buffer_grows_and_packs_in_place():
 
 
 def test_write_day_rejects_rows_that_disagree_with_the_event_count(tmp_path):
-    ticks = encode_day([ticks_batch(DAY_DATE, [(1, 1, 100, 1)])], DAY_DATE, SCALE)
+    ticks = encode_to(
+        tmp_path, DAY_DATE, [ticks_batch(DAY_DATE, [(1, 1, 100, 1)])], SCALE
+    )
     bad = ThetaEvents("0.00010000", 3, None)
     with pytest.raises(ValueError, match="filas"):
         write_day(
@@ -276,14 +279,16 @@ def flash_ticks() -> list[tuple]:
     return [(i, t, p, q) for i, (_, t, p, q) in enumerate(rows)]
 
 
-def write_flash_day(root: Path, day: date = date(2026, 9, 30)) -> Path:
+def write_flash_day(
+    root: Path, day: date = date(2026, 9, 30), chunk: int = TICKS_CHUNK
+) -> Path:
     """Un día con el flash crash de 2026-09-30: cuatro eventos DC en menos de un segundo.
 
     Un evento largo que termina en el pico, cuatro eventos entre `FLASH` y `FLASH + 0,982`,
     otro largo que arranca donde termina el cuarto y, en `BURST` (en medio del tercer evento), 4 090 ticks en un
     milisegundo. Un segundo θ confirma en el mismo instante que el segundo evento del primero.
     """
-    ticks = encode_day([ticks_batch(day, flash_ticks())], day, SCALE)
+    ticks = encode_to(root, day, [ticks_batch(day, flash_ticks())], SCALE, chunk)
     first = month_events(
         day,
         (1, 2, 3, -1, 44_000.0, 44_500.0, FLASH),

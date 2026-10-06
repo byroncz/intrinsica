@@ -1,4 +1,7 @@
+import functools
+import hashlib
 import json
+import struct
 from datetime import date
 from pathlib import Path
 
@@ -15,9 +18,12 @@ from lake_fixture import (
     write_carry_over,
     write_consolidated,
 )
-from viz_tiles import cli
-from viz_tiles.contract import DAY_US
-from viz_tiles.write import find_index
+from viz_helpers import ticks_batch
+from viz_tiles import cli, pipeline
+from viz_tiles.contract import DAY_US, INT32_MAX, TICKS_CHUNK_HEADER, price_scale
+from viz_tiles.pipeline import _DayStream
+from viz_tiles.ticks import PriceUnrepresentable, TicksAccumulator, decode_ticks
+from viz_tiles.write import TicksFile, find_index
 
 KEY = {"provider": "binance", "market": "spot", "asset": "BTCUSDT"}
 NEXT_DAY = "2017-08-19"
@@ -129,3 +135,45 @@ def test_a_gap_day_inside_the_month_is_a_missing_input(tmp_path, flag):
     assert find_index(roots.tiles, **KEY, day=date(2017, 8, 18)) is not None
     assert find_index(roots.tiles, **KEY, day=date(2017, 8, 19)) is None
     assert find_index(roots.tiles, **KEY, day=date(2017, 8, 20)) is not None
+
+
+def test_a_day_of_several_chunks_is_written_as_the_job_reads_it(tmp_path, monkeypatch):
+    """El job escribe `ticks.bin` tramo a tramo: el índice declara el tramo y la página lo lleva entero."""
+    monkeypatch.setattr(
+        pipeline, "TicksAccumulator", functools.partial(TicksAccumulator, chunk=1_000)
+    )
+    roots, ticks, _ = build_lake(tmp_path)
+    assert run(roots, "--day", "2017-08-18") == 0
+    directory = (
+        Path(roots.tiles) / f"provider=binance/market=spot/asset=BTCUSDT/day={DAY}"
+    )
+    index = json.loads((directory / "index.json").read_text())
+    assert index["ticks_chunk"] == 1_000 and index["ticks"] == len(ticks) == 4735
+    raw = (directory / "ticks.bin").read_bytes()
+    got = decode_ticks(raw, index["ticks"], chunk=index["ticks_chunk"])
+    assert len(got.time_ms) == 4735
+    first = struct.unpack_from(TICKS_CHUNK_HEADER, raw)
+    assert first[0] == 1_000
+    # El hash del índice cubre `ticks.bin` tal como quedó, y la página lo trae.
+    digest = hashlib.sha256()
+    for name in ("events.bin", "ticks.bin"):
+        digest.update(name.encode() + b"\0" + (directory / name).read_bytes())
+    assert digest.hexdigest() == index["content_hash"]
+    assert (directory / "index.html").stat().st_size > 0
+
+
+def test_a_day_with_an_unrepresentable_price_leaves_no_ticks_file(tmp_path):
+    day = date(2026, 8, 31)
+    scale = price_scale("BTCUSDT")
+    closed = []
+    stream = _DayStream(
+        [(day, "x")],
+        scale,
+        lambda *args: closed.append(args),
+        lambda d: TicksFile(tmp_path, "binance", "spot", "BTCUSDT", d),
+    )
+    stream.feed(ticks_batch(day, [(1, 1, INT32_MAX // scale + 1, 1)]))
+    stream.drain()
+    assert isinstance(closed[0][2], PriceUnrepresentable)
+    directory = tmp_path / f"provider=binance/market=spot/asset=BTCUSDT/day={day}"
+    assert not (directory / "ticks.bin").exists()

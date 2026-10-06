@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 import pyarrow.fs as pafs
 import pytest
-from viz_helpers import DOWN_T, UP_T, month_events, ticks_batch
+from viz_helpers import DOWN_T, UP_T, encode_to, month_events, ticks_batch
 from viz_tiles.contract import (
     EVENT_BYTES,
     INDEX_FIELDS,
@@ -14,7 +14,7 @@ from viz_tiles.contract import (
     price_scale,
 )
 from viz_tiles.events import EventsBuffer, event_rows
-from viz_tiles.ticks import day_start_us, decode_ticks, encode_day
+from viz_tiles.ticks import day_start_us, decode_ticks
 from viz_tiles.write import ThetaEvents, day_dir, read_index, write_day
 
 DAY = date(2026, 8, 31)
@@ -33,7 +33,7 @@ def theta(name: str, buffer: EventsBuffer, pending=None) -> ThetaEvents:
 
 
 def write(root, day=DAY, rows=ROWS, **kwargs):
-    ticks = encode_day([ticks_batch(day, rows)], day, SCALE)
+    ticks = encode_to(root, day, [ticks_batch(day, rows)], SCALE)
     buffer = EventsBuffer()
     thetas = [theta("0.00010000", buffer), theta("0.05000000", buffer)]
     args = {
@@ -58,7 +58,7 @@ def test_round_trip_returns_the_ticks_and_the_events_of_the_day(tmp_path):
     )
     assert read_index(tmp_path, **KEY, day=DAY) == index
     raw = Path(f"{directory}/{index['ticks_file']}").read_bytes()
-    assert raw == ticks.to_bytes()
+    assert len(raw) == ticks.nbytes
     got = decode_ticks(raw, index["ticks"])
     assert got.time_ms.tolist() == [1000, 30_000, 70_000, 80_000]
     assert got.price.tolist() == [10_000, 10_200, 10_300, 10_400]
@@ -105,7 +105,7 @@ def test_a_day_has_four_objects_whatever_the_number_of_thetas(tmp_path):
 
 
 def test_a_day_without_thetas_writes_empty_events(tmp_path):
-    ticks = encode_day([ticks_batch(DAY, ROWS)], DAY, SCALE)
+    ticks = encode_to(tmp_path, DAY, [ticks_batch(DAY, ROWS)], SCALE)
     index = write_day(
         tmp_path,
         **KEY,
@@ -149,7 +149,7 @@ def test_latest_of_another_series_is_not_overwritten(tmp_path):
     """La raíz es mono-activo: otra serie falla sin escribir nada ni mover `latest.json`."""
     write(tmp_path)
     before = (tmp_path / "latest.json").read_text()
-    ticks = encode_day([ticks_batch(DAY, ROWS)], DAY, SCALE)
+    ticks = encode_to(tmp_path, DAY, [ticks_batch(DAY, ROWS)], SCALE)
     with pytest.raises(ValueError, match="mono-activo"):
         write_day(
             tmp_path,
@@ -225,7 +225,7 @@ def test_index_is_written_last(tmp_path, monkeypatch):
 
 
 def test_write_day_rejects_rows_that_disagree_with_the_event_count(tmp_path):
-    ticks = encode_day([ticks_batch(DAY, ROWS)], DAY, SCALE)
+    ticks = encode_to(tmp_path, DAY, [ticks_batch(DAY, ROWS)], SCALE)
     bad = ThetaEvents("0.00010000", 3, None)
     with pytest.raises(ValueError, match="filas"):
         write_day(
@@ -239,20 +239,44 @@ def test_write_day_rejects_rows_that_disagree_with_the_event_count(tmp_path):
         )
 
 
-def test_ticks_are_written_section_by_section_without_joining_them(
-    tmp_path, monkeypatch
-):
-    """`ticks.bin` sale de sus tres secciones tal cual: no se arma un buffer con el día."""
+def test_ticks_are_read_back_by_blocks_for_the_hash_and_the_page(tmp_path, monkeypatch):
+    """`ticks.bin` ya está en el objeto: la página lo lee por bloques, nunca entero."""
     import viz_tiles.write as module
 
     seen = {}
-    real = module._put
+    real = module.render_day_to
 
-    def spying(fs, path, data, metadata=None):
-        seen[Path(path).name] = data
-        real(fs, path, data, metadata)
+    def spying(out, index, arrays, **kwargs):
+        listed = [(name, [bytes(p) for p in parts]) for name, parts in arrays]
+        seen.update(dict(listed))
+        real(out, index, listed, **kwargs)
 
-    monkeypatch.setattr(module, "_put", spying)
+    monkeypatch.setattr(module, "READ_BLOCK", 16)
+    monkeypatch.setattr(module, "render_day_to", spying)
     ticks, _ = write(tmp_path)
-    assert len(seen["ticks.bin"]) == 3
-    assert [bytes(p) for p in seen["ticks.bin"]] == [bytes(s) for s in ticks.sections]
+    blocks = seen["ticks.bin"]
+    assert len(blocks) > 1 and all(len(b) <= 16 for b in blocks)
+    assert sum(map(len, blocks)) == ticks.nbytes
+
+
+def test_write_day_needs_the_ticks_file_already_written(tmp_path):
+    ticks = encode_to(tmp_path, DAY, [ticks_batch(DAY, ROWS)], SCALE)
+    other = date(2026, 9, 1)
+    with pytest.raises(ValueError, match="ticks.bin"):
+        write_day(
+            tmp_path,
+            **KEY,
+            day=other,
+            ticks=ticks,
+            thetas=[],
+            input_hash="x",
+            image_version="v",
+        )
+
+
+def test_opening_ticks_file_drops_the_previous_index(tmp_path):
+    """`index.json` es la marca de commit: se borra antes del primer tramo de `ticks.bin`."""
+    write(tmp_path)
+    assert (Path(day_dir(tmp_path, **KEY, day=DAY)) / "index.json").exists()
+    encode_to(tmp_path, DAY, [ticks_batch(DAY, ROWS)], SCALE)
+    assert not (Path(day_dir(tmp_path, **KEY, day=DAY)) / "index.json").exists()

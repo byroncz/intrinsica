@@ -26,15 +26,22 @@ PRICE_SCALE_BY_ASSET = {"BTCUSDT": 100}
 
 INT32_MAX = 2**31 - 1
 
-# `ticks.bin`: tres secciones de enteros varint (LEB128, 7 bits por byte, el bit
-# alto marca que sigue otro byte), cada una con `ticks` valores y en este orden:
-#   1. Δtiempo en ms desde el tick anterior (el primero, desde el inicio del día).
-#   2. Δprecio en unidades de 1/price_scale, en zigzag (el primero, desde 0).
+# `ticks.bin`: una secuencia de tramos de hasta `TICKS_CHUNK` ticks. Cada tramo
+# lleva una cabecera de `TICKS_CHUNK_HEADER` (uint32 little-endian: los ticks del
+# tramo y los bytes de cada una de sus tres secciones) y esas tres secciones de
+# enteros varint (LEB128, 7 bits por byte, el bit alto marca que sigue otro byte),
+# cada una con los valores del tramo y en este orden:
+#   1. Δtiempo en ms desde el tick anterior (el primero del día, desde su inicio).
+#   2. Δprecio en unidades de 1/price_scale, en zigzag (el primero del día, desde 0).
 #   3. cantidad en unidades de 10⁻⁸ (sin signo).
-# Los ticks van en el orden del consolidado de L1: `transact_time` y, dentro de
-# un mismo instante, `agg_trade_id`.
+# El primer tick de un tramo es relativo al último del tramo anterior. Todos los
+# tramos salen llenos salvo el último, así que los bytes no dependen de cómo se
+# partan los lotes. Los ticks van en el orden del consolidado de L1:
+# `transact_time` y, dentro de un mismo instante, `agg_trade_id`.
 TICKS_FILE = "ticks.bin"
 TICK_SECTIONS = ("dt_ms", "dprice_zigzag", "quantity_1e8")
+TICKS_CHUNK = 65_536
+TICKS_CHUNK_HEADER = "<4I"
 
 # `events.bin`: cuatro secciones de `N` valores (referencia, confirmación y
 # extremo en int32 y un byte de banderas), con `N` el total de eventos. El θ `k`
@@ -74,6 +81,7 @@ INDEX_FIELDS = (
     ("t0", "integer"),
     ("price_scale", "integer"),
     ("ticks", "integer"),
+    ("ticks_chunk", "integer"),
     ("first_agg_trade_id", "integer"),
     ("last_agg_trade_id", "integer"),
     ("ticks_file", "string"),

@@ -1,3 +1,4 @@
+import io
 import json
 import logging
 import time
@@ -191,8 +192,9 @@ def test_ticks_file_matches_a_direct_encoding_of_l1(lake):
         ],
         schema=TICKS_SCHEMA,
     )
-    expected = encode_day([batch], DAY_DATE, price_scale("BTCUSDT"))
-    assert tile_bytes(roots, "ticks.bin") == expected.to_bytes()
+    expected = io.BytesIO()
+    encode_day([batch], DAY_DATE, price_scale("BTCUSDT"), expected)
+    assert tile_bytes(roots, "ticks.bin") == expected.getvalue()
 
 
 # -- idempotencia ------------------------------------------------------------

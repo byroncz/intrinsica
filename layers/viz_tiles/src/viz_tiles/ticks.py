@@ -1,26 +1,37 @@
-"""Los ticks de un día en `ticks.bin`: deltas en varint, tal como los lee el navegador.
+"""Los ticks de un día en `ticks.bin`: deltas en varint por tramos, tal como los lee el navegador.
 
 TRD-viz §7.3 y ADR-VZ-14. La vista dibuja lo que mide L1, a cualquier zoom: lo
 que se dibuja es un tick o la envolvente exacta de los ticks de un píxel. Por eso
 la página lleva todos los ticks del día, sin reducir, y el navegador deriva precio,
 volumen y confirmaciones por píxel al dibujar.
 
-Memoria: los ticks se leen una sola vez, lote a lote, y cada lote se codifica y se
-suelta. Lo único que se retiene del día son los bytes codificados (≈ 5 B por tick,
-el propio `ticks.bin`): nunca conviven los ticks y su codificación.
+Memoria: los ticks se leen una sola vez, lote a lote. Cada lote se codifica en el
+tramo en curso y, cuando el tramo se llena (`TICKS_CHUNK` ticks, ≈ 330 KB), se
+escribe al objeto y se suelta. El pico es O(lote) más un tramo, nunca O(día).
 """
 
+import io
+import struct
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
+from typing import BinaryIO
 
 import numpy as np
 import pyarrow as pa
 
-from viz_tiles.contract import DAY_US, INT32_MAX, L1_SCALE, TICK_SECTIONS
+from viz_tiles.contract import (
+    DAY_US,
+    INT32_MAX,
+    L1_SCALE,
+    TICK_SECTIONS,
+    TICKS_CHUNK,
+    TICKS_CHUNK_HEADER,
+)
 
 # Un varint de uint64 ocupa a lo sumo 10 bytes.
 _MAX_VARINT_BYTES = 10
+_HEADER_BYTES = struct.calcsize(TICKS_CHUNK_HEADER)
 
 
 class PriceUnrepresentable(ValueError):
@@ -139,49 +150,91 @@ class DecodedTicks:
     quantity: np.ndarray
 
 
-def decode_ticks(data: bytes | memoryview, ticks: int) -> DecodedTicks:
-    """Decodifica `ticks.bin` de `ticks` ticks. Lanza `ValueError` si no cuadra."""
+def decode_ticks(
+    data: bytes | memoryview, ticks: int, chunk: int = TICKS_CHUNK
+) -> DecodedTicks:
+    """Decodifica `ticks.bin` de `ticks` ticks en tramos de hasta `chunk`.
+
+    Recorre los tramos en orden; el Δtiempo y el Δprecio del primer tick de cada uno
+    son relativos al último del anterior. Lanza `ValueError` si no cuadra.
+    """
     raw = np.frombuffer(data, dtype=np.uint8)
     pos = 0
-    sections = []
-    for _ in TICK_SECTIONS:
-        values, size = decode_varint(raw[pos:], ticks)
-        pos += size
-        sections.append(values)
-    if pos != len(raw):
-        raise ValueError(f"sobran {len(raw) - pos} bytes después de la tercera sección")
-    dt, dprice, quantity = sections
+    time_ms: list[np.ndarray] = []
+    price: list[np.ndarray] = []
+    quantity: list[np.ndarray] = []
+    last_time = last_price = total = 0
+    while pos < len(raw):
+        if len(raw) - pos < _HEADER_BYTES:
+            raise ValueError("cabecera de tramo truncada")
+        count, *sizes = struct.unpack_from(TICKS_CHUNK_HEADER, raw, pos)
+        pos += _HEADER_BYTES
+        if not 0 < count <= chunk:
+            raise ValueError(f"un tramo de {count} ticks no cabe en {chunk}")
+        if sum(sizes) > len(raw) - pos:
+            raise ValueError("tramo truncado")
+        sections = []
+        for size in sizes:
+            values, used = decode_varint(raw[pos : pos + size], count)
+            if used != size:
+                raise ValueError(f"una sección ocupa {used} bytes y declara {size}")
+            pos += size
+            sections.append(values)
+        dt, dprice, qty = sections
+        time_ms.append(last_time + np.cumsum(dt.astype(np.int64)))
+        price.append(last_price + np.cumsum(unzigzag(dprice)))
+        quantity.append(qty.astype(np.int64))
+        last_time, last_price = int(time_ms[-1][-1]), int(price[-1][-1])
+        total += count
+    if total != ticks:
+        raise ValueError(f"se esperaban {ticks} ticks y hay {total}")
+    empty = np.empty(0, dtype=np.int64)
     return DecodedTicks(
-        time_ms=np.cumsum(dt.astype(np.int64)),
-        price=np.cumsum(unzigzag(dprice)),
-        quantity=quantity.astype(np.int64),
+        time_ms=np.concatenate(time_ms) if time_ms else empty,
+        price=np.concatenate(price) if price else empty,
+        quantity=np.concatenate(quantity) if quantity else empty,
     )
 
 
 def encode_ticks(
-    time_ms: np.ndarray, price: np.ndarray, quantity: np.ndarray
-) -> list[np.ndarray]:
-    """Las tres secciones de `ticks.bin` (en `uint8`) de ticks completos, de una vez.
+    time_ms: np.ndarray,
+    price: np.ndarray,
+    quantity: np.ndarray,
+    chunk: int = TICKS_CHUNK,
+) -> bytes:
+    """`ticks.bin` de ticks completos, de una vez (para las pruebas y el sondeo).
 
-    Es lo que `TicksAccumulator` hace por lotes; sirve para comprobar que el
+    Es lo que `TicksAccumulator` hace por lotes: sirve para comprobar que el
     resultado no depende de cómo se parta el día.
     """
-    acc = _Sections()
-    acc.add(
+    out = io.BytesIO()
+    writer = _ChunkWriter(out, chunk)
+    writer.add(
         np.asarray(time_ms, np.int64),
         np.asarray(price, np.int64),
         np.asarray(quantity, np.int64),
     )
-    return [np.frombuffer(s, np.uint8) for s in acc.buffers]
+    writer.flush()
+    return out.getvalue()
 
 
-class _Sections:
-    """Las tres secciones en construcción y el último valor de cada una."""
+class _ChunkWriter:
+    """Codifica los ticks en tramos y escribe cada tramo en cuanto se llena.
 
-    def __init__(self) -> None:
-        self.buffers = tuple(bytearray() for _ in TICK_SECTIONS)
+    Retiene a lo sumo un tramo (`chunk` ticks, ≈ 5 B por tick) y el último tiempo y
+    precio, que son la referencia del siguiente tick.
+    """
+
+    def __init__(self, out: BinaryIO, chunk: int) -> None:
+        if chunk < 1 or chunk > 2**32 - 1:
+            raise ValueError(f"el tramo debe caber en un uint32, llegó {chunk}")
+        self._out = out
+        self.chunk = chunk
+        self._sections = tuple(bytearray() for _ in TICK_SECTIONS)
+        self._count = 0
         self._time = 0
         self._price = 0
+        self.nbytes = 0
 
     def add(self, time_ms: np.ndarray, price: np.ndarray, quantity: np.ndarray) -> None:
         if not len(time_ms):
@@ -193,54 +246,67 @@ class _Sections:
             raise ValueError("quantity no admite valores negativos")
         dprice = np.diff(price, prepend=self._price)
         self._time, self._price = int(time_ms[-1]), int(price[-1])
-        for buffer, values in zip(
-            self.buffers, (dt, zigzag(dprice), quantity), strict=True
-        ):
-            buffer += encode_varint(values).tobytes()
+        values = (dt, zigzag(dprice), quantity)
+        pos = 0
+        while pos < len(dt):
+            take = min(self.chunk - self._count, len(dt) - pos)
+            for section, column in zip(self._sections, values, strict=True):
+                section += encode_varint(column[pos : pos + take]).tobytes()
+            self._count += take
+            pos += take
+            if self._count == self.chunk:
+                self.flush()
+
+    def flush(self) -> None:
+        """Escribe el tramo en curso (si lo hay) y lo suelta."""
+        if not self._count:
+            return
+        header = struct.pack(
+            TICKS_CHUNK_HEADER, self._count, *(len(s) for s in self._sections)
+        )
+        self._out.write(header)
+        self.nbytes += len(header)
+        for section in self._sections:
+            self._out.write(section)
+            self.nbytes += len(section)
+            section.clear()
+        self._count = 0
 
 
 @dataclass(frozen=True)
 class DayTicks:
-    """Los ticks de un día, codificados, y lo que el índice y los hallazgos declaran.
+    """Lo que el índice y los hallazgos declaran de los ticks de un día.
 
-    `sections` son las tres secciones de `ticks.bin` en orden; juntas son el
-    archivo. `first_agg_trade_id` y `last_agg_trade_id` son los de su primer y
-    último tick. `rounded` y `max_abs_delta_int` alimentan el hallazgo
-    `price_rounded` (ticks fuera del tick y su mayor distancia al tick más cercano,
-    ×10⁻⁸).
+    Los bytes de `ticks.bin` no viven aquí: salieron al objeto tramo a tramo.
+    `nbytes` es su tamaño, `chunk` el tamaño máximo de un tramo, y
+    `first_agg_trade_id` y `last_agg_trade_id` los de su primer y último tick.
+    `rounded` y `max_abs_delta_int` alimentan el hallazgo `price_rounded` (ticks
+    fuera del tick y su mayor distancia al tick más cercano, ×10⁻⁸).
     """
 
     ticks: int
+    chunk: int
     price_scale: int
     first_agg_trade_id: int
     last_agg_trade_id: int
     rounded: int
     max_abs_delta_int: int
-    sections: tuple[bytearray, ...]
-
-    @property
-    def nbytes(self) -> int:
-        return sum(len(s) for s in self.sections)
-
-    def parts(self) -> list[memoryview]:
-        """Los bytes de `ticks.bin`, sin copiarlos: una vista por sección."""
-        return [memoryview(s) for s in self.sections]
-
-    def to_bytes(self) -> bytes:
-        """`ticks.bin` entero en un `bytes` (copia: para las pruebas, no para el job)."""
-        return b"".join(self.sections)
+    nbytes: int
 
 
 class TicksAccumulator:
-    """Consume lotes de ticks en orden y retiene solo `ticks.bin` del día.
+    """Consume lotes de ticks en orden y escribe `ticks.bin` del día, tramo a tramo.
 
     Cada lote es un `RecordBatch` con `agg_trade_id`, `price`, `quantity` y
     `transact_time`, con los tipos del contrato de L1, ordenado como el
     Parquet de L1 (por `transact_time`). Los ticks fuera del día se ignoran,
-    así que se pueden pasar los row groups completos de un mes.
+    así que se pueden pasar los row groups completos de un mes. `out` recibe los
+    bytes del archivo; quien llama lo cierra después de `finish()`.
     """
 
-    def __init__(self, day: date, price_scale: int) -> None:
+    def __init__(
+        self, day: date, price_scale: int, out: BinaryIO, chunk: int = TICKS_CHUNK
+    ) -> None:
         self.day_start_us = day_start_us(day)
         self.price_scale = price_scale
         self._factor = _factor(price_scale)
@@ -252,7 +318,7 @@ class TicksAccumulator:
         self.rounded = 0
         self.max_abs_delta_int = 0
         self._max_price_int = 0
-        self._sections = _Sections()
+        self._writer = _ChunkWriter(out, chunk)
         self._last_time = -(2**63)
 
     def update(self, batch: pa.RecordBatch) -> None:
@@ -271,7 +337,7 @@ class TicksAccumulator:
         price = _scaled_ints(batch.column("price"))[keep]
         quantity = _scaled_ints(batch.column("quantity"))[keep]
         ids = batch.column("agg_trade_id").to_numpy(zero_copy_only=True)[keep]
-        self._sections.add(
+        self._writer.add(
             rel[keep] // 1000, _round_to_tick(price, self._factor), quantity
         )
         if self._first_id is None:
@@ -287,7 +353,8 @@ class TicksAccumulator:
             self.max_abs_delta_int = max(self.max_abs_delta_int, int(delta.max()))
 
     def finish(self) -> DayTicks:
-        """El día codificado. Lanza `PriceUnrepresentable` si algún precio no cabe en `int32`."""
+        """Escribe el último tramo y devuelve el día. Lanza `PriceUnrepresentable` si algún precio no cabe en `int32`."""
+        self._writer.flush()
         if self.ticks:
             rounded_max = int(
                 _round_to_tick(np.int64(self._max_price_int), self._factor)
@@ -296,20 +363,25 @@ class TicksAccumulator:
                 raise PriceUnrepresentable(self.price_scale, self._max_price_int)
         return DayTicks(
             ticks=self.ticks,
+            chunk=self._writer.chunk,
             price_scale=self.price_scale,
             first_agg_trade_id=self._first_id if self._first_id is not None else -1,
             last_agg_trade_id=self._last_id if self.ticks else -1,
             rounded=self.rounded,
             max_abs_delta_int=self.max_abs_delta_int,
-            sections=self._sections.buffers,
+            nbytes=self._writer.nbytes,
         )
 
 
 def encode_day(
-    batches: Iterable[pa.RecordBatch], day: date, price_scale: int
+    batches: Iterable[pa.RecordBatch],
+    day: date,
+    price_scale: int,
+    out: BinaryIO,
+    chunk: int = TICKS_CHUNK,
 ) -> DayTicks:
-    """Los ticks del día `day` de esos lotes, codificados como `ticks.bin`."""
-    acc = TicksAccumulator(day, price_scale)
+    """Los ticks del día `day` de esos lotes, escritos en `out` como `ticks.bin`."""
+    acc = TicksAccumulator(day, price_scale, out, chunk)
     for batch in batches:
         acc.update(batch)
     return acc.finish()

@@ -4,8 +4,10 @@ from pathlib import Path
 
 import numpy as np
 import pyarrow as pa
+from viz_tiles.contract import TICKS_CHUNK
 from viz_tiles.lake import MonthEvents
-from viz_tiles.ticks import day_start_us
+from viz_tiles.ticks import DayTicks, day_start_us, encode_day
+from viz_tiles.write import TicksFile
 
 FIXTURES = Path(__file__).resolve().parents[3] / "shared/dc_core/tests/fixtures"
 
@@ -31,6 +33,15 @@ def ticks_batch(day, rows) -> pa.RecordBatch:
         ],
         schema=TICKS_SCHEMA,
     )
+
+
+def encode_to(root, day, batches, scale: int, chunk: int = TICKS_CHUNK) -> DayTicks:
+    """Escribe `ticks.bin` del día bajo `root` (como lo hace el job) y devuelve su resumen."""
+    out = TicksFile(root, "binance", "spot", "BTCUSDT", day)
+    try:
+        return encode_day(batches, day, scale, out, chunk)
+    finally:
+        out.close()
 
 
 def read_ticks_csv() -> list[dict[str, str]]:

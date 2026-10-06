@@ -197,6 +197,7 @@ import gzip
 import hashlib
 import json
 import re
+import struct
 from pathlib import Path
 
 import pyarrow.parquet as pq
@@ -233,13 +234,24 @@ def varints(raw, pos, count):
     return out, pos
 
 
-# ticks.bin: tres secciones de varint que ocupan el archivo entero y decodifican a los
-# 4 735 ticks del día (ticks.csv: id, precio y tiempo; la cantidad de la prueba es 1).
+# ticks.bin: tramos (cabecera de cuatro uint32 y tres secciones de varint) que ocupan el
+# archivo entero y decodifican a los 4 735 ticks del día (ticks.csv: id, precio y tiempo;
+# la cantidad de la prueba es 1). Un día tan corto cabe en un solo tramo.
+assert index["ticks_chunk"] == 65_536, index["ticks_chunk"]
 raw = (day / "ticks.bin").read_bytes()
-dt, pos = varints(raw, 0, index["ticks"])
-dprice, pos = varints(raw, pos, index["ticks"])
-quantity, pos = varints(raw, pos, index["ticks"])
+dt, dprice, quantity = [], [], []
+pos = 0
+while pos < len(raw):
+    count, *sizes = struct.unpack_from("<4I", raw, pos)
+    pos += 16
+    assert 0 < count <= index["ticks_chunk"], count
+    for column, size in zip((dt, dprice, quantity), sizes):
+        values, end = varints(raw, pos, count)
+        assert end == pos + size, (end, pos, size)
+        column += values
+        pos = end
 assert pos == len(raw), (pos, len(raw))
+assert len(dt) == index["ticks"], len(dt)
 assert set(quantity) == {10**8}, set(quantity)
 times, prices = [], []
 t = p = 0

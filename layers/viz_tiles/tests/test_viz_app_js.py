@@ -26,10 +26,11 @@ from test_viz_events import (
     write_flash_day,
 )
 from viz_tiles import cli
-from viz_tiles.contract import FLAG_CONFIRM_CLIPPED, PAGE_FILE
+from viz_tiles.contract import FLAG_CONFIRM_CLIPPED, PAGE_FILE, TICKS_CHUNK
 from viz_tiles.events import EventRows, EventsBuffer
 from viz_tiles.ticks import DayTicks, day_start_us, encode_ticks
 from viz_tiles.write import ThetaEvents, write_day
+from viz_tiles.write import day_dir as tiles_day_dir
 
 NODE = shutil.which("node")
 HARNESS = Path(__file__).parent / "js" / "harness.cjs"
@@ -921,15 +922,20 @@ def write_big_day(
     time_ms = np.sort(rng.integers(0, 86_400_000, ticks))
     price = 6_000_000 + np.cumsum(rng.integers(-4, 5, ticks))
     quantity = rng.integers(1, 400_000_000, ticks)
-    sections = encode_ticks(time_ms, price, quantity)
+    # `ticks.bin` se escribe donde `write_day` lo espera (el job lo escribe al leer L1).
+    directory = Path(tiles_day_dir(root, "binance", "spot", "BTCUSDT", day))
+    directory.mkdir(parents=True)
+    data = encode_ticks(time_ms, price, quantity)
+    (directory / "ticks.bin").write_bytes(data)
     day_ticks = DayTicks(
         ticks=ticks,
+        chunk=TICKS_CHUNK,
         price_scale=SCALE,
         first_agg_trade_id=1,
         last_agg_trade_id=ticks,
         rounded=0,
         max_abs_delta_int=0,
-        sections=tuple(bytearray(s.tobytes()) for s in sections),
+        nbytes=len(data),
     )
     buffer = EventsBuffer()
     docs = []
@@ -1003,3 +1009,18 @@ def test_the_tooltip_names_the_event_that_closes_at_its_extreme_millisecond(flas
         flash, "--theta", "0", "--zoom", window, "--hover", f"price@{ms + 0.0015}"
     )
     assert "evento 3 / 6" in result["hovers"][0]["tooltip"]
+
+
+def test_a_day_in_several_chunks_draws_exactly_like_the_same_day_in_one(
+    flash, tmp_path
+):
+    """El decodificador recorre los tramos en orden: partir `ticks.bin` no cambia ningún píxel."""
+    many = write_flash_day(tmp_path, chunk=1_000)  # 17 tramos
+    zoom = f"{BURST - 0.001},{BURST + 0.001}"
+    flags = ("--zoom", zoom, "--hover", f"price@{BURST}")
+    one, parts = view(flash, *flags), view(many, *flags)
+    assert parts["errors"] == []
+    for name in ("inicio", f"zoom:{zoom}"):
+        assert step(parts, name)["marks"] == step(one, name)["marks"]
+    assert parts["hovers"] == one["hovers"]
+    assert step(parts, "inicio")["metrics"]["ticks"] == len(flash_ticks())

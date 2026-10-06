@@ -5,8 +5,9 @@ se calcula con los metadatos de los archivos (nunca se lee un tick para decidir)
 los días al día se saltan; los demás salen de **una** pasada por el
 `consolidated.parquet` del mes, row group a row group, y cada día cierra cuando
 los ticks cambian de día. Cada `events.parquet` de θ se lee **una vez por mes**
-(no una por día). En RAM: un row group de L1, los bytes de `ticks.bin` del día en
-curso (≈ 5 B por tick) y, por θ, los eventos del mes en arreglos de NumPy.
+(no una por día). En RAM: un row group de L1, un tramo de `ticks.bin` (≈ 330 KB;
+cada tramo se escribe al objeto en cuanto se llena) y, por θ, los eventos del mes en
+arreglos de NumPy.
 """
 
 import calendar
@@ -59,7 +60,7 @@ from viz_tiles.ticks import (
     TicksAccumulator,
     day_start_us,
 )
-from viz_tiles.write import ThetaEvents, day_sizes, find_index, write_day
+from viz_tiles.write import ThetaEvents, TicksFile, day_sizes, find_index, write_day
 
 logger = logging.getLogger(__name__)
 
@@ -294,13 +295,16 @@ class _DayStream:
         self,
         pending: list[tuple[date, str]],
         scale: int,
-        close: Callable[[date, str, DayTicks, float], None],
+        close: Callable[[date, str, DayTicks | PriceUnrepresentable, float], None],
+        open_file: Callable[[date], TicksFile],
     ) -> None:
         self._pending = pending
         self._scale = scale
         self._close = close
+        self._open_file = open_file
         self._pos = -1
         self.acc: TicksAccumulator | None = None
+        self._file: TicksFile | None = None
         self._started = 0.0
         self._end = 0
         self._advance()
@@ -311,20 +315,34 @@ class _DayStream:
             self.acc = None
             return
         day = self._pending[self._pos][0]
-        self.acc = TicksAccumulator(day, self._scale)
+        self._file = self._open_file(day)
+        self.acc = TicksAccumulator(day, self._scale, self._file)
         self._started = time.monotonic()
         self._end = day_start_us(day) + DAY_US
 
     def _finish(self) -> None:
         day, digest = self._pending[self._pos]
         acc, self.acc = self.acc, None
+        file, self._file = self._file, None
         try:
             ticks = acc.finish()
         except PriceUnrepresentable as exc:
+            file.discard()  # un día que no se escribe no deja su `ticks.bin`
             self._close(day, digest, exc, self._started)
+        except BaseException:
+            file.close()
+            raise
         else:
+            file.close()
             self._close(day, digest, ticks, self._started)
         self._advance()
+
+    def abort(self) -> None:
+        """Corta el día en curso (la corrida falló): cierra su `ticks.bin` sin indexarlo."""
+        self.acc = None
+        if self._file is not None:
+            self._file.close()
+            self._file = None
 
     def feed(self, batch: pa.RecordBatch) -> None:
         top = batch.column("transact_time")[-1].as_py()
@@ -550,11 +568,18 @@ def _process(
             return
         month_state.build(day, digest, result, started)
 
+    def open_file(day: date) -> TicksFile:
+        return TicksFile(ctx.tiles_root, ctx.provider, ctx.market, ctx.asset, day)
+
     spans = [(day_start_us(d), day_start_us(d) + DAY_US) for d, _ in pending]
-    stream = _DayStream(pending, month_state.scale, close)
-    for batch in _read_batches(parquet, _row_groups(bounds, spans)):
-        stream.feed(batch)
-        del batch
-        if stream.done:
-            break
-    stream.drain()
+    stream = _DayStream(pending, month_state.scale, close, open_file)
+    try:
+        for batch in _read_batches(parquet, _row_groups(bounds, spans)):
+            stream.feed(batch)
+            del batch
+            if stream.done:
+                break
+        stream.drain()
+    except BaseException:
+        stream.abort()
+        raise
