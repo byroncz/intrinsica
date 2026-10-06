@@ -1,17 +1,19 @@
 # viz_tiles
 
-Capa viz: reduce un día de ticks de L1 y de eventos de L2 a **tiles** (arreglos
-binarios planos por nivel de zoom) que el tablero descarga y dibuja sin cómputo
-en caliente. Diseño en [`docs/TRD/viz.md`](../../docs/TRD/viz.md); el contrato
-de los archivos, en [`docs/data-contracts.md`](../../docs/data-contracts.md)
-("Tiles de viz"). Una prueba rompe el CI si ese contrato se desvía del código.
+Capa viz: codifica un día de ticks de L1 y de eventos de L2 en dos archivos,
+`ticks.bin` (todos los ticks, sin reducir) y `events.bin` (los eventos exactos de
+cada θ), y los lleva dentro de una página que dibuja lo que mide L1: un tick o la
+envolvente exacta de los ticks de un píxel. Diseño en
+[`docs/TRD/viz.md`](../../docs/TRD/viz.md); el contrato de los archivos, en
+[`docs/data-contracts.md`](../../docs/data-contracts.md) ("Tiles de viz"). Una
+prueba rompe el CI si ese contrato se desvía del código.
 
 La imagen corre `python -m viz_tiles --mode tiles`: lee un mes de L1 y los
-eventos de L2 (en disco o en `gs://`), construye los tiles de cada día pedido y
+eventos de L2 (en disco o en `gs://`), codifica los archivos de cada día pedido y
 los escribe junto a una página `index.html` autocontenida del día: la plantilla de
-[`site/`](site/), uPlot y los 37 arreglos en base64 dentro de un solo documento,
+[`site/`](site/), uPlot y los dos archivos en base64 dentro de un solo documento,
 sin peticiones de red (el porqué, en [TRD-viz §6.5](../../docs/TRD/viz.md#65-adr-vz-05--entrega-solo-bucket-sin-servidor)).
-`--mode render` vuelve a armar esas páginas desde los tiles ya escritos, sin leer
+`--mode render` vuelve a armar esas páginas desde los archivos ya escritos, sin leer
 L1 ni L2, cuando cambia la plantilla.
 
 ## Uso en local
@@ -63,7 +65,8 @@ calculan sobre el archivo. Si el `index.json` del día trae el mismo `input_hash
 `tiles_version`, el día se salta y no se escribe nada; no se lee ningún tick.
 
 Los archivos de entrada del día son el `consolidated.parquet` del mes y el
-`events.parquet` y `carry_over.parquet` de cada θ. Los θ son los que L2 tiene en
+`events.parquet` y `carry_over.parquet` de cada θ. Cada `events.parquet` se lee
+una vez por mes, no una por día. Los θ son los que L2 tiene en
 el mes; uno sin `events.parquet` o sin `carry_over.parquet` va a
 `missing_thetas`, deja `input_missing` y el día se escribe con los demás.
 
@@ -76,7 +79,7 @@ extremo es un candidato; cuando L2 cierra el evento, el definitivo sale del
 `input_hash` suma los archivos de esa cadena, así que un mes nuevo de L2 rehace
 esos días. Se mide con el candidato del carry-over del mes y no con el de la última
 carry-over de la cadena: si la primera ya mueve el candidato a un mes posterior,
-los tiles del día cambian (pasan a overshoot certero) y con el candidato último el
+los eventos del día cambian (la cola deja de ser provisional) y con el candidato último el
 hash seguiría igual.
 
 **Revisión hacia atrás.** Sin `--day` ni `--from`, tras el mes anterior se revisan
@@ -87,14 +90,14 @@ es definitivo para todos los θ. La idempotencia salta lo que no cambió.
 
 ## La página del día
 
-Un día trae `index.html` junto a sus tiles, y el último día se copia también a
+Un día trae `index.html` junto a `ticks.bin` y `events.bin`, y el último día se copia también a
 `latest.html` en la raíz (`tiles/latest.html`). Es un solo documento: la plantilla
-(`site/index.html`, `app.js`, `style.css`), uPlot y los arreglos del día, en
+(`site/index.html`, `app.js`, `style.css`), uPlot y los dos archivos del día, en
 base64 bajo su nombre, en `window.VIZ_DATA`. Se abre igual desde disco (`file://`),
 desde `python -m http.server` o desde `storage.cloud.google.com`; no hace
-peticiones de red después de cargar. El día se descodifica en el navegador sin
-más cálculo que `t / 1000` y `p / price_scale`; las métricas (bytes
-decodificados, primer trazo, cambio de θ) van a la consola.
+peticiones de red después de cargar. Al abrir, el navegador decodifica los ticks a
+arreglos tipados una sola vez; las métricas (ticks decodificados en … ms, primer
+trazo, redibujo, cambio de θ) van a la consola.
 
 - **En un bucket** la página se guarda comprimida (`Content-Encoding: gzip`,
   `Content-Type: text/html; charset=utf-8`, `Cache-Control: no-cache`). **En disco
@@ -106,7 +109,7 @@ decodificados, primer trazo, cambio de θ) van a la consola.
   immutable`; `index.json` y `latest.json`, `application/json` con `no-cache`.
 - La página guarda en un `<meta name="viz-render">` la `tiles_version` y el
   SHA-256 de la plantilla. `--mode render` salta los días cuya página ya los trae
-  iguales y regenera el resto desde los arreglos del directorio; si no coinciden
+  iguales y regenera el resto desde los archivos del directorio; si no coinciden
   con el `content_hash` del índice, no escribe nada y deja `input_missing`.
 
 La plantilla va en la imagen (`VIZ_TEMPLATE_DIR=/app/site`); en el repo se lee
@@ -142,16 +145,16 @@ contra el bucket real: la primera descarga del humano lo confirma.
 Cuando cambia la plantilla (`site/`: HTML, JS, CSS o uPlot) se sube `VERSION`, se
 despliega la imagen y se corre el job `viz-render` (*Actions → Run job*, ver
 [infra/README.md](../../infra/README.md#stack-viz-tiles-de-visualización)) sobre
-el rango que se quiera rehacer. Lee solo los tiles del bucket, sin L1 ni L2: un
-re-render completo son unas 3 300 lecturas de `index.json` y de 37 arreglos por
-día y otras tantas escrituras, minutos de cómputo y centavos de operaciones,
+el rango que se quiera rehacer. Lee solo `ticks.bin` y `events.bin` del bucket, sin
+L1 ni L2: un re-render completo son unas 3 300 lecturas de `index.json` y de dos
+archivos por día y otras tantas escrituras, minutos de cómputo y centavos de operaciones,
 frente a repetir el backfill desde L1 y L2. Esa diferencia es la razón de
-conservar los tiles como artefacto separado.
+conservar `ticks.bin` y `events.bin` como artefactos separados.
 
 Cada día deja un `render_summary` (`skipped`, hash de la plantilla, bytes de la
 página guardados y descomprimidos). En un rango, los días sin `index.json` se
 omiten; `input_missing` (`what = tiles`, código 1) sale si un mes no tiene ningún
-día con tiles o si un día tiene arreglos rotos. Un día suelto sin `index.json`
+día con archivos o si un día tiene archivos rotos. Un día suelto sin `index.json`
 solo se detecta con `--day`, que `run-job.yml` no expone. Un día cuya página ya
 trae la misma `tiles_version` y la misma huella de plantilla se salta, salvo con
 `force`. Si el rango incluye el último día, `latest.html` se actualiza con él.
@@ -168,32 +171,34 @@ la huella de la plantilla cambia sola y `--mode render` rehace las páginas.
 ### Vista
 
 Tres paneles con eje X y cursor compartidos (precio 65 %, confirmaciones 15 %,
-volumen 20 %), franja de estado fija (día, θ, navegación por eventos, última
-actualización, datos completos o incompletos) y tooltip por cubeta.
+volumen 20 %), franja de estado fija (día, θ, navegación por eventos con «evento
+k / n», última actualización, datos completos o incompletos) y tooltip por píxel.
+Todo se deriva por píxel de ancho, al dibujar, de los ticks y los eventos ya
+decodificados ([TRD-viz §7.4](../../docs/TRD/viz.md#74-lo-que-el-navegador-deriva-por-píxel)):
 
-- **Precio**, nunca velas: una columna con 1 o 2 ticks es un punto por tick; con
-  más ticks, siempre el segmento de su mínimo a su máximo (la envolvente exacta
-  de sus ticks) y, desde 5 px por columna, además sus cuatro puntos M4 (ticks
-  reales) en su instante exacto, sobre el segmento. Nada une una columna con la
-  vecina. Una
-  columna sin ticks se marca con una línea punteada ámbar de 1 px a media altura
-  y `◇`.
+- **Precio**, nunca velas: un píxel con 1 o 2 ticks es un punto por tick; con más,
+  el segmento de su mínimo a su máximo y nada más. Nada une un píxel con el
+  vecino. Los ticks de un mismo milisegundo comparten píxel: el tooltip dice «n
+  ticks en este ms».
+- **Volumen**: una barra por píxel con la suma de la cantidad; rótulo «Volumen».
+- **Confirmaciones**: barra con los θ que confirman en el píxel y marca intensa
+  con el máximo de θ que confirman en el mismo instante; el tooltip lista cuáles y
+  a qué hora; rótulo «θ que confirman».
 - **Franjas del θ activo**, dibujadas desde `events.bin` en los instantes exactos
   de cada evento a cualquier zoom: confirmación tenue y fina, overshoot intenso y
-  grueso, una línea de 1 px en cada extremo (frontera compartida con el evento
-  que sigue) y otra del color del evento en cada confirmación. Donde varios
-  eventos enteros caen en un mismo píxel, una marca gris con el número ("4
-  eventos"); `DENSE_PX` fija el ancho de ese píxel.
-- **Navegación**: "Evento anterior" y "Evento siguiente" desplazan la vista a la
-  ventana `[referencia(k−1), extremo(k+1)]` sin cambiar la escala; "Ajustar a la
-  ventana" pone la escala en esa ventana con 5 % de margen. Funciona dentro del
-  día: lo que sale del día se recorta y la vista lo dice.
-- **Confirmaciones**: barra con los θ que confirman en la columna y marca intensa
-  con el máximo de θ que confirman en el mismo instante; el tooltip lista cuáles
-  y a qué hora.
+  grueso, y una línea del color del evento en cada confirmación (no hay línea de
+  extremo: el cambio de color entre franjas ya lo marca). Donde varios eventos
+  enteros caen en un mismo píxel, una marca gris con el número («4 eventos»);
+  `DENSE_PX` fija el ancho de ese píxel.
+- **Navegación**: «Evento anterior» y «Evento siguiente» desplazan la vista a la
+  ventana `[referencia(k−1), extremo(k+1)]` sin cambiar la escala; «Ajustar a la
+  ventana» pone la escala en esa ventana con 5 % de margen. La referencia, la
+  confirmación, el extremo, la ventana y las notas (recorte, provisional) van al
+  tooltip al pasar el mouse sobre el evento.
+- **Leyenda** con muestras dibujadas como en el gráfico, sin frases.
 
-Los
-principios y la Evaluación ergonómica que cada cambio de vista debe traer están en
+Los principios y la Evaluación ergonómica que cada cambio de vista debe traer
+están en
 [TRD-viz §6.7](../../docs/TRD/viz.md#67-adr-vz-07--nueve-principios-de-ergonomía-y-evaluación-ergonómica-obligatoria).
 
 ## Hallazgos
@@ -205,22 +210,25 @@ resume `run-job.yml`) y las filas en `VIZ_DQ_ROOT`.
 
 | `check_type` | `severity` | Cuándo |
 |---|---|---|
-| `tiles_summary` | info | Uno por día, construido o saltado: `skipped`, `bytes`, `objects`, `levels`, `input_hash`, `content_hash`, `thetas`, `provisional_thetas`, `provisional_tail` y `missing_thetas`. |
-| `input_missing` | error | Sin `consolidated.parquet` (`what = l1`), sin `events.parquet` en el mes (`events`), un θ sin `events.parquet` o `carry_over.parquet` o con la cadena rota (`events`, `carry_over`, con `theta`), o un día sin ticks (`ticks`). En modo `render`, un día sin `index.json` o con arreglos que faltan o no coinciden con su `content_hash` (`what = tiles`). Los de mes llevan el primer día pedido en `details.day` y `days`. |
+| `tiles_summary` | info | Uno por día, construido o saltado: `skipped`, `bytes`, `objects`, `ticks_bytes`, `events_bytes`, `page_bytes`, `input_hash`, `content_hash`, `thetas`, `provisional_thetas`, `provisional_tail` y `missing_thetas`. |
+| `input_missing` | error | Sin `consolidated.parquet` (`what = l1`), sin `events.parquet` en el mes (`events`), un θ sin `events.parquet` o `carry_over.parquet` o con la cadena rota (`events`, `carry_over`, con `theta`), o un día sin ticks (`ticks`). En modo `render`, un día sin `index.json` o con archivos que faltan o no coinciden con su `content_hash` (`what = tiles`). Los de mes llevan el primer día pedido en `details.day` y `days`. |
 | `price_rounded` | warning | Ticks fuera del tick del activo: se redondean y el día se escribe. |
 | `price_unrepresentable` | error | El precio máximo no cabe en `int32`: el día no se escribe. |
 | `render_summary` | info | Modo `render`: uno por día, regenerado o al día. `skipped`, `tiles_version`, `template_hash`, `content_hash`, `page_bytes` (lo guardado: gzip en un bucket, plano en disco) y `decoded_bytes` (el HTML ya descomprimido). |
 
 Cada día termina con una línea sonda: `sonda: unit=<día> ticks=… wall_s=…
-rss_mib=…`.
+rss_mib=… ticks_bytes=… page_bytes=…`; `wall_s` es el tiempo por día (objetivo: un
+mes en menos de 10 minutos).
 
 ## Memoria
 
 Una sola pasada por el `consolidated.parquet` del mes, row group a row group,
 saltando por las estadísticas de `transact_time` los que no tocan los días por
-construir. Un día cierra cuando los ticks pasan al siguiente. Por θ se leen solo
-los row groups de `events.parquet` que tocan el día. En RAM: un row group, los
-acumuladores del día en curso y los eventos de un θ.
+construir. Un día cierra cuando los ticks pasan al siguiente. Cada lote se codifica
+en varint y se suelta; de un día solo viven los bytes codificados (≈ 5 B por tick,
+el propio `ticks.bin`) y se escriben por tramos, sin juntar sus tres secciones.
+Los `events.parquet` se leen una vez por mes y quedan como arreglos de NumPy (41 B
+por evento). En RAM: un row group, los bytes del día en curso y los eventos del mes.
 
 ## Imagen
 
@@ -236,17 +244,17 @@ nombre de columna.
 
 ```python
 from viz_tiles.contract import price_scale
-from viz_tiles.direction import PendingEvent, direction_tiles
-from viz_tiles.reduce import reduce_day
-from viz_tiles.write import ThetaTiles, write_day
+from viz_tiles.events import EventsBuffer, event_rows
+from viz_tiles.ticks import encode_day
+from viz_tiles.write import ThetaEvents, write_day
 
 # `batches`: RecordBatch de L1 (agg_trade_id, price, quantity, transact_time),
 # ordenados por transact_time; se consumen uno a uno.
-reduction = reduce_day(batches, day, price_scale("BTCUSDT"))
+ticks = encode_day(batches, day, price_scale("BTCUSDT"))
 
-# `events`: filas del θ con el esquema de events.parquet que tocan el día;
-# `pending`: PendingEvent.from_carry_over(fila) o None.
-directions = direction_tiles(reduction.last_ids, events, pending)
+# `events`: MonthEvents.touching(first_id, last_id) del θ; `pending`: la cola del carry-over.
+buffer = EventsBuffer()
+buffer.add(event_rows(events, pending, provisional, day_start_us))
 
 write_day(
     root,
@@ -254,21 +262,23 @@ write_day(
     market="spot",
     asset="BTCUSDT",
     day=day,
-    reduction=reduction,
-    thetas=[ThetaTiles("0.00010000", n_events, None, directions)],
+    ticks=ticks,
+    events=buffer,
+    thetas=[ThetaEvents("0.00010000", n_events, None)],
     input_hash=input_hash,
-    image_version="0.1.0",
+    image_version="1.0.0",
 )
 ```
 
-- `reduce_day` guarda solo acumuladores de 4 096 columnas: la RAM es O(lote),
-  no O(ticks). Los niveles gruesos se derivan del más fino (M4 es componible).
-- `direction_tile` resuelve el estado con `searchsorted` sobre los ids de los
-  eventos, sin recorrer ticks. Compara por `agg_trade_id` (TRD-viz §7.5).
-- `write_day` escribe los arreglos, la página y, al final, `index.json` (marca de
-  commit); `latest.json` y `latest.html` solo avanzan. Se lee con `numpy.fromfile`.
+- `TicksAccumulator` (y `encode_day`) guarda solo los bytes ya codificados: la RAM
+  es O(lote) más ≈ 5 B por tick. `decode_ticks` es la inversa, para pruebas y
+  sondas.
+- `read_month_events` lee un `events.parquet` entero, una vez por mes;
+  `MonthEvents.touching` saca los eventos de cada día por `agg_trade_id`.
+- `write_day` escribe `events.bin`, `ticks.bin`, la página y, al final,
+  `index.json` (marca de commit); `latest.json` y `latest.html` solo avanzan.
 - `render_day(index, arrays)` arma el `index.html` de un día: `arrays` entrega
-  `(nombre, bytes)` en orden de nombre y cada uno se codifica y se suelta.
+  `(nombre, tramos)` en orden de nombre y cada uno se codifica por tramos y se suelta.
 
 ## Pruebas
 
