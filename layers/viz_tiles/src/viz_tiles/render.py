@@ -196,9 +196,18 @@ def render_day_to(
     if not compress:
         out.writelines(chunks)
         return
-    with gzip.GzipFile(fileobj=out, mode="wb", mtime=0, compresslevel=9) as gz:
+    with gzip_to(out) as gz:
         for chunk in chunks:
             gz.write(chunk)
+
+
+def gzip_to(out: BinaryIO) -> gzip.GzipFile:
+    """Un compresor gzip determinista (sin marca de tiempo) que escribe en `out`.
+
+    La salida no depende de cómo se parta la entrada en bloques: comprimir la página
+    al vuelo, de un temporal plano, da los mismos bytes que renderizarla comprimida.
+    """
+    return gzip.GzipFile(fileobj=out, mode="wb", mtime=0, compresslevel=9)
 
 
 class _Sink:

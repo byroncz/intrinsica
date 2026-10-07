@@ -3,8 +3,13 @@
 Solo lo que usan las pruebas: subida resumible, lectura, metadatos, listado, borrado
 y copia. Registra cada petición y niega con 403 la consulta a los objetos de `denied`
 (el padre `tiles` de la raíz, fuera del prefijo en que la cuenta tiene permiso).
+
+Como GCS real, transcodifica al leer: un objeto con `Content-Encoding: gzip` se entrega
+descomprimido si la petición no trae `Accept-Encoding: gzip`, y el `GcsFileSystem` de
+Arrow no lo trae (ITSC-320). El tamaño del metadato sigue siendo el almacenado.
 """
 
+import gzip
 import json
 import re
 import threading
@@ -115,7 +120,11 @@ class FakeGcs:
         elif name not in self.objects:
             self._reply(h, 404, b'{"error":{"code":404,"message":"no existe"}}')
         elif query.get("alt") == ["media"]:
-            data = self.objects[name][0]
+            data, meta = self.objects[name]
+            if meta.get("contentEncoding") == "gzip" and (
+                "gzip" not in h.headers.get("Accept-Encoding", "")
+            ):
+                data = gzip.decompress(data)
             span = re.fullmatch(r"bytes=(\d+)-(\d*)", h.headers.get("Range", ""))
             if span:
                 start = int(span[1])

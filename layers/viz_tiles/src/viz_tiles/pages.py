@@ -36,6 +36,7 @@ from viz_tiles.write import (
     day_blocks,
     day_dir,
     find_index,
+    latest_page_is_copy,
     stream_latest_page,
     stream_page,
 )
@@ -199,8 +200,14 @@ def _render_day(
     is_latest = latest == day.isoformat()
     want = (index["tiles_version"], template.hash)
 
+    # `latest.html` también debe pesar lo que la página del día: la huella se lee ya
+    # descomprimida y no distingue un latest plano con etiqueta gzip (ITSC-320).
     fresh = _stored_meta(fs, page_path) == want and (
-        not is_latest or _stored_meta(fs, latest_path) == want
+        not is_latest
+        or (
+            _stored_meta(fs, latest_path) == want
+            and latest_page_is_copy(fs, base, directory)
+        )
     )
     if fresh and not ctx.force:
         logger.info(

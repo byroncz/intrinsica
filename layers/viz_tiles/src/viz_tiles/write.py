@@ -30,7 +30,7 @@ from viz_tiles.contract import (
     TILES_VERSION,
 )
 from viz_tiles.events import EventsBuffer
-from viz_tiles.render import Template, expected_names, render_day_to
+from viz_tiles.render import Template, expected_names, gzip_to, render_day_to
 from viz_tiles.ticks import DayTicks, TicksReader, day_start_us
 
 logger = logging.getLogger(__name__)
@@ -124,16 +124,20 @@ def _publish_page(
     arrays: Iterator[tuple[str, Iterable[Buffer]]],
     template: Template | None,
     publish: Callable[[str], None],
+    *,
+    plain_tmp: bool = False,
 ) -> None:
     """Renderiza la página en `tmp` y la publica con `publish(tmp)`, que consume `tmp`.
 
-    Mismos metadatos que `write_page`. El temporal va también en un bucket: si el
-    render falla a medias, el `with` cierra el flujo y GCS publica lo escrito
-    (pyarrow no tiene `abort`); así cae en el temporal, que se borra, y no sobre la
-    página vigente. El temporal se borra también si falla `publish`, no solo el
-    render; ese borrado no tapa el error original.
+    Mismos metadatos que `write_page`, salvo con `plain_tmp`: el temporal va sin
+    comprimir y sin `Content-Encoding`, para quien lo relee con Arrow (GCS descomprime
+    al servir un objeto etiquetado gzip; ver `stream_latest_page`). El temporal va
+    también en un bucket: si el render falla a medias, el `with` cierra el flujo y GCS
+    publica lo escrito (pyarrow no tiene `abort`); así cae en el temporal, que se
+    borra, y no sobre la página vigente. El temporal se borra también si falla
+    `publish`, no solo el render; ese borrado no tapa el error original.
     """
-    compress = compresses_pages(fs)
+    compress = compresses_pages(fs) and not plain_tmp
     meta = PAGE_META | (GZIP_META if compress else {})
     try:
         with fs.open_output_stream(tmp, metadata=meta) as out:
@@ -178,6 +182,12 @@ def stream_latest_page(
     El render va a un temporal en el directorio del día, cuyo padre sí cae bajo el
     prefijo, y de ahí se copia por bloques a la raíz (O(bloque) en RAM); el temporal
     se borra siempre. En disco local no hay permisos por prefijo y `move` es atómico.
+
+    Restricción (ITSC-320): GCS descomprime al servir un objeto con `Content-Encoding:
+    gzip` si el cliente no pide gzip, y Arrow no lo pide; releerlo para copiarlo
+    entrega bytes planos. Por eso el temporal va plano y sin etiqueta, y la copia a la
+    raíz comprime al vuelo con los mismos parámetros que la página del día: el
+    resultado es byte a byte el `index.html` del día, sin depender de cómo sirva GCS.
     """
 
     def publish(tmp: str) -> None:
@@ -185,13 +195,22 @@ def stream_latest_page(
         if isinstance(fs, pafs.LocalFileSystem):
             fs.move(tmp, dest)
             return
-        with fs.open_output_stream(dest, metadata=PAGE_META | GZIP_META) as out:
+        with (
+            fs.open_output_stream(dest, metadata=PAGE_META | GZIP_META) as out,
+            gzip_to(out) as gz,
+        ):
             for block in read_blocks(fs, tmp):
-                out.write(block)
+                gz.write(block)
         fs.delete_file(tmp)
 
     _publish_page(
-        fs, f"{directory}/{LATEST_PAGE_FILE}.tmp", index, arrays, template, publish
+        fs,
+        f"{directory}/{LATEST_PAGE_FILE}.tmp",
+        index,
+        arrays,
+        template,
+        publish,
+        plain_tmp=True,
     )
 
 
@@ -445,20 +464,22 @@ def _advance_latest(
     write_latest_page: Callable[[], None] | None = None,
     *,
     only_if_stale: bool = False,
+    page_is_copy: bool = True,
 ) -> None:
     """Escribe `latest.json` y `latest.html` si el día no es anterior al que apunta.
 
     `latest.html` es la copia de la página del día (`write_latest_page` la vuelve a
     renderizar: así no se guarda la página entre una escritura y la otra); va
     primero para que el puntero no apunte a una página que todavía no existe. Con
-    `only_if_stale` no hace nada si `latest.json` ya dice lo mismo que el índice.
+    `only_if_stale` no hace nada si `latest.json` ya dice lo mismo que el índice y
+    `latest.html` es copia de la página del día (`page_is_copy`, ITSC-320).
     """
     series = {k: index[k] for k in ("provider", "market", "asset")}
     current = _read_latest(fs, base, series)
     latest = {name: index[name] for name in LATEST_FIELDS}
     if current is not None and current["day"] > index["day"]:
         return
-    if only_if_stale and current == latest:
+    if only_if_stale and current == latest and page_is_copy:
         return
     _discard_legacy_tmp(fs, base)
     if write_latest_page is not None:
@@ -498,7 +519,22 @@ def advance_latest_from_files(root: str | Path, index: dict) -> None:
             fs, base, directory, index, day_blocks(fs, directory, index), None
         ),
         only_if_stale=True,
+        page_is_copy=latest_page_is_copy(fs, base, directory),
     )
+
+
+def latest_page_is_copy(fs: pafs.FileSystem, base: str, directory: str) -> bool:
+    """Si `latest.html` pesa lo mismo que la página del día (y por tanto es su copia).
+
+    Ambas se comprimen igual (`gzip_to`), así que la misma plantilla y los mismos
+    archivos dan los mismos bytes. Un `latest.html` que llegó plano con etiqueta gzip
+    (ITSC-320) pesa el doble: no coincide y `latest` se rehace. `get_file_info` da el
+    tamaño almacenado, sin transcodificar. Falta alguna de las dos: no es copia.
+    """
+    latest = fs.get_file_info(f"{base}/{LATEST_PAGE_FILE}")
+    page = fs.get_file_info(f"{directory}/{PAGE_FILE}")
+    both = latest.type == page.type == pafs.FileType.File
+    return both and latest.size == page.size
 
 
 def read_index(

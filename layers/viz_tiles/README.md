@@ -248,6 +248,14 @@ padre) y el temporal se borra siempre, también si falla. Un día al día avanza
 si estaba atrasado, y se borra el `tiles/latest.html.tmp` huérfano de antes (TRD-viz
 ADR-VZ-10, ITSC-318).
 
+Restricción (ITSC-320): **ningún objeto etiquetado `Content-Encoding: gzip` se relee con
+Arrow para copiarlo.** GCS lo descomprime al servirlo si el cliente no pide gzip, y el
+`GcsFileSystem` de Arrow no lo pide; el resultado sería un `latest.html` plano con
+etiqueta gzip, que el navegador no abre. Por eso el temporal de `latest.html` va plano y
+sin etiqueta, y la copia a la raíz lo comprime al vuelo (`gzip_to`) con la etiqueta
+gzip: `latest.html` es byte a byte el `index.html` del día. Si su tamaño no coincide con
+el de la página del día, el job lo rehace aunque `latest.json` ya apunte al día.
+
 ## Imagen
 
 ```bash
