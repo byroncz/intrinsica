@@ -186,8 +186,10 @@ decodificados ([TRD-viz §7.4](../../docs/TRD/viz.md#74-lo-que-el-navegador-deri
   a qué hora; rótulo «θ que confirman».
 - **Franjas del θ activo**, dibujadas desde `events.bin` en los instantes exactos
   de cada evento a cualquier zoom: confirmación tenue y fina, overshoot intenso y
-  grueso, y una línea del color del evento en cada confirmación (no hay línea de
-  extremo: el cambio de color entre franjas ya lo marca). Donde varios eventos
+  grueso. Sobre el precio, un triángulo en el tick exacto de cada extremo (sólido) y
+  de cada confirmación (hueco), solo en los eventos cuya franja es al menos tan ancha
+  como el triángulo (no hay línea de confirmación ni de extremo: el cambio de color
+  y de grosor entre franjas ya los marca). Donde varios eventos
   enteros caen en un mismo píxel, una marca gris con el número («4 eventos»);
   `DENSE_PX` fija el ancho de ese píxel.
 - **Navegación**: «Evento anterior» y «Evento siguiente» desplazan la vista a la
@@ -228,7 +230,7 @@ construir. Un día cierra cuando los ticks pasan al siguiente. Cada lote se codi
 en varint dentro del tramo en curso de `ticks.bin` (hasta 65 536 ticks, ≈ 330 KB);
 cuando el tramo se llena se escribe al objeto y se suelta, así que los bytes del día
 nunca viven en RAM. Los `events.parquet` se leen una vez por mes y quedan como arreglos
-de NumPy (41 B por evento). En RAM: un row group, un tramo de ticks y los eventos del
+de NumPy (49 B por evento). En RAM: un row group, un tramo de ticks y los eventos del
 mes. La página sale en streaming a un temporal que se renombra al terminar (`render_day_to`,
 gzip en streaming; si falla a medias, la página vigente queda intacta) y lee
 `ticks.bin` de vuelta por bloques de 1 MB: ni la página ni un archivo del día están
