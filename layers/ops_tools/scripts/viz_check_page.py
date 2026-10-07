@@ -1,4 +1,4 @@
-"""Invariantes de un día de viz: `ticks.bin`, `events.bin` e `index.json` cuadran.
+"""Herramienta local. Invariantes de un día de viz: `ticks.bin`, `events.bin` e `index.json` cuadran.
 
 Comprueba, sin leer L1 ni L2, lo que el contrato del día promete (TRD-viz §7.2,
 §7.3 y §7.5) y que la vista da por hecho:
@@ -33,9 +33,11 @@ Imprime hasta 50 líneas `FALLO <código>: <detalle>`. Última línea:
 `día AAAA-MM-DD: ticks=…; θ=…; eventos=…; fallos=…`. Sale con 1 si hay algún fallo.
 
 Solo lee. `index.html` y `latest.html` no se leen (van con `Content-Encoding: gzip` y
-Arrow los descomprimiría): solo se compara su tamaño guardado. La service account de
-`ops-script` aún no puede leer el bucket viz: con `gs://` corre desde Cloud Shell, o
-descarga el día y usa `--dir`.
+Arrow los descomprimiría): solo se compara su tamaño guardado.
+
+Dónde corre: `uv run` en local o con `gcloud` desde Cloud Shell. NO corre como
+`ops-script`: esa cuenta no tiene permiso sobre el bucket viz (solo `l1/` y `l2/`) y
+fallaría con 403. No es `viz_check_day.py` (el de `ops-script`, que valida L2 contra L1).
 """
 
 import argparse

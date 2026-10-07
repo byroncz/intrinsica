@@ -108,9 +108,9 @@ procesado:
   (warning) no detiene el día: anota cuántos hay (ítem 10 de TRD-viz §14).
 
 Un año completo son 365 líneas `sonda:` (366 en bisiesto). **Timeout de la
-tarea: 36 000 s** (10 h), fijado en el stack. Un año al techo de la proyección
-(≈ 14 min por mes) son ≈ 2,8 h: cabe con holgura. Si la pared real se acerca al
-timeout, no subas el tope por tu cuenta: anota y abre una card.
+tarea: 36 000 s** (10 h), fijado en el stack. Medido con 2025: **3 h 24 min**
+(≈ 17 min por mes), un tercio del tope. Si la pared real se acerca al timeout, no
+subas el tope por tu cuenta: anota y abre una card.
 
 Anota: URL del run, nombre de la ejecución de Cloud Run, tareas completadas y
 fallidas, inicio y fin, y los reintentos.
@@ -259,9 +259,10 @@ gcloud storage ls -l $T/latest.html \
 
 Las dos líneas deben dar **el mismo tamaño** (lo guardado, en gzip). Después, abre
 `tiles/latest.html` en el navegador: debe mostrar el día de `latest.json`. El mismo
-chequeo está en `viz_check_day.py` (`--tiles-root gs://intrinsica-dc-viz/tiles`
+chequeo está en `viz_check_page.py` (`--tiles-root gs://intrinsica-dc-viz/tiles`
 termina en `latest.html = index.html del <día>: <bytes> B` o en `FALLO
-latest_distinto`).
+latest_distinto`). Medido el 2026-10-07: `tiles/latest.html` pesa **3 660 213 B**,
+igual que el `index.html` del 2026-09-30 (la verificación de ITSC-320).
 
 ## Paso 5: encadenamiento mensual
 
@@ -322,103 +323,104 @@ Si el fallo es de un eslabón, el siguiente no corre: relanza **solo ese job** c
 
 ## Scripts de operación
 
-Versionados en [`layers/ops_tools/scripts/`](../../layers/ops_tools/scripts/), con
-pruebas en `layers/ops_tools/tests/test_viz_scripts.py` contra un día que escribe
-viz de verdad. Solo leen. **La service account de `ops-script` no tiene permiso
-sobre el bucket viz** (su IAM cubre `landing`, `dc-events`, `dq-findings`,
-`manifest` y `ops`), así que no pueden correr hoy con el job `ops-script` contra
-`gs://`: córrelos desde Cloud Shell, o descarga el día y usa `--dir`. Dar lectura a
-`viz/tiles/` a `ops-script` es un cambio del stack `ops`, fuera de esta card.
+Versionados en [`layers/ops_tools/scripts/`](../../layers/ops_tools/scripts/). Hay
+**dos pares con nombres parecidos y propósitos distintos**; no los confundas:
 
-- **`viz_check_day.py`**: los invariantes de un día (`ticks.bin` decodifica y suma
+| Script | Qué hace | Dónde corre |
+| --- | --- | --- |
+| `viz_check_day.py` | Valida L2 contra L1: invariantes de los eventos del mes, eventos y velas de una ventana, regla de columna. No lee tiles | `ops-script` |
+| `viz_probe_ticks.py` | Mide la codificación de un día de ticks. No lee tiles | `ops-script` |
+| `viz_check_page.py` | Valida los archivos del día de viz (`index.json`, `ticks.bin`, `events.bin`) y `latest.html` | **local** |
+| `viz_probe_page.py` | Mide `ticks.bin`, `events.bin` y la página guardada contra el presupuesto de 4 MB | **local** |
+
+**Los dos primeros son los originales** que corrieron en `ops-script-2r2fv` y en
+la sonda del 2026-10-06 (TRD-viz §14 ítem 17). **Estado: aún no están en el repo.**
+El arquitecto decidió versionarlos tal cual bajo esos nombres, pero los archivos no
+llegaron con el comentario de la card; hasta entonces solo existen en
+`gs://intrinsica-dc-ops/scripts/`. **Los dos últimos leen `tiles/` y
+la cuenta de `ops-script` no tiene permiso sobre el bucket viz** (su IAM cubre
+`l1/` y `l2/`: `landing`, `dc-events`, `dq-findings`, `manifest` y `ops`): como
+`ops-script` fallarían con 403. Corren con `uv run` en local o desde Cloud Shell con
+tu cuenta. Dar lectura a `viz/tiles/` a `ops-script` es un cambio del stack `ops`,
+fuera de esta card. Tienen pruebas en `layers/ops_tools/tests/test_viz_scripts.py`
+contra un día que escribe viz de verdad.
+
+- **`viz_check_page.py`**: los invariantes de un día (`ticks.bin` decodifica y suma
   lo del índice, `events.bin` pesa 25 B por evento, cada punto apunta a un tick
   con su mismo tiempo, la cadena de eventos cierra, `latest.html` pesa lo que la
   página del día).
 
   ```bash
-  python3 viz_check_day.py --dir dia/           # un día descargado
-  python3 viz_check_day.py --tiles-root gs://intrinsica-dc-viz/tiles --day 2026-09-30
+  uv run layers/ops_tools/scripts/viz_check_page.py --dir dia/    # un día descargado
+  uv run layers/ops_tools/scripts/viz_check_page.py --tiles-root gs://intrinsica-dc-viz/tiles --day 2026-09-30
   ```
 
   Termina en `día AAAA-MM-DD: ticks=…; θ=…; eventos=…; fallos=0` y código 0.
-- **`viz_probe_ticks.py`**: la sonda de bytes de los ticks de un día: bytes por
-  tick, por sección (crudos y en gzip), `ticks.bin` y `events.bin` en gzip y en
-  base64 más gzip, y, con `--tiles-root`, la página guardada contra el presupuesto
-  de 4 MB.
+- **`viz_probe_page.py`**: bytes por tick, por sección (crudos y en gzip),
+  `ticks.bin` y `events.bin` en gzip y en base64 más gzip, y, con `--tiles-root`, la
+  página guardada contra el presupuesto de 4 MB.
 
   ```bash
-  python3 viz_probe_ticks.py --tiles-root gs://intrinsica-dc-viz/tiles --day 2026-09-30 --page-budget-mb 4
+  uv run layers/ops_tools/scripts/viz_probe_page.py --tiles-root gs://intrinsica-dc-viz/tiles --day 2026-09-30 --page-budget-mb 4
   ```
 
-  Termina en `sonda ticks: día=… presupuesto=ok` o `excedido` (código 1).
-  Con `--dir`, sin `index.html` descargado, dice `sin_página`.
+  Termina en `sonda ticks: día=… presupuesto=ok` o `excedido` (código 1). Con
+  `--dir`, sin `index.html` descargado, dice `sin_página`.
 
-Para un día descargado (sin comillas: el shell expande las llaves; con
-`--tiles-root gs://` hace falta `python3 -m pip install --user pyarrow`):
+Con `--tiles-root gs://` hace falta `pyarrow` y credenciales (`gcloud auth
+application-default login` en local; en Cloud Shell ya están). Para un día
+descargado (sin comillas: el shell expande las llaves):
 
 ```bash
 mkdir dia && gcloud storage cp \
   gs://intrinsica-dc-viz/tiles/provider=binance/market=spot/asset=BTCUSDT/day=2026-09-30/{index.json,ticks.bin,events.bin} dia/
 ```
 
-**Copia a GCS.** Para dejarlos donde el humano los usa
-(`gs://intrinsica-dc-ops/scripts/`; el bucket tiene versionado, ver
-[operacion-ops](operacion-ops.md#trazabilidad-sin-git)):
+**Copia a GCS de los originales.** Los de `ops-script` viven en
+`gs://intrinsica-dc-ops/scripts/` (el bucket tiene versionado, ver
+[operacion-ops](operacion-ops.md#trazabilidad-sin-git)); el repo es la fuente y el
+bucket, la copia que el job lee. Tras cambiarlos en una card:
 
 ```bash
 gcloud storage cp layers/ops_tools/scripts/viz_check_day.py gs://intrinsica-dc-ops/scripts/viz_check_day.py
 gcloud storage cp layers/ops_tools/scripts/viz_probe_ticks.py gs://intrinsica-dc-ops/scripts/viz_probe_ticks.py
 ```
 
-> **Antes de copiar, ojo.** Los scripts con estos nombres que ya viven en
-> `gs://intrinsica-dc-ops/scripts/` (los de las mediciones del 2026-10-06 y del
-> análisis de ITSC-316) **no estaban en el repo** y el agente que versionó estos no
-> pudo leerlos. Estos son una reescritura contra el contrato (TRD-viz §7.3 y §7.5),
-> no una copia: `viz_probe_ticks.py` mide un `ticks.bin` ya escrito, y
-> `viz_check_day.py` valida los archivos del día de viz, no los eventos de L2 contra
-> L1 como el original. Para conservar los originales y compararlos:
->
-> ```bash
-> gcloud storage ls -a gs://intrinsica-dc-ops/scripts/viz_check_day.py   # generations
-> gcloud storage cp gs://intrinsica-dc-ops/scripts/viz_check_day.py viz_check_day.original.py
-> ```
->
-> Si los originales son lo que quieres versionar, súbelos a
-> `layers/ops_tools/scripts/` en una card y reemplaza estos.
+Los dos locales **no se copian** al bucket de `ops`: ahí no los puede leer nadie que
+los necesite y, como `ops-script` no accede a viz, un 403 no diría nada útil.
 
 ## Proyección del histórico
 
-Con lo medido en 2026-10-06, antes del año medido (TRD-viz §10):
+Antes del año medido (2026-10-06) y con él (2026-10-07):
 
-| Dato | Valor | Fuente |
-| --- | --- | --- |
-| Día del 2026-09-30 (948 740 ticks) | 29 s (era 5 s en la 2.0) | humano, 2026-10-06 |
-| Mes pesado (30 días a ese ritmo) | ≈ 14 min | 30 × 29 s |
-| Histórico: 110 meses | ≈ 25 h de job | 110 × 14 min |
-| vCPU-s y GiB-s del histórico a 4 vCPU / 4 GiB | ≈ 360 000 de cada uno | 25 h × 3 600 × 4 |
-| Cupo mensual gratis (compartido con L1 y L2) | 180 000 vCPU-s y 360 000 GiB-s | Cloud Run |
+| Dato | Antes (un día) | Medido (2025, 365 días) | Fuente |
+| --- | --- | --- | --- |
+| Pared por día | 29 s (2026-09-30, 948 740 ticks; era 5 s en la 2.0) | **31,2 s** (Σ `wall_s` 11 400 s ÷ 365) | humano |
+| Pared de la tarea | | 3 h 24 min, **≈ 17 min por mes** | humano |
+| Histórico: 110 meses | ≈ 25 h de job (110 × 14 min) | **≈ 31 h de job** (110 × 17 min) | cálculo |
+| vCPU-s y GiB-s del histórico a 4 vCPU / 4 GiB | ≈ 360 000 de cada uno | **≈ 450 000 de cada uno** (4 × 31 h × 3 600 s; el humano lo redondeó a ≈ 500 000) | cálculo |
+| Volumen del histórico (3 330 días) | ≈ 30 GB (cota de TRD-viz §10.3) | **≈ 42 GB** (12,5 MB por día) | cálculo |
+| Almacenamiento del histórico al mes | ≈ 0,6 USD | **≈ 0,9 USD** | cálculo |
+| Cupo mensual gratis (compartido con L1 y L2) | 180 000 vCPU-s y 360 000 GiB-s | igual | Cloud Run |
 
-**Es una cota alta**: supone que cada mes es tan pesado como septiembre de 2026 y
-los años anteriores tienen bastantes menos ticks por día. Aun así dice dos cosas
-que el año medido debe confirmar o corregir:
+**La cota de antes resultó baja, no alta.** Se creía que septiembre de 2026 era el
+mes más pesado y que los años anteriores tenían menos ticks por día. 2025 cuesta
+31 s por día, más que los 29 s del día de referencia, porque tiene días mucho más
+grandes que él (el 2025-10-10 trae 4 501 514 ticks, 4,7× los de 2026-09-30).
+Todo el histórico a ese ritmo es una estimación razonable, no una cota; los años
+anteriores a 2025 pueden bajarla, y solo medirlos lo dice. Lo que la medición
+confirma:
 
-1. **No cabe en un solo mes calendario del cupo**: ≈ 360 000 vCPU-s son 2× el cupo
-   de vCPU-s, y el resto lo gastan L1 y L2 (50 % en octubre de 2026). Lo que pase
-   del cupo cuesta 0,000018 USD por vCPU-s: ≈ 3,2 USD si todo el histórico cae en
-   un mes limpio. Repartir los rangos en dos o tres meses calendario lo deja en
-   cero (RVZ-04). Con Billing en la mano, elige cuántos rangos lanzar por mes.
+1. **No cabe en un solo mes calendario del cupo**: ≈ 450 000 vCPU-s son 2,5× el
+   cupo de vCPU-s, y L1 y L2 gastan parte del mismo cupo. **Repartir el backfill en
+   tres meses calendario** (≈ 150 000 vCPU-s al mes) lo deja dentro del cupo
+   gratis, siempre que L1 y L2 no consuman más de lo que sobra: lee Billing antes
+   de cada rango. Todo en un mes limpio costaría, de lista, ≈ 4,9 USD de vCPU-s y
+   ≈ 0,2 USD de GiB-s por lo que pase del cupo (0,000018 y 0,000002 USD por
+   vCPU-s y GiB-s); repartido, 0 (RVZ-04).
 2. **El costo lo domina la relectura de tramos**: con la 2.1.0, el 2026-09-30 pasó
    de 5 s a 29 s porque `first_at_price` relee de `ticks.bin` los tramos que
    contienen cada confirmación (TRD-viz §7.5). Triplica el costo del histórico.
-
-Tabla de proyección con lo medido del año (se llena al cerrar la card):
-
-| Medida | Año medido | Histórico proyectado |
-| --- | --- | --- |
-| Σ `wall_s` | _pendiente_ | _pendiente_ |
-| vCPU-s = GiB-s (×4) | _pendiente_ | _pendiente_ |
-| Costo de lista (0,000018 USD por vCPU-s + 0,000002 USD por GiB-s) | _pendiente_ | _pendiente_ |
-| Volumen de `tiles/` | _pendiente_ | _pendiente_ |
 
 **Pendiente (no es alcance de esta card): evaluar una card de eficiencia antes del
 backfill completo.** Tres palancas que la medición debe decidir, sin asumir
@@ -427,50 +429,119 @@ ninguna: evitar la relectura de tramos de `ticks.bin` en `first_at_price`
 los tramos que el job ya tiene en memoria); medir si 4 vCPU hacen falta (el
 proceso es de un solo hilo salvo Arrow, y facturar 1 vCPU dividiría los vCPU-s
 por 4); y dejar de escribir los binarios sueltos si `render` leyera los datos de
-la propia página (ítem 11 de TRD-viz §14).
+la propia página (ítem 11 de TRD-viz §14). El humano decide cuándo lanzar los demás
+rangos.
 
 ## Resultados
 
-Ejecutados por el humano; cada celda `_pendiente_` la llena la card al recibir las
-cifras (comentario en la card). Stack `viz` con 4 vCPU / 4 GiB e imagen
-`viz_tiles:1.1.1`.
+Ejecutados por el humano con el arquitecto el 2026-10-07; los números son los que
+reportaron en la card. Stack `viz` con 4 vCPU / 4 GiB e imagen `viz_tiles:1.1.1`.
 
 **Runs**
 
 | Paso | Run de Actions | Ejecución de Cloud Run | Rango | Días construidos / al día | Pared de la tarea | Reintentos |
 | --- | --- | --- | --- | --- | --- | --- |
-| Backfill del año medido | _pendiente_ | _pendiente_ | _pendiente_ | _pendiente_ | _pendiente_ | _pendiente_ |
-| Relanzar con los mismos inputs | _pendiente_ | _pendiente_ | igual | 0 / todos | _pendiente_ | _pendiente_ |
-| Encadenamiento (`l1-run-job`) | _pendiente_ | `l1-monthly-close-…`, `l2-monthly-…`, `viz-tiles-…` | mes anterior | _pendiente_ | _pendiente_ | _pendiente_ |
+| Backfill del año medido | 37570918667 | `viz-tiles-tc5gb` | 2025-01 a 2025-12 | 365 / 0 | 3 h 24 min (04:19 a 07:43 UTC) | 0 |
+| Relanzar con los mismos inputs | 37634503346 | `viz-tiles-j85kx` | igual | 0 / 365 | 10 min | 0 |
+| Encadenamiento (`l1-run-job`) | _pendiente del primer cierre real (noviembre)_ | `l1-monthly-close-…`, `l2-monthly-…`, `viz-tiles-…` | mes anterior | _pendiente_ | _pendiente_ | _pendiente_ |
 
-**Sonda del año medido** (del paso 2): Σ `wall_s`, máximo por día, `rss_mib` pico,
-Σ `ticks.bin` y Σ `index.html`: _pendiente_.
+El backfill no dejó **ningún hallazgo** fuera de `tiles_summary`. El relanzamiento
+confirma la idempotencia: saltó los 365 días, no escribió y, aun así, tardó 10 min
+por leer los metadatos de las entradas de cada día (RSS 154 MiB).
+
+**Sonda del año medido** (paso 2): Σ `wall_s` **11 400 s** (3,17 h); `rss_mib` pico
+**581 MiB** (de 4 GiB); páginas (`page_bytes`): media **5,0 MB**, mínima 1,20 MB,
+máxima **68,76 MB** (2025-10-10, 4 501 514 ticks); **179 días de 365 pesan más de
+4 MB y 25 más de 10 MB**. Los cinco mayores:
+
+| Día | Página en gzip |
+| --- | --- |
+| 2025-10-10 | 68,76 MB |
+| 2025-01-20 | 26,91 MB |
+| 2025-02-03 | 24,41 MB |
+| 2025-02-28 | 19,69 MB |
+| 2025-04-07 | 18,67 MB |
+
+El presupuesto de 4 MB (RNF-VZ-02) está medido y se cumple **solo para el
+2026-09-30** (3,66 MB). Más de 10 MB es el umbral que reabre ADR-VZ-14; 25 días de
+2025 lo superan. **La decisión sobre esos días no es de esta card**: va en una card
+aparte, que se abre con `task-create` (ver "Cards abiertas").
 
 **Costo**
 
 | Concepto | Valor |
 | --- | --- |
-| vCPU-s y GiB-s del rango (×4) | _pendiente_ |
-| Contra el cupo mensual (180 000 vCPU-s y 360 000 GiB-s, compartido con L1 y L2) | _pendiente_ |
-| Billing, Cloud Run, bruto / cupo / neto | _pendiente_ |
-| Billing, Cloud Storage del rango, bruto / cupo / neto | _pendiente_ |
-| Costo proyectado del histórico | _pendiente_ |
+| vCPU-s del rango (4 × Σ `wall_s`) | 45 600 calculados; **45 847,77** en Billing (coincide) |
+| GiB-s del rango | **46 807,77** en Billing (con 4 GiB, el mismo orden) |
+| Contra el cupo mensual (180 000 vCPU-s y 360 000 GiB-s, compartido con L1 y L2) | 25 % de los vCPU-s y 13 % de los GiB-s |
+| Billing, Cloud Run Jobs CPU us-east1 | bruto 2 756, cupo −2 756, **neto 0** |
+| Billing, Cloud Run Jobs Memory us-east1 | bruto 313, cupo −313, **neto 0** |
+| Billing, Cloud Storage Regional Standard, Clase A (1 303 operaciones) | bruto 22, neto 0 |
+| Billing, Cloud Storage Regional Standard, Clase B (8 404 operaciones) | bruto 11, neto 0 |
+| Billing, Artifact Registry (0,05 GiB-mes) | 0 |
+| Billing, almacenamiento GCS | aún no facturado (GB-mes se cobra al cierre del mes) |
+| **Total neto** | **0** |
+| Costo de lista del año (0,000018 USD por vCPU-s + 0,000002 USD por GiB-s) | ≈ 0,91 USD (45 600 vCPU-s y GiB-s) |
+| Costo proyectado del histórico | CPU y memoria: 0 si se reparte en tres meses (≈ 9 USD de lista); almacenamiento ≈ 0,9 USD al mes |
 
-**Volumen** (`gcloud storage du`): `tiles/` total _pendiente_; año medido
-_pendiente_ (por día _pendiente_) contra ≈ 9 MB por día y ≈ 9 GB (decisión) o ≈ 30 GB
-(TRD-viz §10.3) del histórico.
+Billing del 2026-10-06 y 07 (*Facturación → Informes*, CSV, moneda de la cuenta, el
+cupo gratis aparece en "Other savings"). Cuenta los dos días de las dos
+ejecuciones (backfill y relanzamiento) y no separa por job.
 
-**Métricas de la decisión de fidelidad** (último día disponible):
+**Volumen** (`gcloud storage du`):
 
-| Métrica | Criterio | 2026-10-06 (2026-09-30) | Esta card |
+| Medida | Valor | Contra lo estimado |
+| --- | --- | --- |
+| `tiles/` total | 4 840 908 461 B (≈ 4,84 GB) | |
+| Año 2025 | 4 561 622 351 B | |
+| Por día (÷ 365) | **12,5 MB** | ≈ 9 MB por día estimados (TRD-viz §10.3): **+39 %** |
+| Histórico (3 330 días) | **≈ 42 GB** | ≈ 9 GB (decisión, solo páginas) y ≈ 30 GB (cota con binarios) |
+| Almacenamiento del histórico al mes | **≈ 0,9 USD** | ≈ 0,20 USD (decisión) y ≈ 0,6 USD (cota) |
+
+Lo medido **no confirma ninguna de las dos cifras**: supera la de solo páginas
+(≈ 9 GB) y también la cota con binarios (≈ 30 GB). La causa es la media de página
+de 5,0 MB (frente a los 3,3 MB del 2026-09-30) por los días grandes. El costo sigue
+siendo bajo en términos absolutos, pero el presupuesto de TRD-viz §10.3 hay que
+corregirlo.
+
+**Métricas de la decisión de fidelidad** (Chrome, consola con `viz:`, día
+2026-09-30, medidas el 2026-10-06; es el último día disponible, así que no cambió
+nada para repetirlas el 2026-10-07):
+
+| Métrica | Criterio | Medido | ¿Cumple? |
 | --- | --- | --- | --- |
-| Apertura | < 5 s | 1,7 s | _pendiente_ |
-| Redibujo tras zoom | < 100 ms | 0,4 a 12 ms | _pendiente_ |
-| Cambio de θ | < 100 ms | < 2 ms | _pendiente_ |
-| Página en gzip, 2026-09-30 | ≤ 4 MB | 3,66 MB | _pendiente_ |
+| Apertura (primer trazo desde la navegación) | < 5 s | 1 671,9 ms | sí |
+| Ticks decodificados (informativa) | | 41,3 ms (948 740 ticks) | |
+| Redibujo tras zoom | < 100 ms | 0,4 a 11,2 ms | sí |
+| Cambio de θ | < 100 ms | 0,4 a 1,6 ms | sí |
+| Página en gzip, 2026-09-30 | ≤ 4 MB | 3,66 MB | sí |
 
-**`latest`**: tamaños de `latest.html` e `index.html` del día de `latest.json`:
-_pendiente_. **Encadenamiento**: nombres de las tres ejecuciones y su estado:
-_pendiente_.
+Las cuatro cumplen, así que esta card no abre una card por incumplimiento. Pero
+ninguna se midió en otro día: **el 2025-10-10 (68,76 MB, 4 501 514 ticks)
+no se abrió en el navegador**, y a ese tamaño la apertura y la decodificación no
+tienen evidencia. Eso queda a la card de los días mayores de 10 MB.
+
+**`latest`**: `tiles/latest.html` pesa **3 660 213 B**, igual que el `index.html` del
+2026-09-30 al que apunta `latest.json` (verificación de ITSC-320).
+
+**Encadenamiento**: **no se probó**. Forzar `monthly-close` hoy relanzaría
+`l2-monthly` sobre 2026-09, que ya está procesado: es el fallo de `l2-monthly-xdtrf`
+del 2026-09-30 (creador `l1-workflow`, código 1 en 60 s). Queda pendiente del primer
+cierre real (noviembre de 2026): con L1 ya publicado, se lanza el comando del paso
+5 y se anotan aquí los nombres de las tres ejecuciones y su estado. La lectura de
+una ejecución fallida (`describe` más `logging read` con `jsonPayload.message`) está
+documentada arriba.
+
+## Cards abiertas
+
+Lo que esta medición deja fuera de la card, con el motivo:
+
+- **Días de más de 10 MB** (25 de 2025; umbral de reapertura de ADR-VZ-14):
+  decisión de fondo sobre la fidelidad frente al tamaño de página.
+- **Eficiencia de `first_at_price`** (TRD-viz §14 ítem 19): 31 s por día, triplica el
+  costo y obliga a repartir el backfill en tres meses.
+- **Primer encadenamiento real** (noviembre de 2026): registrar las tres ejecuciones.
+- **Originales de `viz_check_day.py` y `viz_probe_ticks.py`** en el repo (ver
+  "Scripts de operación").
 
 La entrada consolidada de la Épica la escribe `task-close.sh` al cerrarla.

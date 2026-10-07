@@ -1,4 +1,4 @@
-"""Los scripts de viz de `layers/ops_tools/scripts/` contra un día que escribe viz de verdad.
+"""Las herramientas locales de viz de `layers/ops_tools/scripts/` (`viz_check_page.py`, `viz_probe_page.py`) contra un día que escribe viz de verdad.
 
 El día sale de correr `viz_tiles` sobre el lago de fixtures de su capa (L1 y L2 reales de
 2017-08, 5 θ), así los invariantes se prueban contra lo que el job escribe y no contra lo
@@ -56,8 +56,8 @@ def edit_events(
     path.write_bytes(raw)
 
 
-def test_check_day_pasa_con_lo_que_escribe_viz(day, capsys):
-    check = load("viz_check_day")
+def test_check_page_pasa_con_lo_que_escribe_viz(day, capsys):
+    check = load("viz_check_page")
     assert check.main(["--tiles-root", str(day)]) == 0
     index = json.loads((day_dir(day) / "index.json").read_text())
     events = sum(t["events"] for t in index["thetas"])
@@ -66,63 +66,63 @@ def test_check_day_pasa_con_lo_que_escribe_viz(day, capsys):
     )
 
 
-def test_check_day_con_dir_y_sin_latest(day, capsys):
-    check = load("viz_check_day")
+def test_check_page_con_dir_y_sin_latest(day, capsys):
+    check = load("viz_check_page")
     assert check.main(["--dir", str(day_dir(day))]) == 0
     assert "latest" not in capsys.readouterr().out
 
 
-def test_check_day_latest_coincide_con_la_pagina(day, capsys):
+def test_check_page_latest_coincide_con_la_pagina(day, capsys):
     (day / "latest.html").write_bytes((day_dir(day) / "index.html").read_bytes())
-    check = load("viz_check_day")
+    check = load("viz_check_page")
     assert check.main(["--tiles-root", str(day), "--day", DAY]) == 0
     assert "latest.html = index.html del 2017-08-18" in capsys.readouterr().out
 
 
-def test_check_day_latest_distinto(day, capsys):
+def test_check_page_latest_distinto(day, capsys):
     (day / "latest.html").write_bytes(b"otra cosa")
-    check = load("viz_check_day")
+    check = load("viz_check_page")
     assert check.main(["--tiles-root", str(day)]) == 1
     assert "FALLO latest_distinto" in capsys.readouterr().out
 
 
-def test_check_day_ticks_truncados(day, capsys):
+def test_check_page_ticks_truncados(day, capsys):
     path = day_dir(day) / "ticks.bin"
     path.write_bytes(path.read_bytes()[:-3])
-    check = load("viz_check_day")
+    check = load("viz_check_page")
     assert check.main(["--tiles-root", str(day)]) == 1
     assert "FALLO ticks_dañado" in capsys.readouterr().out
 
 
-def test_check_day_tamano_de_events(day, capsys):
+def test_check_page_tamano_de_events(day, capsys):
     path = day_dir(day) / "events.bin"
     path.write_bytes(path.read_bytes()[:-1])
-    check = load("viz_check_day")
+    check = load("viz_check_page")
     assert check.main(["--tiles-root", str(day)]) == 1
     assert "FALLO events_tamano" in capsys.readouterr().out
 
 
-def test_check_day_un_tick_que_no_es_el_del_evento(day, capsys):
+def test_check_page_un_tick_que_no_es_el_del_evento(day, capsys):
     # La confirmación del primer evento apunta a otro tick: su tiempo ya no coincide.
     path = day_dir(day) / "events.bin"
     raw = path.read_bytes()
     n = len(raw) // 25
     first = struct.unpack_from("<I", raw, 4 * n * 4)[0]
     edit_events(day, 4, 0, first + 1_000, "<I")
-    check = load("viz_check_day")
+    check = load("viz_check_page")
     assert check.main(["--tiles-root", str(day)]) == 1
     out = capsys.readouterr().out
     assert "FALLO tick_no_coincide" in out or "FALLO ticks_desordenados" in out
 
 
-def test_check_day_un_tiempo_fuera_del_dia(day, capsys):
+def test_check_page_un_tiempo_fuera_del_dia(day, capsys):
     edit_events(day, 1, 0, 86_400_001)
-    check = load("viz_check_day")
+    check = load("viz_check_page")
     assert check.main(["--tiles-root", str(day)]) == 1
     assert "FALLO tiempo_fuera_del_dia" in capsys.readouterr().out
 
 
-def test_check_day_cadena_rota(day, capsys):
+def test_check_page_cadena_rota(day, capsys):
     # El extremo del primer evento deja de ser la referencia del segundo.
     index = json.loads((day_dir(day) / "index.json").read_text())
     theta = next(t for t in index["thetas"] if t["events"] >= 2)
@@ -132,13 +132,13 @@ def test_check_day_cadena_rota(day, capsys):
     at = theta["events_offset"]
     ext = struct.unpack_from("<i", raw, 4 * n * 2 + 4 * at)[0]
     edit_events(day, 2, at, ext + 1)
-    check = load("viz_check_day")
+    check = load("viz_check_page")
     assert check.main(["--tiles-root", str(day)]) == 1
     assert "FALLO cadena_rota" in capsys.readouterr().out
 
 
-def test_probe_ticks_mide_el_dia(day, capsys):
-    probe = load("viz_probe_ticks")
+def test_probe_page_mide_el_dia(day, capsys):
+    probe = load("viz_probe_page")
     assert probe.main(["--tiles-root", str(day)]) == 0
     out = capsys.readouterr().out.splitlines()
     raw = (day_dir(day) / "ticks.bin").read_bytes()
@@ -156,15 +156,15 @@ def test_probe_ticks_mide_el_dia(day, capsys):
     assert out[-1].endswith("presupuesto=ok")
 
 
-def test_probe_ticks_presupuesto_excedido(day, capsys):
-    probe = load("viz_probe_ticks")
+def test_probe_page_presupuesto_excedido(day, capsys):
+    probe = load("viz_probe_page")
     assert probe.main(["--dir", str(day_dir(day)), "--page-budget-mb", "0.001"]) == 1
     assert last_line(capsys).endswith("presupuesto=excedido")
 
 
-def test_probe_ticks_dañado(day, capsys):
+def test_probe_page_dañado(day, capsys):
     path = day_dir(day) / "ticks.bin"
     path.write_bytes(path.read_bytes()[:-3])
-    probe = load("viz_probe_ticks")
+    probe = load("viz_probe_page")
     assert probe.main(["--dir", str(day_dir(day))]) == 1
     assert "FALLO ticks_dañado" in capsys.readouterr().out
