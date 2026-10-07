@@ -925,7 +925,7 @@
   };
 
   // El tooltip de un triángulo: el evento, el punto, la hora al ms, el precio del tick y, si el instante
-  // tiene más de un tick, cuál es.
+  // tiene más de un tick, cuál es (y, en la confirmación, dónde cierra L2 el grupo).
   function triangleLines(pt) {
     var tr = activeBlock();
     var fl = ev.flags[pt.e];
@@ -938,7 +938,11 @@
       clockMs(t, 3) + " UTC",
       "precio " + fixed(ticks.p[pt.tick] / scale),
     ];
-    if (same > 1) lines.push("tick " + (pt.tick - first + 1) + " de " + same + " en este ms");
+    if (same > 1) {
+      var which = "tick " + (pt.tick - first + 1) + " de " + same + " en este ms";
+      // La confirmación es el tick del instante con el precio de confirmación; L2 cierra el grupo en el último.
+      lines.push(pt.kind === "confirm" ? which + "; L2 cierra el grupo en el tick " + same : which);
+    }
     return lines;
   }
 

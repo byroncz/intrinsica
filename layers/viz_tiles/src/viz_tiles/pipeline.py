@@ -58,6 +58,7 @@ from viz_tiles.ticks import (
     DayTicks,
     PriceUnrepresentable,
     TicksAccumulator,
+    TicksReader,
     day_start_us,
 )
 from viz_tiles.write import (
@@ -66,6 +67,7 @@ from viz_tiles.write import (
     advance_latest_from_files,
     day_sizes,
     find_index,
+    open_ticks_reader,
     write_day,
 )
 
@@ -228,7 +230,15 @@ class _Month:
                 )
             )
         events = EventsBuffer()
-        thetas = [self._theta_events(state, day, ticks, events) for state in self.ready]
+        # La confirmación de cada evento apunta a su tick releyendo tramos del
+        # `ticks.bin` ya escrito, de uno en uno: el día no se retiene.
+        with open_ticks_reader(
+            ctx.tiles_root, ctx.provider, ctx.market, ctx.asset, day, ticks
+        ) as reader:
+            thetas = [
+                self._theta_events(state, day, ticks, reader, events)
+                for state in self.ready
+            ]
         write_day(
             ctx.tiles_root,
             provider=ctx.provider,
@@ -265,6 +275,7 @@ class _Month:
         state: ThetaMonth,
         day: date,
         ticks: DayTicks,
+        reader: TicksReader,
         buffer: EventsBuffer,
     ) -> ThetaEvents:
         # Los eventos que tocan el día son los de ids entre su primer y su último tick.
@@ -282,6 +293,7 @@ class _Month:
             provisional_from_s is not None,
             day_start_us(day),
             ticks,
+            reader,
         )
         del events  # las filas del θ ya son los bytes de `events.bin`
         buffer.add(rows)

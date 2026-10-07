@@ -692,7 +692,7 @@ las banderas al final, así cada sección queda alineada para `Int32Array` y
 | confirmación | int32 | Lo mismo, del tick de confirmación (`confirm_time`) |
 | extremo | int32 | Lo mismo, del tick extremo; en la cola pendiente, el candidato vigente |
 | `reference_tick` | uint32 | Posición en `ticks.bin` (0 es el primer tick del día) del tick de referencia |
-| `confirm_tick` | uint32 | Lo mismo, del tick de confirmación |
+| `confirm_tick` | uint32 | Lo mismo, del tick de confirmación: el primero de su instante con el `confirm_price` de L2, no el último del grupo de empate |
 | `extreme_tick` | uint32 | Lo mismo, del tick extremo; en la cola pendiente, el del candidato vigente si cae en el día |
 | banderas | uint8 | Suma de bits de la tabla siguiente |
 
@@ -711,12 +711,13 @@ anterior al primero (`first_agg_trade_id` y `last_agg_trade_id` del índice).
 su posición en `ticks.bin`: `id − first_agg_trade_id` mientras los ids son
 consecutivos, y descontando los huecos de `agg_trade_id` que el proveedor tenga
 dentro del día. El navegador nunca ve ids: lee la posición y toma tiempo, precio y
-cantidad de los arreglos de `ticks.bin` ya decodificados. `confirm_tick` apunta al
-`confirm_agg_trade_id`, el **último tick del grupo de empate** (ADR-L2-03): si ese
-grupo trae ticks de precio distinto en el mismo instante, el precio del tick puede ser
-otro que el `confirm_price` de L2 (el del primer tick que cruzó), que sigue siendo el
-precio de un tick del mismo instante. La referencia y el extremo siempre coinciden con el
-precio de L2. Un punto que cae fuera del día (el que lleva la bandera de recorte) lleva el
+cantidad de los arreglos de `ticks.bin` ya decodificados. `reference_tick` y `extreme_tick` apuntan al tick de su `agg_trade_id`, que siempre
+coincide con el precio de L2. `confirm_tick` no apunta al `confirm_agg_trade_id`, que es el
+**último tick del grupo de empate** (ADR-L2-03) y puede tener otro precio que el
+`confirm_price` de L2 (el del primer tick que cruzó): apunta al primer tick del mismo
+instante cuyo precio es `confirm_price`, así que su `agg_trade_id` es menor o igual que
+`confirm_agg_trade_id` y el triángulo de la vista queda en el instante y el precio de la
+confirmación (TRD-viz §7.5). Un punto que cae fuera del día (el que lleva la bandera de recorte) lleva el
 centinela `0xFFFFFFFF`. Un id
 dentro del día que no es un tick suyo es un error de entrada: la corrida falla y el día queda sin `index.json`.
 

@@ -7,6 +7,7 @@ y `events_v0.csv` del fixture, con enteros y listas de Python.
 import io
 import itertools
 import json
+from dataclasses import replace
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
@@ -31,7 +32,13 @@ from viz_tiles.contract import (
     price_scale,
 )
 from viz_tiles.events import EventRows, EventsBuffer, event_rows
-from viz_tiles.ticks import DayTicks, day_start_us, decode_ticks, encode_day
+from viz_tiles.ticks import (
+    DayTicks,
+    TicksReader,
+    day_start_us,
+    decode_ticks,
+    encode_day,
+)
 from viz_tiles.write import ThetaEvents, write_day
 
 SCALE = price_scale("BTCUSDT")
@@ -91,15 +98,15 @@ def oracle_rows(theta: int, pending: dict) -> list[tuple[int, int, int, int]]:
     return rows
 
 
-def oracle_points(theta: int, pending: dict) -> list[tuple[tuple[int, str], ...]]:
-    """Por evento, `((agg_trade_id, precio), …)` de referencia, confirmación y extremo en L2.
+def oracle_points(theta: int, pending: dict) -> list[tuple[tuple[int, str, int], ...]]:
+    """Por evento, `((agg_trade_id, precio, tiempo µs), …)` de referencia, confirmación y extremo en L2.
 
     Sale de `events_v0.csv`; el extremo de la cola pendiente es el candidato del carry-over.
     """
     *closed, last = read_events()[theta]
     out = [
         tuple(
-            (int(r[f"{p}_agg_trade_id"]), r[f"{p}_price"])
+            (int(r[f"{p}_agg_trade_id"]), r[f"{p}_price"], int(r[f"{p}_time"]))
             for p in ("reference", "confirm", "extreme")
         )
         for r in closed
@@ -107,9 +114,17 @@ def oracle_points(theta: int, pending: dict) -> list[tuple[tuple[int, str], ...]
     top = pending["extreme"]
     out.append(
         (
-            (int(last["reference_agg_trade_id"]), last["reference_price"]),
-            (int(last["confirm_agg_trade_id"]), last["confirm_price"]),
-            (top["id"], str(top["price"])),
+            (
+                int(last["reference_agg_trade_id"]),
+                last["reference_price"],
+                int(last["reference_time"]),
+            ),
+            (
+                int(last["confirm_agg_trade_id"]),
+                last["confirm_price"],
+                int(last["confirm_time"]),
+            ),
+            (top["id"], str(top["price"]), int(top["time"])),
         )
     )
     return out
@@ -147,29 +162,26 @@ def test_events_file_has_the_exact_rows_of_every_theta(built):
 
 
 def test_every_event_point_round_trips_to_its_tick(built):
-    """Ida y vuelta (TRD-viz §7.5): la posición apunta al tick con el id de L2.
+    """Ida y vuelta (TRD-viz §7.5): la posición apunta a un tick con el instante y el precio de L2.
 
-    La referencia y el extremo tienen además el precio del evento. La confirmación apunta al
-    último tick del grupo de empate (`confirm_agg_trade_id`, ADR-L2-03), cuyo precio puede ser
-    otro que el `confirm_price` de L2, que es el del primer tick que cruzó: ese precio sigue
-    siendo el de un tick del mismo instante.
+    La referencia y el extremo son el tick de su `agg_trade_id`. La confirmación es el primer
+    tick del grupo de empate con el `confirm_price` de L2, así que su id es menor o igual que
+    `confirm_agg_trade_id` (el último del grupo, ADR-L2-03): el triángulo queda en el instante y
+    el precio de la confirmación.
     """
     directory, index, ticks, pending = built
     sections = read_sections(directory, index)
     day_ticks = decode_ticks(
         (directory / index["ticks_file"]).read_bytes(), index["ticks"]
     )
-    by_time: dict[int, set[Decimal]] = {}
-    for tick in ticks:
-        by_time.setdefault(tick["time"], set()).add(tick["price"])
-    checked = tie_groups = 0
+    checked = moved = 0
     for doc in index["thetas"]:
         theta = int(doc["theta"].split(".")[1])
         lo, hi = doc["events_offset"], doc["events_offset"] + doc["events"]
         points = oracle_points(theta, pending[theta])
         assert len(points) == hi - lo
         for k, row in enumerate(points):
-            for name, ms, (agg_id, price) in zip(
+            for name, ms, (agg_id, price, time) in zip(
                 ("ref", "confirm", "extreme"),
                 (sections["ref"], sections["confirm"], sections["extreme"]),
                 row,
@@ -178,20 +190,31 @@ def test_every_event_point_round_trips_to_its_tick(built):
                 position = int(sections[f"{name}_tick"][lo + k])
                 assert position != TICK_OUTSIDE
                 tick = ticks[position]
-                assert tick["id"] == agg_id, (doc["theta"], k, name)
-                # La posición apunta también al tick de `ticks.bin`: mismo precio y mismo ms.
+                where = (doc["theta"], k, name)
+                # El tick apuntado comparte instante y precio con el evento de L2.
+                assert tick["time"] == time, where
+                assert tick["price"] == Decimal(price), where
+                # Y es también el de `ticks.bin`: mismo precio y mismo ms.
                 assert day_ticks.price[position] == int(tick["price"] * SCALE)
                 assert day_ticks.time_ms[position] == ms[lo + k]
-                if name == "confirm" and tick["price"] != Decimal(price):
-                    tie_groups += 1
-                    assert Decimal(price) in by_time[tick["time"]]
-                else:
-                    assert tick["price"] == Decimal(price), (doc["theta"], k, name)
+                if name != "confirm":
+                    assert tick["id"] == agg_id, where
+                    checked += 1
+                    continue
+                assert tick["id"] <= agg_id, where
+                # El primero del grupo con ese precio, no uno posterior.
+                first = next(
+                    t["id"]
+                    for t in ticks
+                    if t["time"] == time and t["price"] == Decimal(price)
+                )
+                assert tick["id"] == first, where
+                moved += tick["id"] != agg_id
                 checked += 1
     assert checked == 3 * sum(t["events"] for t in index["thetas"])
     assert (
-        tie_groups > 0
-    )  # el fixture sí trae confirmaciones con empates de precio distinto
+        moved > 0
+    )  # el fixture sí trae confirmaciones cuyo último tick del grupo tiene otro precio
 
 
 def test_the_extreme_tick_of_an_event_is_the_reference_tick_of_the_next(built):
@@ -604,3 +627,38 @@ def test_the_acceptance_points_are_the_exact_ticks_in_their_shared_milliseconds(
     # Los siete eventos se encadenan: el extremo de uno es la referencia del siguiente.
     sl = slice(first, first + 7)
     assert s["extreme_tick"][sl][:-1].tolist() == s["ref_tick"][sl][1:].tolist()
+
+
+def test_event_rows_point_the_confirmation_at_the_tick_with_the_confirm_price():
+    """Con `reader`, la confirmación va al tick del instante que tiene el `confirm_price` de L2."""
+    # Ids 1 a 6: el segundo 3 trae tres ticks, ids 3 (100), 4 (110) y 5 (100); L2 da id 5.
+    rows = [
+        (1, 1, 90, 1),
+        (2, 2, 95, 1),
+        (3, 3, 100, 1),
+        (4, 3, 110, 1),
+        (5, 3, 100, 1),
+        (6, 4, 99, 1),
+    ]
+    out = io.BytesIO()
+    day_ticks = encode_day([ticks_batch(DAY_DATE, rows)], DAY_DATE, SCALE, out)
+    data = out.getvalue()
+    reader = TicksReader(day_ticks, lambda offset, size: data[offset : offset + size])
+    table = month_events(DAY_DATE, (1, 5, 6, 1, 1.0, 3.0, 4.0))
+    scaled = 10**8
+    for price, position in ((110, 3), (100, 2)):
+        events = replace(table, confirm_price=np.array([price * scaled], np.int64))
+        assert event_rows(events, None, False, T0, day_ticks).confirm_tick.tolist() == [
+            4
+        ]
+        moved = event_rows(events, None, False, T0, day_ticks, reader)
+        assert moved.confirm_tick.tolist() == [position]
+        # La referencia y el extremo siguen en el tick de su `agg_trade_id`.
+        assert (moved.reference_tick[0], moved.extreme_tick[0]) == (0, 5)
+    # El pendiente también: sin su precio de confirmación no se puede apuntar.
+    tail = PendingEvent(2, 5, 6, -1, T0 + 2_000_000, T0 + 3_000_000, T0 + 4_000_000)
+    with pytest.raises(ValueError, match="precio de su confirmación"):
+        event_rows(month_events(DAY_DATE), tail, False, T0, day_ticks, reader)
+    tail = replace(tail, confirm_price=110 * scaled)
+    pending = event_rows(month_events(DAY_DATE), tail, False, T0, day_ticks, reader)
+    assert pending.confirm_tick.tolist() == [3]

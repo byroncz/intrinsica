@@ -1239,7 +1239,8 @@ def test_the_triangle_tooltip_names_the_event_the_point_the_time_the_price_and_t
         "confirmación",
         "12:40:26.943 UTC",
         "precio 84601.13",
-        "tick 2 de 3 en este ms",
+        # Es el tick con el precio de confirmación; L2 cierra el grupo en el último del instante.
+        "tick 2 de 3 en este ms; L2 cierra el grupo en el tick 3",
     ]
     assert up[0] == "θ 0.05000000 · evento 3 / 7 · alza"
     assert up[1:] == [
@@ -1250,7 +1251,7 @@ def test_the_triangle_tooltip_names_the_event_the_point_the_time_the_price_and_t
     ]
     # Un instante con dos ticks (el de fondo y el primero de los de 0,1 s) lo dice también.
     assert start[1:3] == ["confirmación", "12:40:26.000 UTC"]
-    assert start[-1] == "tick 1 de 2 en este ms"
+    assert start[-1] == "tick 1 de 2 en este ms; L2 cierra el grupo en el tick 2"
     # Lejos de un triángulo, el tooltip sigue siendo el del píxel.
     away = view(flash, *flags, "--hover", f"price@{FLASH + 0.6}@2@20")["hovers"][0]
     assert "precio" in away["tooltip"] and "extremo (" not in away["tooltip"]

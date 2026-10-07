@@ -1,6 +1,7 @@
 import base64
 import hashlib
 from datetime import date
+from decimal import Decimal
 
 import numpy as np
 import pyarrow as pa
@@ -20,6 +21,8 @@ from viz_tiles.lake import (
 )
 
 DAY = date(2017, 8, 18)
+DEC = pa.decimal128(18, 8)
+EMPTY_TYPES = {"direction": pa.int8(), "confirm_price": DEC}
 
 
 def test_crc32c_of_a_local_file_matches_the_standard_vector(tmp_path):
@@ -133,6 +136,10 @@ def test_read_month_events_reads_each_row_group_once_and_keeps_every_event(
             int(r[f"{name}_time"]) for r in rows
         ]
     assert events.direction.tolist() == [int(r["direction"]) for r in rows]
+    # El precio de la confirmación llega en enteros de 10⁻⁸, sin pasar por `float`.
+    assert events.confirm_price.tolist() == [
+        int(Decimal(r["confirm_price"]).scaleb(8)) for r in rows
+    ]
 
 
 def test_touching_keeps_the_events_that_reach_the_ticks_of_a_day():
@@ -144,6 +151,7 @@ def test_touching_keeps_the_events_that_reach_the_ticks_of_a_day():
         confirm_time=np.arange(4, dtype=np.int64),
         extreme_time=np.arange(4, dtype=np.int64),
         direction=np.array([1, -1, 1, -1], np.int8),
+        confirm_price=np.arange(4, dtype=np.int64),
     )
     # Un evento toca [lo, hi] si su referencia es < hi y su extremo >= lo.
     assert events.touching(31, 60).reference_id.tolist() == [30, 55]
@@ -167,6 +175,7 @@ def test_month_events_are_sorted_by_reference_and_a_duplicate_is_rejected(tmp_pa
                     "confirm_time": pa.array(range(n), pa.int64()),
                     "extreme_time": pa.array(range(n), pa.int64()),
                     "direction": pa.array([1] * n, pa.int8()),
+                    "confirm_price": pa.array([Decimal(1)] * n, DEC),
                 }
             ),
             path,
@@ -184,7 +193,7 @@ def test_month_events_of_an_empty_file_are_empty(tmp_path):
     pq.write_table(
         pa.table(
             {
-                name: pa.array([], pa.int8() if name == "direction" else pa.int64())
+                name: pa.array([], EMPTY_TYPES.get(name, pa.int64()))
                 for name in lake.EVENT_COLUMNS
             }
         ),

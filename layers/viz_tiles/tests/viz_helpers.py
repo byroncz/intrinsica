@@ -65,6 +65,7 @@ def month_events(day, *rows: tuple) -> MonthEvents:
         np.array([r[2] for r in rows], np.int64),
         *(np.array(col, np.int64) for col in us),
         np.array([r[3] for r in rows], np.int8),
+        np.zeros(len(rows), np.int64),
     )
 
 

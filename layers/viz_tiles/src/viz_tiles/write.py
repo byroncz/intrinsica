@@ -10,6 +10,7 @@ import hashlib
 import json
 import logging
 from collections.abc import Buffer, Callable, Iterable, Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -30,7 +31,7 @@ from viz_tiles.contract import (
 )
 from viz_tiles.events import EventsBuffer
 from viz_tiles.render import Template, expected_names, render_day_to
-from viz_tiles.ticks import DayTicks, day_start_us
+from viz_tiles.ticks import DayTicks, TicksReader, day_start_us
 
 logger = logging.getLogger(__name__)
 
@@ -272,6 +273,25 @@ class TicksFile:
         self.close()
         if _exists(self._fs, self.path):
             self._fs.delete_file(self.path)
+
+
+@contextmanager
+def open_ticks_reader(
+    root: str | Path,
+    provider: str,
+    market: str,
+    asset: str,
+    day: date,
+    ticks: DayTicks,
+) -> Iterator[TicksReader]:
+    """Un `TicksReader` sobre el `ticks.bin` ya escrito del día, abierto mientras dure el `with`.
+
+    Lee el objeto por rangos: un tramo por lectura, nunca el archivo entero.
+    """
+    fs = resolve_fs(root)[0]
+    path = f"{day_dir(root, provider, market, asset, day)}/{TICKS_FILE}"
+    with fs.open_input_file(path) as src:
+        yield TicksReader(ticks, lambda offset, size: src.read_at(size, offset))
 
 
 def write_day(

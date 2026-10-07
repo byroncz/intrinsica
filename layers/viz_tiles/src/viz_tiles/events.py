@@ -4,7 +4,9 @@ TRD-viz §7.4 y §7.5. El navegador dibuja las franjas desde los tiempos exactos
 cada evento, que aquí se bajan a milisegundos desde el inicio del día, y deriva de
 ellos las confirmaciones por píxel (cuántos θ confirman y cuántos en el mismo
 instante). Junto al tiempo, cada punto lleva la posición de su tick en `ticks.bin`:
-en un instante con miles de ticks, el tiempo no dice cuál es.
+en un instante con miles de ticks, el tiempo no dice cuál es. La confirmación
+apunta al tick del instante que tiene el precio de confirmación de L2, no al último
+del grupo de empate (TRD-viz §7.5).
 """
 
 from dataclasses import dataclass
@@ -22,7 +24,7 @@ from viz_tiles.contract import (
     FLAG_UP,
 )
 from viz_tiles.lake import MonthEvents
-from viz_tiles.ticks import DayTicks
+from viz_tiles.ticks import DayTicks, TicksReader
 
 
 @dataclass(frozen=True)
@@ -70,6 +72,7 @@ def event_rows(
     provisional: bool,
     day_start_us: int,
     ticks: DayTicks,
+    reader: TicksReader | None = None,
 ) -> EventRows:
     """Las filas de eventos de un θ para el día que arranca en `day_start_us` (µs).
 
@@ -77,18 +80,29 @@ def event_rows(
     `pending` la cola del carry-over si el día la incluye (con sus tres tiempos);
     `provisional` marca esa cola como candidata, no definitiva. `ticks` traduce el
     `agg_trade_id` de cada punto a su posición en `ticks.bin`.
+
+    La referencia y el extremo apuntan al tick de su `agg_trade_id`. La confirmación
+    también lo hace, y con `reader` se corrige: L2 da como `confirm_agg_trade_id` el
+    último tick del grupo de empate (ADR-L2-03), pero el punto que confirma es el de
+    `confirm_price`, así que `confirm_tick` pasa al primer tick del mismo instante
+    que tiene ese precio (su id es menor o igual que `confirm_agg_trade_id`). Sin
+    `reader` la confirmación queda en el último tick del grupo.
     """
     reference = events.reference_time
     confirm = events.confirm_time
     extreme = events.extreme_time
+    confirm_price = events.confirm_price
     ids = (events.reference_id, events.confirm_id, events.extreme_id)
     flags = np.where(events.direction == 1, FLAG_UP, 0).astype("u1")
     if pending is not None:
         if None in (pending.reference_time, pending.confirm_time, pending.extreme_time):
             raise ValueError("el pendiente no trae los tiempos de sus tres puntos")
+        if reader is not None and pending.confirm_price is None:
+            raise ValueError("el pendiente no trae el precio de su confirmación")
         reference = np.append(reference, pending.reference_time)
         confirm = np.append(confirm, pending.confirm_time)
         extreme = np.append(extreme, pending.extreme_time)
+        confirm_price = np.append(confirm_price, pending.confirm_price or 0)
         ids = tuple(
             np.append(column, value)
             for column, value in zip(
@@ -113,11 +127,18 @@ def event_rows(
     ref_ms, ref_flag = _clip(reference, FLAG_REF_CLIPPED)
     confirm_ms, confirm_flag = _clip(confirm, FLAG_CONFIRM_CLIPPED)
     extreme_ms, extreme_flag = _clip(extreme, FLAG_EXTREME_CLIPPED)
+    reference_tick, confirm_tick, extreme_tick = (
+        ticks.tick_positions(column) for column in ids
+    )
+    if reader is not None:
+        confirm_tick = reader.first_at_price(confirm_tick, confirm_price)
     return EventRows(
         ref_ms,
         confirm_ms,
         extreme_ms,
-        *(ticks.tick_positions(column) for column in ids),
+        reference_tick,
+        confirm_tick,
+        extreme_tick,
         flags | ref_flag | confirm_flag | extreme_flag,
     )
 
