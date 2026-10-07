@@ -711,8 +711,12 @@ anterior al primero (`first_agg_trade_id` y `last_agg_trade_id` del índice).
 su posición en `ticks.bin`: `id − first_agg_trade_id` mientras los ids son
 consecutivos, y descontando los huecos de `agg_trade_id` que el proveedor tenga
 dentro del día. El navegador nunca ve ids: lee la posición y toma tiempo, precio y
-cantidad de los arreglos de `ticks.bin` ya decodificados. `reference_tick` y `extreme_tick` apuntan al tick de su `agg_trade_id`, que siempre
-coincide con el precio de L2. `confirm_tick` no apunta al `confirm_agg_trade_id`, que es el
+cantidad de los arreglos de `ticks.bin` ya decodificados. `reference_tick` y `extreme_tick` apuntan al tick de su `agg_trade_id`, salvo cuando ese
+id es el de una confirmación: con el Overshoot vacío, L2 reinicia el extremo con la terna
+de la confirmación (ADR-L2-03), así que `extreme_agg_trade_id = confirm_agg_trade_id` y el
+precio del extremo es `confirm_price`, no el del último tick del grupo. Ese extremo toma
+el mismo tick que `confirm_tick`, y la referencia del evento siguiente también
+(`extreme_tick` de `k` = `reference_tick` de `k + 1`). `confirm_tick` no apunta al `confirm_agg_trade_id`, que es el
 **último tick del grupo de empate** (ADR-L2-03) y puede tener otro precio que el
 `confirm_price` de L2 (entre los ticks del grupo, el de precio mínimo que aún cumple el
 umbral en un upturn y el de precio máximo en un downturn, ADR-L2-03): apunta al primer

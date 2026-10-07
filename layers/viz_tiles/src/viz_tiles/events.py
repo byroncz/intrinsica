@@ -88,6 +88,13 @@ def event_rows(
     posterior a la referencia, que tiene ese precio (su id es mayor que el de la
     referencia y menor o igual que `confirm_agg_trade_id`). Sin
     `reader` la confirmación queda en el último tick del grupo.
+
+    Con el Overshoot vacío, L2 reinicia el extremo con la terna de la confirmación
+    (ADR-L2-03): `extreme_agg_trade_id = confirm_agg_trade_id` y el precio es el de la
+    confirmación, no el del último tick del grupo. Ese extremo toma el `confirm_tick`
+    ya corregido, y la referencia del evento siguiente, el `extreme_tick` del anterior.
+    El primer evento de la lista no tiene anterior: si su referencia cae en el día, el
+    evento que la fijó también toca el día y está en la lista; si no, es el centinela.
     """
     reference = events.reference_time
     confirm = events.confirm_time
@@ -135,6 +142,12 @@ def event_rows(
         confirm_tick = reader.first_at_price(
             confirm_tick, confirm_price, reference_tick
         )
+        reference_id, confirm_id, extreme_id = ids
+        # Las posiciones son arreglos propios de `tick_positions`: se corrigen en sitio.
+        reset = extreme_id == confirm_id
+        extreme_tick[reset] = confirm_tick[reset]
+        chained = reference_id[1:] == extreme_id[:-1]
+        reference_tick[1:][chained] = extreme_tick[:-1][chained]
     return EventRows(
         ref_ms,
         confirm_ms,

@@ -102,6 +102,9 @@ def oracle_points(theta: int, pending: dict) -> list[tuple[tuple[int, str, int],
     """Por evento, `((agg_trade_id, precio, tiempo µs), …)` de referencia, confirmación y extremo en L2.
 
     Sale de `events_v0.csv`; el extremo de la cola pendiente es el candidato del carry-over.
+    Con el Overshoot vacío, L2 reinicia el extremo con la terna de la confirmación
+    (ADR-L2-03, `detector.rs`): ese extremo, y la referencia del evento siguiente, valen
+    `confirm_price`, no el precio del tick que la v0 lee en su `agg_trade_id`.
     """
     *closed, last = read_events()[theta]
     out = [
@@ -127,7 +130,8 @@ def oracle_points(theta: int, pending: dict) -> list[tuple[tuple[int, str, int],
             (top["id"], str(top["price"]), int(top["time"])),
         )
     )
-    return out
+    confirms = {confirm[0]: confirm for _, confirm, _ in out}
+    return [tuple(confirms.get(point[0], point) for point in row) for row in out]
 
 
 def test_index_lists_the_events_file_and_the_events_offsets(built):
@@ -167,7 +171,8 @@ def test_every_event_point_round_trips_to_its_tick(built):
     La referencia y el extremo son el tick de su `agg_trade_id`. La confirmación es el primer
     tick del grupo de empate con el `confirm_price` de L2, así que su id es menor o igual que
     `confirm_agg_trade_id` (el último del grupo, ADR-L2-03): el triángulo queda en el instante y
-    el precio de la confirmación.
+    el precio de la confirmación. Un extremo o una referencia con el id de una confirmación
+    (Overshoot vacío) es esa misma terna de L2 y sigue la misma regla.
     """
     directory, index, ticks, pending = built
     sections = read_sections(directory, index)
@@ -175,12 +180,13 @@ def test_every_event_point_round_trips_to_its_tick(built):
         (directory / index["ticks_file"]).read_bytes(), index["ticks"]
     )
     position_of = {t["id"]: p for p, t in enumerate(ticks)}
-    checked = moved = 0
+    checked = moved = reset = 0
     for doc in index["thetas"]:
         theta = int(doc["theta"].split(".")[1])
         lo, hi = doc["events_offset"], doc["events_offset"] + doc["events"]
         points = oracle_points(theta, pending[theta])
         assert len(points) == hi - lo
+        confirm_ids = {row[1][0] for row in points}
         for k, row in enumerate(points):
             for name, ms, (agg_id, price, time) in zip(
                 ("ref", "confirm", "extreme"),
@@ -198,14 +204,17 @@ def test_every_event_point_round_trips_to_its_tick(built):
                 # Y es también el de `ticks.bin`: mismo precio y mismo ms.
                 assert day_ticks.price[position] == int(tick["price"] * SCALE)
                 assert day_ticks.time_ms[position] == ms[lo + k]
-                if name != "confirm":
+                if name != "confirm" and agg_id not in confirm_ids:
                     assert tick["id"] == agg_id, where
                     checked += 1
                     continue
                 assert tick["id"] <= agg_id, where
-                # Nunca antes de la referencia ni después del último tick del grupo.
-                reference = int(sections["ref_tick"][lo + k])
-                assert reference < position <= position_of[agg_id], where
+                if name == "confirm":
+                    # Nunca antes de la referencia ni después del último tick del grupo.
+                    reference = int(sections["ref_tick"][lo + k])
+                    assert reference < position <= position_of[agg_id], where
+                else:
+                    reset += 1
                 # El primero del grupo con ese precio, no uno posterior.
                 first = next(
                     t["id"]
@@ -219,6 +228,7 @@ def test_every_event_point_round_trips_to_its_tick(built):
     assert (
         moved > 0
     )  # el fixture sí trae confirmaciones cuyo último tick del grupo tiene otro precio
+    assert reset > 0  # y extremos con el Overshoot vacío
 
 
 def test_the_extreme_tick_of_an_event_is_the_reference_tick_of_the_next(built):
@@ -666,3 +676,55 @@ def test_event_rows_point_the_confirmation_at_the_tick_with_the_confirm_price():
     tail = replace(tail, confirm_price=110 * scaled)
     pending = event_rows(month_events(DAY_DATE), tail, False, T0, day_ticks, reader)
     assert pending.confirm_tick.tolist() == [3]
+
+
+def test_an_empty_overshoot_puts_the_extreme_and_the_next_reference_on_the_confirmation():
+    """Overshoot vacío: L2 da al extremo la terna de la confirmación (ADR-L2-03).
+
+    Un alza y una baja cerradas y un pendiente al alza, los tres sin ningún tick que
+    supere la confirmación: `extreme_agg_trade_id = confirm_agg_trade_id` y el precio de
+    L2 del extremo (y de la referencia siguiente) es `confirm_price`. El último tick de cada
+    grupo tiene otro precio, así que los tres puntos deben ir al tick corregido.
+    """
+    rows = [
+        (1, 1, 100, 1),  # 0: referencia del alza
+        (2, 2, 102, 1),  # 1
+        (3, 3, 110, 1),  # 2: alza, confirm_price 110 (el mínimo del grupo que cruza)
+        (4, 3, 112, 1),  # 3
+        (5, 3, 111, 1),  # 4: último del grupo, id de L2
+        (6, 4, 108, 1),  # 5: no supera 110
+        (7, 5, 101, 1),  # 6: baja, confirm_price 101 (el máximo del grupo que cruza)
+        (8, 5, 100, 1),  # 7: último del grupo, id de L2
+        (9, 6, 103, 1),  # 8: no baja de 101
+        (10, 7, 107, 1),  # 9: pendiente al alza, confirm_price 107
+        (11, 7, 108, 1),  # 10: último del grupo, id de L2
+        (12, 8, 106, 1),  # 11: no supera 107
+    ]
+    out = io.BytesIO()
+    day_ticks = encode_day([ticks_batch(DAY_DATE, rows)], DAY_DATE, SCALE, out)
+    data = out.getvalue()
+    reader = TicksReader(day_ticks, lambda offset, size: data[offset : offset + size])
+    scaled = 10**8
+    events = replace(
+        month_events(
+            DAY_DATE, (1, 5, 5, 1, 1.0, 3.0, 3.0), (5, 8, 8, -1, 3.0, 5.0, 5.0)
+        ),
+        confirm_price=np.array([110 * scaled, 101 * scaled], np.int64),
+    )
+    tail = PendingEvent(
+        8, 11, 11, 1, T0 + 5_000_000, T0 + 7_000_000, T0 + 7_000_000, 107 * scaled
+    )
+    got = event_rows(events, tail, True, T0, day_ticks, reader)
+    assert got.reference_tick.tolist() == [0, 2, 6]
+    assert got.confirm_tick.tolist() == [2, 6, 9]
+    assert got.extreme_tick.tolist() == [2, 6, 9]
+    # Cada punto queda en el precio de L2: el extremo y la referencia siguiente valen
+    # `confirm_price`, no el precio del último tick del grupo.
+    price = [r[2] for r in rows]
+    assert [price[p] for p in got.reference_tick] == [100, 110, 101]
+    assert [price[p] for p in got.confirm_tick] == [110, 101, 107]
+    assert [price[p] for p in got.extreme_tick] == [110, 101, 107]
+    # Sin `reader` los tres apuntan al último tick del grupo, el `agg_trade_id` de L2.
+    raw = event_rows(events, tail, True, T0, day_ticks)
+    assert raw.reference_tick.tolist() == [0, 4, 7]
+    assert raw.confirm_tick.tolist() == raw.extreme_tick.tolist() == [4, 7, 10]
