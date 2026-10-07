@@ -312,7 +312,8 @@ scheduler de `monthly-close` (día 8) está con `paused = true`
 **Esta prueba no se hizo en ITSC-311 y la registra ITSC-323.** El primer cierre real
 que se registra es el de octubre de 2026 (Scheduler del 8 de noviembre, o
 `monthly-close` lanzado por el humano). No se fuerza antes: relanzaría `l2-monthly`
-sobre 2026-09, ya procesado (fallo de `l2-monthly-xdtrf`, abajo). Cuando ocurra, el
+sobre 2026-09, ya procesado (decisión del humano, comentario en ITSC-311,
+2026-10-07). Cuando ocurra, el
 humano reporta las cifras en la card y se anotan en "Encadenamiento" de
 "Resultados": los tres nombres, el mes, la pared y el resultado de cada ejecución, y
 que `latest.html` avanzó al último día de octubre (paso 4).
@@ -587,9 +588,11 @@ tienen evidencia. Eso queda a ITSC-322.
 2026-09-30 al que apunta `latest.json` (verificación de ITSC-320).
 
 **Encadenamiento**: **no se probó en ITSC-311; lo registra ITSC-323.** Forzar
-`monthly-close` hoy relanzaría `l2-monthly` sobre 2026-09, que ya está procesado: es
-el fallo de `l2-monthly-xdtrf` del 2026-09-30 (creador `l1-workflow`, código 1 en
-60 s). El humano decidió no forzarlo (comentario en ITSC-311, 2026-10-07). Queda
+`monthly-close` hoy relanzaría `l2-monthly` sobre 2026-09, que ya está procesado. El
+humano decidió no forzarlo (comentario en ITSC-311, 2026-10-07). El único
+antecedente de la cadena es el fallo de `l2-monthly-xdtrf` del 2026-09-30 (creador
+`l1-workflow`, código 1 en 60 s), que tuvo otra causa: L1 aún no había publicado el
+mes (paso 5, "La cadena solo prospera si L1 cerró el mes"). Queda
 pendiente del primer cierre real, el de octubre (a partir del 8 de noviembre de
 2026): con L1 ya publicado, se lanza el comando del paso 5 y se anota aquí, en una
 tabla, por ejecución: nombre (`l1-monthly-close-…`, `l2-monthly-…`, `viz-tiles-…`),
