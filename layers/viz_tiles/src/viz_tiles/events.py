@@ -84,8 +84,9 @@ def event_rows(
     La referencia y el extremo apuntan al tick de su `agg_trade_id`. La confirmación
     también lo hace, y con `reader` se corrige: L2 da como `confirm_agg_trade_id` el
     último tick del grupo de empate (ADR-L2-03), pero el punto que confirma es el de
-    `confirm_price`, así que `confirm_tick` pasa al primer tick del mismo instante
-    que tiene ese precio (su id es menor o igual que `confirm_agg_trade_id`). Sin
+    `confirm_price`, así que `confirm_tick` pasa al primer tick del mismo instante,
+    posterior a la referencia, que tiene ese precio (su id es mayor que el de la
+    referencia y menor o igual que `confirm_agg_trade_id`). Sin
     `reader` la confirmación queda en el último tick del grupo.
     """
     reference = events.reference_time
@@ -131,7 +132,9 @@ def event_rows(
         ticks.tick_positions(column) for column in ids
     )
     if reader is not None:
-        confirm_tick = reader.first_at_price(confirm_tick, confirm_price)
+        confirm_tick = reader.first_at_price(
+            confirm_tick, confirm_price, reference_tick
+        )
     return EventRows(
         ref_ms,
         confirm_ms,

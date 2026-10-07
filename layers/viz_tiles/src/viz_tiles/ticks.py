@@ -495,7 +495,7 @@ class TicksReader:
         )
 
     def first_at_price(
-        self, positions: np.ndarray, price_int: np.ndarray
+        self, positions: np.ndarray, price_int: np.ndarray, after: np.ndarray
     ) -> np.ndarray:
         """Para cada posición, el primer tick de su instante que tiene ese precio.
 
@@ -507,6 +507,12 @@ class TicksReader:
         ticks al mismo precio gana el primero, o sea el de menor `agg_trade_id`; si
         es el único, la posición no cambia. Lanza `ValueError` si ningún
         tick del instante lo tiene: L2 y L1 no cuadran.
+
+        `after` es la posición de la referencia de cada evento (`TICK_OUTSIDE` si cae
+        fuera del día). El milisegundo puede traer ticks anteriores a la referencia, de
+        otro µs, con el mismo precio; la búsqueda empieza en el tick siguiente a ella.
+        Tras la referencia el umbral es fijo, así que el primer tick con ese precio en
+        ese tramo es del grupo de L2.
         """
         out = np.array(positions, dtype="<u4")
         inside = np.flatnonzero(out != TICK_OUTSIDE)
@@ -516,6 +522,8 @@ class TicksReader:
         target = _round_to_tick(np.asarray(price_int, dtype=np.int64), self._factor)[
             inside
         ]
+        reference = np.asarray(after, dtype=np.int64)[inside]
+        floor = np.where(reference == TICK_OUTSIDE, 0, reference + 1)
         chunk_of = np.searchsorted(self._firsts, at, side="right") - 1
         for index in np.unique(chunk_of):
             mine = np.flatnonzero(chunk_of == index)
@@ -531,7 +539,12 @@ class TicksReader:
             )
             for k in mine[walk]:
                 out[inside[k]] = self._walk_back(
-                    int(index), time_ms, price, int(at[k]), int(target[k])
+                    int(index),
+                    time_ms,
+                    price,
+                    int(at[k]),
+                    int(target[k]),
+                    int(floor[k]),
                 )
         return out
 
@@ -542,18 +555,20 @@ class TicksReader:
         price: np.ndarray,
         position: int,
         target: int,
+        floor: int,
     ) -> int:
-        """La posición del primer tick del instante de `position` con precio `target`."""
+        """La posición del primer tick del instante de `position` con precio `target`, desde `floor`."""
         first = int(self._firsts[index])
         instant = time_ms[position - first]
         hi = position - first + 1
         found = None
         while True:
             lo = int(np.searchsorted(time_ms[:hi], instant, side="left"))
-            hit = np.flatnonzero(price[lo:hi] == target)
+            start = max(lo, floor - first)
+            hit = np.flatnonzero(price[start:hi] == target)
             if len(hit):
-                found = first + lo + int(hit[0])
-            if lo > 0 or index == 0:
+                found = first + start + int(hit[0])
+            if lo > 0 or index == 0 or floor >= first:
                 break
             # El instante sigue en el tramo anterior (un instante con decenas de miles de ticks).
             index -= 1

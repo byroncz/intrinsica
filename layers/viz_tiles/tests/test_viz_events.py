@@ -174,6 +174,7 @@ def test_every_event_point_round_trips_to_its_tick(built):
     day_ticks = decode_ticks(
         (directory / index["ticks_file"]).read_bytes(), index["ticks"]
     )
+    position_of = {t["id"]: p for p, t in enumerate(ticks)}
     checked = moved = 0
     for doc in index["thetas"]:
         theta = int(doc["theta"].split(".")[1])
@@ -202,6 +203,9 @@ def test_every_event_point_round_trips_to_its_tick(built):
                     checked += 1
                     continue
                 assert tick["id"] <= agg_id, where
+                # Nunca antes de la referencia ni después del último tick del grupo.
+                reference = int(sections["ref_tick"][lo + k])
+                assert reference < position <= position_of[agg_id], where
                 # El primero del grupo con ese precio, no uno posterior.
                 first = next(
                     t["id"]

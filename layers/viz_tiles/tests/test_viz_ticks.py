@@ -541,20 +541,60 @@ def test_first_at_price_picks_the_first_tick_of_the_instant_with_that_price():
     ]
     _, reader, _, _ = reader_of([ticks_batch(DAY, rows)], chunk=100)
     last = np.array([5], dtype="<u4")  # el último tick del instante, el id 16
+    ref = np.array([0], dtype="<u4")  # la referencia, antes del instante
     price = lambda p: np.array([p * L1_SCALE], dtype=np.int64)
-    # El precio del primer tick que cruzó es 110: la confirmación pasa al id 15.
-    assert reader.first_at_price(last, price(110)).tolist() == [4]
+    # Con 110 la confirmación pasa al id 15, el único del instante con ese precio.
+    assert reader.first_at_price(last, price(110), ref).tolist() == [4]
     # Con 100 gana el primero de los dos, el id 14, no el último.
-    assert reader.first_at_price(last, price(100)).tolist() == [3]
+    assert reader.first_at_price(last, price(100), ref).tolist() == [3]
     # Un tick solo en su instante que ya tiene el precio no se mueve, aunque otro lo repita después.
-    assert reader.first_at_price(np.array([6], "<u4"), price(100)).tolist() == [6]
+    assert reader.first_at_price(np.array([6], "<u4"), price(100), ref).tolist() == [6]
     # Fuera del día no hay tick: el centinela se deja igual.
     outside = np.array([TICK_OUTSIDE, 5], dtype="<u4")
     both = np.array([100 * L1_SCALE, 100 * L1_SCALE], dtype=np.int64)
-    assert reader.first_at_price(outside, both).tolist() == [TICK_OUTSIDE, 3]
+    refs = np.array([0, 0], dtype="<u4")
+    assert reader.first_at_price(outside, both, refs).tolist() == [TICK_OUTSIDE, 3]
+    # Una referencia fuera del día no acota: se busca desde el inicio del instante.
+    assert reader.first_at_price(
+        last, price(100), np.array([TICK_OUTSIDE], "<u4")
+    ).tolist() == [3]
     # Un precio que ningún tick del instante tiene es una entrada rota.
     with pytest.raises(ValueError, match="no cuadra"):
-        reader.first_at_price(last, price(120))
+        reader.first_at_price(last, price(120), ref)
+
+
+def test_first_at_price_never_lands_before_the_reference_in_a_shared_millisecond():
+    """Caso A/B/C en un mismo ms: A a 95, B el máximo 110 (referencia), C a 95 que confirma.
+
+    L1 está en µs y el grupo de L2 arranca en el primer tick que cruza (ADR-L2-03): A es
+    de otro µs, anterior a la referencia, y la confirmación no puede quedar en él.
+    """
+    rows = [
+        (1, 1, 100, 1),
+        (2, 5.0001, 95, 1),  # A
+        (3, 5.0002, 110, 1),  # B, la referencia del evento bajista
+        (4, 5.0003, 95, 1),  # C, el tick que confirma
+        (5, 6, 100, 1),
+    ]
+    _, reader, data, _ = reader_of([ticks_batch(DAY, rows)], chunk=100)
+    decoded = decode_ticks(data, len(rows))
+    assert len(set(decoded.time_ms[1:4].tolist())) == 1  # los tres en el mismo ms
+    confirm = np.array([3], dtype="<u4")  # C, el `confirm_agg_trade_id` de L2
+    reference = np.array([2], dtype="<u4")  # B
+    got = reader.first_at_price(confirm, np.array([95 * L1_SCALE]), reference)
+    assert got.tolist() == [3]
+    assert reference[0] < got[0] <= confirm[0]
+
+
+def test_first_at_price_stops_at_the_reference_in_an_earlier_chunk():
+    # Seis ticks en el segundo 3, de a tres por tramo; 50 está antes y después de la referencia.
+    rows = [(1, 1, 10, 1)]
+    rows += [(2 + k, 3, (50, 70, 50, 60, 61, 62)[k], 1) for k in range(6)]
+    _, reader, _, _ = reader_of([ticks_batch(DAY, rows)], chunk=3)
+    last = np.array([6], dtype="<u4")
+    # La referencia es la posición 2 (precio 70): el 50 de la posición 1 queda fuera.
+    got = reader.first_at_price(last, np.array([50 * L1_SCALE]), np.array([2], "<u4"))
+    assert got.tolist() == [3]
 
 
 def test_first_at_price_follows_an_instant_that_crosses_chunks():
@@ -565,6 +605,7 @@ def test_first_at_price_follows_an_instant_that_crosses_chunks():
     day_ticks, reader, _, _ = reader_of([ticks_batch(DAY, rows)], chunk=3)
     assert len(day_ticks.chunks) == 4
     last = np.array([10], dtype="<u4")  # el último tick del segundo 3 (id 11)
-    assert reader.first_at_price(last, np.array([50 * L1_SCALE])).tolist() == [2]
+    ref = np.array([0], dtype="<u4")
+    assert reader.first_at_price(last, np.array([50 * L1_SCALE]), ref).tolist() == [2]
     # Un precio que está solo en el último tramo no se busca más atrás.
-    assert reader.first_at_price(last, np.array([68 * L1_SCALE])).tolist() == [10]
+    assert reader.first_at_price(last, np.array([68 * L1_SCALE]), ref).tolist() == [10]
