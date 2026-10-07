@@ -54,7 +54,6 @@ def month_events(day, *rows: tuple) -> MonthEvents:
     """Eventos `(ref_id, confirm_id, extremo_id, dirección, ref_s, confirm_s, extremo_s)`.
 
     Los tres últimos son segundos desde el inicio del día (pueden salirse de él).
-    `confirm_id` no viaja: el día ya no lo necesita.
     """
     if not rows:
         return MonthEvents.empty()
@@ -62,6 +61,7 @@ def month_events(day, *rows: tuple) -> MonthEvents:
     us = [[t0 + round(r[i] * 1_000_000) for r in rows] for i in (4, 5, 6)]
     return MonthEvents(
         np.array([r[0] for r in rows], np.int64),
+        np.array([r[1] for r in rows], np.int64),
         np.array([r[2] for r in rows], np.int64),
         *(np.array(col, np.int64) for col in us),
         np.array([r[3] for r in rows], np.int8),

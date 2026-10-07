@@ -193,6 +193,7 @@ grep -q '"check_type": "tiles_summary"' "$data/run.log" \
 # El índice, los 4 objetos con su tamaño y el Parquet de hallazgos.
 docker run --rm -v "$data:/data" --entrypoint python "$image" - <<'PY'
 import base64
+import csv
 import gzip
 import hashlib
 import json
@@ -205,7 +206,7 @@ import pyarrow.parquet as pq
 day = Path("/data/tiles/provider=binance/market=spot/asset=BTCUSDT/day=2017-08-18")
 index = json.loads((day / "index.json").read_text())
 assert index["ticks"] == 4735, index["ticks"]
-assert index["tiles_version"] == "2.0.0", index["tiles_version"]
+assert index["tiles_version"] == "2.1.0", index["tiles_version"]
 assert index["page"] == "index.html", index["page"]
 assert (index["ticks_file"], index["events"]) == ("ticks.bin", "events.bin")
 assert index["first_agg_trade_id"] == 3089 and index["last_agg_trade_id"] == 7823, index
@@ -214,7 +215,7 @@ assert all(t["provisional_from_s"] is not None for t in index["thetas"]), "cola 
 files = sorted(p.name for p in day.iterdir())
 assert files == ["events.bin", "index.html", "index.json", "ticks.bin"], files
 total = sum(t["events"] for t in index["thetas"])
-assert (day / index["events"]).stat().st_size == 13 * total, total
+assert (day / index["events"]).stat().st_size == 25 * total, total
 assert [t["events_offset"] for t in index["thetas"]][0] == 0
 
 
@@ -262,6 +263,19 @@ for a, z in zip(dt, dprice):
     prices.append(p)
 assert times == sorted(times) and 0 <= times[0] and times[-1] < 86_400_000
 assert min(prices) > 0
+
+# events.bin: siete secciones (tres int32 de tiempo, tres uint32 de posición de tick y las
+# banderas). Los ids del fixture son consecutivos desde el primero del día, así que la
+# posición de cada punto es `agg_trade_id − first_agg_trade_id` (TRD-viz §7.5).
+events = (day / index["events"]).read_bytes()
+tick_sections = struct.unpack_from(f"<{3 * total}I", events, 12 * total)
+assert all(p < index["ticks"] for p in tick_sections), "posición fuera de ticks.bin"
+with open("/fixtures/events_v0.csv") as f:
+    first = next(csv.DictReader(f))
+assert int(first["theta"]) == int(index["thetas"][0]["theta"].split(".")[1]), first
+for k, name in enumerate(("reference", "confirm", "extreme")):
+    wanted = int(first[f"{name}_agg_trade_id"]) - index["first_agg_trade_id"]
+    assert tick_sections[k * total] == wanted, (name, tick_sections[k * total], wanted)
 latest = json.loads(Path("/data/tiles/latest.json").read_text())
 assert latest["day"] == "2017-08-18", latest
 

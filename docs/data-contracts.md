@@ -561,7 +561,7 @@ las tablas de esta sección se desvían de esas constantes.
 
 Los archivos de un día no son fuente de verdad: se regeneran desde L1 y L2. Todos
 los binarios son planos: `events.bin` sin cabecera y `ticks.bin` con la cabecera de
-cada tramo. `tiles_version` es `2.0.0`: la 1.x guardaba arreglos M4 por nivel de zoom (`price-<w>`, `volume-<w>`, `dir-<w>`, `count-<w>`,
+cada tramo. `tiles_version` es `2.1.0` (la 2.1 sumó a `events.bin` la posición de los ticks de cada evento): la 1.x guardaba arreglos M4 por nivel de zoom (`price-<w>`, `volume-<w>`, `dir-<w>`, `count-<w>`,
 `confirms-<w>`, `simul-<w>`) y esa noción de nivel desapareció (ADR-VZ-14).
 
 ### Disposición
@@ -677,17 +677,23 @@ y [§9.3](TRD/viz.md#93-tipos-de-chequeo-check_type).
 ### Eventos exactos
 
 `events.bin` lleva los eventos de **todos** los θ del día, para que el navegador
-dibuje cada franja en su instante real y derive de ellos las confirmaciones de
-cada píxel. Son los eventos de `events.parquet` que tocan el día (los mismos de
-`thetas[].events`), más la cola pendiente del carry-over con su candidato. Sin
-cabecera, little-endian, cuatro secciones consecutivas de `N` valores, con `N` el
-total de eventos del día (la suma de `thetas[].events`); 13 bytes por evento:
+dibuje cada franja en su instante real, derive de ellos las confirmaciones de
+cada píxel y marque en el precio el tick exacto de cada punto. Son los eventos de
+`events.parquet` que tocan el día (los mismos de `thetas[].events`), más la cola
+pendiente del carry-over con su candidato. Sin cabecera, little-endian, siete
+secciones consecutivas de `N` valores, con `N` el total de eventos del día (la
+suma de `thetas[].events`); 25 bytes por evento. Las de cuatro bytes van primero y
+las banderas al final, así cada sección queda alineada para `Int32Array` y
+`Uint32Array` sin copiar:
 
 | Sección | Tipo | Contenido |
 |---|---|---|
 | referencia | int32 | Milisegundos desde `t0` (`⌊µs / 1000⌋`) del tick de referencia; recortado a `[0, 86 400 000]` |
 | confirmación | int32 | Lo mismo, del tick de confirmación (`confirm_time`) |
 | extremo | int32 | Lo mismo, del tick extremo; en la cola pendiente, el candidato vigente |
+| `reference_tick` | uint32 | Posición en `ticks.bin` (0 es el primer tick del día) del tick de referencia |
+| `confirm_tick` | uint32 | Lo mismo, del tick de confirmación |
+| `extreme_tick` | uint32 | Lo mismo, del tick extremo; en la cola pendiente, el del candidato vigente si cae en el día |
 | banderas | uint8 | Suma de bits de la tabla siguiente |
 
 El θ en la posición `k` de `thetas` ocupa de `events_offset` a
@@ -695,9 +701,24 @@ El θ en la posición `k` de `thetas` ocupa de `events_offset` a
 tiempos de un θ no decrecen, y el extremo de un evento es la referencia del
 siguiente. Un valor fuera del día se recorta al borde y se marca; el tick
 extremo pertenece al evento que cierra, `(referencia, extremo]`, así que el evento
-siguiente arranca en el tick que lo sigue. Un evento toca el día si su referencia
-es anterior al último `agg_trade_id` del día y su extremo no es anterior al primero
-(`first_agg_trade_id` y `last_agg_trade_id` del índice).
+siguiente arranca en el tick que lo sigue (pero su referencia es ese mismo tick:
+`extreme_tick` de `k` y `reference_tick` de `k + 1` son iguales). Un evento toca el
+día si su referencia es anterior al último `agg_trade_id` del día y su extremo no es
+anterior al primero (`first_agg_trade_id` y `last_agg_trade_id` del índice).
+
+**Posición de un tick.** El job traduce el `agg_trade_id` de cada punto del evento
+(`reference_agg_trade_id`, `confirm_agg_trade_id` y `extreme_agg_trade_id` de L2) a
+su posición en `ticks.bin`: `id − first_agg_trade_id` mientras los ids son
+consecutivos, y descontando los huecos de `agg_trade_id` que el proveedor tenga
+dentro del día. El navegador nunca ve ids: lee la posición y toma tiempo, precio y
+cantidad de los arreglos de `ticks.bin` ya decodificados. `confirm_tick` apunta al
+`confirm_agg_trade_id`, el **último tick del grupo de empate** (ADR-L2-03): si ese
+grupo trae ticks de precio distinto en el mismo instante, el precio del tick puede ser
+otro que el `confirm_price` de L2 (el del primer tick que cruzó), que sigue siendo el
+precio de un tick del mismo instante. La referencia y el extremo siempre coinciden con el
+precio de L2. Un punto que cae fuera del día (el que lleva la bandera de recorte) lleva el
+centinela `0xFFFFFFFF`. Un id
+dentro del día que no es un tick suyo es un error de entrada: la corrida falla y el día queda sin `index.json`.
 
 | Bit | Bandera |
 |---|---|

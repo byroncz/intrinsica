@@ -126,6 +126,7 @@ def test_read_month_events_reads_each_row_group_once_and_keeps_every_event(
     assert events.reference_id.tolist() == [
         int(r["reference_agg_trade_id"]) for r in rows
     ]
+    assert events.confirm_id.tolist() == [int(r["confirm_agg_trade_id"]) for r in rows]
     assert events.extreme_id.tolist() == [int(r["extreme_agg_trade_id"]) for r in rows]
     for name in ("reference", "confirm", "extreme"):
         assert getattr(events, f"{name}_time").tolist() == [
@@ -137,6 +138,7 @@ def test_read_month_events_reads_each_row_group_once_and_keeps_every_event(
 def test_touching_keeps_the_events_that_reach_the_ticks_of_a_day():
     events = MonthEvents(
         reference_id=np.array([10, 30, 55, 90], np.int64),
+        confirm_id=np.array([20, 40, 60, 100], np.int64),
         extreme_id=np.array([30, 55, 90, 120], np.int64),
         reference_time=np.arange(4, dtype=np.int64),
         confirm_time=np.arange(4, dtype=np.int64),
@@ -159,6 +161,7 @@ def test_month_events_are_sorted_by_reference_and_a_duplicate_is_rejected(tmp_pa
             pa.table(
                 {
                     "reference_agg_trade_id": pa.array(refs, pa.int64()),
+                    "confirm_agg_trade_id": pa.array([r + 3 for r in refs], pa.int64()),
                     "extreme_agg_trade_id": pa.array([r + 5 for r in refs], pa.int64()),
                     "reference_time": pa.array(range(n), pa.int64()),
                     "confirm_time": pa.array(range(n), pa.int64()),

@@ -12,6 +12,7 @@ from viz_helpers import TICKS_SCHEMA, read_ticks_csv, ticks_batch
 from viz_tiles.contract import (
     INT32_MAX,
     L1_SCALE,
+    TICK_OUTSIDE,
     TICKS_CHUNK,
     TICKS_CHUNK_HEADER,
     price_scale,
@@ -431,3 +432,53 @@ def test_a_chunk_is_written_as_soon_as_it_fills_up_and_released():
 def test_chunk_size_must_fit_a_uint32():
     with pytest.raises(ValueError, match="uint32"):
         TicksAccumulator(DAY, SCALE, io.BytesIO(), chunk=0)
+
+
+# -- posición de un tick por su agg_trade_id (ITSC-319) ---------------------------------
+
+
+def _ids_day(ids, split=None):
+    """El `DayTicks` de ticks de un por segundo con esos ids, partidos en lotes de `split`."""
+    rows = [(i, k + 1, 100 + k, 1) for k, i in enumerate(ids)]
+    step = split or len(rows)
+    return encode(
+        [ticks_batch(DAY, rows[a : a + step]) for a in range(0, len(rows), step)]
+    )
+
+
+def test_ids_without_gaps_are_one_run_and_the_position_is_the_offset_from_the_first():
+    out = _ids_day([30, 31, 32, 33, 34])
+    assert out.id_runs == ((0, 30),)
+    got = out.tick_positions(np.array([30, 32, 34]))
+    assert got.tolist() == [0, 2, 4] and got.dtype == np.dtype("<u4")
+
+
+def test_a_gap_of_the_provider_starts_a_run_and_positions_skip_it():
+    out = _ids_day([10, 11, 12, 20, 21, 30])
+    assert out.id_runs == ((0, 10), (3, 20), (5, 30))
+    ids = np.array([10, 12, 20, 21, 30])
+    assert out.tick_positions(ids).tolist() == [0, 2, 3, 4, 5]
+    # Un id dentro del día que ningún tick tiene (cae en un hueco) no se adivina.
+    for hole in (13, 19, 22, 29):
+        with pytest.raises(ValueError, match="no es un tick"):
+            out.tick_positions(np.array([hole]))
+
+
+def test_ids_outside_the_day_get_the_sentinel():
+    out = _ids_day([10, 11, 12])
+    got = out.tick_positions(np.array([9, 10, 12, 13, 2**40]))
+    assert got.tolist() == [TICK_OUTSIDE, 0, 2, TICK_OUTSIDE, TICK_OUTSIDE]
+    assert encode([]).tick_positions(np.array([1])).tolist() == [TICK_OUTSIDE]
+
+
+@pytest.mark.parametrize("split", [1, 2, 3, 4])
+def test_the_runs_do_not_depend_on_how_the_batches_are_split(split):
+    ids = [10, 11, 12, 20, 21, 30, 31, 32, 40]
+    assert _ids_day(ids, split).id_runs == _ids_day(ids).id_runs
+
+
+def test_ids_that_do_not_grow_are_rejected():
+    with pytest.raises(ValueError, match="crecer"):
+        _ids_day([10, 11, 11])
+    with pytest.raises(ValueError, match="no supera"):
+        _ids_day([10, 12, 9], split=2)

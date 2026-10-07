@@ -24,6 +24,7 @@ from viz_tiles.contract import (
     DAY_US,
     INT32_MAX,
     L1_SCALE,
+    TICK_OUTSIDE,
     TICK_SECTIONS,
     TICKS_CHUNK,
     TICKS_CHUNK_HEADER,
@@ -282,6 +283,11 @@ class DayTicks:
     `first_agg_trade_id` y `last_agg_trade_id` los de su primer y último tick.
     `rounded` y `max_abs_delta_int` alimentan el hallazgo `price_rounded` (ticks
     fuera del tick y su mayor distancia al tick más cercano, ×10⁻⁸).
+
+    `id_runs` dice dónde está cada `agg_trade_id` sin guardar uno por tick: una
+    tupla `(posición, id)` por cada tramo de ids consecutivos (un tramo si el día no
+    tiene huecos; un tramo más por cada hueco del proveedor). Vacía, el día se
+    toma como un solo tramo desde `first_agg_trade_id`.
     """
 
     ticks: int
@@ -292,6 +298,34 @@ class DayTicks:
     rounded: int
     max_abs_delta_int: int
     nbytes: int
+    id_runs: tuple[tuple[int, int], ...] = ()
+
+    def tick_positions(self, ids: np.ndarray) -> np.ndarray:
+        """Posición en `ticks.bin` (`uint32`) de cada `agg_trade_id` de `ids`.
+
+        Un id fuera del día, o sea anterior al primer tick o posterior al último,
+        da `TICK_OUTSIDE`. Lanza `ValueError` si el id cae dentro del día pero en un
+        hueco: ningún tick lo tiene, y un evento de L2 no puede apuntar ahí.
+        """
+        ids = np.asarray(ids, dtype=np.int64)
+        out = np.full(len(ids), TICK_OUTSIDE, dtype="<u4")
+        if not self.ticks:
+            return out
+        if self.ticks >= TICK_OUTSIDE:
+            raise ValueError(f"{self.ticks} ticks no caben en una posición uint32")
+        runs = self.id_runs or ((0, self.first_agg_trade_id),)
+        starts = np.array([start for start, _ in runs], dtype=np.int64)
+        first_ids = np.array([first for _, first in runs], dtype=np.int64)
+        ends = np.append(starts[1:], self.ticks)
+        inside = (ids >= self.first_agg_trade_id) & (ids <= self.last_agg_trade_id)
+        run = np.searchsorted(first_ids, ids[inside], side="right") - 1
+        position = starts[run] + (ids[inside] - first_ids[run])
+        if np.any(position >= ends[run]):
+            raise ValueError(
+                "un evento apunta a un agg_trade_id que no es un tick del día"
+            )
+        out[inside] = position
+        return out
 
 
 class TicksAccumulator:
@@ -313,6 +347,7 @@ class TicksAccumulator:
         self.ticks = 0
         self._first_id: int | None = None
         self._last_id = 0
+        self._id_runs: list[tuple[int, int]] = []
         # Ticks cuyo precio no cae en el tick, y la mayor distancia al tick más
         # cercano entre ellos (en enteros de L1, ×10⁻⁸): el hallazgo `price_rounded`.
         self.rounded = 0
@@ -340,9 +375,7 @@ class TicksAccumulator:
         self._writer.add(
             rel[keep] // 1000, _round_to_tick(price, self._factor), quantity
         )
-        if self._first_id is None:
-            self._first_id = int(ids[0])
-        self._last_id = int(ids[-1])
+        self._track_ids(ids)
         self.ticks += len(price)
         self._max_price_int = max(self._max_price_int, int(price.max()))
         rest = price % self._factor
@@ -351,6 +384,31 @@ class TicksAccumulator:
             self.rounded += int(off.sum())
             delta = np.minimum(rest, self._factor - rest)[off]
             self.max_abs_delta_int = max(self.max_abs_delta_int, int(delta.max()))
+
+    def _track_ids(self, ids: np.ndarray) -> None:
+        """Anota dónde empieza cada tramo de ids consecutivos (`DayTicks.id_runs`).
+
+        Los ids de un día crecen estrictamente (TRD-viz §7.5): uno que no crece
+        rompería la búsqueda de posiciones, y se rechaza. El tramo que arranca en
+        el primer tick del lote se anota aparte, midiéndolo contra el último id
+        del lote anterior.
+        """
+        steps = np.diff(ids)
+        previous = self._last_id
+        if self._first_id is not None and ids[0] <= previous:
+            raise ValueError(
+                f"agg_trade_id {int(ids[0])} no supera al anterior {previous}"
+            )
+        if (steps <= 0).any():
+            raise ValueError("los agg_trade_id de un día deben crecer estrictamente")
+        if self._first_id is None:
+            self._first_id = int(ids[0])
+            self._id_runs.append((self.ticks, int(ids[0])))
+        elif ids[0] != previous + 1:
+            self._id_runs.append((self.ticks, int(ids[0])))
+        for b in np.flatnonzero(steps != 1) + 1:
+            self._id_runs.append((self.ticks + int(b), int(ids[b])))
+        self._last_id = int(ids[-1])
 
     def finish(self) -> DayTicks:
         """Escribe el último tramo y devuelve el día. Lanza `PriceUnrepresentable` si algún precio no cabe en `int32`."""
@@ -370,6 +428,7 @@ class TicksAccumulator:
             rounded=self.rounded,
             max_abs_delta_int=self.max_abs_delta_int,
             nbytes=self._writer.nbytes,
+            id_runs=tuple(self._id_runs),
         )
 
 

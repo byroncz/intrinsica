@@ -22,12 +22,15 @@ from test_viz_events import (
     BURST_TICKS,
     FLASH,
     SCALE,
+    SHARED,
     flash_ticks,
+    tick_at,
     write_flash_day,
 )
+from viz_helpers import encode_to, month_events, ticks_batch
 from viz_tiles import cli
 from viz_tiles.contract import FLAG_CONFIRM_CLIPPED, PAGE_FILE, TICKS_CHUNK
-from viz_tiles.events import EventRows, EventsBuffer
+from viz_tiles.events import EventRows, EventsBuffer, event_rows
 from viz_tiles.ticks import DayTicks, day_start_us, encode_ticks
 from viz_tiles.write import ThetaEvents, write_day
 from viz_tiles.write import day_dir as tiles_day_dir
@@ -131,7 +134,10 @@ def events_of(day_dir, theta_pos):
         "ref": np.frombuffer(raw, "<i4", total, 0)[sl],
         "confirm": np.frombuffer(raw, "<i4", total, 4 * total)[sl],
         "extreme": np.frombuffer(raw, "<i4", total, 8 * total)[sl],
-        "flags": np.frombuffer(raw, "u1", total, 12 * total)[sl],
+        "ref_tick": np.frombuffer(raw, "<u4", total, 12 * total)[sl],
+        "confirm_tick": np.frombuffer(raw, "<u4", total, 16 * total)[sl],
+        "extreme_tick": np.frombuffer(raw, "<u4", total, 20 * total)[sl],
+        "flags": np.frombuffer(raw, "u1", total, 24 * total)[sl],
     }
 
 
@@ -572,7 +578,11 @@ def navigated(day_dir, target):
 
 
 def test_next_event_moves_the_window_and_keeps_the_scale(navigated, day_dir, target):
-    ev = {k: v / 1000 for k, v in events_of(day_dir, 0).items() if k != "flags"}
+    ev = {
+        k: v / 1000
+        for k, v in events_of(day_dir, 0).items()
+        if k in ("ref", "confirm", "extreme")
+    }
     zero, one, two, back = (step(navigated, f"nav-{i}") for i in range(4))
     span = zero["x"][1] - zero["x"][0]
     assert span == pytest.approx(600)
@@ -607,7 +617,11 @@ def test_the_status_strip_says_only_which_event_it_is(navigated, day_dir, target
 
 
 def test_fit_sets_the_scale_to_the_window_with_a_margin(navigated, day_dir, target):
-    ev = {k: v / 1000 for k, v in events_of(day_dir, 0).items() if k != "flags"}
+    ev = {
+        k: v / 1000
+        for k, v in events_of(day_dir, 0).items()
+        if k in ("ref", "confirm", "extreme")
+    }
     k = target[0]
     fit = step(navigated, "nav-fit")
     start, end = ev["ref"][k - 1], ev["extreme"][k + 1]
@@ -621,7 +635,11 @@ def test_fit_sets_the_scale_to_the_window_with_a_margin(navigated, day_dir, targ
 
 
 def test_bands_are_drawn_at_the_exact_instants_of_the_event(navigated, day_dir, target):
-    ev = {k: v / 1000 for k, v in events_of(day_dir, 0).items() if k != "flags"}
+    ev = {
+        k: v / 1000
+        for k, v in events_of(day_dir, 0).items()
+        if k in ("ref", "confirm", "extreme")
+    }
     flags = events_of(day_dir, 0)["flags"]
     k = target[0]
     fit = step(navigated, "nav-fit")
@@ -647,9 +665,12 @@ def test_bands_are_drawn_at_the_exact_instants_of_the_event(navigated, day_dir, 
     assert any(
         abs(r[1] - x_conf) < 1 and abs(r[1] + r[3] - x_ext) < 1.5 for r in over_band
     )
-    # La línea de confirmación (1 px, del color del evento) está en su instante; la de extremo ya no existe.
-    lines = [r for r in rects if r[3] == 1 and r[4] == full]
-    assert any(r[0] == f"rgb({rgb})" and abs(r[1] - x_conf) <= 1 for r in lines)
+    # Ni la línea de confirmación (ITSC-319: el triángulo hueco y el cambio de franja ya marcan el
+    # instante) ni la de extremo existen: ninguna línea de 1 px de todo el alto del panel.
+    assert not [
+        r for r in rects if r[0].startswith("rgb(") and r[3] == 1 and r[4] == full
+    ]
+    assert "function vline" not in APP_JS.read_text(encoding="utf-8")
 
 
 def test_no_light_vertical_line_marks_the_extreme_of_an_event(navigated):
@@ -766,8 +787,6 @@ def test_legend_is_made_of_samples_not_sentences(day_dir):
     for sample in ("sw up conf", "sw up over", "sw down conf", "sw down over"):
         assert f'class="{sample}"' in legend
     for sample in (
-        "ln up",
-        "ln down",
         "mk price",
         "sw dense",
         "ln prov",
@@ -775,7 +794,10 @@ def test_legend_is_made_of_samples_not_sentences(day_dir):
         "bar vol",
     ):
         assert f'class="{sample}"' in legend
-    assert legend.count('class="key"') == 11
+    # Cuatro triángulos (extremo y confirmación, alza y baja), tal como se dibujan.
+    for sample in ("tri up", "tri down", "tri up hollow", "tri down hollow"):
+        assert f'class="{sample}"' in legend
+    assert legend.count('class="key"') == 13
     # El único texto visible es la marca gris con su número, tal como se dibuja: nada obliga a leer una frase.
     samples = legend.split('<span id="f-help">')[0]
     visible = re.sub(
@@ -785,7 +807,7 @@ def test_legend_is_made_of_samples_not_sentences(day_dir):
     assert "tenue: confirmación" not in page and "línea clara" not in page
     assert "marca gris con número" not in page
     # Cada muestra se explica al pasar el mouse.
-    assert legend.count("title=") == 11
+    assert legend.count("title=") == 13
     # Los botones de navegación siguen en la franja.
     for label in ("Evento anterior", "Evento siguiente", "Ajustar a la ventana"):
         assert f">{label}<" in page
@@ -832,20 +854,22 @@ def test_with_a_one_second_zoom_the_four_events_show_with_their_ticks(flash):
     p = np.array([round(float(r[2]) * 100) for r in flash_ticks()])
     q = np.array([float(r[3]) for r in flash_ticks()])
     fr = frame_of((t, p, q), x, round(zoom["plotW"]))
-    # Los 10 de 0,1 s, el tick de fondo que cae en `FLASH` y los 4 090 del milisegundo: ninguno se pierde.
-    assert (
-        zoom["metrics"]["frame"]["ticks"] == int(fr["n"].sum()) == 10 + 1 + BURST_TICKS
-    )
+    # Los 10 de 0,1 s, el tick de fondo que cae en `FLASH`, los 4 090 del milisegundo y los ticks de
+    # los puntos de los eventos que caen en la ventana: ninguno se pierde.
+    expected = int(((t >= round(x[0] * 1000)) & (t <= round(x[1] * 1000))).sum())
+    assert expected == 10 + 1 + BURST_TICKS + sum(len(v) for v in SHARED.values()) + 1
+    assert zoom["metrics"]["frame"]["ticks"] == int(fr["n"].sum()) == expected
     assert sorted(price_marks(zoom)) == [int(c) for c in np.flatnonzero(fr["n"])]
     # Los 4 090 ticks del milisegundo son UN segmento del mínimo al máximo, no 4 090 puntos.
-    assert zoom["metrics"]["price_draw"]["segments"] == 1
+    # (más los tres instantes de tres ticks de los puntos de los eventos: otros tres segmentos)
+    assert zoom["metrics"]["price_draw"]["segments"] == 1 + len(SHARED)
     n = fr["n"]
     dots = int(((n == 1) | ((n == 2) & (fr["lo"] == fr["hi"]))).sum()) + 2 * int(
         ((n == 2) & (fr["lo"] != fr["hi"])).sum()
     )
     assert (
-        zoom["metrics"]["price_draw"]["dots"] == dots == 11
-    )  # 9 instantes sueltos y 2 ticks en `FLASH`
+        zoom["metrics"]["price_draw"]["dots"] == dots == 12
+    )  # 10 instantes sueltos (con el de .982) y 2 ticks en `FLASH`
 
 
 def test_at_the_millisecond_of_the_burst_the_price_is_one_min_max_segment_and_the_tooltip_counts(
@@ -941,10 +965,14 @@ def write_big_day(
     docs = []
     for k in range(thetas):
         ref = np.sort(rng.integers(0, 86_000_000, events + 1)).astype("<i4")
+        tick = np.sort(rng.integers(0, ticks, events + 1)).astype("<u4")
         rows = EventRows(
             ref[:-1],
             ((ref[:-1].astype(np.int64) + ref[1:]) // 2).astype("<i4"),
             ref[1:],
+            tick[:-1],
+            ((tick[:-1].astype(np.int64) + tick[1:]) // 2).astype("<u4"),
+            tick[1:],
             (np.arange(events) % 2).astype("u1"),
         )
         buffer.add(rows)
@@ -1024,3 +1052,246 @@ def test_a_day_in_several_chunks_draws_exactly_like_the_same_day_in_one(
         assert step(parts, name)["marks"] == step(one, name)["marks"]
     assert parts["hovers"] == one["hovers"]
     assert step(parts, "inicio")["metrics"]["ticks"] == len(flash_ticks())
+
+
+# ---- Triángulos de extremo y confirmación en el tick exacto (ITSC-319) -------------------
+
+TRI_UP, TRI_DOWN = "rgb(63, 185, 80)", "rgb(248, 81, 73)"
+
+
+def expected_triangle(zoom, window, tick_id, *, hollow, up):
+    """Dónde debe quedar un triángulo: la punta en el píxel y el precio del tick `tick_id`.
+
+    Sale de `flash_ticks()` y de los números del dibujo (escala x del panel, ancho en píxeles y
+    escala y del precio), no de `events.bin`.
+    """
+    _id, seconds, price, _qty = flash_ticks()[tick_id]
+    a, z = window[0] * 1000, window[1] * 1000
+    plot = zoom["plot"]
+    cols = round(zoom["plotW"])
+    px = min(int(np.floor((round(seconds * 1000) - a) * cols / (z - a))), cols - 1)
+    ymin, ymax = zoom["yPrice"]
+    return {
+        "x": plot["left"] + (px + 0.5) * plot["width"] / cols,
+        "y": plot["top"] + (ymax - float(price)) / (ymax - ymin) * plot["height"],
+        "hollow": hollow,
+        "up": up,
+        "px": px,
+    }
+
+
+def assert_triangles(zoom, window, expected):
+    """Los triángulos dibujados son exactamente `expected`, de izquierda a derecha."""
+    drawn = sorted(zoom["triangles"], key=lambda t: t["apex"][0])
+    wanted = sorted(
+        (expected_triangle(zoom, window, i, hollow=h, up=u) for i, h, u in expected),
+        key=lambda t: t["x"],
+    )
+    assert len(drawn) == len(wanted), [t["apex"] for t in drawn]
+    for got, want in zip(drawn, wanted, strict=True):
+        assert got["apex"][0] == pytest.approx(want["x"], abs=0.01)
+        assert got["apex"][1] == pytest.approx(want["y"], abs=0.01)
+        assert got["hollow"] is want["hollow"]
+        assert got["color"] == (TRI_UP if want["up"] else TRI_DOWN)
+        # La punta es el tick y el cuerpo cuelga del lado contrario a la dirección del evento.
+        base_y = got["pts"][1][1]
+        assert (base_y > got["apex"][1]) is want["up"] and base_y == got["pts"][2][1]
+    return drawn, wanted
+
+
+def test_the_acceptance_window_draws_the_four_triangles_at_their_exact_ticks(flash):
+    """2026-09-30, 12:40:26.0 a 27.0: ▼ en .051, ▽ en .943 y ▲ en .980 dentro del instante compartido."""
+    window = (FLASH, FLASH + 1)
+    result = view(flash, "--theta", "2", "--zoom", f"{window[0]},{window[1]}")
+    zoom = step(result, f"zoom:{window[0]},{window[1]}")
+    assert not result["errors"]
+    start = tick_at(FLASH)[0]
+    drawn, wanted = assert_triangles(
+        zoom,
+        window,
+        [
+            (
+                start,
+                True,
+                True,
+            ),  # △ la confirmación del evento 1 (alza), en 12:40:26.000
+            (tick_at(FLASH + 0.051, 1)[0], False, False),  # ▼ en .051 a 85 034,99
+            (tick_at(FLASH + 0.943, 1)[0], True, False),  # ▽ en .943 a 84 601,13
+            (tick_at(FLASH + 0.980, 1)[0], False, True),  # ▲ en .980 a 84 000,01
+        ],
+    )
+    assert zoom["metrics"]["triangles"] == {"total": 4, "solid": 2, "hollow": 2}
+    # Dentro de un instante compartido, el triángulo va al precio de su tick y no al del segmento.
+    t = np.array([round(r[1] * 1000) for r in flash_ticks()])
+    p = np.array([round(float(r[2]) * 100) for r in flash_ticks()])
+    fr = frame_of((t, p, np.ones(len(t))), window, round(zoom["plotW"]))
+    plot = zoom["plot"]
+    ymin, ymax = zoom["yPrice"]
+
+    def y_of(units):
+        return plot["top"] + (ymax - units / 100) / (ymax - ymin) * plot["height"]
+
+    for tri, want, price in zip(
+        drawn[1:], wanted[1:], (85_034.99, 84_601.13, 84_000.01), strict=True
+    ):
+        assert fr["n"][want["px"]] == 3  # tres ticks en el milisegundo
+        assert tri["apex"][1] == pytest.approx(y_of(round(price * 100)), abs=0.01)
+        assert (
+            y_of(fr["hi"][want["px"]]) <= tri["apex"][1] <= y_of(fr["lo"][want["px"]])
+        )
+    # ▼ y ▽ caen a media altura del segmento; ▲ está en su extremo inferior (84 000,01 es el mínimo).
+    assert (
+        y_of(fr["hi"][wanted[1]["px"]])
+        < drawn[1]["apex"][1]
+        < y_of(fr["lo"][wanted[1]["px"]])
+    )
+    assert drawn[3]["apex"][1] == pytest.approx(
+        y_of(fr["lo"][wanted[3]["px"]]), abs=0.01
+    )
+
+
+def test_the_triangle_tooltip_names_the_event_the_point_the_time_the_price_and_the_tick(
+    flash,
+):
+    window = (FLASH, FLASH + 1)
+    flags = ["--theta", "2", "--zoom", f"{window[0]},{window[1]}"]
+    zoom_label = f"zoom:{window[0]},{window[1]}"
+    first = view(flash, *flags)
+    triangles = sorted(step(first, zoom_label)["triangles"], key=lambda t: t["apex"][0])
+    top = step(first, zoom_label)["plot"]["top"]
+
+    def over(index, sec):
+        # El centro del triángulo: dos tercios de su alto desde la punta, hacia el cuerpo.
+        apex = triangles[index]["apex"]
+        body = triangles[index]["pts"][1][1] - apex[1]
+        return f"price@{sec}@2@{apex[1] - top + body * 2 / 3}"
+
+    result = view(
+        flash,
+        *flags,
+        "--hover",
+        over(1, FLASH + 0.051),
+        "--hover",
+        over(2, FLASH + 0.943),
+        "--hover",
+        over(3, FLASH + 0.980),
+        "--hover",
+        over(0, FLASH),
+    )
+    down, confirm, up, start = (h["tooltip"].split("\n") for h in result["hovers"])
+    assert down == [
+        "θ 0.05000000 · evento 2 / 7 · baja",
+        "extremo (inicia el evento)",
+        "12:40:26.051 UTC",
+        "precio 85034.99",
+        "tick 2 de 3 en este ms",
+    ]
+    assert confirm[1:] == [
+        "confirmación",
+        "12:40:26.943 UTC",
+        "precio 84601.13",
+        "tick 2 de 3 en este ms",
+    ]
+    assert up[0] == "θ 0.05000000 · evento 3 / 7 · alza"
+    assert up[1:] == [
+        "extremo (inicia el evento)",
+        "12:40:26.980 UTC",
+        "precio 84000.01",
+        "tick 2 de 3 en este ms",
+    ]
+    # Un instante con dos ticks (el de fondo y el primero de los de 0,1 s) lo dice también.
+    assert start[1:3] == ["confirmación", "12:40:26.000 UTC"]
+    assert start[-1] == "tick 1 de 2 en este ms"
+    # Lejos de un triángulo, el tooltip sigue siendo el del píxel.
+    away = view(flash, *flags, "--hover", f"price@{FLASH + 0.6}@2@20")["hovers"][0]
+    assert "precio" in away["tooltip"] and "extremo (" not in away["tooltip"]
+
+
+def test_the_full_day_draws_no_triangles_for_events_the_density_mark_groups(flash):
+    """Con θ = 0,00509931 en el día entero los cuatro eventos en un segundo son una marca."""
+    result = view(flash, "--theta", "0", "--zoom", "0,86400")
+    full = step(result, "zoom:0,86400")
+    assert full["metrics"]["density"]["groups"] == 1
+    # Solo los eventos que se ven enteros: el 1 (▼ y ▽) y el 6 (▲, △ y el extremo que lo cierra, ▼).
+    assert [
+        (t["hollow"], t["color"])
+        for t in sorted(full["triangles"], key=lambda t: t["apex"][0])
+    ] == [
+        (False, TRI_DOWN),
+        (True, TRI_DOWN),
+        (False, TRI_UP),
+        (True, TRI_UP),
+        (False, TRI_DOWN),
+    ]
+    assert full["metrics"]["triangles"]["total"] == 5
+
+
+def test_zooming_in_opens_the_density_mark_into_its_triangles(flash):
+    window = (FLASH - 0.05, FLASH + 1.05)
+    result = view(flash, "--theta", "0", "--zoom", f"{window[0]},{window[1]}")
+    zoom = step(result, f"zoom:{window[0]},{window[1]}")
+    assert zoom["metrics"]["density"]["groups"] == 0
+    # Cada evento trae su extremo (sólido) y su confirmación (hueca); los extremos son la referencia del siguiente.
+    ids = [tick_at(FLASH)[0], tick_at(FLASH + 0.051, 1)[0]]
+    for sec in (0.3, 0.4, 0.6, 0.7, 0.8, 0.9):
+        ids.append(tick_at(FLASH + sec)[0])
+    ids.append(tick_at(FLASH + 0.982)[0])
+    kinds = [
+        (False, True),  # ▲ FLASH: el extremo que inicia el evento 2 (alza)
+        (True, True),  # △ .051: su confirmación
+        (False, False),  # ▼ .300
+        (True, False),  # ▽ .400
+        (False, True),  # ▲ .600
+        (True, True),  # △ .700
+        (False, False),  # ▼ .800
+        (True, False),  # ▽ .900
+        (False, True),  # ▲ .982
+    ]
+    assert_triangles(
+        zoom, window, [(i, h, u) for i, (h, u) in zip(ids, kinds, strict=True)]
+    )
+    assert zoom["metrics"]["triangles"] == {"total": 9, "solid": 5, "hollow": 4}
+
+
+def write_clipped_day(root, day=date(2026, 9, 30)) -> Path:
+    """Dos eventos con un punto fuera del día cada uno: ids 10 a 15 a 100, 200… 600 s."""
+    rows = [(10 + k, 100.0 * (k + 1), 100 + k, 1) for k in range(6)]
+    ticks = encode_to(root, day, [ticks_batch(day, rows)], SCALE)
+    table = month_events(
+        day,
+        (5, 11, 13, 1, -10.0, 200.0, 400.0),  # la referencia es anterior al día
+        (13, 14, 20, -1, 400.0, 500.0, 90_000.0),  # el extremo es posterior al día
+    )
+    buffer = EventsBuffer()
+    buffer.add(event_rows(table, None, False, day_start_us(day), ticks))
+    write_day(
+        root,
+        provider="binance",
+        market="spot",
+        asset="BTCUSDT",
+        day=day,
+        ticks=ticks,
+        events=buffer,
+        thetas=[ThetaEvents("0.01000000", 2, None)],
+        input_hash="ab" * 32,
+        image_version="0.1.0+test",
+    )
+    return (
+        Path(root) / f"provider=binance/market=spot/asset=BTCUSDT/day={day.isoformat()}"
+    )
+
+
+def test_a_point_outside_the_day_gets_no_triangle(tmp_path):
+    result = view(write_clipped_day(tmp_path), "--zoom", "0,700")
+    zoom = step(result, "zoom:0,700")
+    assert not result["errors"]
+    # Sin la referencia del evento 1 ni el extremo del 2: quedan △ (200 s), ▼ (400 s) y ▽ (500 s).
+    assert [
+        (t["hollow"], t["color"])
+        for t in sorted(zoom["triangles"], key=lambda t: t["apex"][0])
+    ] == [
+        (True, TRI_UP),
+        (False, TRI_DOWN),
+        (True, TRI_DOWN),
+    ]
+    assert zoom["metrics"]["triangles"]["total"] == 3

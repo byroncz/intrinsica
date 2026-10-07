@@ -12,8 +12,9 @@
 //   --nav <k>: con el θ de la opción k, "evento siguiente" dos veces, "anterior" y "ajustar a la ventana".
 //   --nav-switch <j>: tras navegar, cambia al θ de la opción j y deja el paso "nav-switch".
 //   --nav-at <seg>: antes de navegar, un zoom de 600 s centrado en ese segundo (la escala "fijada" por el humano).
-//   --hover <panel>@<seg>[@<theta>]: tras el último zoom, el cursor de ese panel (price, confirms o volume)
-//     en ese segundo, con el θ de la opción pedida; devuelve el tooltip. Se puede repetir.
+//   --hover <panel>@<seg>[@<theta>[@<top>]]: tras el último zoom, el cursor de ese panel (price, confirms o
+//     volume) en ese segundo, con el θ de la opción pedida y a `top` px del borde de arriba (20 por
+//     defecto); devuelve el tooltip. Se puede repetir.
 //   --bench <n>: n zooms alternados (día completo y un tramo del medio) y los tiempos de redibujo.
 "use strict";
 const fs = require("fs");
@@ -230,6 +231,27 @@ const COLORS = {
   simul: "rgb(86, 182, 194)",
 };
 
+// Los triángulos que el último dibujo del precio dejó: cada camino de tres puntos (moveTo, lineTo, lineTo,
+// closePath) y cómo se pintó (fill o stroke) con el color vigente. `apex` es el primer punto: la punta.
+function trianglesOf(plot) {
+  const out = [];
+  let path = [];
+  let fillStyle = null;
+  let strokeStyle = null;
+  let pending = null;
+  for (const call of canvasOf(plot).log || []) {
+    const [op, ...a] = call;
+    if (op === "fillStyle") fillStyle = a[0];
+    else if (op === "strokeStyle") strokeStyle = a[0];
+    else if (op === "beginPath") { path = []; pending = null; }
+    else if (op === "moveTo" || op === "lineTo") path.push(a);
+    else if (op === "closePath" && path.length === 3) pending = { pts: path.slice(), fill: false, stroke: false };
+    else if (op === "fill" && pending) { pending.fill = true; pending.fillStyle = fillStyle; }
+    else if (op === "stroke" && pending) { pending.stroke = true; pending.strokeStyle = strokeStyle; out.push(pending); pending = null; }
+  }
+  return out.map((t) => ({ apex: t.pts[0], pts: t.pts, hollow: !t.fill, color: t.strokeStyle }));
+}
+
 function snapshot(label) {
   const { price, conf, vol } = plots();
   const info = { label };
@@ -250,6 +272,7 @@ function snapshot(label) {
       confirms: marksOf(conf, COLORS.confirms),
       simul: marksOf(conf, COLORS.simul),
     };
+    info.triangles = trianglesOf(price);
     info.panelTexts = {
       price: canvasOf(price).log.filter((c) => c[0] === "fillText").map((c) => c[1]),
       confirms: canvasOf(conf).log.filter((c) => c[0] === "fillText").map((c) => c[1]),
@@ -367,7 +390,7 @@ function snapshot(label) {
     out.hovers = [];
     for (let i = 0; i < args.length; i++) {
       if (args[i] !== "--hover") continue;
-      const [panel, sec, theta] = args[i + 1].split("@");
+      const [panel, sec, theta, top] = args[i + 1].split("@");
       if (theta !== undefined) {
         byId.theta.value = byId.theta.options[Number(theta)].value;
         byId.theta.dispatch("change");
@@ -375,7 +398,7 @@ function snapshot(label) {
       }
       const plot = plots()[{ price: "price", confirms: "conf", volume: "vol" }[panel]];
       plot.over.dispatch("mouseenter");
-      plot.setCursor({ left: plot.valToPos(Number(sec), "x"), top: 20 });
+      plot.setCursor({ left: plot.valToPos(Number(sec), "x"), top: top === undefined ? 20 : Number(top) });
       await tick();
       out.hovers.push({ spec: args[i + 1], tooltip: byId.tip.hidden ? null : byId.tip.textContent });
       plot.over.dispatch("mouseleave");

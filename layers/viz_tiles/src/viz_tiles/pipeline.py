@@ -277,7 +277,11 @@ class _Month:
         )
         provisional_from_s = state.provisional_from_s(day)
         rows = event_rows(
-            events, pending, provisional_from_s is not None, day_start_us(day)
+            events,
+            pending,
+            provisional_from_s is not None,
+            day_start_us(day),
+            ticks,
         )
         del events  # las filas del θ ya son los bytes de `events.bin`
         buffer.add(rows)

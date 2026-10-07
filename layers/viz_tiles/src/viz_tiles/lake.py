@@ -30,10 +30,12 @@ EVENTS = "events.parquet"
 CARRY_OVER = "carry_over.parquet"
 
 TICK_COLUMNS = ("agg_trade_id", "price", "quantity", "transact_time")
-# Lo que un día necesita de cada evento: los ids de su referencia y su extremo
-# (qué eventos tocan el día) y los tres tiempos y el sentido (`events.bin`).
+# Lo que un día necesita de cada evento: los ids de sus tres puntos (qué eventos
+# tocan el día y la posición de cada tick en `events.bin`) y los tres tiempos y el
+# sentido. El orden es el de los campos de `MonthEvents`.
 EVENT_COLUMNS = (
     "reference_agg_trade_id",
+    "confirm_agg_trade_id",
     "extreme_agg_trade_id",
     "reference_time",
     "confirm_time",
@@ -271,11 +273,12 @@ class MonthEvents:
     """Los eventos de un θ en un mes, en arreglos de NumPy y ordenados por referencia.
 
     Se leen una sola vez por mes y de ahí salen los de cada día (`touching`): son
-    41 bytes por evento, y un mes de 50 θ trae decenas de miles. Los tiempos son
+    49 bytes por evento, y un mes de 50 θ trae decenas de miles. Los tiempos son
     µs UTC; `direction` es 1 (alza) o -1 (baja).
     """
 
     reference_id: np.ndarray
+    confirm_id: np.ndarray
     extreme_id: np.ndarray
     reference_time: np.ndarray
     confirm_time: np.ndarray
@@ -287,7 +290,7 @@ class MonthEvents:
 
     @classmethod
     def empty(cls) -> MonthEvents:
-        return cls(*(np.empty(0, np.int64) for _ in range(5)), np.empty(0, np.int8))
+        return cls(*(np.empty(0, np.int64) for _ in range(6)), np.empty(0, np.int8))
 
     def touching(self, first_id: int, last_id: int) -> MonthEvents:
         """Los eventos que tocan los ticks de id `[first_id, last_id]`.
@@ -317,7 +320,7 @@ def read_month_events(path: str) -> MonthEvents:
                         group[name].to_numpy().astype(dtype, copy=False)
                         for name, dtype in zip(
                             EVENT_COLUMNS,
-                            (np.int64,) * 5 + (np.int8,),
+                            (np.int64,) * 6 + (np.int8,),
                             strict=True,
                         )
                     )
