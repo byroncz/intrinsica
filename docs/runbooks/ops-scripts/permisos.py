@@ -2,10 +2,11 @@
 
 Comprueba que la cuenta hace lo que debe y falla con 403 en lo demás:
 
-  - leer el lago: listar un objeto de landing y de dc-events  -> debe poder
+  - leer el lago: listar un objeto de landing, dc-events y de tiles/ de viz
+                                                               -> debe poder
   - escribir bajo OPS_RESULTS_URI                              -> debe poder
   - escribir en scripts/ del bucket ops                        -> 403
-  - escribir en landing, dc-events, dq-findings y manifest     -> 403
+  - escribir en landing, dc-events, dq-findings, manifest y viz -> 403
   - pisar un objeto ya escrito en results/ (sin borrar)        -> 403
 
 Una escritura que "debe fallar" y no falla deja un objeto `ops-permisos-*` en el
@@ -64,6 +65,7 @@ def main() -> int:
     checks = [
         ("leer landing", "ok", list_one(f"{project}-landing", "l1/")),
         ("leer dc-events", "ok", list_one(f"{project}-dc-events", "l2/")),
+        ("leer viz", "ok", list_one(f"{project}-viz", "tiles/")),
         (
             "escribir en results/",
             "ok",
@@ -79,6 +81,7 @@ def main() -> int:
             write(f"{project}-dq-findings", f"l2/{name}"),
         ),
         ("escribir en manifest", "403", write(f"{project}-manifest", f"l2/{name}")),
+        ("escribir en viz", "403", write(f"{project}-viz", f"tiles/{name}")),
     ]
     passed = sum(attempt(*check) for check in checks)
     print(f"permisos: {passed} de {len(checks)} como se esperaba")
