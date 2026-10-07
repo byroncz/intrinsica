@@ -16,6 +16,10 @@ sin peticiones de red (el porqué, en [TRD-viz §6.5](../../docs/TRD/viz.md#65-a
 `--mode render` vuelve a armar esas páginas desde los archivos ya escritos, sin leer
 L1 ni L2, cuando cambia la plantilla.
 
+En GCS la operación (backfill por rangos de un año, volumen y costo, métricas de la
+vista, `latest.html` y encadenamiento mensual) está en el
+[runbook de operación de viz](../../docs/runbooks/operacion-viz.md).
+
 ## Uso en local
 
 ```bash
