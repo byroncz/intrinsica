@@ -1,4 +1,4 @@
-"""Herramienta local. Sonda del tamaño de `ticks.bin`: cuánto pesan los ticks de un día de viz.
+"""Sonda del tamaño de `ticks.bin`: cuánto pesan los ticks de un día de viz.
 
 La página de un día lleva sus ticks (TRD-viz §7.3, ADR-VZ-14) y su presupuesto es
 de 4 MB en gzip el 2026-09-30. Esta sonda lee `ticks.bin` e `index.json` del día y
@@ -22,10 +22,10 @@ Args (todos opcionales):
 events_gzip=… página=… presupuesto=ok|excedido|sin_página`. Sale con 1 si el archivo está dañado o la página supera
 el presupuesto.
 
-Solo lee: no escribe nada. Dónde corre: `uv run` en local o con `gcloud` desde Cloud
-Shell. NO corre como `ops-script`: esa cuenta no tiene permiso sobre el bucket viz
-(solo `l1/` y `l2/`) y fallaría con 403. No es `viz_probe_ticks.py` (el de
-`ops-script`, que mide la codificación de un día de ticks).
+Solo lee: no escribe nada. Dónde corre: con `ops-script`, que lee `tiles/` del bucket
+viz (ITSC-321) y toma la raíz por defecto de `OPS_RESULTS_URI`, o en local con
+`uv run` (`--tiles-root` o `--dir`). No es `viz_probe_ticks.py` (el que mide la
+codificación de un día de ticks).
 """
 
 import argparse
