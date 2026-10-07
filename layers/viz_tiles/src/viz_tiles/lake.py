@@ -278,7 +278,7 @@ class MonthEvents:
     """Los eventos de un θ en un mes, en arreglos de NumPy y ordenados por referencia.
 
     Se leen una sola vez por mes y de ahí salen los de cada día (`touching`): son
-    49 bytes por evento, y un mes de 50 θ trae decenas de miles. Los tiempos son
+    57 bytes por evento, y un mes de 50 θ trae decenas de miles. Los tiempos son
     µs UTC; `direction` es 1 (alza) o -1 (baja); `confirm_price` es el precio de la
     confirmación en enteros de 10⁻⁸ (el `decimal128(18, 8)` de L2, sin perder nada).
     """

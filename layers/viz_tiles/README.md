@@ -232,7 +232,7 @@ construir. Un día cierra cuando los ticks pasan al siguiente. Cada lote se codi
 en varint dentro del tramo en curso de `ticks.bin` (hasta 65 536 ticks, ≈ 330 KB);
 cuando el tramo se llena se escribe al objeto y se suelta, así que los bytes del día
 nunca viven en RAM. Los `events.parquet` se leen una vez por mes y quedan como arreglos
-de NumPy (49 B por evento más 8 B del precio de la confirmación). Para apuntar la
+de NumPy (57 B por evento, con el precio de la confirmación). Para apuntar la
 confirmación de cada evento a su tick, el job relee de `ticks.bin` los tramos que las
 contienen, de uno en uno (`TicksReader`, TRD-viz §7.5). En RAM: un row group, un tramo
 de ticks (dos al leer una confirmación) y los eventos del mes. La página sale en streaming a un temporal que se renombra al terminar (`render_day_to`,
