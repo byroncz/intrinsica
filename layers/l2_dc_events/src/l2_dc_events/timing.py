@@ -4,8 +4,8 @@ El hilo principal encadena fases en serie (carga del carry-over, espera de la
 lectura, detección y espera de los escritores); la lectura anticipada y los
 escritores corren en otros hilos. Por eso hay dos clases de número:
 
-- **Pared del hilo principal** (`carry_s`, `read_s`, `detect_s`, `wait_s`): son
-  disjuntas, suman a lo más `wall_s` y lo que falta es `other_s`.
+- **Pared del hilo principal** (`carry_s`, `open_s`, `read_s`, `detect_s`,
+  `wait_s`): son disjuntas, suman a lo más `wall_s` y lo que falta es `other_s`.
 - **CPU o tiempo acumulado entre hilos** (`decode_s`, `detect_cpu_s`,
   `write_s`): `decode_s` es la CPU del hilo lector al decodificar (ITSC-290: ya
   no es pared del principal); `detect_cpu_s`, la CPU del hilo principal durante
@@ -20,7 +20,8 @@ escritores corren en otros hilos. Por eso hay dos clases de número:
 el último tramo, esperar a que cada θ escriba lo que le queda en cola) y
 `publish_s` (cerrar y mover los 100 archivos). La suma de las tres es `wait_s`.
 Los 50 `ThetaTiming` dicen, por θ, cuánto tardó cada fase y cuándo terminó: el
-último θ en terminar (`done_s` mayor) es el que fija el final de la unidad.
+θ con `events_done_s` mayor cerró su último tramo al final y es el que retrasa
+la unidad; `done_s` solo refleja el orden de la cola de publicación.
 """
 
 from dataclasses import dataclass
