@@ -765,7 +765,7 @@ No hay card de logging: es esta sección y el criterio 8 de §13 ("emite hallazg
 |RVZ-09|Agregar un θ en L2 regenera todos los días del mes.|Bajo|Conocido; el costo es el de repetir el backfill de ese rango, hoy de céntimos (§7.8, §10.3). Si molesta, se compara por archivo antes de reescribir (§14 ítem 9).|
 |RVZ-10|Los paneles se acumulan hasta que nadie mira ninguno.|Medio|Evaluación ergonómica obligatoria en todo PR que cambie la vista; `pr-review` rechaza si falta o si una métrica empeora sin justificación (§6.7).|
 |RVZ-11|Aparece un usuario sin acceso IAM al proyecto.|Bajo|El HTML del día es un solo archivo que se descarga y abre en cualquier navegador; la opción B se abre como card (§6.5).|
-|RVZ-12|La página de un día pesa más de lo previsto (más ticks por día, p. ej. en un día de pánico) y abre despacio.|Medio|Presupuesto de 4 MB en gzip el 2026-09-30 y reapertura de la decisión por encima de 10 MB (§6.14); la sonda de cada día deja `page_bytes` en `tiles_summary` (§9.3). **Se materializó en 2025**: media de 5,0 MB, máximo de 68,76 MB (2025-10-10, 4 501 514 ticks), 179 días de más de 4 MB y 25 de más de 10 MB. La decisión sobre esos días es de una card aparte.|
+|RVZ-12|La página de un día pesa más de lo previsto (más ticks por día, p. ej. en un día de pánico) y abre despacio.|Medio|Presupuesto de 4 MB en gzip el 2026-09-30 y reapertura de la decisión por encima de 10 MB (§6.14); la sonda de cada día deja `page_bytes` en `tiles_summary` (§9.3). **Se materializó en 2025**: media de 5,0 MB, máximo de 68,76 MB (2025-10-10, 4 501 514 ticks), 179 días de más de 4 MB y 25 de más de 10 MB. La decisión sobre esos días es de ITSC-322.|
 
 -----
 
