@@ -38,7 +38,8 @@
   var EVENT_BYTES = 25;
   var NO_TICK = 0xffffffff; // posición de un punto fuera del día
   // Triángulo de un tick de evento (§7.5, ADR-VZ-12): la punta va en el tick exacto. Lados en px CSS;
-  // `hit` es la distancia máxima del cursor a la punta para que el tooltip sea el del triángulo.
+  // `hit` es la distancia máxima del cursor al centro del triángulo (2/3 del alto desde la punta) para
+  // que el tooltip sea el del triángulo.
   var TRI = { w: 10, h: 9, hit: 9 };
   // Franja del borde, en px CSS: fina en la confirmación, gruesa en el overshoot.
   var BAND_PX = { thin: 3, thick: 8 };
