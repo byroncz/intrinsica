@@ -584,10 +584,12 @@
       var xc = Math.min(v.xc, x1);
       band(ctx, b, dpr, v.x0, xc, up, false);
       band(ctx, b, dpr, xc, x1, up, true);
-      // Los triángulos (drawTriangles) solo van en los eventos que se dibujan: el agrupado cuenta en
-      // la marca de densidad. Ni el extremo ni la confirmación llevan línea vertical: el cambio de
-      // color y de grosor de la franja y el triángulo en el tick exacto ya los marcan (ADR-VZ-12).
-      triEvents.push(v.i);
+      // Los triángulos (drawTriangles) solo van en los eventos que se dibujan y que son al menos tan
+      // anchos como el triángulo: el agrupado cuenta en la marca de densidad, y uno más angosto que
+      // TRI.w taparía a sus vecinos (a día completo un θ de 0,0001 no lleva ninguno). Ni el extremo ni
+      // la confirmación llevan línea vertical: el cambio de color y de grosor de la franja y el
+      // triángulo en el tick exacto ya los marcan (ADR-VZ-12).
+      if (v.x1 - v.x0 >= TRI.w * dpr) triEvents.push(v.i);
     });
 
     // Marca de densidad: un rectángulo neutro con el número, en vez de franjas indistinguibles.

@@ -938,9 +938,17 @@ def test_the_first_event_of_the_day_has_no_previous_event_and_says_so(flash):
 
 
 def write_big_day(
-    root: Path, ticks: int = 950_000, events: int = 600, thetas: int = 50
+    root: Path,
+    ticks: int = 950_000,
+    events: int = 600,
+    thetas: int = 50,
+    mean_event_s: float | None = None,
 ):
-    """Un día del tamaño del 2026-09-30 (948 740 ticks) con 50 θ de `events` eventos cada uno."""
+    """Un día del tamaño del 2026-09-30 (948 740 ticks) con 50 θ de `events` eventos cada uno.
+
+    Con `mean_event_s` los eventos se encadenan (el extremo de uno es la referencia del siguiente) con
+    duraciones exponenciales de esa media, como los de un θ real; sin él, las referencias son uniformes.
+    """
     rng = np.random.default_rng(30)
     day = date(2026, 9, 30)
     time_ms = np.sort(rng.integers(0, 86_400_000, ticks))
@@ -964,7 +972,11 @@ def write_big_day(
     buffer = EventsBuffer()
     docs = []
     for k in range(thetas):
-        ref = np.sort(rng.integers(0, 86_000_000, events + 1)).astype("<i4")
+        if mean_event_s is None:
+            ref = np.sort(rng.integers(0, 86_000_000, events + 1)).astype("<i4")
+        else:
+            gaps = rng.exponential(mean_event_s * 1000, events + 1)
+            ref = np.minimum(np.cumsum(gaps), 86_000_000).astype("<i4")
         tick = np.sort(rng.integers(0, ticks, events + 1)).astype("<u4")
         rows = EventRows(
             ref[:-1],
@@ -1021,6 +1033,42 @@ def test_a_real_sized_day_decodes_and_redraws_well_inside_the_budget(big):
     assert start["metrics"]["decoded_bytes"] > 5_000_000
 
 
+@pytest.fixture(scope="module")
+def realistic(tmp_path_factory):
+    """Un θ de 930 eventos de duración exponencial con media 93 s: el de 0,0001 del 2026-09-30 (TRD 1.3)."""
+    return write_big_day(
+        tmp_path_factory.mktemp("realistic"), events=930, thetas=1, mean_event_s=93
+    )
+
+
+def test_the_full_day_of_a_real_theta_draws_triangles_only_on_events_as_wide_as_one(
+    realistic,
+):
+    """Criterio: con θ = 0,0001 en el día completo casi no hay triángulos (ADR-VZ-12).
+
+    A ~72 s por píxel, uno de cada diez eventos supera los 3 px de la franja; el triángulo (TRI.w, 10 px)
+    no se dibuja en uno más angosto que él. Solo un evento tan ancho como el triángulo lleva el suyo:
+    el oráculo cuenta esos eventos y ninguno más. Acercando, los mismos eventos sí llevan sus puntos.
+    """
+    result = view(realistic, "--theta", "0", "--zoom", "0,86400", "--zoom", "0,3600")
+    full = step(result, "zoom:0,86400")
+    events = events_of(realistic, 0)
+    seconds = (events["extreme"].astype(np.int64) - events["ref"]) / 1000
+    assert (seconds * full["plotW"] / 86_400 >= 3).sum() > 50  # sí hay franjas anchas
+    wide = int((seconds * full["plotW"] / 86_400 >= TRI_W).sum())
+    assert (
+        wide < len(seconds) / 100
+    )  # el criterio: a día completo, prácticamente ninguno
+    # Un evento ancho trae su extremo sólido y su confirmación hueca.
+    assert full["metrics"]["triangles"] == {
+        "total": 2 * wide,
+        "solid": wide,
+        "hollow": wide,
+    }
+    zoom = step(result, "zoom:0,3600")
+    assert zoom["metrics"]["triangles"]["total"] > 0
+
+
 def test_the_tooltip_names_the_event_that_closes_at_its_extreme_millisecond(flash):
     """El tick extremo pertenece al evento que cierra, (referencia, extremo] (ADR-VZ-12)."""
     # FLASH + 0,300 es el extremo del evento 2 y la referencia del 3: ese ms es del 2.
@@ -1056,6 +1104,7 @@ def test_a_day_in_several_chunks_draws_exactly_like_the_same_day_in_one(
 
 # ---- Triángulos de extremo y confirmación en el tick exacto (ITSC-319) -------------------
 
+TRI_W = 10  # TRI.w de app.js: ancho del triángulo en px CSS
 TRI_UP, TRI_DOWN = "rgb(63, 185, 80)", "rgb(248, 81, 73)"
 
 
