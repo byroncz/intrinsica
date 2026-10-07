@@ -597,6 +597,10 @@ def test_the_acceptance_points_are_the_exact_ticks_in_their_shared_milliseconds(
         # Tres ticks comparten ese milisegundo y el del evento no es el mínimo ni el máximo (salvo ▲).
         shared = got.price[got.time_ms == FLASH * 1000 + ms]
         assert len(shared) == 3
+        if column == "ref_tick" and event == 2:  # ▲ es el mínimo del milisegundo
+            assert got.price[position] == shared.min()
+        else:  # ▼ y ▽ ni el mínimo ni el máximo
+            assert shared.min() < got.price[position] < shared.max()
     # Los siete eventos se encadenan: el extremo de uno es la referencia del siguiente.
     sl = slice(first, first + 7)
     assert s["extreme_tick"][sl][:-1].tolist() == s["ref_tick"][sl][1:].tolist()
