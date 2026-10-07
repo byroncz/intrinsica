@@ -143,7 +143,7 @@ una vez y el reintento salta lo que ya está al día. Si la ejecución termina
 `Fallida`, lee la causa como en "Leer una ejecución fallida" y distingue:
 
 - **OOM** ("Memory limit exceeded"): no hay línea `sonda:` del día. El pico medido
-  con 2025 fue de **581 MiB** (2025-10-10, 4 501 514 ticks, el día mayor del año):
+  con 2025 fue de **581 MiB** (el pico del año, con días de hasta 4 501 514 ticks):
   14 % de los 4 GiB del job (4 096 ÷ 581 ≈ 7 veces de holgura). Un OOM con 4 GiB no
   es un día grande más, es un hallazgo: anota el día y abre una card. El 204 MiB de
   la sonda sintética (950 000 ticks) no sirve de referencia.
