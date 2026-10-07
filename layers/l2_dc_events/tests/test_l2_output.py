@@ -572,8 +572,9 @@ def test_unit_timing_says_what_each_theta_spent_and_when_it_finished(
     # Los desgloses suman lo que ya se reportaba como `write_s`.
     split = sum(details[k] for k in ("encode_s", "close_s", "move_s", "carry_write_s"))
     assert split == pytest.approx(details["write_s"], abs=0.01 * len(per_theta))
-    assert details["close_s"] > 0
-    assert details["move_s"] > 0
+    # Sin redondear: en disco local cada cierre y move dura µs y `details` los lleva a 0,0.
+    assert result.timing.close_s > 0
+    assert result.timing.move_s > 0
 
 
 def test_timing_stays_out_of_events_summary(fixture_ticks, write_month, ctx):
