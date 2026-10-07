@@ -15,14 +15,15 @@ locals {
   buckets = local.data.buckets
   ops     = local.buckets["ops"]
 
-  # Solo lectura sobre el lago (landing, eventos, hallazgos y manifiesto) y
-  # sobre los scripts. Nada de escritura en el lago: lo que un script quiera
-  # dejar va a results/, abajo.
+  # Solo lectura sobre el lago (landing, eventos, hallazgos, manifiesto y tiles
+  # de viz) y sobre los scripts. Nada de escritura en el lago: lo que un script
+  # quiera dejar va a results/, abajo.
   access = {
     (local.buckets["landing"])     = { role = "roles/storage.objectViewer", prefixes = ["l1/"] }
     (local.buckets["dc-events"])   = { role = "roles/storage.objectViewer", prefixes = ["l2/"] }
     (local.buckets["dq-findings"]) = { role = "roles/storage.objectViewer", prefixes = ["l1/", "l2/"] }
     (local.buckets["manifest"])    = { role = "roles/storage.objectViewer", prefixes = ["l1/", "l2/"] }
+    (local.buckets["viz"])         = { role = "roles/storage.objectViewer", prefixes = ["tiles/"] }
     (local.ops)                    = { role = "roles/storage.objectViewer", prefixes = ["scripts/"] }
   }
 }

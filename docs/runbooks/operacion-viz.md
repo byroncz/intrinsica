@@ -365,19 +365,18 @@ Versionados en [`layers/ops_tools/scripts/`](../../layers/ops_tools/scripts/). H
 | --- | --- | --- |
 | `viz_check_day.py` | Valida L2 contra L1: invariantes de los eventos del mes, eventos y velas de una ventana, regla de columna. No lee tiles | `ops-script` |
 | `viz_probe_ticks.py` | Mide la codificación de un día de ticks. No lee tiles | `ops-script` |
-| `viz_check_page.py` | Valida los archivos del día de viz (`index.json`, `ticks.bin`, `events.bin`) y `latest.html` | **local** |
-| `viz_probe_page.py` | Mide `ticks.bin`, `events.bin` y la página guardada contra el presupuesto de 4 MB | **local** |
+| `viz_check_page.py` | Valida los archivos del día de viz (`index.json`, `ticks.bin`, `events.bin`) y `latest.html` | `ops-script` o local |
+| `viz_probe_page.py` | Mide `ticks.bin`, `events.bin` y la página guardada contra el presupuesto de 4 MB | `ops-script` o local |
 
 **Los dos primeros son los originales** que corrieron en `ops-script-2r2fv` y en
 la sonda del 2026-10-06 (TRD-viz §14 ítem 17), versionados tal cual: no se
 reformatean ni se editan (`layers/ops_tools/scripts/ruff.toml` los excluye del
 formato y del lint de CI). Si hay que cambiarlos, se cambian a propósito en una card,
-no por estilo. **Los dos últimos leen `tiles/` y
-la cuenta de `ops-script` no tiene permiso sobre el bucket viz** (su IAM cubre
-`l1/` y `l2/`: `landing`, `dc-events`, `dq-findings`, `manifest` y `ops`): como
-`ops-script` fallarían con 403. Corren con `uv run` en local o desde Cloud Shell con
-tu cuenta. Dar lectura a `viz/tiles/` a `ops-script` es un cambio del stack `ops`,
-fuera de esta card. Los cuatro tienen pruebas en `layers/ops_tools/tests/`: los
+no por estilo. **Los dos últimos leen `tiles/`**; la cuenta de `ops-script` tiene
+lectura (solo lectura) sobre `tiles/` del bucket viz desde ITSC-321, además de
+`l1/` y `l2/`, así que también corren con Run job (`job` = `ops-script`), una vez
+aplicado el stack `ops` y copiados al bucket ops (abajo). Siguen corriendo con
+`uv run` en local o desde Cloud Shell con tu cuenta. Los cuatro tienen pruebas en `layers/ops_tools/tests/`: los
 locales (`test_viz_scripts.py`) contra un día que escribe viz de verdad, y los dos
 originales (`test_ops_script_originals.py`) contra el lago de fixtures.
 
@@ -418,6 +417,12 @@ originales (`test_ops_script_originals.py`) contra el lago de fixtures.
   ```
 
   Termina en `día AAAA-MM-DD: ticks=…; θ=…; eventos=…; fallos=0` y código 0.
+  Como `ops-script`:
+
+  ```text
+  script = gs://intrinsica-dc-ops/scripts/viz_check_page.py
+  args   = --tiles-root gs://intrinsica-dc-viz/tiles
+  ```
 - **`viz_probe_page.py`**: bytes por tick, por sección (crudos y en gzip),
   `ticks.bin` y `events.bin` en gzip y en base64 más gzip, y, con `--tiles-root`, la
   página guardada contra el presupuesto de 4 MB.
@@ -427,7 +432,12 @@ originales (`test_ops_script_originals.py`) contra el lago de fixtures.
   ```
 
   Termina en `sonda ticks: día=… presupuesto=ok` o `excedido` (código 1). Con
-  `--dir`, sin `index.html` descargado, dice `sin_página`.
+  `--dir`, sin `index.html` descargado, dice `sin_página`. Como `ops-script`:
+
+  ```text
+  script = gs://intrinsica-dc-ops/scripts/viz_probe_page.py
+  args   = --tiles-root gs://intrinsica-dc-viz/tiles --day 2026-09-30 --page-budget-mb 4
+  ```
 
 Con `--tiles-root gs://` hace falta `pyarrow` y credenciales (`gcloud auth
 application-default login` en local; en Cloud Shell ya están). Para un día
@@ -438,18 +448,18 @@ mkdir dia && gcloud storage cp \
   gs://intrinsica-dc-viz/tiles/provider=binance/market=spot/asset=BTCUSDT/day=2026-09-30/{index.json,ticks.bin,events.bin} dia/
 ```
 
-**Copia a GCS de los originales.** Los de `ops-script` viven en
+**Copia a GCS.** Los scripts que corren como `ops-script` viven en
 `gs://intrinsica-dc-ops/scripts/` (el bucket tiene versionado, ver
 [operacion-ops](operacion-ops.md#trazabilidad-sin-git)); el repo es la fuente y el
-bucket, la copia que el job lee. Tras cambiarlos en una card:
+bucket, la copia que el job lee. Tras cambiarlos en una card (o la primera vez, para
+los dos de `tiles/`):
 
 ```bash
 gcloud storage cp layers/ops_tools/scripts/viz_check_day.py gs://intrinsica-dc-ops/scripts/viz_check_day.py
 gcloud storage cp layers/ops_tools/scripts/viz_probe_ticks.py gs://intrinsica-dc-ops/scripts/viz_probe_ticks.py
+gcloud storage cp layers/ops_tools/scripts/viz_check_page.py gs://intrinsica-dc-ops/scripts/viz_check_page.py
+gcloud storage cp layers/ops_tools/scripts/viz_probe_page.py gs://intrinsica-dc-ops/scripts/viz_probe_page.py
 ```
-
-Los dos locales **no se copian** al bucket de `ops`: ahí no los puede leer nadie que
-los necesite y, como `ops-script` no accede a viz, un 403 no diría nada útil.
 
 ## Proyección del histórico
 
@@ -614,7 +624,9 @@ Lo que esta medición deja fuera de la card, con el motivo:
   vCPU y los binarios duplicados. Obliga a repartir el backfill en tres meses.
 - **Backfill del histórico restante** (ITSC-325; ítems 2, 10 y 16): depende de ITSC-324.
   Cada rango se lanza con la revisión del cupo del paso 1.
-- **Acceso de `ops-script` a `tiles/`** (ITSC-321; ítem 20).
+- **Verificar el acceso de `ops-script` a `tiles/`** (ITSC-321; ítem 20): tras el
+  apply del stack `ops` por el humano, `permisos.py` (`11 de 11`) y `viz_check_page.py`
+  con `--tiles-root gs://<proyecto>-viz/tiles` sobre el último día, con `fallos=0`.
 - **Primer encadenamiento real y mediciones del humano** (ITSC-323; ítems 12, 13, 15 y
   16): las tres ejecuciones del cierre de octubre (paso 5), el `content-type` y
   `content-encoding` guardados (paso 3, ítem 12), `events_gzip` de `viz_probe_page.py`
