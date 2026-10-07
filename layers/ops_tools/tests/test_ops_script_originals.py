@@ -50,25 +50,29 @@ def ops_lake(tmp_path):
     return out, text, ticks
 
 
-def test_check_day_corre_y_reporta_los_invariantes(ops_lake, capsys):
+def test_check_day_corre_y_reporta_los_invariantes(ops_lake, capsys, monkeypatch):
     """Los eventos de los fixtures son `events_v0`, anteriores a ADR-L2-03 (b): el script debe señalarlos."""
     out, theta, ticks = ops_lake
     check = load("viz_check_day")
-    sys.argv = [
-        "viz_check_day.py",
-        "--project",
-        "p",
-        "--theta",
-        theta,
-        "--day",
-        DAY,
-        "--window",
-        "00:00-01:00",
-        "--w",
-        "128",
-        "--local-root",
-        str(out),
-    ]
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "viz_check_day.py",
+            "--project",
+            "p",
+            "--theta",
+            theta,
+            "--day",
+            DAY,
+            "--window",
+            "00:00-01:00",
+            "--w",
+            "128",
+            "--local-root",
+            str(out),
+        ],
+    )
     check.main()
     text = capsys.readouterr().out
     assert f"L1 {DAY}: {len(ticks)} ticks" in text
@@ -85,7 +89,7 @@ def test_check_day_corre_y_reporta_los_invariantes(ops_lake, capsys):
         assert f"== {section}" in text
 
 
-def test_check_day_detecta_ids_que_no_crecen(ops_lake):
+def test_check_day_detecta_ids_que_no_crecen(ops_lake, monkeypatch):
     import pyarrow as pa
     import pyarrow.parquet as pq
 
@@ -97,17 +101,21 @@ def test_check_day_detecta_ids_que_no_crecen(ops_lake):
     table = table.set_column(0, table.schema.field(0), pa.array(ids, pa.int64()))
     pq.write_table(table, path)
     check = load("viz_check_day")
-    sys.argv = [
-        "viz_check_day.py",
-        "--project",
-        "p",
-        "--theta",
-        theta,
-        "--day",
-        DAY,
-        "--local-root",
-        str(out),
-    ]
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "viz_check_day.py",
+            "--project",
+            "p",
+            "--theta",
+            theta,
+            "--day",
+            DAY,
+            "--local-root",
+            str(out),
+        ],
+    )
     with pytest.raises(
         AssertionError, match="agg_trade_id no es estrictamente creciente"
     ):

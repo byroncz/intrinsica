@@ -83,6 +83,26 @@ completadas y fallidas, inicio y fin) en el *Summary* del run.
 
 ## Paso 1: backfill por rangos de un año
 
+**Antes de lanzar un rango, revisa en *Facturación → Informes* el uso de Cloud Run
+del mes (vCPU-s y GiB-s) y lanza solo si el rango cabe en lo que queda del cupo.**
+El cupo gratis (180 000 vCPU-s y 360 000 GiB-s al mes) es uno solo para L1, L2 y
+viz: comparar el año de viz contra el cupo entero engaña. Cuenta de octubre de
+2026, con lo que L1 y L2 ya habían gastado al 2026-10-03 (90 044 vCPU-s y
+261 358 GiB-s, [operacion-l2](operacion-l2.md#costo-real-y-volumen)):
+
+| | vCPU-s | GiB-s |
+| --- | --- | --- |
+| L1 y L2 al 2026-10-03 | 90 044 (50 %) | 261 358 (73 %) |
+| + viz, 2025 (medido) | 45 848 (25 %) | 46 808 (13 %) |
+| **Usado** | **135 892 (75 %)** | **308 166 (86 %)** |
+| **Queda** | **44 108 (25 %)** | **51 834 (14 %)** |
+
+Otro año como 2025 en octubre (≈ 45 848 vCPU-s) **pasaría el cupo de vCPU-s** por
+≈ 1 740 (≈ 0,03 USD de lista) y dejaría 5 026 GiB-s libres; un rango de seis meses
+(≈ 23 000 vCPU-s) sí cabe. El 2026-10-03 es una foto: L1 y L2 siguen gastando, así
+que lee el uso del día en que lanzas. Si el rango no cabe, parte el rango o espera
+al mes siguiente (el cupo se renueva el día 1).
+
 *Actions → Run job → Run workflow*, rama `main`:
 
 | Input | Valor |
@@ -122,8 +142,11 @@ proceso termina con código 1; con `max_retries = 1`, Cloud Run reintenta la tar
 una vez y el reintento salta lo que ya está al día. Si la ejecución termina
 `Fallida`, lee la causa como en "Leer una ejecución fallida" y distingue:
 
-- **OOM** ("Memory limit exceeded"): no hay línea `sonda:` del día. El pico
-  medido en la sonda sintética fue de 204 MiB; con 4 GiB sería un hallazgo grande.
+- **OOM** ("Memory limit exceeded"): no hay línea `sonda:` del día. El pico medido
+  con 2025 fue de **581 MiB** (2025-10-10, 4 501 514 ticks, el día mayor del año):
+  14 % de los 4 GiB del job (4 096 ÷ 581 ≈ 7 veces de holgura). Un OOM con 4 GiB no
+  es un día grande más, es un hallazgo: anota el día y abre una card. El 204 MiB de
+  la sonda sintética (950 000 ticks) no sirve de referencia.
 - **Timeout**: la tarea se corta a las 10 h, sin mensaje de memoria.
 - **Entrada ausente** (`input_missing` con `what` = `l1`, `events`, `carry_over`
   o `ticks`): falta un archivo de L1 o de L2 de ese mes; corrígelo en su capa.
@@ -193,14 +216,17 @@ los días procesados, reintentos incluidos (un intento fallido también factura)
 
    ```bash
    B=gs://intrinsica-dc-viz/tiles/provider=binance/market=spot/asset=BTCUSDT
-   gcloud storage du -s -h gs://intrinsica-dc-viz/tiles
-   gcloud storage du -s -h "$B/day=2025-*"
+   gcloud storage du -s gs://intrinsica-dc-viz/tiles
+   gcloud storage du -s "$B/day=2025-*" | awk '{ s += $1 } END { print s " B" }'
    gcloud storage ls "$B/day=2025-*/index.json" | wc -l
    ```
 
    El primero es el total de `tiles/` (incluye todo lo construido hasta hoy); el
-   segundo, el del año medido; el tercero, los días con índice (365 en 2025).
-   Volumen por día = segundo ÷ tercero. Compáralo con
+   segundo, el del año medido; el tercero, los días con índice (365 en 2025). Con
+   un comodín, `du -s` da **una línea por día** (no el total del año): el `awk` las
+   suma, en bytes (sin `-h`). Con `du` solo (sin `-s`) saldría una línea por objeto.
+   Para 2025, el segundo debe dar **4 561 622 351 B**, la cifra de "Resultados"; si
+   difiere, otra corrida escribió en el año. Volumen por día = segundo ÷ tercero. Compáralo con
    [TRD-viz §7.3 y §10.3](../TRD/viz.md#73-ticksbin-los-ticks-del-día-sin-reducir):
    ≈ 9 MB por día (4,85 de `ticks.bin`, ≈ 0,8 de `events.bin` y ≈ 3,3 de
    página en gzip), que son **≈ 30 GB** para el histórico con los binarios
@@ -239,9 +265,9 @@ sesión limpia (ventana de incógnito o *Disable cache* en DevTools) y red de ca
    el runbook lo dice ahí y se abre una card con `task-create`; por encima de
    10 MB de página se reabre ADR-VZ-14.
 
-Medido el 2026-10-06 sobre 2026-09-30 (antes de esta card): apertura 1,7 s;
-redibujo 0,4 a 12 ms; cambio de θ < 2 ms; página 3,66 MB. Cumple las cuatro; la
-página queda a 0,34 MB del techo (la estimación era 3,3 a 3,4 MB).
+Hay **un solo juego de cifras**, el de la tabla de "Resultados" (medido el
+2026-10-06 sobre 2026-09-30, una vez; no se repitió el 2026-10-07). Cumple las
+cuatro; la página queda a 0,34 MB del techo (la estimación era 3,3 a 3,4 MB).
 
 ## Paso 4: `latest` verificado
 
@@ -282,6 +308,14 @@ viz-tiles*. Anota el nombre de las tres ejecuciones (`l1-monthly-close-…`,
 `l2-monthly-…`, `viz-tiles-…`) y la pared de cada una. En el repo, el
 scheduler de `monthly-close` (día 8) está con `paused = true`
 (`infra/stacks/batch/l1/main.tf`); verifica su estado real antes de contar con él.
+
+**Esta prueba no se hizo en ITSC-311 y la registra ITSC-323.** El primer cierre real
+que se registra es el de octubre de 2026 (Scheduler del 8 de noviembre, o
+`monthly-close` lanzado por el humano). No se fuerza antes: relanzaría `l2-monthly`
+sobre 2026-09, ya procesado (fallo de `l2-monthly-xdtrf`, abajo). Cuando ocurra, el
+humano reporta las cifras en la card y se anotan en "Encadenamiento" de
+"Resultados": los tres nombres, el mes, la pared y el resultado de cada ejecución, y
+que `latest.html` avanzó al último día de octubre (paso 4).
 
 **La cadena solo prospera si L1 cerró el mes.** El 2026-09-30, `l2-monthly-xdtrf`
 falló porque L1 aún no había dejado el `consolidated.parquet` del mes: L2 solo lee
@@ -447,17 +481,18 @@ confirma:
    vCPU-s y GiB-s); repartido, 0 (RVZ-04).
 2. **El costo lo domina la relectura de tramos**: con la 2.1.0, el 2026-09-30 pasó
    de 5 s a 29 s porque `first_at_price` relee de `ticks.bin` los tramos que
-   contienen cada confirmación (TRD-viz §7.5). Triplica el costo del histórico.
+   contienen cada confirmación (TRD-viz §7.5). Es casi **seis veces** el costo por
+   día (29 ÷ 5 ≈ 5,8).
 
-**Pendiente (no es alcance de esta card): evaluar una card de eficiencia antes del
-backfill completo.** Tres palancas que la medición debe decidir, sin asumir
+**Pendiente (ITSC-324): evaluar la eficiencia antes del backfill completo.** Tres
+palancas que la medición debe decidir, sin asumir
 ninguna: evitar la relectura de tramos de `ticks.bin` en `first_at_price`
 (guardar la posición del primer tick por precio al escribirlo, o resolverla con
 los tramos que el job ya tiene en memoria); medir si 4 vCPU hacen falta (el
 proceso es de un solo hilo salvo Arrow, y facturar 1 vCPU dividiría los vCPU-s
 por 4); y dejar de escribir los binarios sueltos si `render` leyera los datos de
 la propia página (ítem 11 de TRD-viz §14). El humano decide cuándo lanzar los demás
-rangos.
+rangos (ITSC-325, que depende de ITSC-324).
 
 ## Resultados
 
@@ -470,7 +505,7 @@ reportaron en la card. Stack `viz` con 4 vCPU / 4 GiB e imagen `viz_tiles:1.1.1`
 | --- | --- | --- | --- | --- | --- | --- |
 | Backfill del año medido | 37570918667 | `viz-tiles-tc5gb` | 2025-01 a 2025-12 | 365 / 0 | 3 h 24 min (04:19 a 07:43 UTC) | 0 |
 | Relanzar con los mismos inputs | 37634503346 | `viz-tiles-j85kx` | igual | 0 / 365 | 10 min | 0 |
-| Encadenamiento (`l1-run-job`) | _pendiente del primer cierre real (noviembre)_ | `l1-monthly-close-…`, `l2-monthly-…`, `viz-tiles-…` | mes anterior | _pendiente_ | _pendiente_ | _pendiente_ |
+| Encadenamiento (`l1-run-job`) | _pendiente: primer cierre real, ITSC-323_ | `l1-monthly-close-…`, `l2-monthly-…`, `viz-tiles-…` | 2026-10 | _pendiente_ | _pendiente_ | _pendiente_ |
 
 El backfill no dejó **ningún hallazgo** fuera de `tiles_summary`. El relanzamiento
 confirma la idempotencia: saltó los 365 días, no escribió y, aun así, tardó 10 min
@@ -491,8 +526,8 @@ máxima **68,76 MB** (2025-10-10, 4 501 514 ticks); **179 días de 365 pesan má
 
 El presupuesto de 4 MB (RNF-VZ-02) está medido y se cumple **solo para el
 2026-09-30** (3,66 MB). Más de 10 MB es el umbral que reabre ADR-VZ-14; 25 días de
-2025 lo superan. **La decisión sobre esos días no es de esta card**: va en una card
-aparte, que se abre con `task-create` (ver "Cards abiertas").
+2025 lo superan. **La decisión sobre esos días no es de esta card**: es de ITSC-322
+(ver "Cards abiertas").
 
 **Costo**
 
@@ -532,8 +567,8 @@ siendo bajo en términos absolutos, pero el presupuesto de TRD-viz §10.3 hay qu
 corregirlo.
 
 **Métricas de la decisión de fidelidad** (Chrome, consola con `viz:`, día
-2026-09-30, medidas el 2026-10-06; es el último día disponible, así que no cambió
-nada para repetirlas el 2026-10-07):
+2026-09-30, medidas el 2026-10-06; **un solo juego**, no se repitieron el
+2026-10-07):
 
 | Métrica | Criterio | Medido | ¿Cumple? |
 | --- | --- | --- | --- |
@@ -546,27 +581,40 @@ nada para repetirlas el 2026-10-07):
 Las cuatro cumplen, así que esta card no abre una card por incumplimiento. Pero
 ninguna se midió en otro día: **el 2025-10-10 (68,76 MB, 4 501 514 ticks)
 no se abrió en el navegador**, y a ese tamaño la apertura y la decodificación no
-tienen evidencia. Eso queda a la card de los días mayores de 10 MB.
+tienen evidencia. Eso queda a ITSC-322.
 
 **`latest`**: `tiles/latest.html` pesa **3 660 213 B**, igual que el `index.html` del
 2026-09-30 al que apunta `latest.json` (verificación de ITSC-320).
 
-**Encadenamiento**: **no se probó**. Forzar `monthly-close` hoy relanzaría
-`l2-monthly` sobre 2026-09, que ya está procesado: es el fallo de `l2-monthly-xdtrf`
-del 2026-09-30 (creador `l1-workflow`, código 1 en 60 s). Queda pendiente del primer
-cierre real (noviembre de 2026): con L1 ya publicado, se lanza el comando del paso
-5 y se anotan aquí los nombres de las tres ejecuciones y su estado. La lectura de
-una ejecución fallida (`describe` más `logging read` con `jsonPayload.message`) está
-documentada arriba.
+**Encadenamiento**: **no se probó en ITSC-311; lo registra ITSC-323.** Forzar
+`monthly-close` hoy relanzaría `l2-monthly` sobre 2026-09, que ya está procesado: es
+el fallo de `l2-monthly-xdtrf` del 2026-09-30 (creador `l1-workflow`, código 1 en
+60 s). El humano decidió no forzarlo (comentario en ITSC-311, 2026-10-07). Queda
+pendiente del primer cierre real, el de octubre (a partir del 8 de noviembre de
+2026): con L1 ya publicado, se lanza el comando del paso 5 y se anota aquí, en una
+tabla, por ejecución: nombre (`l1-monthly-close-…`, `l2-monthly-…`, `viz-tiles-…`),
+mes procesado, pared, resultado, y si `latest.html` avanzó al último día de octubre.
+Si una ejecución falla, se lee con la guía de arriba (`describe` más `logging read`
+con `jsonPayload.message`) y se abre la card que corresponda.
+
+_Pendiente de ITSC-323 al 2026-10-07: el cierre de octubre aún no ocurre._
 
 ## Cards abiertas
 
 Lo que esta medición deja fuera de la card, con el motivo:
 
 - **Días de más de 10 MB** (ITSC-322; 25 de 2025, umbral de reapertura de ADR-VZ-14):
-  decisión de fondo sobre la fidelidad frente al tamaño de página.
-- **Eficiencia de `first_at_price`** (TRD-viz §14 ítem 19): 31 s por día, triplica el
-  costo y obliga a repartir el backfill en tres meses.
-- **Primer encadenamiento real** (noviembre de 2026): registrar las tres ejecuciones.
+  decisión de fondo sobre la fidelidad frente al tamaño de página. Incluye abrir en el
+  navegador el 2025-10-10.
+- **Eficiencia de `viz-tiles`** (ITSC-324; TRD-viz §14 ítems 3, 11 y 19):
+  `first_at_price` (31 s por día, casi seis veces el costo de la 2.0), si bastan menos
+  vCPU y los binarios duplicados. Obliga a repartir el backfill en tres meses.
+- **Backfill del histórico restante** (ITSC-325; ítems 2, 10 y 16): depende de ITSC-324.
+  Cada rango se lanza con la revisión del cupo del paso 1.
+- **Acceso de `ops-script` a `tiles/`** (ITSC-321; ítem 20).
+- **Primer encadenamiento real y mediciones del humano** (ITSC-323; ítems 12, 13, 15 y
+  16): las tres ejecuciones del cierre de octubre (paso 5), el `content-type` y
+  `content-encoding` guardados (paso 3, ítem 12), `events_gzip` de `viz_probe_page.py`
+  (ítem 13) y la validación de la ventana de tres eventos (ítem 15).
 
 La entrada consolidada de la Épica la escribe `task-close.sh` al cerrarla.
