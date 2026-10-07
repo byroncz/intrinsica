@@ -26,9 +26,10 @@ class Block:
 class Recorder:
     """Un escritor que anota qué recibe y en qué hilo."""
 
-    def __init__(self, delay=0.0, fail_on=None, gate=None):
+    def __init__(self, delay=0.0, fail_on=None, gate=None, jitter=True):
         self.added, self.threads = [], set()
         self.delay, self.fail_on, self.gate = delay, fail_on, gate
+        self.jitter = jitter
         self._busy = threading.Lock()
 
     def add(self, block):
@@ -37,7 +38,7 @@ class Recorder:
         try:
             if self.gate is not None:
                 self.gate.wait(timeout=10)
-            time.sleep(self.delay * random.random())
+            time.sleep(self.delay * (random.random() if self.jitter else 1))
             if block.tag == self.fail_on:
                 raise RuntimeError(f"falla en {block.tag}")
             self.added.append(block.tag)
@@ -105,7 +106,7 @@ def test_blocks_must_match_the_writers(pool):
 
 
 def test_the_wait_is_blamed_on_the_theta_that_finishes_last(pool):
-    slow = Recorder(delay=0.05)
+    slow = Recorder(delay=0.05, jitter=False)
     writers = [Recorder(), slow, Recorder()]
     parallel_writers = ParallelWriters(pool, writers)
     for tag in range(3):
