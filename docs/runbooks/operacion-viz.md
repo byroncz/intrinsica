@@ -334,16 +334,43 @@ Versionados en [`layers/ops_tools/scripts/`](../../layers/ops_tools/scripts/). H
 | `viz_probe_page.py` | Mide `ticks.bin`, `events.bin` y la página guardada contra el presupuesto de 4 MB | **local** |
 
 **Los dos primeros son los originales** que corrieron en `ops-script-2r2fv` y en
-la sonda del 2026-10-06 (TRD-viz §14 ítem 17). **Estado: aún no están en el repo.**
-El arquitecto decidió versionarlos tal cual bajo esos nombres, pero los archivos no
-llegaron con el comentario de la card; hasta entonces solo existen en
-`gs://intrinsica-dc-ops/scripts/`. **Los dos últimos leen `tiles/` y
+la sonda del 2026-10-06 (TRD-viz §14 ítem 17), versionados tal cual: no se
+reformatean ni se editan (`layers/ops_tools/scripts/ruff.toml` los excluye del
+formato y del lint de CI). Si hay que cambiarlos, se cambian a propósito en una card,
+no por estilo. **Los dos últimos leen `tiles/` y
 la cuenta de `ops-script` no tiene permiso sobre el bucket viz** (su IAM cubre
 `l1/` y `l2/`: `landing`, `dc-events`, `dq-findings`, `manifest` y `ops`): como
 `ops-script` fallarían con 403. Corren con `uv run` en local o desde Cloud Shell con
 tu cuenta. Dar lectura a `viz/tiles/` a `ops-script` es un cambio del stack `ops`,
-fuera de esta card. Tienen pruebas en `layers/ops_tools/tests/test_viz_scripts.py`
-contra un día que escribe viz de verdad.
+fuera de esta card. Los cuatro tienen pruebas en `layers/ops_tools/tests/`: los
+locales (`test_viz_scripts.py`) contra un día que escribe viz de verdad, y los dos
+originales (`test_ops_script_originals.py`) contra el lago de fixtures.
+
+- **`viz_check_day.py`**: valida L2 contra L1 para un día y un θ. Imprime los
+  invariantes de todos los eventos del mes (contrato §7.2 y ADR-L2-03), los eventos y
+  las velas de 1 min de una ventana, y las columnas del nivel con su forma y estado;
+  el resumen cuenta las que contradicen el color y la causa. Con `OPS_RESULTS_URI`
+  deja además un CSV por columna en `results/`.
+
+  ```text
+  script = gs://intrinsica-dc-ops/scripts/viz_check_day.py
+  args   = --theta 0.01 --day 2026-09-30 --window 12:30-13:00 --w 1024
+  ```
+
+  Un valor mayor que 0 en `barra ≥ θ contra el estado` es un defecto real; las
+  violaciones de invariantes (`== Invariantes L2 sobre N eventos: K violaciones ==`)
+  deben ser 0. Lee `l1/` y `l2/`: corre con `ops-script` (Run job, `job` = `ops-script`).
+- **`viz_probe_ticks.py`**: cuánto pesa un día de ticks codificado en columnas planas
+  (A) y en deltas varint (B), en crudo, gzip, base64 más gzip y zstd; termina en
+  `== Resumen: N ticks | B en gzip … MB = … B/tick | histórico ~3 330 días ≈ … GB ==`.
+
+  ```text
+  script = gs://intrinsica-dc-ops/scripts/viz_probe_ticks.py
+  args   = --day 2026-09-30
+  ```
+
+  También corre con `ops-script`. No lee tiles: mide la codificación, no lo que viz
+  escribió (eso es `viz_probe_page.py`).
 
 - **`viz_check_page.py`**: los invariantes de un día (`ticks.bin` decodifica y suma
   lo del índice, `events.bin` pesa 25 B por evento, cada punto apunta a un tick
@@ -541,7 +568,5 @@ Lo que esta medición deja fuera de la card, con el motivo:
 - **Eficiencia de `first_at_price`** (TRD-viz §14 ítem 19): 31 s por día, triplica el
   costo y obliga a repartir el backfill en tres meses.
 - **Primer encadenamiento real** (noviembre de 2026): registrar las tres ejecuciones.
-- **Originales de `viz_check_day.py` y `viz_probe_ticks.py`** en el repo (ver
-  "Scripts de operación").
 
 La entrada consolidada de la Épica la escribe `task-close.sh` al cerrarla.

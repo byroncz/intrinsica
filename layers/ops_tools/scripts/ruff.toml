@@ -1,0 +1,5 @@
+# Estos dos scripts son los originales de gs://intrinsica-dc-ops/scripts/, versionados tal cual
+# (ITSC-311): no se les aplica el formato ni el lint del repo para no alterarlos. El resto de
+# la carpeta sigue la configuración raíz.
+extend = "../../../pyproject.toml"
+extend-exclude = ["viz_check_day.py", "viz_probe_ticks.py"]
