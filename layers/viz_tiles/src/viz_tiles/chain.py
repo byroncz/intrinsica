@@ -11,6 +11,7 @@ pendiente, y el `events.parquet` del primer mes que ya no lo trae.
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date
+from decimal import Decimal
 
 from viz_tiles.contract import DAY_US
 from viz_tiles.lake import (
@@ -33,6 +34,11 @@ def _optional_int(value: object) -> int | None:
     return None if value is None else int(value)
 
 
+def _optional_price(value: Decimal | None) -> int | None:
+    """Un `decimal128(18, 8)` de L2 en enteros de 10⁻⁸, sin pasar por `float`."""
+    return None if value is None else int(value.scaleb(8))
+
+
 @dataclass(frozen=True)
 class PendingEvent:
     """Evento pendiente al cierre del mes, de `carry_over.parquet` (TRD-viz §7.6).
@@ -52,6 +58,8 @@ class PendingEvent:
     reference_time: int | None = None
     confirm_time: int | None = None
     extreme_time: int | None = None
+    # Precio de la confirmación (enteros de 10⁻⁸): con él `events.bin` apunta a su tick.
+    confirm_price: int | None = None
 
     @classmethod
     def from_carry_over(cls, row: Mapping[str, object]) -> PendingEvent | None:
@@ -68,6 +76,7 @@ class PendingEvent:
             reference_time=_optional_int(row.get("pending_reference_time")),
             confirm_time=_optional_int(row.get("pending_confirm_time")),
             extreme_time=_optional_int(row.get(f"{extreme}_time")),
+            confirm_price=_optional_price(row.get("pending_confirm_price")),
         )
 
 
@@ -200,5 +209,6 @@ def theta_month(
         tail.reference_time,
         tail.confirm_time,
         found[1],
+        tail.confirm_price,
     )
     return ThetaMonth(theta, resolved, own_time, last_time, True, tuple(chain))

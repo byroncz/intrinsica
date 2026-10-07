@@ -1,6 +1,7 @@
 /* Vista de un día (TRD-viz §6.6, §6.7, §6.11 a §6.14, §7). Sin red: los dos archivos del día llegan en
  * window.VIZ_DATA, en base64 bajo su nombre. `ticks.bin` (§7.3) son todos los ticks del día en tramos
- * de tres secciones de varint; `events.bin` (§7.4), los eventos exactos de cada θ. El navegador los decodifica
+ * de tres secciones de varint; `events.bin` (§7.5), los eventos exactos de cada θ, con la posición en
+ * `ticks.bin` del tick de cada punto (de ahí salen los triángulos). El navegador los decodifica
  * una sola vez a arreglos tipados y, en cada dibujo, deriva de ellos lo que se ve: por cada píxel de
  * ancho de la escala actual, el precio (un punto por tick, o el segmento del mínimo al máximo), el volumen
  * (suma de la cantidad) y las confirmaciones (θ que confirman, y máximo en el mismo instante). Lo que se
@@ -26,13 +27,20 @@
     up: "63, 185, 80",
     down: "248, 81, 73",
   };
-  // Banderas de un evento (§7.4).
+  // Banderas de un evento (§7.5).
   var F_UP = 1;
   var F_PROVISIONAL = 2;
   var F_REF_CLIPPED = 4;
   var F_CONFIRM_CLIPPED = 8;
   var F_EXTREME_CLIPPED = 16;
-  var EVENT_BYTES = 13;
+  // Bytes por evento: 13 hasta la 2.0 (sin posiciones de tick), 25 desde la 2.1 (§7.5).
+  var EVENT_BYTES_V20 = 13;
+  var EVENT_BYTES = 25;
+  var NO_TICK = 0xffffffff; // posición de un punto fuera del día
+  // Triángulo de un tick de evento (§7.5, ADR-VZ-12): la punta va en el tick exacto. Lados en px CSS;
+  // `hit` es la distancia máxima del cursor al centro del triángulo (2/3 del alto desde la punta) para
+  // que el tooltip sea el del triángulo.
+  var TRI = { w: 10, h: 9, hit: 9 };
   // Franja del borde, en px CSS: fina en la confirmación, gruesa en el overshoot.
   var BAND_PX = { thin: 3, thick: 8 };
   // Eventos enteros (de la referencia al extremo) más angostos que estos px CSS que caben juntos en
@@ -219,8 +227,9 @@
     renderStatus();
   }
 
-  // Eventos exactos de todos los θ del día (§7.4): cuatro secciones de N valores. El θ k ocupa
-  // de events_offset a events_offset + events - 1 en cada una.
+  // Eventos exactos de todos los θ del día (§7.5): siete secciones de N valores (desde la 2.1; hasta la
+  // 2.0, cuatro, sin las posiciones de tick). El θ k ocupa de events_offset a events_offset + events - 1
+  // en cada una.
   var ev = null;
   // Las confirmaciones de todos los θ en orden de hora: confT (ms) y confK (índice del θ).
   var conf = null;
@@ -235,7 +244,9 @@
     if (!bytes) return;
     var total = 0;
     thetas.forEach(function (t) { total += t.events; });
-    if (bytes.length !== EVENT_BYTES * total) {
+    // Una página de la 2.0 (render sobre archivos viejos) trae 13 B por evento y ningún tick de evento.
+    var withTicks = parseInt(String(data.tiles_version).split(".")[1], 10) >= 1;
+    if (bytes.length !== (withTicks ? EVENT_BYTES : EVENT_BYTES_V20) * total) {
       bad(name, "tamaño inesperado");
       return;
     }
@@ -244,7 +255,11 @@
       ref: new Int32Array(bytes.buffer, 0, total), // ms desde el inicio del día
       conf: new Int32Array(bytes.buffer, 4 * total, total),
       ext: new Int32Array(bytes.buffer, 8 * total, total),
-      flags: new Uint8Array(bytes.buffer, 12 * total, total),
+      // Posición del tick de cada punto en ticks.bin, o NO_TICK si cae fuera del día.
+      refTick: withTicks ? new Uint32Array(bytes.buffer, 12 * total, total) : null,
+      confTick: withTicks ? new Uint32Array(bytes.buffer, 16 * total, total) : null,
+      extTick: withTicks ? new Uint32Array(bytes.buffer, 20 * total, total) : null,
+      flags: new Uint8Array(bytes.buffer, (withTicks ? 24 : 12) * total, total),
     };
     buildConfirmations();
   }
@@ -378,6 +393,10 @@
   //  - cc, cs: θ que confirman en el píxel y máximo de θ que confirman en el mismo instante.
   // El píxel de un tick es una función de su ms: los ticks de un mismo instante nunca se separan.
   var frame = null;
+  // Eventos del θ activo (índices en su bloque) que la última pasada de regiones dibujó como franja
+  // propia, y los triángulos que el precio dejó: ahí apunta el cursor.
+  var triEvents = [];
+  var triHits = [];
 
   function plotPx(u) {
     var dpr = window.devicePixelRatio || 1;
@@ -501,11 +520,6 @@
 
   /* ---------- Dibujo de las regiones (en el lienzo de uPlot, bajo las marcas) ---------- */
 
-  function vline(ctx, x, b, dpr, style) {
-    ctx.fillStyle = style;
-    ctx.fillRect(Math.round(x - dpr / 2), b.top, dpr, b.height);
-  }
-
   // Una franja de un evento: relleno del tramo y franja del borde (arriba el alza, abajo la baja).
   function band(ctx, b, dpr, x0, x1, up, strong) {
     var rgb = up ? C.up : C.down;
@@ -524,6 +538,7 @@
   function drawEvents(u, ctx, b, dpr) {
     var tr = activeBlock();
     var out = { events: 0, groups: 0, grouped: 0, max: 0 };
+    triEvents = [];
     if (!tr || !tr.n) return out;
     var xs = u.scales.x;
     var minW = DENSE_PX * dpr;
@@ -563,17 +578,18 @@
     // Franjas. Un evento entero más angosto que DENSE_PX dentro de un grupo de varios no se
     // dibuja solo: lo cuenta la marca. Uno solo, angosto, se ensancha hasta DENSE_PX para verse.
     vis.forEach(function (v) {
-      var f = ev.flags[v.e];
-      var up = (f & F_UP) !== 0;
+      var up = (ev.flags[v.e] & F_UP) !== 0;
       if (v.compact && groups[v.g].n > 1) return;
       var x1 = v.compact ? v.x0 + minW : v.x1;
       var xc = Math.min(v.xc, x1);
       band(ctx, b, dpr, v.x0, xc, up, false);
       band(ctx, b, dpr, xc, x1, up, true);
-      // Confirmación: línea del color del evento. El extremo no lleva línea: el cambio de color
-      // entre franjas ya lo marca, porque los eventos alternan siempre. No se dibuja si el tiempo
-      // quedó recortado al borde del día.
-      if (!(f & F_CONFIRM_CLIPPED)) vline(ctx, xc, b, dpr, "rgb(" + (up ? C.up : C.down) + ")");
+      // Los triángulos (drawTriangles) solo van en los eventos que se dibujan y que son al menos tan
+      // anchos como el triángulo: el agrupado cuenta en la marca de densidad, y uno más angosto que
+      // TRI.w taparía a sus vecinos (a día completo un θ de 0,0001 no lleva ninguno). Ni el extremo ni
+      // la confirmación llevan línea vertical: el cambio de color y de grosor de la franja y el
+      // triángulo en el tick exacto ya los marcan (ADR-VZ-12).
+      if (v.x1 - v.x0 >= TRI.w * dpr) triEvents.push(v.i);
     });
 
     // Marca de densidad: un rectángulo neutro con el número, en vez de franjas indistinguibles.
@@ -649,6 +665,81 @@
     var s = u.scales[key];
     var b = u.bbox;
     return b.top + ((s.max - v) / (s.max - s.min)) * b.height;
+  }
+
+  // Los puntos de un evento que llevan triángulo (ADR-VZ-12): el extremo que lo inicia (sólido) y su
+  // confirmación (hueco), ambos apuntando en la dirección del evento; y, en el último evento del θ, el
+  // extremo que lo cierra y empieza el siguiente (sólido, hacia el otro lado). El extremo de un evento
+  // es la referencia del siguiente: un solo triángulo por tick. Un punto fuera del día no se dibuja.
+  function eventPoints(tr, i) {
+    var e = tr.off + i;
+    var fl = ev.flags[e];
+    var up = (fl & F_UP) !== 0;
+    var out = [];
+    if (!(fl & F_REF_CLIPPED) && ev.refTick[e] !== NO_TICK) {
+      out.push({ e: e, i: i, kind: "start", tick: ev.refTick[e], up: up, hollow: false });
+    }
+    if (!(fl & F_CONFIRM_CLIPPED) && ev.confTick[e] !== NO_TICK) {
+      out.push({ e: e, i: i, kind: "confirm", tick: ev.confTick[e], up: up, hollow: true });
+    }
+    if (i === tr.n - 1 && !(fl & F_EXTREME_CLIPPED) && ev.extTick[e] !== NO_TICK) {
+      out.push({ e: e, i: i, kind: "end", tick: ev.extTick[e], up: !up, hollow: false });
+    }
+    return out;
+  }
+
+  // Triángulos del θ activo sobre el precio, en el tick exacto de L1: x del píxel del tick (la misma
+  // columna que su punto o su segmento, así dentro de un instante compartido el triángulo cae en el
+  // segmento) e y del precio de ese tick. Apuntan hacia arriba en un evento al alza y hacia abajo en uno
+  // a la baja; la punta toca el tick y el cuerpo queda del lado opuesto, fuera de la trayectoria.
+  function drawTriangles(u) {
+    triHits = [];
+    var tr = activeBlock();
+    var sum = { total: 0, solid: 0, hollow: 0 };
+    metrics.triangles = sum;
+    if (!tr || !ev || !ev.refTick || !ticks || !triEvents.length) return;
+    var f = getFrame(u);
+    var ctx = u.ctx;
+    var b = u.bbox;
+    var dpr = window.devicePixelRatio || 1;
+    var colW = b.width / f.cols;
+    var w = TRI.w * dpr;
+    var h = TRI.h * dpr;
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(b.left, b.top, b.width, b.height);
+    ctx.clip();
+    ctx.lineWidth = 1.5 * dpr;
+    ctx.lineJoin = "round";
+    triEvents.forEach(function (i) {
+      eventPoints(tr, i).forEach(function (pt) {
+        var t = ticks.t[pt.tick];
+        if (t < f.a || t > f.z) return;
+        var px = Math.min(f.cols - 1, ((t - f.a) * f.k) | 0);
+        var x = b.left + (px + 0.5) * colW;
+        var y = yPos(u, "p", ticks.p[pt.tick] / scale);
+        var base = pt.up ? y + h : y - h; // la punta es el tick
+        var rgb = "rgb(" + (pt.up ? C.up : C.down) + ")";
+        ctx.beginPath();
+        ctx.moveTo(x, y);
+        ctx.lineTo(x - w / 2, base);
+        ctx.lineTo(x + w / 2, base);
+        ctx.closePath();
+        ctx.strokeStyle = rgb; // el sólido lleva el mismo contorno que el hueco: así lo muestra la leyenda
+        if (!pt.hollow) {
+          ctx.fillStyle = rgb;
+          ctx.fill();
+        }
+        ctx.stroke();
+        pt.x = (x - b.left) / dpr; // en px CSS del panel: el sistema del cursor
+        pt.y = (y - b.top) / dpr;
+        triHits.push(pt);
+        sum.total++;
+        if (pt.hollow) sum.hollow++;
+        else sum.solid++;
+      });
+    });
+    ctx.restore();
   }
 
   // Precio: por cada píxel de ancho, un punto por tick (con 1 o 2 ticks) o el segmento del mínimo al
@@ -827,6 +918,49 @@
     return lines.concat(w.notes);
   }
 
+  var TRI_LABEL = {
+    start: "extremo (inicia el evento)",
+    confirm: "confirmación",
+    end: "extremo (cierra el evento)",
+  };
+
+  // El tooltip de un triángulo: el evento, el punto, la hora al ms, el precio del tick y, si el instante
+  // tiene más de un tick, cuál es. No dice dónde cierra L2 el grupo de empate: ese grupo es el de un
+  // mismo µs (ADR-L2-03), no el del ms, y la vista no tiene la posición de `confirm_agg_trade_id`.
+  function triangleLines(pt) {
+    var tr = activeBlock();
+    var fl = ev.flags[pt.e];
+    var t = ticks.t[pt.tick];
+    var first = lowerBoundAll(ticks.t, ticks.n, t);
+    var same = lowerBoundAll(ticks.t, ticks.n, t + 1) - first;
+    var lines = [
+      "θ " + sel.theta + " · evento " + (pt.i + 1) + " / " + tr.n + " · " + ((fl & F_UP) !== 0 ? "alza" : "baja"),
+      TRI_LABEL[pt.kind] + (pt.kind === "end" && (fl & F_PROVISIONAL) ? " · candidato vigente (provisional)" : ""),
+      clockMs(t, 3) + " UTC",
+      "precio " + fixed(ticks.p[pt.tick] / scale),
+    ];
+    if (same > 1) {
+      lines.push("tick " + (pt.tick - first + 1) + " de " + same + " en este ms");
+    }
+    return lines;
+  }
+
+  // El triángulo cuya punta está a menos de TRI.hit px CSS del cursor (el más cercano), o null.
+  function triangleAt(left, top) {
+    var best = null;
+    var bestD = TRI.hit * TRI.hit;
+    triHits.forEach(function (pt) {
+      // El cuerpo cuelga de la punta: el centro del triángulo es lo que se apunta.
+      var cy = pt.y + (pt.up ? 1 : -1) * ((2 * TRI.h) / 3);
+      var d = (pt.x - left) * (pt.x - left) + (cy - top) * (cy - top);
+      if (d <= bestD) {
+        best = pt;
+        bestD = d;
+      }
+    });
+    return best;
+  }
+
   function thetaLines(f, c) {
     var lines = [];
     if (sel.kind === "m") {
@@ -875,7 +1009,12 @@
     var f = getFrame(u);
     var css = u.bbox.width / (window.devicePixelRatio || 1);
     var c = Math.min(f.cols - 1, Math.max(0, Math.floor((left * f.cols) / css)));
-    var lines = u === confP ? confirmLines(f, c) : pixelLines(f, c).concat(thetaLines(f, c));
+    var tri = u === pricePlot ? triangleAt(left, u.cursor.top) : null;
+    var lines = tri
+      ? triangleLines(tri)
+      : u === confP
+        ? confirmLines(f, c)
+        : pixelLines(f, c).concat(thetaLines(f, c));
     tip.textContent = lines.join("\n");
     tip.hidden = false;
     var box = u.over.getBoundingClientRect();
@@ -1181,6 +1320,7 @@
             function (u) {
               if (stale(u)) return; // el eje Y se está poniendo al día: la pasada que sigue pinta
               drawPrice(u);
+              drawTriangles(u);
               drawMessages(u);
               var now = performance.now();
               if (metrics.first_paint_ms === null) {

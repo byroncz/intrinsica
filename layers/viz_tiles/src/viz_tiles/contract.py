@@ -10,7 +10,11 @@ estas constantes.
 # confirmaciones por píxel al dibujar. Desaparecen los arreglos por nivel
 # (`price-<w>`, `volume-<w>`, `dir-<w>`, `count-<w>`, `confirms-<w>`, `simul-<w>`)
 # y la noción de nivel (TRD-viz §7 y ADR-VZ-14).
-TILES_VERSION = "2.0.0"
+#
+# 2.1.0: `events.bin` suma tres secciones `uint32` por evento (`reference_tick`,
+# `confirm_tick`, `extreme_tick`): la posición de cada tick en `ticks.bin`, para que
+# la vista marque el tick exacto y no solo su instante (TRD-viz §7.5).
+TILES_VERSION = "2.1.0"
 
 DAY_US = 86_400_000_000
 DAY_S = 86_400
@@ -43,11 +47,15 @@ TICK_SECTIONS = ("dt_ms", "dprice_zigzag", "quantity_1e8")
 TICKS_CHUNK = 65_536
 TICKS_CHUNK_HEADER = "<4I"
 
-# `events.bin`: cuatro secciones de `N` valores (referencia, confirmación y
-# extremo en int32 y un byte de banderas), con `N` el total de eventos. El θ `k`
+# `events.bin`: siete secciones de `N` valores, con `N` el total de eventos: los
+# tiempos de referencia, confirmación y extremo en int32 (ms), la posición de esos
+# tres ticks en `ticks.bin` en uint32 y un byte de banderas. Las de 4 bytes van
+# primero y las banderas al final, para que cada una quede alineada. El θ `k`
 # ocupa de `events_offset` a `events_offset + events - 1` en cada sección.
 EVENTS_FILE = "events.bin"
-EVENT_BYTES = 13
+EVENT_BYTES = 25
+# Posición de tick de un punto fuera del día (el que lleva bandera de recorte).
+TICK_OUTSIDE = 0xFFFFFFFF
 
 # Banderas de un evento (uint8).
 FLAG_UP = 1  # alza; sin el bit, baja

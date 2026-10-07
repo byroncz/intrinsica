@@ -28,6 +28,7 @@ from viz_tiles.context import RunContext
 from viz_tiles.contract import (
     DAY_MS,
     DAY_US,
+    EVENT_BYTES,
     FLAG_EXTREME_CLIPPED,
     FLAG_PROVISIONAL,
     TILES_VERSION,
@@ -77,7 +78,7 @@ def events_of(roots, k: int) -> list[tuple[int, int, int, int]]:
     doc = index["thetas"][k]
     lo, hi = doc["events_offset"], doc["events_offset"] + doc["events"]
     sections = [np.frombuffer(raw, "<i4", total, 4 * total * i) for i in range(3)]
-    flags = np.frombuffer(raw, "u1", total, 12 * total)
+    flags = np.frombuffer(raw, "u1", total, 24 * total)
     return [
         (int(sections[0][i]), int(sections[1][i]), int(sections[2][i]), int(flags[i]))
         for i in range(lo, hi)
@@ -322,7 +323,7 @@ def test_theta_without_carry_over_is_a_missing_theta(lake):
         "0.02000000",
     ]
     # El θ sin carry-over no aporta eventos: `events.bin` trae los de los otros cuatro.
-    assert sum(t["events"] for t in index["thetas"]) * 13 == len(
+    assert sum(t["events"] for t in index["thetas"]) * EVENT_BYTES == len(
         tile_bytes(roots, "events.bin")
     )
     (missing,) = [f for f in findings_of(roots) if f["check_type"] == "input_missing"]

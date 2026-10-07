@@ -186,8 +186,12 @@ decodificados ([TRD-viz §7.4](../../docs/TRD/viz.md#74-lo-que-el-navegador-deri
   a qué hora; rótulo «θ que confirman».
 - **Franjas del θ activo**, dibujadas desde `events.bin` en los instantes exactos
   de cada evento a cualquier zoom: confirmación tenue y fina, overshoot intenso y
-  grueso, y una línea del color del evento en cada confirmación (no hay línea de
-  extremo: el cambio de color entre franjas ya lo marca). Donde varios eventos
+  grueso. Sobre el precio, un triángulo en el tick exacto de cada extremo (sólido) y
+  de cada confirmación (hueco; en el tick del instante con el precio de confirmación,
+  no en el último del grupo de empate, y su tooltip dice «tick i de n en este ms»),
+  solo en los eventos cuya franja es al menos tan ancha
+  como el triángulo (no hay línea de confirmación ni de extremo: el cambio de color
+  y de grosor entre franjas ya los marca). Donde varios eventos
   enteros caen en un mismo píxel, una marca gris con el número («4 eventos»);
   `DENSE_PX` fija el ancho de ese píxel.
 - **Navegación**: «Evento anterior» y «Evento siguiente» desplazan la vista a la
@@ -228,8 +232,10 @@ construir. Un día cierra cuando los ticks pasan al siguiente. Cada lote se codi
 en varint dentro del tramo en curso de `ticks.bin` (hasta 65 536 ticks, ≈ 330 KB);
 cuando el tramo se llena se escribe al objeto y se suelta, así que los bytes del día
 nunca viven en RAM. Los `events.parquet` se leen una vez por mes y quedan como arreglos
-de NumPy (41 B por evento). En RAM: un row group, un tramo de ticks y los eventos del
-mes. La página sale en streaming a un temporal que se renombra al terminar (`render_day_to`,
+de NumPy (57 B por evento, con el precio de la confirmación). Para apuntar la
+confirmación de cada evento a su tick, el job relee de `ticks.bin` los tramos que las
+contienen, de uno en uno (`TicksReader`, TRD-viz §7.5). En RAM: un row group, un tramo
+de ticks (dos al leer una confirmación) y los eventos del mes. La página sale en streaming a un temporal que se renombra al terminar (`render_day_to`,
 gzip en streaming; si falla a medias, la página vigente queda intacta) y lee
 `ticks.bin` de vuelta por bloques de 1 MB: ni la página ni un archivo del día están
 enteros en RAM. Regla sin excepción (TRD-viz §7.3 y §8.1, ITSC-317).
@@ -257,8 +263,8 @@ nombre de columna.
 ```python
 from viz_tiles.contract import price_scale
 from viz_tiles.events import EventsBuffer, event_rows
-from viz_tiles.ticks import encode_day
-from viz_tiles.write import ThetaEvents, write_day
+from viz_tiles.ticks import day_start_us, encode_day
+from viz_tiles.write import ThetaEvents, open_ticks_reader, write_day
 
 # `batches`: RecordBatch de L1 (agg_trade_id, price, quantity, transact_time),
 # ordenados por transact_time; se consumen uno a uno.
@@ -266,7 +272,10 @@ ticks = encode_day(batches, day, price_scale("BTCUSDT"))
 
 # `events`: MonthEvents.touching(first_id, last_id) del θ; `pending`: la cola del carry-over.
 buffer = EventsBuffer()
-buffer.add(event_rows(events, pending, provisional, day_start_us))
+with open_ticks_reader(root, "binance", "spot", "BTCUSDT", day, ticks) as reader:
+    buffer.add(
+        event_rows(events, pending, provisional, day_start_us(day), ticks, reader)
+    )
 
 write_day(
     root,

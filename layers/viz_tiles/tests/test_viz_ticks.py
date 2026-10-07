@@ -12,6 +12,7 @@ from viz_helpers import TICKS_SCHEMA, read_ticks_csv, ticks_batch
 from viz_tiles.contract import (
     INT32_MAX,
     L1_SCALE,
+    TICK_OUTSIDE,
     TICKS_CHUNK,
     TICKS_CHUNK_HEADER,
     price_scale,
@@ -19,6 +20,7 @@ from viz_tiles.contract import (
 from viz_tiles.ticks import (
     PriceUnrepresentable,
     TicksAccumulator,
+    TicksReader,
     day_start_us,
     decode_ticks,
     decode_varint,
@@ -431,3 +433,179 @@ def test_a_chunk_is_written_as_soon_as_it_fills_up_and_released():
 def test_chunk_size_must_fit_a_uint32():
     with pytest.raises(ValueError, match="uint32"):
         TicksAccumulator(DAY, SCALE, io.BytesIO(), chunk=0)
+
+
+# -- posición de un tick por su agg_trade_id (ITSC-319) ---------------------------------
+
+
+def _ids_day(ids, split=None):
+    """El `DayTicks` de ticks de un por segundo con esos ids, partidos en lotes de `split`."""
+    rows = [(i, k + 1, 100 + k, 1) for k, i in enumerate(ids)]
+    step = split or len(rows)
+    return encode(
+        [ticks_batch(DAY, rows[a : a + step]) for a in range(0, len(rows), step)]
+    )
+
+
+def test_ids_without_gaps_are_one_run_and_the_position_is_the_offset_from_the_first():
+    out = _ids_day([30, 31, 32, 33, 34])
+    assert out.id_runs == ((0, 30),)
+    got = out.tick_positions(np.array([30, 32, 34]))
+    assert got.tolist() == [0, 2, 4] and got.dtype == np.dtype("<u4")
+
+
+def test_a_gap_of_the_provider_starts_a_run_and_positions_skip_it():
+    out = _ids_day([10, 11, 12, 20, 21, 30])
+    assert out.id_runs == ((0, 10), (3, 20), (5, 30))
+    ids = np.array([10, 12, 20, 21, 30])
+    assert out.tick_positions(ids).tolist() == [0, 2, 3, 4, 5]
+    # Un id dentro del día que ningún tick tiene (cae en un hueco) no se adivina.
+    for hole in (13, 19, 22, 29):
+        with pytest.raises(ValueError, match="no es un tick"):
+            out.tick_positions(np.array([hole]))
+
+
+def test_ids_outside_the_day_get_the_sentinel():
+    out = _ids_day([10, 11, 12])
+    got = out.tick_positions(np.array([9, 10, 12, 13, 2**40]))
+    assert got.tolist() == [TICK_OUTSIDE, 0, 2, TICK_OUTSIDE, TICK_OUTSIDE]
+    assert encode([]).tick_positions(np.array([1])).tolist() == [TICK_OUTSIDE]
+
+
+@pytest.mark.parametrize("split", [1, 2, 3, 4])
+def test_the_runs_do_not_depend_on_how_the_batches_are_split(split):
+    ids = [10, 11, 12, 20, 21, 30, 31, 32, 40]
+    assert _ids_day(ids, split).id_runs == _ids_day(ids).id_runs
+
+
+def test_ids_that_do_not_grow_are_rejected():
+    with pytest.raises(ValueError, match="crecer"):
+        _ids_day([10, 11, 11])
+    with pytest.raises(ValueError, match="no supera"):
+        _ids_day([10, 12, 9], split=2)
+
+
+# -- relectura de tramos sueltos (TicksReader) --------------------------------
+
+
+def reader_of(batches, chunk: int):
+    """`(DayTicks, TicksReader, bytes)` de un día escrito con tramos de `chunk` ticks."""
+    out = io.BytesIO()
+    day_ticks = encode_day(batches, DAY, SCALE, out, chunk)
+    data = out.getvalue()
+    reads = []
+
+    def read(offset: int, size: int) -> bytes:
+        reads.append((offset, size))
+        return data[offset : offset + size]
+
+    return day_ticks, TicksReader(day_ticks, read), data, reads
+
+
+def test_the_writer_notes_where_every_chunk_starts_and_with_what_state():
+    rows = [(i + 1, 1 + i // 4, 100 + (i * 7) % 13, 1) for i in range(23)]
+    day_ticks, _, data, _ = reader_of([ticks_batch(DAY, rows)], chunk=5)
+    decoded = decode_ticks(data, len(rows), chunk=5)
+    assert [c[0] for c in day_ticks.chunks] == [0, 5, 10, 15, 20]
+    for first, _, time0, price0 in day_ticks.chunks[1:]:
+        # Arranca desde el último tick del tramo anterior.
+        assert (time0, price0) == (decoded.time_ms[first - 1], decoded.price[first - 1])
+    assert day_ticks.chunks[0][1:] == (0, 0, 0)
+    assert day_ticks.chunks[-1][1] < day_ticks.nbytes
+
+
+def test_a_chunk_is_reread_alone_and_decodes_like_the_whole_file():
+    rows = [(i + 1, 1 + i // 3, 100 + (i * 7) % 13, 1) for i in range(40)]
+    day_ticks, reader, data, reads = reader_of([ticks_batch(DAY, rows)], chunk=8)
+    whole = decode_ticks(data, len(rows), chunk=8)
+    # Cada tramo, de a uno y en desorden, sin tocar los demás.
+    for index in (3, 0, 4, 2, 1):
+        reads.clear()
+        time_ms, price = reader._decode(index)
+        first = day_ticks.chunks[index][0]
+        assert time_ms.tolist() == whole.time_ms[first : first + 8].tolist()
+        assert price.tolist() == whole.price[first : first + 8].tolist()
+        assert len(reads) == 1
+
+
+def test_first_at_price_picks_the_first_tick_of_the_instant_with_that_price():
+    # Un instante (el segundo 5) con tres ticks: 100, 110, 100; ids 14, 15, 16.
+    rows = [
+        (11, 1, 90, 1),
+        (12, 2, 95, 1),
+        (13, 4, 96, 1),
+        (14, 5, 100, 1),
+        (15, 5, 110, 1),
+        (16, 5, 100, 1),
+        (17, 6, 100, 1),
+    ]
+    _, reader, _, _ = reader_of([ticks_batch(DAY, rows)], chunk=100)
+    last = np.array([5], dtype="<u4")  # el último tick del instante, el id 16
+    ref = np.array([0], dtype="<u4")  # la referencia, antes del instante
+    price = lambda p: np.array([p * L1_SCALE], dtype=np.int64)
+    # Con 110 la confirmación pasa al id 15, el único del instante con ese precio.
+    assert reader.first_at_price(last, price(110), ref).tolist() == [4]
+    # Con 100 gana el primero de los dos, el id 14, no el último.
+    assert reader.first_at_price(last, price(100), ref).tolist() == [3]
+    # Un tick solo en su instante que ya tiene el precio no se mueve, aunque otro lo repita después.
+    assert reader.first_at_price(np.array([6], "<u4"), price(100), ref).tolist() == [6]
+    # Fuera del día no hay tick: el centinela se deja igual.
+    outside = np.array([TICK_OUTSIDE, 5], dtype="<u4")
+    both = np.array([100 * L1_SCALE, 100 * L1_SCALE], dtype=np.int64)
+    refs = np.array([0, 0], dtype="<u4")
+    assert reader.first_at_price(outside, both, refs).tolist() == [TICK_OUTSIDE, 3]
+    # Una referencia fuera del día no acota: se busca desde el inicio del instante.
+    assert reader.first_at_price(
+        last, price(100), np.array([TICK_OUTSIDE], "<u4")
+    ).tolist() == [3]
+    # Un precio que ningún tick del instante tiene es una entrada rota.
+    with pytest.raises(ValueError, match="no cuadra"):
+        reader.first_at_price(last, price(120), ref)
+
+
+def test_first_at_price_never_lands_before_the_reference_in_a_shared_millisecond():
+    """Caso A/B/C en un mismo ms: A a 95, B el máximo 110 (referencia), C a 95 que confirma.
+
+    L1 está en µs y el grupo de empate de L2 es el de un mismo µs (ADR-L2-03): A es de
+    otro µs, anterior a la referencia, y la confirmación no puede quedar en él.
+    """
+    rows = [
+        (1, 1, 100, 1),
+        (2, 5.0001, 95, 1),  # A
+        (3, 5.0002, 110, 1),  # B, la referencia del evento bajista
+        (4, 5.0003, 95, 1),  # C, el tick que confirma
+        (5, 6, 100, 1),
+    ]
+    _, reader, data, _ = reader_of([ticks_batch(DAY, rows)], chunk=100)
+    decoded = decode_ticks(data, len(rows))
+    assert len(set(decoded.time_ms[1:4].tolist())) == 1  # los tres en el mismo ms
+    confirm = np.array([3], dtype="<u4")  # C, el `confirm_agg_trade_id` de L2
+    reference = np.array([2], dtype="<u4")  # B
+    got = reader.first_at_price(confirm, np.array([95 * L1_SCALE]), reference)
+    assert got.tolist() == [3]
+    assert reference[0] < got[0] <= confirm[0]
+
+
+def test_first_at_price_stops_at_the_reference_in_an_earlier_chunk():
+    # Seis ticks en el segundo 3, de a tres por tramo; 50 está antes y después de la referencia.
+    rows = [(1, 1, 10, 1)]
+    rows += [(2 + k, 3, (50, 70, 50, 60, 61, 62)[k], 1) for k in range(6)]
+    _, reader, _, _ = reader_of([ticks_batch(DAY, rows)], chunk=3)
+    last = np.array([6], dtype="<u4")
+    # La referencia es la posición 2 (precio 70): el 50 de la posición 1 queda fuera.
+    got = reader.first_at_price(last, np.array([50 * L1_SCALE]), np.array([2], "<u4"))
+    assert got.tolist() == [3]
+
+
+def test_first_at_price_follows_an_instant_that_crosses_chunks():
+    # Nueve ticks en el segundo 3, de a tres por tramo; el precio 50 solo está en el primero.
+    rows = [(1, 1, 10, 1), (2, 2, 20, 1)]
+    rows += [(3 + k, 3, 50 if k == 0 else 60 + k, 1) for k in range(9)]
+    rows += [(12, 4, 70, 1)]
+    day_ticks, reader, _, _ = reader_of([ticks_batch(DAY, rows)], chunk=3)
+    assert len(day_ticks.chunks) == 4
+    last = np.array([10], dtype="<u4")  # el último tick del segundo 3 (id 11)
+    ref = np.array([0], dtype="<u4")
+    assert reader.first_at_price(last, np.array([50 * L1_SCALE]), ref).tolist() == [2]
+    # Un precio que está solo en el último tramo no se busca más atrás.
+    assert reader.first_at_price(last, np.array([68 * L1_SCALE]), ref).tolist() == [10]

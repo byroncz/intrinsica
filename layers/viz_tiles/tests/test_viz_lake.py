@@ -1,6 +1,7 @@
 import base64
 import hashlib
 from datetime import date
+from decimal import Decimal
 
 import numpy as np
 import pyarrow as pa
@@ -20,6 +21,8 @@ from viz_tiles.lake import (
 )
 
 DAY = date(2017, 8, 18)
+DEC = pa.decimal128(18, 8)
+EMPTY_TYPES = {"direction": pa.int8(), "confirm_price": DEC}
 
 
 def test_crc32c_of_a_local_file_matches_the_standard_vector(tmp_path):
@@ -126,22 +129,29 @@ def test_read_month_events_reads_each_row_group_once_and_keeps_every_event(
     assert events.reference_id.tolist() == [
         int(r["reference_agg_trade_id"]) for r in rows
     ]
+    assert events.confirm_id.tolist() == [int(r["confirm_agg_trade_id"]) for r in rows]
     assert events.extreme_id.tolist() == [int(r["extreme_agg_trade_id"]) for r in rows]
     for name in ("reference", "confirm", "extreme"):
         assert getattr(events, f"{name}_time").tolist() == [
             int(r[f"{name}_time"]) for r in rows
         ]
     assert events.direction.tolist() == [int(r["direction"]) for r in rows]
+    # El precio de la confirmación llega en enteros de 10⁻⁸, sin pasar por `float`.
+    assert events.confirm_price.tolist() == [
+        int(Decimal(r["confirm_price"]).scaleb(8)) for r in rows
+    ]
 
 
 def test_touching_keeps_the_events_that_reach_the_ticks_of_a_day():
     events = MonthEvents(
         reference_id=np.array([10, 30, 55, 90], np.int64),
+        confirm_id=np.array([20, 40, 60, 100], np.int64),
         extreme_id=np.array([30, 55, 90, 120], np.int64),
         reference_time=np.arange(4, dtype=np.int64),
         confirm_time=np.arange(4, dtype=np.int64),
         extreme_time=np.arange(4, dtype=np.int64),
         direction=np.array([1, -1, 1, -1], np.int8),
+        confirm_price=np.arange(4, dtype=np.int64),
     )
     # Un evento toca [lo, hi] si su referencia es < hi y su extremo >= lo.
     assert events.touching(31, 60).reference_id.tolist() == [30, 55]
@@ -159,11 +169,13 @@ def test_month_events_are_sorted_by_reference_and_a_duplicate_is_rejected(tmp_pa
             pa.table(
                 {
                     "reference_agg_trade_id": pa.array(refs, pa.int64()),
+                    "confirm_agg_trade_id": pa.array([r + 3 for r in refs], pa.int64()),
                     "extreme_agg_trade_id": pa.array([r + 5 for r in refs], pa.int64()),
                     "reference_time": pa.array(range(n), pa.int64()),
                     "confirm_time": pa.array(range(n), pa.int64()),
                     "extreme_time": pa.array(range(n), pa.int64()),
                     "direction": pa.array([1] * n, pa.int8()),
+                    "confirm_price": pa.array([Decimal(1)] * n, DEC),
                 }
             ),
             path,
@@ -181,7 +193,7 @@ def test_month_events_of_an_empty_file_are_empty(tmp_path):
     pq.write_table(
         pa.table(
             {
-                name: pa.array([], pa.int8() if name == "direction" else pa.int64())
+                name: pa.array([], EMPTY_TYPES.get(name, pa.int64()))
                 for name in lake.EVENT_COLUMNS
             }
         ),

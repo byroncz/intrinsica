@@ -10,6 +10,7 @@ from viz_tiles.contract import (
     EVENT_BYTES,
     INDEX_FIELDS,
     LATEST_FIELDS,
+    TICK_OUTSIDE,
     TILES_VERSION,
     price_scale,
 )
@@ -27,13 +28,15 @@ from viz_tiles.write import (
 DAY = date(2026, 8, 31)
 SCALE = price_scale("BTCUSDT")
 KEY = {"provider": "binance", "market": "spot", "asset": "BTCUSDT"}
-ROWS = [(11, 1, 100, 1), (21, 30, 102, "0.5"), (31, 70, 103, 1), (56, 80, 104, 1)]
+# Los ids de los ticks son los de los puntos de UP_T y DOWN_T, salvo el extremo 55 de
+# la baja, que cae después del último tick del día.
+ROWS = [(10, 1, 100, 1), (20, 30, 102, "0.5"), (30, 70, 103, 1), (40, 80, 104, 1)]
 WHEN = datetime(2026, 10, 5, 17, 0, tzinfo=UTC)
 
 
-def theta(name: str, buffer: EventsBuffer, pending=None) -> ThetaEvents:
+def theta(name: str, buffer: EventsBuffer, ticks, pending=None) -> ThetaEvents:
     rows = event_rows(
-        month_events(DAY, UP_T, DOWN_T), pending, False, day_start_us(DAY)
+        month_events(DAY, UP_T, DOWN_T), pending, False, day_start_us(DAY), ticks
     )
     buffer.add(rows)
     return ThetaEvents(theta=name, events=len(rows), provisional_from_s=None)
@@ -42,7 +45,7 @@ def theta(name: str, buffer: EventsBuffer, pending=None) -> ThetaEvents:
 def write(root, day=DAY, rows=ROWS, **kwargs):
     ticks = encode_to(root, day, [ticks_batch(day, rows)], SCALE)
     buffer = EventsBuffer()
-    thetas = [theta("0.00010000", buffer), theta("0.05000000", buffer)]
+    thetas = [theta("0.00010000", buffer, ticks), theta("0.05000000", buffer, ticks)]
     args = {
         **KEY,
         "day": day,
@@ -70,10 +73,16 @@ def test_round_trip_returns_the_ticks_and_the_events_of_the_day(tmp_path):
     assert got.time_ms.tolist() == [1000, 30_000, 70_000, 80_000]
     assert got.price.tolist() == [10_000, 10_200, 10_300, 10_400]
     assert got.quantity.tolist() == [100_000_000, 50_000_000, 100_000_000, 100_000_000]
-    # Dos θ de dos eventos: cuatro eventos de 13 bytes.
+    # Dos θ de dos eventos: cuatro eventos de 25 bytes.
     events = Path(f"{directory}/{index['events']}").read_bytes()
     assert len(events) == 4 * EVENT_BYTES
     assert np.frombuffer(events, "<i4", 4, 0).tolist() == [500, 50_000, 500, 50_000]
+    # Las posiciones de tick: ids 10, 20, 30 y 40 son los ticks 0 a 3; el 55 cae
+    # después del último tick del día y lleva el centinela.
+    outside = TICK_OUTSIDE
+    assert np.frombuffer(events, "<u4", 4, 48).tolist() == [0, 2] * 2
+    assert np.frombuffer(events, "<u4", 4, 64).tolist() == [1, 3] * 2
+    assert np.frombuffer(events, "<u4", 4, 80).tolist() == [2, outside] * 2
 
 
 def test_index_has_every_contract_field_in_order(tmp_path):
@@ -82,10 +91,10 @@ def test_index_has_every_contract_field_in_order(tmp_path):
     types = {"string": str, "integer": int, "array": list, "object": dict}
     for name, kind in INDEX_FIELDS:
         assert isinstance(index[name], types[kind]), name
-    assert index["tiles_version"] == TILES_VERSION == "2.0.0"
+    assert index["tiles_version"] == TILES_VERSION == "2.1.0"
     assert index["t0"] == day_start_us(DAY)
     assert index["ticks"] == len(ROWS)
-    assert (index["first_agg_trade_id"], index["last_agg_trade_id"]) == (11, 56)
+    assert (index["first_agg_trade_id"], index["last_agg_trade_id"]) == (10, 40)
     assert index["price_scale"] == SCALE
     assert index["ticks_file"] == "ticks.bin" and index["events"] == "events.bin"
     assert index["input_hash"] == "ab" * 32
@@ -131,7 +140,7 @@ def test_content_hash_is_stable_and_follows_the_files(tmp_path):
     _, first = write(tmp_path / "a")
     _, again = write(tmp_path / "b", generated_at=datetime(2030, 1, 1, tzinfo=UTC))
     assert first["content_hash"] == again["content_hash"]
-    _, other = write(tmp_path / "c", rows=[*ROWS, (60, 90, 105, 1)])
+    _, other = write(tmp_path / "c", rows=[*ROWS, (45, 90, 105, 1)])
     assert other["content_hash"] != first["content_hash"]
 
 

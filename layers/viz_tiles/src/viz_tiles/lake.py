@@ -25,20 +25,26 @@ import pyarrow.fs as pafs
 import pyarrow.parquet as pq
 from pyutils import resolve_fs
 
+from viz_tiles.ticks import scaled_ints
+
 CONSOLIDATED = "consolidated.parquet"
 EVENTS = "events.parquet"
 CARRY_OVER = "carry_over.parquet"
 
 TICK_COLUMNS = ("agg_trade_id", "price", "quantity", "transact_time")
-# Lo que un día necesita de cada evento: los ids de su referencia y su extremo
-# (qué eventos tocan el día) y los tres tiempos y el sentido (`events.bin`).
+# Lo que un día necesita de cada evento: los ids de sus tres puntos (qué eventos
+# tocan el día y la posición de cada tick en `events.bin`), los tres tiempos, el
+# sentido y el precio de la confirmación (con él se elige el tick de la confirmación
+# dentro de su instante, TRD-viz §7.5). El orden es el de los campos de `MonthEvents`.
 EVENT_COLUMNS = (
     "reference_agg_trade_id",
+    "confirm_agg_trade_id",
     "extreme_agg_trade_id",
     "reference_time",
     "confirm_time",
     "extreme_time",
     "direction",
+    "confirm_price",
 )
 CARRY_COLUMNS = (
     "direction",
@@ -47,6 +53,7 @@ CARRY_COLUMNS = (
     "pending_confirm_agg_trade_id",
     "pending_reference_time",
     "pending_confirm_time",
+    "pending_confirm_price",
     "ext_high_agg_trade_id",
     "ext_high_time",
     "ext_low_agg_trade_id",
@@ -271,23 +278,30 @@ class MonthEvents:
     """Los eventos de un θ en un mes, en arreglos de NumPy y ordenados por referencia.
 
     Se leen una sola vez por mes y de ahí salen los de cada día (`touching`): son
-    41 bytes por evento, y un mes de 50 θ trae decenas de miles. Los tiempos son
-    µs UTC; `direction` es 1 (alza) o -1 (baja).
+    57 bytes por evento, y un mes de 50 θ trae decenas de miles. Los tiempos son
+    µs UTC; `direction` es 1 (alza) o -1 (baja); `confirm_price` es el precio de la
+    confirmación en enteros de 10⁻⁸ (el `decimal128(18, 8)` de L2, sin perder nada).
     """
 
     reference_id: np.ndarray
+    confirm_id: np.ndarray
     extreme_id: np.ndarray
     reference_time: np.ndarray
     confirm_time: np.ndarray
     extreme_time: np.ndarray
     direction: np.ndarray
+    confirm_price: np.ndarray
 
     def __len__(self) -> int:
         return len(self.reference_id)
 
     @classmethod
     def empty(cls) -> MonthEvents:
-        return cls(*(np.empty(0, np.int64) for _ in range(5)), np.empty(0, np.int8))
+        return cls(
+            *(np.empty(0, np.int64) for _ in range(6)),
+            np.empty(0, np.int8),
+            np.empty(0, np.int64),
+        )
 
     def touching(self, first_id: int, last_id: int) -> MonthEvents:
         """Los eventos que tocan los ticks de id `[first_id, last_id]`.
@@ -296,6 +310,15 @@ class MonthEvents:
         """
         keep = (self.reference_id < last_id) & (self.extreme_id >= first_id)
         return MonthEvents(*(column[keep] for column in vars(self).values()))
+
+
+def _event_column(column: pa.ChunkedArray, dtype: type) -> np.ndarray:
+    """Una columna de `events.parquet` como arreglo de NumPy; un decimal, en enteros de 10⁻⁸."""
+    if pa.types.is_decimal(column.type):
+        if not len(column):
+            return np.empty(0, dtype)
+        return np.ascontiguousarray(scaled_ints(column.combine_chunks()), dtype)
+    return column.to_numpy().astype(dtype, copy=False)
 
 
 def read_month_events(path: str) -> MonthEvents:
@@ -314,10 +337,10 @@ def read_month_events(path: str) -> MonthEvents:
             parts.append(
                 MonthEvents(
                     *(
-                        group[name].to_numpy().astype(dtype, copy=False)
+                        _event_column(group[name], dtype)
                         for name, dtype in zip(
                             EVENT_COLUMNS,
-                            (np.int64,) * 5 + (np.int8,),
+                            (np.int64,) * 6 + (np.int8, np.int64),
                             strict=True,
                         )
                     )
