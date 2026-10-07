@@ -536,7 +536,7 @@ documentada arriba.
 
 Lo que esta medición deja fuera de la card, con el motivo:
 
-- **Días de más de 10 MB** (25 de 2025; umbral de reapertura de ADR-VZ-14):
+- **Días de más de 10 MB** (ITSC-322; 25 de 2025, umbral de reapertura de ADR-VZ-14):
   decisión de fondo sobre la fidelidad frente al tamaño de página.
 - **Eficiencia de `first_at_price`** (TRD-viz §14 ítem 19): 31 s por día, triplica el
   costo y obliga a repartir el backfill en tres meses.
