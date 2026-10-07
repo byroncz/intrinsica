@@ -188,8 +188,8 @@ decodificados ([TRD-viz §7.4](../../docs/TRD/viz.md#74-lo-que-el-navegador-deri
   de cada evento a cualquier zoom: confirmación tenue y fina, overshoot intenso y
   grueso. Sobre el precio, un triángulo en el tick exacto de cada extremo (sólido) y
   de cada confirmación (hueco; en el tick del instante con el precio de confirmación,
-  no en el último del grupo de empate, y su tooltip dice «tick i de n en este ms; L2
-  cierra el grupo en el tick n»), solo en los eventos cuya franja es al menos tan ancha
+  no en el último del grupo de empate, y su tooltip dice «tick i de n en este ms»),
+  solo en los eventos cuya franja es al menos tan ancha
   como el triángulo (no hay línea de confirmación ni de extremo: el cambio de color
   y de grosor entre franjas ya los marca). Donde varios eventos
   enteros caen en un mismo píxel, una marca gris con el número («4 eventos»);

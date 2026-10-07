@@ -925,7 +925,8 @@
   };
 
   // El tooltip de un triángulo: el evento, el punto, la hora al ms, el precio del tick y, si el instante
-  // tiene más de un tick, cuál es (y, en la confirmación, dónde cierra L2 el grupo).
+  // tiene más de un tick, cuál es. No dice dónde cierra L2 el grupo de empate: ese grupo es el de un
+  // mismo µs (ADR-L2-03), no el del ms, y la vista no tiene la posición de `confirm_agg_trade_id`.
   function triangleLines(pt) {
     var tr = activeBlock();
     var fl = ev.flags[pt.e];
@@ -939,9 +940,7 @@
       "precio " + fixed(ticks.p[pt.tick] / scale),
     ];
     if (same > 1) {
-      var which = "tick " + (pt.tick - first + 1) + " de " + same + " en este ms";
-      // La confirmación es el tick del instante con el precio de confirmación; L2 cierra el grupo en el último.
-      lines.push(pt.kind === "confirm" ? which + "; L2 cierra el grupo en el tick " + same : which);
+      lines.push("tick " + (pt.tick - first + 1) + " de " + same + " en este ms");
     }
     return lines;
   }
