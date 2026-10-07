@@ -329,6 +329,19 @@ sonda: unit=binance/spot/BTCUSDT/2020-01 mode=backfill rss_peak_mib=254 wall_s=8
   hilos de escritura, y puede pasar de la pared (en el ejemplo, 38 s de
   escritura en 8 s de pared, sobre 10 hilos). Para saber si la escritura
   frena la unidad se mira `wait_s`. Lo define `timing.py`.
+- **Quién frena a quién (ITSC-293).** `open_s` (abrir los 50 archivos, pared del
+  principal) también suma a `wall_s`. `wait_s` se desglosa en `backpressure_s`
+  (el principal bloqueado en `submit` mientras detecta: los escritores van
+  atrasados), `drain_s` (tras el último tramo, vaciar las colas) y `publish_s`
+  (cerrar y mover los 100 archivos). `write_s` se desglosa, sumado entre hilos,
+  en `encode_s` (armar el lote, hashear, codificar Parquet; en GCS incluye la
+  subida en streaming), `close_s` y `move_s` (cierre y copia más borrado del
+  temporal: latencia por archivo, no por byte) y `carry_write_s`. La línea
+  `sonda:` nombra al θ que más escribió (`heavy_theta`) y al que escribió su último tramo al final
+  (`last_theta`); el hallazgo `unit_timing` trae la tabla de los 50 en
+  `theta_timing`, con `blocked_s` (a quién esperó el principal) y `queued_s` (cuánto
+  esperaron sus bloques en cola). Cómo leerlos:
+  [runbook de la sonda](../../docs/runbooks/sonda-l2.md#el-tramo-serial-a-8-vcpu-itsc-293).
 - **Cómo se separa `read_s` de `decode_s`.** No se envuelve el archivo:
   `ParquetFile` lee con `pre_buffer=True` (lecturas en paralelo en hilos de
   Arrow), y un archivo Python las serializaría y cambiaría lo que se mide. Con

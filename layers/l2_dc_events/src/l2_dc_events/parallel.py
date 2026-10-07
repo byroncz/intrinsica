@@ -14,6 +14,7 @@ la vez en un pool de hilos (pyarrow y `hashlib` sueltan el GIL). Dos reglas:
 """
 
 import threading
+import time
 from collections import deque
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
@@ -38,15 +39,18 @@ class _Chunk:
         self._lock = threading.Lock()
         self._done = threading.Event()
         self.error: Exception | None = None
+        # El θ cuyo bloque terminó último: de quien esperó el hilo principal.
+        self.last: int | None = None
         if not pending:
             self._done.set()
 
-    def finish_one(self, error: Exception | None) -> None:
+    def finish_one(self, error: Exception | None, index: int) -> None:
         with self._lock:
             if error is not None and self.error is None:
                 self.error = error
             self._pending -= 1
             if not self._pending:
+                self.last = index
                 self._done.set()
 
     def wait(self) -> None:
@@ -63,6 +67,13 @@ class ParallelWriters:
     `MAX_CHUNKS_IN_FLIGHT` sin escribir. `wait` espera a todos. Un error de
     cualquier escritor se relanza en el siguiente `submit` o `wait`, y desde
     entonces los escritores dejan de escribir.
+
+    `blocked_s[i]` es lo que el hilo principal esperó, en `submit` y `wait`, a
+    tramos cuyo último bloque en escribirse fue el del θ `i` (ITSC-293): reparte
+    la espera entre los θ y señala cuál frena a los demás. `queued_s[i]` suma lo
+    que sus bloques esperaron en cola antes de que un hilo los tomara: alto con
+    hilos libres es un θ que escribe en serie; alto con todos ocupados, un pool
+    corto.
     """
 
     def __init__(
@@ -71,25 +82,36 @@ class ParallelWriters:
         self._pool = pool
         self._writers = writers
         self._lock = threading.Lock()
-        self._queues: list[deque[tuple[dc_pyo3.EventColumns, _Chunk]]] = [
+        self._queues: list[deque[tuple[dc_pyo3.EventColumns, _Chunk, float]]] = [
             deque() for _ in writers
         ]
         self._running = [False] * len(writers)
         self._failed = False
         self._inflight: deque[_Chunk] = deque()
+        self.blocked_s = [0.0] * len(writers)
+        self.queued_s = [0.0] * len(writers)
+
+    def _wait_oldest(self) -> None:
+        chunk = self._inflight.popleft()
+        started = time.perf_counter()
+        try:
+            chunk.wait()
+        finally:
+            if chunk.last is not None:
+                self.blocked_s[chunk.last] += time.perf_counter() - started
 
     def submit(self, blocks: Sequence[dc_pyo3.EventColumns]) -> None:
         if len(blocks) != len(self._writers):
             raise ValueError(f"{len(blocks)} bloques para {len(self._writers)} θ")
         while len(self._inflight) >= MAX_CHUNKS_IN_FLIGHT:
-            self._inflight.popleft().wait()
+            self._wait_oldest()
         chunk = _Chunk(sum(1 for block in blocks if len(block)))
         self._inflight.append(chunk)
         for i, block in enumerate(blocks):
             if not len(block):
                 continue
             with self._lock:
-                self._queues[i].append((block, chunk))
+                self._queues[i].append((block, chunk, time.perf_counter()))
                 start = not self._running[i]
                 self._running[i] = True
             if start:
@@ -97,7 +119,7 @@ class ParallelWriters:
 
     def wait(self) -> None:
         while self._inflight:
-            self._inflight.popleft().wait()
+            self._wait_oldest()
 
     def _drain(self, i: int) -> None:
         """Escribe, en orden, todo lo que haya en la cola del θ `i`."""
@@ -107,7 +129,8 @@ class ParallelWriters:
                 if not self._queues[i]:
                     self._running[i] = False
                     return
-                block, chunk = self._queues[i].popleft()
+                block, chunk, queued_at = self._queues[i].popleft()
+            self.queued_s[i] += time.perf_counter() - queued_at
             error = None
             try:
                 if not self._failed:
@@ -117,4 +140,4 @@ class ParallelWriters:
                 self._failed = True
             # Soltar los buffers antes de esperar la siguiente tarea.
             del block
-            chunk.finish_one(error)
+            chunk.finish_one(error, i)

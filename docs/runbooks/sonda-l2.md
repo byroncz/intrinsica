@@ -502,3 +502,166 @@ En `l2-backfill` el plan también puede quitar `client` y `client_version`, que
 `gcloud run jobs update` deja puestos y el módulo no fija; es parte de cerrar la
 deriva (ver `infra/README.md`). Cualquier otro cambio es una sorpresa y se
 revisa antes de aprobar.
+
+## El tramo serial a 8 vCPU (ITSC-293)
+
+ITSC-286 dejó una pregunta: a 8 vCPU, con `cpu_throttled_s` = 0, la pared de
+2023-03 (133,4 s) solo bajó 27 % y `wait_s` subió a 38 %. ¿Frena el θ pesado o
+la subida a GCS? La imagen 0.8.0 separa las dos cosas en la sonda. **Esta
+sección tiene la medición de laboratorio, lo que falta medir en la nube, cómo
+leerlo y las optimizaciones con su ganancia esperada.** La corrida en Cloud Run
+la dispara el humano; mientras no esté, 4 vCPU se queda como está.
+
+### Qué agrega la imagen 0.8.0
+
+La línea `sonda:` y el hallazgo `unit_timing` (detalle en
+[data-contracts.md](../data-contracts.md) y en el README de la capa) suman:
+
+| Campo | Qué dice |
+| --- | --- |
+| `open_s` | Abrir los 50 archivos de eventos, en el hilo principal, antes de leer. Costo fijo por mes. |
+| `backpressure_s`, `drain_s`, `publish_s` | Las tres partes de `wait_s`: el principal bloqueado mientras detecta (escritores atrasados), vaciar las colas tras el último tramo, y cerrar y mover los 100 archivos. |
+| `encode_s`, `close_s`, `move_s`, `carry_write_s` | Desglose de `write_s`, sumado entre hilos: codificar (en GCS incluye la subida en streaming), cerrar el archivo, moverlo (copia y borrado) y escribir el carry-over. |
+| `heavy_theta`, `heavy_theta_s`, `heavy_theta_events` | El θ que más tiempo de escritura sumó. |
+| `last_theta`, `last_theta_events_done_s`, `last_theta_done_s` | El θ que escribió su último tramo al final, y cuándo (desde el inicio de la unidad). |
+| `theta_timing` (solo en el hallazgo) | Una fila por θ: `events`, `open_s`, `encode_s`, `close_s`, `move_s`, `carry_write_s`, `events_done_s`, `done_s`, `blocked_s`, `queued_s`. |
+
+`blocked_s` reparte la espera del principal: cada vez que `submit` o `wait`
+esperan un tramo, la espera se carga al θ cuyo bloque terminó último. La suma
+de `blocked_s` es `backpressure_s` + `drain_s` (en laboratorio, 0,611 de 0,654 s).
+`queued_s` es lo que los bloques de un θ esperaron en cola antes de que un hilo
+los tomara. `done_s` mide el orden de la cola de publicación, no quién tardó:
+para saber quién cierra último se usa `events_done_s`.
+
+### Medición de laboratorio (2020-01, 8 cores, imagen 0.8.0)
+
+14,05 M ticks, `taskset -c 0-7`, disco local (sin GCS: `close_s` y `move_s` son
+~0). Los números sirven para ver la forma, no para predecir la nube.
+
+```
+sonda: ... wall_s=3.4 ... read_s=0.1 decode_s=0.7 detect_s=2.2 detect_cpu_s=0.6 write_s=14.3 carry_s=0.0 wait_s=1.0 other_s=0.1 ... fanout_threads=8 write_workers=8 open_s=0.0 backpressure_s=0.7 drain_s=0.0 publish_s=0.3 encode_s=13.6 close_s=0.0 move_s=0.0 carry_write_s=0.6 heavy_theta=10000 heavy_theta_s=1.4 heavy_theta_events=2080306 ... cpu_throttled_s=0.0
+```
+
+- **El θ pesado existe pero no frena aquí.** θ = 10000 tiene 17,1 % de los
+  eventos y escribe 1,4 s de 3,4 s de pared (42 %), pero todos los θ terminan
+  su último tramo junto con la detección (`events_done_s` ≈ 3,0 s de 3,3). La
+  espera (1,0 s, 30 % de la pared) se reparte entre muchos θ, ninguno pasa de
+  0,08 s.
+- **El fan-out sí está desbalanceado, y eso no es `wait_s`.** `dc_core` reparte
+  los 50 θ en grupos contiguos de `ceil(50 / hilos)` y cada tramo de 65 536
+  ticks espera al grupo más lento. Como los θ van de menor a mayor, el primer
+  grupo junta los θ con más eventos y el último queda con un solo θ. Costo de
+  detección por θ medido en un hilo (`sandbox.local/itsc293/detect_per_theta.py`,
+  suma 7,25 s):
+
+  | Hilos | Reparto | Pared del fan-out | Contra el ideal (suma ÷ hilos) |
+  | --- | --- | --- | --- |
+  | 8 | contiguo (hoy) | 1,45 s | 1,60× |
+  | 8 | intercalado (θ `i` al hilo `i % hilos`) | 1,06 s | 1,17× |
+  | 8 | voraz por costo medido | 0,99 s | 1,09× |
+  | 4 | contiguo (hoy) | 2,36 s | 1,31× |
+  | 4 | intercalado | 1,92 s | 1,06× |
+
+  Es coherente con la nube: de 4 a 8 vCPU `detect_s` bajó 1,79× (135,2 a
+  75,6 s) y no 2×; el modelo da 2 × 1,31 ÷ 1,60 = 1,64×.
+
+### Qué falta: la corrida en la nube
+
+Una corrida de 2023-03 a 8 vCPU con la imagen 0.8.0, mismos inputs y misma
+deriva temporal que en "Cambiar la CPU entre corridas" (`--cpu 8 --memory 4Gi
+--task-timeout 86400 --max-retries 0`; el `apply` posterior la cierra). Anota la
+línea `sonda:` completa y imprime la tabla por θ desde el lago de hallazgos,
+con el `gcloud storage cp` de "Qué leer y qué anotar":
+
+```bash
+python3 -c "
+import json, pyarrow.compute as pc, pyarrow.parquet as pq
+t = pq.read_table('/tmp/dq')
+t = t.filter(pc.equal(t['check_type'], 'unit_timing'))
+t = t.filter(pc.and_(pc.equal(t['year'], 2023), pc.equal(t['month'], 3)))
+d = json.loads(t['details'][0].as_py())
+rows = sorted(d['theta_timing'], key=lambda r: -r['blocked_s'])
+print({k: v for k, v in d.items() if k != 'theta_timing'})
+for r in rows[:10]: print(r)"
+```
+
+**Regla de lectura (escrita antes de correr).** Con `espera` = `backpressure_s`
++ `drain_s` y `top` = el θ de mayor `blocked_s`:
+
+1. **θ pesado** si `top.blocked_s` ≥ 50 % de `espera`, o si `top.encode_s` por
+   sí solo pasa de `detect_s`. Un θ escribe en serie y frena a los 49 restantes.
+   Si además su `queued_s` es alto con `encode_s` bajo, el cuello es la serie
+   de su cola y no su codificación.
+2. **Subida a GCS** si `blocked_s` se reparte (ningún θ pasa de 20 % de
+   `espera`) y la latencia por archivo supera 0,3 s: (`close_s` + `move_s`) ÷ 50
+   archivos de eventos, o `carry_write_s` ÷ 50 carry-overs. Son sumas entre
+   hilos, por eso se dividen por archivo. `publish_s` es pared y ya contiene
+   ambas: se compara con `wait_s` aparte, no se suma a ellas.
+3. **Pool de escritura corto** si `blocked_s` se reparte, `queued_s` es alto en
+   muchos θ y `write_s` ÷ (`write_workers` × `wall_s`) pasa de 0,8, o si
+   `encode_s` ÷ `write_workers` es comparable a `wall_s`.
+4. En cualquier caso, `detect_s` contra la suma de CPU de detección dice cuánto
+   del techo es el reparto del fan-out (la tabla de arriba lo predice).
+
+### Optimizaciones propuestas y ganancia esperada
+
+Sobre 133,4 s a 8 vCPU (`detect_s` 75,6 + `wait_s` 51,3 + `read_s` 1,9 + `other_s`
+4,6). Las cifras son proyecciones con la medición de ITSC-286 y la de
+laboratorio; la corrida de arriba las confirma o las descarta.
+
+| # | Cambio | Qué ataca | Ganancia esperada a 8 vCPU | Riesgo |
+| --- | --- | --- | --- | --- |
+| A | Repartir los θ al fan-out de forma intercalada (o voraz) en `dc_core`, no en grupos contiguos | `detect_s` | 75,6 s → ~55 s (×1,17 ÷ 1,60): −20 s, −15 % de la pared. A 4 vCPU, 135,2 → ~109 s (−14 % de 184,1) | Cambia `shared/dc_core` y `dc_pyo3`: sube la versión de las cuatro capas. El resultado no cambia (los θ son independientes); los hashes deben ser iguales. |
+| B | Si la regla da "θ pesado": codificar los row groups del θ pesado en paralelo, o aliviar su codificación (ZSTD de menor nivel solo para θ con más de N eventos) | `wait_s` | Hasta 51,3 s (techo: sin espera, 133,4 → 82,1 s, −38 %); lo real depende de cuánto de la espera es de ese θ | El contrato de salida es un archivo por θ y mes: no se parte en archivos. |
+| C | Si la regla da "subida": cerrar y mover los archivos con más hilos que CPU (es E/S) | `publish_s`, `close_s`, `move_s` | Hasta `publish_s` | Un pool aparte de los escritores de CPU. |
+
+Con A sola, la pared a 8 vCPU baja a ~113 s (−15 %) si la espera no crece, y su
+costo de lista por mes a ~0,017 USD (0,0203 × 113 ÷ 133,4), 17 % sobre el de
+4 vCPU de hoy (0,0147). Con A y B, hasta ~62 s (el piso es `read_s` + `other_s`
++ `detect_s` tras A) y ~0,009 USD. El rango es amplio porque no se sabe cuánto de
+la espera es del θ pesado: lo dice la corrida de arriba.
+
+**Regla para el tamaño, a aplicar sobre corridas de 4 y 8 vCPU con la imagen que
+traiga la optimización que salga de la regla de lectura:** 8 vCPU reemplaza a
+4 si su costo de lista por mes queda a menos de 10 % del de 4 vCPU y su pared es
+al menos 25 % menor. Hoy no se cumple (+38 % de costo por −27 % de pared) y
+**4 vCPU se mantiene**; ADR-04 no se reabre con lo medido hasta aquí.
+
+### Costo fijo por mes (ampliación de ITSC-284)
+
+Los meses livianos de 2017 (61 mil a 546 mil ticks, `detect_s` < 1 s) tardaron
+13 a 23 s a 4 vCPU en el backfill `l2-backfill-gkdlr`, por un costo que no
+depende de los ticks: `carry_s` ~9 s, `write_s` 32 a 39 s repartido en 4
+escritores (`wait_s` ~8 s) y `other_s` ~3 s, sobre 100 archivos Parquet y 50
+carry-overs. En 109 meses son ~2 200 s de 4 957 s (44 %). La imagen 0.8.0 los
+separa del costo proporcional a ticks:
+
+| Costo | Campos | Qué es |
+| --- | --- | --- |
+| Fijo por archivo | `open_s`, `carry_s`, `close_s`, `move_s`, `carry_write_s`, `publish_s` | Latencia de GCS por archivo: abrir 50 subidas, leer 50 carry-overs, cerrar y mover 100 archivos. |
+| Proporcional a ticks | `detect_s`, `decode_s`, `encode_s` | CPU de detección, decodificación y codificación. |
+
+Con los números de ITSC-284 el costo fijo sale a ~0,18 s por carry-over leído
+(`carry_s` ÷ 50, en serie y con unos 4 viajes a GCS por archivo: existencia, pie,
+`state_version` y la fila) y a ~0,35 s por archivo escrito (`write_s` ÷ 100).
+Reducciones propuestas, con el mismo método (proyección, a confirmar con la
+línea `sonda:` de un mes liviano del backfill):
+
+| # | Cambio | Ganancia esperada por mes | En 109 meses |
+| --- | --- | --- | --- |
+| D | Leer los 50 carry-overs en paralelo (E/S, ~16 hilos) y en una sola lectura (hoy `read_carry_over` lee `state_version` y luego la fila) | `carry_s` 9 → ~1 s (−8 s) | −870 s |
+| E | Publicar con más hilos que CPU (es E/S): 100 archivos × 0,35 s ÷ 16 en vez de ÷ 4 | `publish_s` ~8 → ~2 s (−6 s) | −650 s |
+| F | Abrir los 50 archivos de eventos en paralelo | `open_s` ~3 → ~0,4 s (−2,6 s) | −280 s |
+
+D, E y F suman ~−17 s de ~20 s por mes liviano, unos 1 850 s de los 4 957 s del
+backfill (−37 %); la ganancia es tiempo de pared, no dinero (L2 mensual cuesta
+0,015 USD y el backfill 0,39 USD de lista). Escribir los 50 θ en menos archivos
+cambia el contrato de salida (un archivo por θ, ADR-L2-10) y no se propone.
+
+### Qué anotar al correrla
+
+La línea `sonda:` y la tabla de los diez θ de mayor `blocked_s` van al README de
+la capa y a la card ITSC-293, con un párrafo: qué regla de lectura se cumplió,
+cuánto de `wait_s` explica el θ pesado y cuánto la subida, y qué cambio (A, B o
+C) queda como card de implementación. Si la corrida no cumple ninguna de las
+tres reglas, la hipótesis de ITSC-286 estaba mal y se escribe aquí tal cual.

@@ -64,9 +64,22 @@ class EventWriter:
         # hilo que esté escribiendo, uno a la vez por escritor, así que no
         # necesita candado. `pipeline` suma los de los θ del mes.
         self.write_s = 0.0
+        # El mismo `write_s` desglosado (ITSC-293): `encode_s` es armar el lote,
+        # hashear y entregar la tabla al codificador de Parquet (en GCS, la
+        # subida en streaming va dentro de `write_table`); `close_s` y `move_s`
+        # son los de `PartitionWriter.commit`. `open_s` es abrir el archivo
+        # (hilo principal, antes de leer) y no entra en `write_s`.
+        self.open_s = 0.0
+        self.encode_s = 0.0
+        self.close_s = 0.0
+        self.move_s = 0.0
+        # Cuándo (`perf_counter`) terminó la última escritura de un tramo.
+        self.last_add_at = 0.0
 
     def __enter__(self) -> Self:
+        started = time.perf_counter()
         self._writer.__enter__()
+        self.open_s = time.perf_counter() - started
         return self
 
     def __exit__(self, *exc_info) -> None:
@@ -80,7 +93,10 @@ class EventWriter:
         self._rows += len(columns)
         if self._rows >= FLUSH_ROWS:
             self._flush()
-        self.write_s += time.perf_counter() - started
+        self.last_add_at = time.perf_counter()
+        elapsed = self.last_add_at - started
+        self.write_s += elapsed
+        self.encode_s += elapsed
 
     def _flush(self) -> None:
         """Escribe los tramos acumulados como un row group y los suelta."""
@@ -96,6 +112,10 @@ class EventWriter:
         started = time.perf_counter()
         if self._rows:
             self._flush()
+        flushed = time.perf_counter()
+        self.encode_s += flushed - started
         self._writer.commit()
+        self.close_s = self._writer.close_s
+        self.move_s = self._writer.move_s
         self.write_s += time.perf_counter() - started
         return self._hasher.hexdigest()

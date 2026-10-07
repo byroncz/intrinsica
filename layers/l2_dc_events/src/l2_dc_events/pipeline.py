@@ -34,7 +34,7 @@ from l2_dc_events.landing import (
 )
 from l2_dc_events.parallel import ParallelWriters
 from l2_dc_events.thetas import load_thetas
-from l2_dc_events.timing import Phases, Timing
+from l2_dc_events.timing import Phases, ThetaTiming, Timing
 from l2_dc_events.write import CARRY_OVER, EVENTS, partition_path
 
 __all__ = [
@@ -90,7 +90,7 @@ def _feed(
         writes.submit(closed)
         phases.detect_s += detected - started
         phases.detect_cpu_s += cpu_detected - cpu_started
-        phases.wait_s += time.perf_counter() - detected
+        phases.backpressure_s += time.perf_counter() - detected
     return len(ticks)
 
 
@@ -208,10 +208,12 @@ def process_unit(
             )
             phases.carry_s = time.perf_counter() - carry_started
         thetas = fanout.thetas
+        opening = time.perf_counter()
         writers = [
             stack.enter_context(EventWriter(_path(ctx, unit, theta, EVENTS), theta))
             for theta in thetas
         ]
+        phases.open_s = time.perf_counter() - opening
         # Después de los escritores: al salir, primero se cancela y se espera
         # al pool y solo entonces se cierran (o se borran) los temporales.
         pool = ThreadPoolExecutor(max_workers=limit.writers)
@@ -232,7 +234,7 @@ def process_unit(
         writes.wait()
         phases.detect_s += closed - started_tail
         phases.detect_cpu_s += cpu_closed - cpu_tail
-        phases.wait_s += time.perf_counter() - closed
+        phases.drain_s = time.perf_counter() - closed
 
         discarded = fanout.discarded()
         carries = fanout.carry_overs()
@@ -244,15 +246,34 @@ def process_unit(
             _, carry_hash = write_carry_over(
                 carry, where, _path(ctx, unit, theta, CARRY_OVER)
             )
-            return events_hash, carry_hash, time.perf_counter() - carry_started
+            done = time.perf_counter()
+            return events_hash, carry_hash, done - carry_started, done
 
         published = time.perf_counter()
         hashes = list(pool.map(publish, thetas, writers, carries))
-        phases.wait_s += time.perf_counter() - published
-        events_hashes = [events_hash for events_hash, _, _ in hashes]
-        carry_hashes = [carry_hash for _, carry_hash, _ in hashes]
+        phases.publish_s = time.perf_counter() - published
+        events_hashes = [events_hash for events_hash, _, _, _ in hashes]
+        carry_hashes = [carry_hash for _, carry_hash, _, _ in hashes]
         phases.write_s = sum(writer.write_s for writer in writers) + sum(
-            carry_write_s for _, _, carry_write_s in hashes
+            carry_write_s for _, _, carry_write_s, _ in hashes
+        )
+        theta_timings = tuple(
+            ThetaTiming(
+                theta=theta,
+                events=writer.n_events,
+                open_s=writer.open_s,
+                encode_s=writer.encode_s,
+                close_s=writer.close_s,
+                move_s=writer.move_s,
+                carry_write_s=carry_write_s,
+                events_done_s=max(0.0, writer.last_add_at - started),
+                done_s=done - started,
+                blocked_s=blocked_s,
+                queued_s=queued_s,
+            )
+            for theta, writer, blocked_s, queued_s, (_, _, carry_write_s, done) in zip(
+                thetas, writers, writes.blocked_s, writes.queued_s, hashes
+            )
         )
 
     events = [writer.n_events for writer in writers]
@@ -265,6 +286,11 @@ def process_unit(
         write_s=phases.write_s,
         carry_s=phases.carry_s,
         wait_s=phases.wait_s,
+        open_s=phases.open_s,
+        backpressure_s=phases.backpressure_s,
+        drain_s=phases.drain_s,
+        publish_s=phases.publish_s,
+        thetas=theta_timings,
         row_groups=phases.row_groups,
         bytes_in=phases.bytes_in,
         cores=limit.cores,

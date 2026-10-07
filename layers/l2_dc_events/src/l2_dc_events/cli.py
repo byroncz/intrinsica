@@ -210,11 +210,15 @@ def _log_probe(
 
     `cores` es el límite efectivo (cuota del cgroup o, sin ella, los cores
     visibles) y `cores_visible` lo que ve la máquina. Las fases son las de
-    `timing.py`: `read_s`, `detect_s`, `carry_s` y `wait_s` son pared del hilo
-    principal; `decode_s` (CPU del lector), `detect_cpu_s` (CPU del principal
-    durante el fan-out) y `write_s` (suma de los hilos de escritura) no entran
-    en esa suma, y `other_s` es lo que queda de `wall_s` sin explicar (incluye
-    emitir los hallazgos, que el hallazgo `unit_timing` no cuenta).
+    `timing.py`: `read_s`, `detect_s`, `carry_s`, `open_s` y `wait_s` son pared
+    del hilo principal; `decode_s` (CPU del lector), `detect_cpu_s` (CPU del
+    principal durante el fan-out) y `write_s` (suma de los hilos de escritura)
+    no entran en esa suma, y `other_s` es lo que queda de `wall_s` sin explicar
+    (incluye emitir los hallazgos, que el hallazgo `unit_timing` no cuenta).
+    `wait_s` es `backpressure_s` + `drain_s` + `publish_s`; `encode_s`,
+    `close_s`, `move_s` y `carry_write_s` desglosan `write_s` (ITSC-293), y
+    `heavy_theta` y `last_theta` señalan al θ que más escribió y al que escribió
+    su último tramo al final (offsets desde el inicio de la unidad).
     """
     rss_mib = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss // 1024
     wall_s = math.ceil((time.monotonic() - started) * 10) / 10
@@ -222,7 +226,8 @@ def _log_probe(
     if result is not None:
         t = result.timing
         per_core = result.n_ticks / wall_s / t.cores
-        other_s = max(0.0, wall_s - (t.carry_s + t.read_s + t.detect_s + t.wait_s))
+        serial = t.carry_s + t.open_s + t.read_s + t.detect_s
+        other_s = max(0.0, wall_s - (serial + t.wait_s))
         line += (
             f" ticks={result.n_ticks} cores={t.cores:g} cores_visible={t.cores_visible}"
             f" cores_source={t.cores_source} ticks_s_core={per_core:.0f}"
@@ -233,7 +238,19 @@ def _log_probe(
             f" carry_s={t.carry_s:.1f} wait_s={t.wait_s:.1f} other_s={other_s:.1f}"
             f" row_groups={t.row_groups} bytes_in={t.bytes_in}"
             f" fanout_threads={t.fanout_threads} write_workers={t.write_workers}"
+            f" open_s={t.open_s:.1f} backpressure_s={t.backpressure_s:.1f}"
+            f" drain_s={t.drain_s:.1f} publish_s={t.publish_s:.1f}"
+            f" encode_s={t.encode_s:.1f} close_s={t.close_s:.1f}"
+            f" move_s={t.move_s:.1f} carry_write_s={t.carry_write_s:.1f}"
         )
+        heaviest, last = t.heaviest, t.last
+        if heaviest is not None and last is not None:
+            line += (
+                f" heavy_theta={heaviest.theta} heavy_theta_s={heaviest.write_s:.1f}"
+                f" heavy_theta_events={heaviest.events}"
+                f" last_theta={last.theta} last_theta_events_done_s={last.events_done_s:.1f}"
+                f" last_theta_done_s={last.done_s:.1f}"
+            )
         if t.cpu_throttled_s is not None:
             line += f" cpu_throttled_s={t.cpu_throttled_s:.1f}"
     logger.info(line)
