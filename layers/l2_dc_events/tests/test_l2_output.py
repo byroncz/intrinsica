@@ -553,6 +553,29 @@ def test_one_unit_timing_finding_per_unit(fixture_ticks, write_month, ctx):
     assert details["cores"] <= details["cores_visible"]
 
 
+def test_unit_timing_says_what_each_theta_spent_and_when_it_finished(
+    fixture_ticks, write_month, ctx
+):
+    write_month(fixture_ticks, row_group_size=1_000)
+    result = process_unit(AUG, ctx)
+    details = result.timing.details()
+    per_theta = details["theta_timing"]
+    assert [t["theta"] for t in per_theta] == THETAS
+    assert [t["events"] for t in per_theta] == result.events_per_theta
+    # `wait_s` es la suma de sus tres partes (no hay otra espera del principal).
+    parts = ("backpressure_s", "drain_s", "publish_s")
+    assert sum(details[k] for k in parts) == pytest.approx(details["wait_s"], abs=0.003)
+    # Todo θ publica dentro de la unidad, y su escritura no empieza después de publicar.
+    wall = details["wall_s"]
+    assert all(0 < t["done_s"] <= wall + 0.002 for t in per_theta)
+    assert all(t["events_done_s"] <= t["done_s"] for t in per_theta)
+    # Los desgloses suman lo que ya se reportaba como `write_s`.
+    split = sum(details[k] for k in ("encode_s", "close_s", "move_s", "carry_write_s"))
+    assert split == pytest.approx(details["write_s"], abs=0.01 * len(per_theta))
+    assert details["close_s"] > 0
+    assert details["move_s"] > 0
+
+
 def test_timing_stays_out_of_events_summary(fixture_ticks, write_month, ctx):
     """`events_summary` es la huella de la corrida: no puede llevar tiempos."""
     write_month(fixture_ticks, row_group_size=1_000)

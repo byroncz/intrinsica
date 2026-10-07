@@ -89,6 +89,19 @@ def test_backfill_chains_the_range_in_one_process(
     ]
     assert units == [f"binance/spot/BTCUSDT/2017-{m:02d}" for m in (8, 9, 10)]
     assert "ticks_s_core=" in caplog.text
+    # La sonda desglosa la espera y la escritura y nombra al θ pesado y al último.
+    for field in (
+        "backpressure_s=",
+        "drain_s=",
+        "publish_s=",
+        "encode_s=",
+        "close_s=",
+        "move_s=",
+        "carry_write_s=",
+        "heavy_theta=",
+        "last_theta_done_s=",
+    ):
+        assert field in caplog.text
 
 
 @pytest.mark.parametrize("index", ["1", "2"])

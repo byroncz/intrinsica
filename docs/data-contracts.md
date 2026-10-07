@@ -448,7 +448,16 @@ Cada hallazgo, además de la fila en el lago, deja una línea de log JSON
   acumulan entre hilos y no entran en esa suma (`write_s` puede pasar la
   pared). `detect_cpu_s` frente a `detect_s` distingue un detector lento (CPU
   alta) de uno desalojado (CPU baja). Desde ITSC-290 `read_s` es la espera del
-  hilo principal por el lector anticipado y `decode_s` ya no es pared. Va aparte de `events_summary` porque sus tiempos cambian en cada
+  hilo principal por el lector anticipado y `decode_s` ya no es pared. Desde
+  ITSC-293 lleva además `open_s` (abrir los 50 archivos de eventos, pared del
+  principal que también suma a `wall_s`), el desglose de `wait_s` en
+  `backpressure_s` + `drain_s` + `publish_s`, el de `write_s` en `encode_s`,
+  `close_s`, `move_s` y `carry_write_s` (acumulados entre hilos) y
+  `theta_timing`: una entrada por θ con `theta`, `events`, `open_s`,
+  `encode_s`, `close_s`, `move_s`, `carry_write_s`, `events_done_s` y `done_s`
+  (offsets desde el inicio de la unidad), `blocked_s` (lo que el hilo
+  principal esperó a tramos que ese θ cerró último) y `queued_s` (lo que sus
+  bloques esperaron en cola). Va aparte de `events_summary` porque sus tiempos cambian en cada
   corrida y el de `events_summary` no puede.
 
 ### Estado actual de un hallazgo

@@ -104,6 +104,37 @@ def test_blocks_must_match_the_writers(pool):
         ParallelWriters(pool, [Recorder()]).submit([])
 
 
+def test_the_wait_is_blamed_on_the_theta_that_finishes_last(pool):
+    slow = Recorder(delay=0.05)
+    writers = [Recorder(), slow, Recorder()]
+    parallel_writers = ParallelWriters(pool, writers)
+    for tag in range(3):
+        parallel_writers.submit([Block(tag) for _ in writers])
+    parallel_writers.wait()
+    fast_before, slow_s, fast_after = parallel_writers.blocked_s
+    assert slow_s > 0.01
+    assert fast_before < slow_s and fast_after < slow_s
+
+
+def test_a_theta_that_never_emits_is_never_blamed(pool):
+    parallel_writers = ParallelWriters(pool, [Recorder(), Recorder(delay=0.01)])
+    for tag in range(3):
+        parallel_writers.submit([Block(tag, 0), Block(tag)])
+    parallel_writers.wait()
+    assert parallel_writers.blocked_s[0] == 0.0
+    assert parallel_writers.queued_s[0] == 0.0
+
+
+def test_a_block_behind_a_slow_one_of_its_theta_counts_as_queued():
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        parallel_writers = ParallelWriters(pool, [Recorder(delay=0.2), Recorder()])
+        parallel_writers.submit([Block(0), Block(0)])
+        parallel_writers.submit([Block(1), Block(1)])
+        parallel_writers.wait()
+    slow, fast = parallel_writers.queued_s
+    assert slow > fast
+
+
 def test_to_batch_wraps_the_binding_buffers_without_changing_the_values():
     fanout = dc_pyo3.FanOut([10_000_000])
     scale = dc_pyo3.SCALE

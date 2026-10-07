@@ -2,6 +2,7 @@
 
 import logging
 import os
+import time
 import uuid
 from pathlib import Path
 from types import TracebackType
@@ -90,6 +91,12 @@ class PartitionWriter:
         self._sink: pa.NativeFile | None = None
         self._writer: pq.ParquetWriter | None = None
         self._committed = False
+        # Segundos de `commit` en cerrar el archivo (pie del Parquet y última
+        # subida) y en moverlo al destino (en GCS, copia más borrado). Los lee
+        # la sonda de L2 (ITSC-293): el segundo es latencia por archivo, no
+        # depende de su tamaño.
+        self.close_s = 0.0
+        self.move_s = 0.0
 
     def __enter__(self) -> Self:
         if not isinstance(self._fs, pafs.GcsFileSystem):
@@ -108,11 +115,15 @@ class PartitionWriter:
 
     def commit(self) -> str:
         """Cierra el archivo y lo deja en el destino. Devuelve `path`."""
+        started = time.perf_counter()
         self._close()
+        closed = time.perf_counter()
         if isinstance(self._fs, pafs.GcsFileSystem):
             self._fs.move(self._tmp, self._target)
         else:
             os.replace(self._tmp, self._target)
+        self.close_s = closed - started
+        self.move_s = time.perf_counter() - closed
         self._committed = True
         return self.path
 

@@ -207,3 +207,12 @@ def test_compact_encoding_keeps_the_logical_content_and_shrinks_the_file(tmp_pat
         pq.read_table(paths[False])
     )
     assert os.path.getsize(paths[True]) < os.path.getsize(paths[False])
+
+
+def test_commit_times_closing_and_moving_the_file(tmp_path):
+    with PartitionWriter(str(tmp_path / "t.parquet"), SCHEMA) as writer:
+        assert (writer.close_s, writer.move_s) == (0.0, 0.0)
+        writer.write_table(_table(3))
+        writer.commit()
+    assert writer.close_s > 0
+    assert writer.move_s > 0
