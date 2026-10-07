@@ -566,8 +566,8 @@ def test_first_at_price_picks_the_first_tick_of_the_instant_with_that_price():
 def test_first_at_price_never_lands_before_the_reference_in_a_shared_millisecond():
     """Caso A/B/C en un mismo ms: A a 95, B el máximo 110 (referencia), C a 95 que confirma.
 
-    L1 está en µs y el grupo de L2 arranca en el primer tick que cruza (ADR-L2-03): A es
-    de otro µs, anterior a la referencia, y la confirmación no puede quedar en él.
+    L1 está en µs y el grupo de empate de L2 es el de un mismo µs (ADR-L2-03): A es de
+    otro µs, anterior a la referencia, y la confirmación no puede quedar en él.
     """
     rows = [
         (1, 1, 100, 1),

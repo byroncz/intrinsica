@@ -714,9 +714,11 @@ dentro del día. El navegador nunca ve ids: lee la posición y toma tiempo, prec
 cantidad de los arreglos de `ticks.bin` ya decodificados. `reference_tick` y `extreme_tick` apuntan al tick de su `agg_trade_id`, que siempre
 coincide con el precio de L2. `confirm_tick` no apunta al `confirm_agg_trade_id`, que es el
 **último tick del grupo de empate** (ADR-L2-03) y puede tener otro precio que el
-`confirm_price` de L2 (el del primer tick que cruzó): apunta al primer tick del mismo
-instante cuyo precio es `confirm_price`, así que su `agg_trade_id` es menor o igual que
-`confirm_agg_trade_id` y el triángulo de la vista queda en el instante y el precio de la
+`confirm_price` de L2 (entre los ticks del grupo, el de precio mínimo que aún cumple el
+umbral en un upturn y el de precio máximo en un downturn, ADR-L2-03): apunta al primer
+tick del mismo instante, posterior a la referencia, cuyo precio es `confirm_price`, así
+que su `agg_trade_id` es mayor que el de la referencia y menor o igual que
+`confirm_agg_trade_id`, y el triángulo de la vista queda en el instante y el precio de la
 confirmación (TRD-viz §7.5). Un punto que cae fuera del día (el que lleva la bandera de recorte) lleva el
 centinela `0xFFFFFFFF`. Un id
 dentro del día que no es un tick suyo es un error de entrada: la corrida falla y el día queda sin `index.json`.
