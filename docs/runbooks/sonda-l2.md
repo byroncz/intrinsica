@@ -593,10 +593,13 @@ for r in rows[:10]: print(r)"
    Si además su `queued_s` es alto con `encode_s` bajo, el cuello es la serie
    de su cola y no su codificación.
 2. **Subida a GCS** si `blocked_s` se reparte (ningún θ pasa de 20 % de
-   `espera`) y `publish_s` + `close_s` + `move_s` ÷ 100 archivos supera 0,3 s
-   por archivo, o `encode_s` ÷ `write_workers` es comparable a `wall_s`.
+   `espera`) y la latencia por archivo supera 0,3 s: (`close_s` + `move_s`) ÷ 50
+   archivos de eventos, o `carry_write_s` ÷ 50 carry-overs. Son sumas entre
+   hilos, por eso se dividen por archivo. `publish_s` es pared y ya contiene
+   ambas: se compara con `wait_s` aparte, no se suma a ellas.
 3. **Pool de escritura corto** si `blocked_s` se reparte, `queued_s` es alto en
-   muchos θ y `write_s` ÷ (`write_workers` × `wall_s`) pasa de 0,8.
+   muchos θ y `write_s` ÷ (`write_workers` × `wall_s`) pasa de 0,8, o si
+   `encode_s` ÷ `write_workers` es comparable a `wall_s`.
 4. En cualquier caso, `detect_s` contra la suma de CPU de detección dice cuánto
    del techo es el reparto del fan-out (la tabla de arriba lo predice).
 
