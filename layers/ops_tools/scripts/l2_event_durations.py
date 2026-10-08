@@ -37,12 +37,11 @@ Args (todos opcionales):
                                                 directorio actual; una ruta que termina
                                                 en `/` es un directorio)
 
-Para dejar el CSV junto al script: `--out gs://<proyecto>-ops/scripts/l2_event_durations.csv`.
-El tiempo de L2 está en microsegundos.
+Con `ops-script` el CSV queda en `gs://<proyecto>-ops/results/<ejecución>/`
+(OPS_RESULTS_URI): la cuenta del job solo crea objetos bajo `results/`, y `scripts/` es
+de solo lectura por diseño. Un `--out gs://` fuera de OPS_RESULTS_URI falla al arrancar,
+no después de leer los ~5.450 archivos. El tiempo de L2 está en microsegundos.
 
-Dónde corre: con `ops-script`, o en local con `uv run`. Solo lee L2; lo único que
-escribe es el CSV de `--out`. Sale con 1 si no encuentra eventos o hay uno con
-`extreme < reference`.
 """
 
 import argparse
@@ -191,6 +190,16 @@ def default_out() -> str:
     return f"{os.environ.get('OPS_RESULTS_URI', '')}{CSV_NAME}"
 
 
+def check_out(out: str) -> None:
+    """Con `ops-script`, un `gs://` fuera de OPS_RESULTS_URI da 403 al final: falla ya."""
+    results = os.environ.get("OPS_RESULTS_URI", "")
+    if out.startswith("gs://") and results and not out.startswith(results):
+        sys.exit(
+            f"FALLO out_fuera_de_results: {out} no está bajo {results}; "
+            "el job solo crea objetos ahí"
+        )
+
+
 def event_files(fs: pafs.FileSystem, series: str) -> list[tuple[str, str, str]]:
     """`(θ, año-mes, ruta)` de cada `events.parquet` de la serie, en orden de θ y mes."""
     selector = pafs.FileSelector(series, recursive=True, allow_not_found=True)
@@ -313,6 +322,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out")
     ns = parser.parse_args(argv)
 
+    out = ns.out or default_out()
+    check_out(out)
     fs, base = open_fs(ns.events_root or default_events_root())
     series = f"{base}/provider={ns.provider}/market={ns.market}/asset={ns.asset}"
     stats, files = collect(fs, series)
@@ -325,7 +336,7 @@ def main(argv: list[str] | None = None) -> int:
     print_summary(table, stats)
     events = sum(r["eventos"] for r in table)
     print(f"\nθ={len(table)}; archivos={files}; eventos cerrados={events:,}")
-    print(f"tabla: {write_csv(table, ns.out or default_out())}")
+    print(f"tabla: {write_csv(table, out)}")
     return 0
 
 

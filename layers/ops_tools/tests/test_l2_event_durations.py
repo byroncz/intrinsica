@@ -161,3 +161,17 @@ def test_raiz_por_defecto_sale_del_proyecto(monkeypatch):
     assert (
         mod.default_out() == "gs://intrinsica-dc-ops/results/abc/l2_event_durations.csv"
     )
+
+
+def test_out_gs_fuera_de_results_falla_al_arrancar(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPS_RESULTS_URI", "gs://intrinsica-dc-ops/results/abc/")
+    # El lago no existe: si leyera antes de validar, fallaría por otra cosa.
+    with pytest.raises(SystemExit, match="out_fuera_de_results"):
+        load().main(
+            [
+                "--events-root",
+                str(tmp_path),
+                "--out",
+                "gs://intrinsica-dc-ops/scripts/l2_event_durations.csv",
+            ]
+        )
