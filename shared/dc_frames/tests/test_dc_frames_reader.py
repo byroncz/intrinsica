@@ -315,6 +315,13 @@ def test_arguments_are_validated(tmp_path):
         read_frames(["0.001", "0.00100000"], tmp_path, tmp_path, MONTH, MONTH)
     with pytest.raises(TypeError):
         read_frames(0.001, tmp_path, tmp_path, MONTH, MONTH)
+    with pytest.raises(ValueError, match="8 decimales"):
+        read_frames("0.000000001", tmp_path, tmp_path, MONTH, MONTH)
+    for bad in [(2017, 0), (2017, 13)]:
+        with pytest.raises(ValueError, match="entre 1 y 12"):
+            read_frames("0.001", tmp_path, tmp_path, bad, (2018, 1))
+        with pytest.raises(ValueError, match="entre 1 y 12"):
+            read_frames("0.001", tmp_path, tmp_path, (2016, 1), bad)
 
 
 class Spy:

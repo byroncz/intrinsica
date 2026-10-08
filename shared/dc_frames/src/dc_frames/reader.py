@@ -227,7 +227,16 @@ def _drive(
 def _theta(value: Decimal | str) -> Decimal:
     if not isinstance(value, Decimal | str):
         raise TypeError(f"θ debe ser Decimal o str, no {type(value).__name__}")
-    return Decimal(value).quantize(_THETA_SCALE)
+    theta = Decimal(value)
+    scaled = theta.quantize(_THETA_SCALE)
+    if scaled != theta:
+        raise ValueError(f"θ {value} no cabe en 8 decimales, que es la partición de L2")
+    return scaled
+
+
+def _check_month(name: str, month: Month) -> None:
+    if not 1 <= month[1] <= 12:
+        raise ValueError(f"{name} {month}: el mes debe estar entre 1 y 12")
 
 
 def read_frames(
@@ -252,13 +261,16 @@ def read_frames(
     cada θ. Quien conserva los arrays de un evento que cabía en un row group lo ancla.
 
     Errores: `FramesInputError` si falta un archivo o no cumple su contrato;
-    `FrameBoundaryError` si una frontera de L2 no es un tick de L1.
+    `FrameBoundaryError` si una frontera de L2 no es un tick de L1 o el tick de
+    confirmación no tiene `transact_time = confirm_time`.
     """
     if isinstance(thetas, Decimal | str):
         thetas = [thetas]
     values = [_theta(t) for t in thetas]
     if not values or len(set(values)) != len(values):
         raise ValueError("thetas debe traer al menos un θ y sin repetidos")
+    _check_month("start", start)
+    _check_month("end", end)
     if start > end:
         raise ValueError(f"start {start} es posterior a end {end}")
     key = (provider, market, asset)
