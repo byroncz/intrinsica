@@ -35,6 +35,7 @@ BOUNDARY_COLUMNS = (
     "confirm_agg_trade_id",
     "extreme_agg_trade_id",
 )
+CONFIRM_TIME = "confirm_time"
 
 Month = tuple[int, int]
 
@@ -214,11 +215,13 @@ class L1:
 class EventGroup:
     """Un row group de `events.parquet`: sus filas y sus tres ids de frontera.
 
-    `bounds[i] = (R, C, E)` del evento `i`. `batch` conserva las 11 columnas.
+    `bounds[i] = (R, C, E)` del evento `i` y `confirm_times[i]` es su `confirm_time`, que
+    el tick `C` debe tener como `transact_time`. `batch` conserva las 11 columnas.
     """
 
     batch: pa.RecordBatch
     bounds: np.ndarray
+    confirm_times: np.ndarray
 
     def __len__(self) -> int:
         return len(self.bounds)
@@ -242,7 +245,8 @@ def event_group(batch: pa.RecordBatch, where: str) -> EventGroup:
         raise FramesInputError(
             f"{where}: los eventos no cumplen R < C <= E ni E[i] <= R[i+1]"
         )
-    return EventGroup(batch, bounds)
+    confirm_times = batch.column(CONFIRM_TIME).to_numpy(zero_copy_only=False)
+    return EventGroup(batch, bounds, confirm_times)
 
 
 def event_groups(
@@ -253,7 +257,7 @@ def event_groups(
     last: Month,
 ) -> Iterator[EventGroup]:
     """Los row groups de eventos de un θ, mes a mes, de uno en uno y sin vacíos."""
-    expected = {name: pa.int64() for name in BOUNDARY_COLUMNS}
+    expected = {name: pa.int64() for name in (*BOUNDARY_COLUMNS, CONFIRM_TIME)}
     for month in months(first, last):
         path = l2_path(root, key, theta, month)
         parquet = open_parquet(

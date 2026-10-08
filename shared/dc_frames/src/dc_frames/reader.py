@@ -101,6 +101,7 @@ class _Cursor:
         bad = (inside & (left == right)) | ((bounds < rg.low) & ~seen)
         if bad.any():
             raise self._boundary_error(bounds, bad, rg)
+        self._check_confirm_times(rg, group, bounds, left, inside[:, 1])
         seen |= inside
 
         closed = int(np.count_nonzero(bounds[:, 2] <= rg.high))
@@ -151,6 +152,31 @@ class _Cursor:
             columns.append(pa.concat_arrays(pieces))
             pieces.clear()
         return Frame(*columns)
+
+    def _check_confirm_times(
+        self,
+        rg: RowGroup,
+        group: EventGroup,
+        bounds: np.ndarray,
+        left: np.ndarray,
+        inside: np.ndarray,
+    ) -> None:
+        """El tick `C` de cada evento cuya confirmación cae en este row group debe tener
+        `transact_time = confirm_time` (TRD-L3 §7.4, garantía 1): si no, L1 y L2 no cuadran.
+        """
+        rows = np.flatnonzero(inside)
+        if not rows.size:
+            return
+        found = rg.columns[0].to_numpy(zero_copy_only=False)[left[rows, 1]]
+        wanted = group.confirm_times[self._k + rows]
+        wrong = np.flatnonzero(found != wanted)
+        if wrong.size:
+            i = int(rows[wrong[0]])
+            raise FrameBoundaryError(
+                f"θ {self.theta}: el tick de confirmación {bounds[i, 1]} (evento con "
+                f"referencia {bounds[i, 0]}) tiene transact_time {found[wrong[0]]} y L2 "
+                f"dice confirm_time {wanted[wrong[0]]}: L1 y L2 no cuadran"
+            )
 
     def _boundary_error(
         self, bounds: np.ndarray, bad: np.ndarray, rg: RowGroup

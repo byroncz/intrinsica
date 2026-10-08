@@ -208,6 +208,18 @@ def test_a_boundary_in_a_gap_is_an_error(tmp_path, which):
         list(read_frames(THETAS[0], l1_root, l2_root, MONTH, MONTH))
 
 
+@pytest.mark.parametrize("row_group", [2, 64, 500])
+def test_a_confirmation_tick_with_another_time_is_an_error(tmp_path, row_group):
+    ticks = read_ticks()
+    rows = read_events()[100000]
+    c = boundaries(rows[40])[1]
+    # L1 reprocesado: el tick C conserva su id pero cambió de tiempo.
+    moved = [{**t, "time": t["time"] + 1} if t["id"] == c else t for t in ticks]
+    l1_root, l2_root, _, _ = build_lake(tmp_path, ticks=moved, l1_row_group=row_group)
+    with pytest.raises(FrameBoundaryError, match=rf"confirmación {c} .*transact_time"):
+        list(read_frames(THETAS[0], l1_root, l2_root, MONTH, MONTH))
+
+
 def test_a_boundary_in_a_gap_between_row_groups_is_an_error(tmp_path):
     ticks = read_ticks()
     rows = read_events()[100000]
