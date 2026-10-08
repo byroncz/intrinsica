@@ -163,6 +163,12 @@ def test_raiz_por_defecto_sale_del_proyecto(monkeypatch):
     )
 
 
+def test_nulos_fallan(tmp_path):
+    put(tmp_path, "0.00100000", "2020-01", [(1_000, 2_000, None, 9)])
+    with pytest.raises(SystemExit, match="FALLO nulos: θ=0.00100000 2020-01"):
+        load().main(["--events-root", str(tmp_path), "--out", str(tmp_path / "x.csv")])
+
+
 def test_out_gs_fuera_de_results_falla_al_arrancar(tmp_path, monkeypatch):
     monkeypatch.setenv("OPS_RESULTS_URI", "gs://intrinsica-dc-ops/results/abc/")
     # El lago no existe: si leyera antes de validar, fallaría por otra cosa.
@@ -175,3 +181,15 @@ def test_out_gs_fuera_de_results_falla_al_arrancar(tmp_path, monkeypatch):
                 "gs://intrinsica-dc-ops/scripts/l2_event_durations.csv",
             ]
         )
+
+
+def test_imprime_cada_theta_al_cerrarlo(tmp_path, capsys):
+    t0 = 1_500_000_000_000_000
+    put(tmp_path, "0.00100000", "2020-01", [(t0, t0 + DAY_US, 10, 50)])
+    put(tmp_path, "0.00100000", "2020-02", [(t0, t0 + 2 * DAY_US, 10, 60)])
+    put(tmp_path, "0.02000000", "2020-01", [(t0, t0 + 100 * DAY_US, 10, 900)])
+    assert load().main(["--events-root", str(tmp_path), "--out", f"{tmp_path}/"]) == 0
+    lines = [x for x in capsys.readouterr().out.splitlines() if "cerrado:" in x]
+    assert len(lines) == 2
+    assert lines[0].startswith("θ=0.00100000 cerrado: eventos=2 dias_max=2.000")
+    assert lines[1].endswith("ge_90d=1")

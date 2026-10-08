@@ -42,6 +42,10 @@ Con `ops-script` el CSV queda en `gs://<proyecto>-ops/results/<ejecución>/`
 de solo lectura por diseño. Un `--out gs://` fuera de OPS_RESULTS_URI falla al arrancar,
 no después de leer los ~5.450 archivos. El tiempo de L2 está en microsegundos.
 
+Dónde corre: con `ops-script`, o en local con `uv run`. Solo lee L2; lo único que
+escribe es el CSV de `--out`. Mientras lee, imprime una línea por θ en cuanto lo cierra
+(el job vence a los 3.600 s: si no alcanza, queda lo medido). Sale con 1 si no encuentra
+eventos; con `FALLO` si hay un evento con `extreme < reference` o un nulo.
 """
 
 import argparse
@@ -156,11 +160,13 @@ class ThetaStats:
         self.longest = Peak()
         self.largest = Peak()
 
-    def add(self, table: pa.Table, month: str) -> None:
-        duration = pc.subtract(table["extreme_time"], table["reference_time"])
-        size = pc.subtract(
-            table["extreme_agg_trade_id"], table["reference_agg_trade_id"]
-        )
+    def add(
+        self,
+        table: pa.Table,
+        month: str,
+        duration: pa.ChunkedArray,
+        size: pa.ChunkedArray,
+    ) -> None:
         self.days.add(duration)
         self.ticks.add(size)
         for d in THRESHOLDS:
@@ -211,27 +217,39 @@ def event_files(fs: pafs.FileSystem, series: str) -> list[tuple[str, str, str]]:
     return sorted(found)
 
 
+def print_closed(theta: str, s: ThetaStats) -> None:
+    """Una línea por θ apenas se cierra: si el job vence, queda lo medido."""
+    print(
+        f"θ={theta} cerrado: eventos={s.days.n:,} dias_max={s.days.high / DAY_US:.3f} "
+        f"ticks_max={s.ticks.high:,} ge_90d={s.ge[90]}",
+        flush=True,
+    )
+
+
 def collect(fs: pafs.FileSystem, series: str) -> tuple[dict[str, ThetaStats], int]:
     stats: dict[str, ThetaStats] = {}
     files = event_files(fs, series)
+    previous = None
     for theta, month, path in files:
-        table = pq.read_table(path, columns=COLUMNS, filesystem=fs).drop_null()
+        # `event_files` ordena por θ: al empezar uno nuevo, el anterior ya está cerrado.
+        if previous not in (None, theta) and previous in stats:
+            print_closed(previous, stats[previous])
+        previous = theta
+        table = pq.read_table(path, columns=COLUMNS, filesystem=fs)
+        if any(table[name].null_count for name in COLUMNS):
+            sys.exit(f"FALLO nulos: θ={theta} {month}")
         if len(table):
-            if (
-                pc.min(
-                    pc.subtract(table["extreme_time"], table["reference_time"])
-                ).as_py()
-                < 0
-                or pc.min(
-                    pc.subtract(
-                        table["extreme_agg_trade_id"], table["reference_agg_trade_id"]
-                    )
-                ).as_py()
-                < 0
-            ):
+            duration = pc.subtract(table["extreme_time"], table["reference_time"])
+            size = pc.subtract(
+                table["extreme_agg_trade_id"], table["reference_agg_trade_id"]
+            )
+            if pc.min(duration).as_py() < 0 or pc.min(size).as_py() < 0:
                 sys.exit(f"FALLO extremo_antes_de_la_referencia: θ={theta} {month}")
-            stats.setdefault(theta, ThetaStats()).add(table, month)
+            stats.setdefault(theta, ThetaStats()).add(table, month, duration, size)
+            del duration, size
         del table
+    if previous in stats:
+        print_closed(previous, stats[previous])
     return stats, len(files)
 
 
