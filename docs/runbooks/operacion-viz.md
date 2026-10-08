@@ -245,7 +245,7 @@ sesión limpia (ventana de incógnito o *Disable cache* en DevTools) y red de ca
 
    | Línea | Qué mide | Criterio |
    | --- | --- | --- |
-   | `viz: primer trazo a … ms desde el inicio de la navegación` | **Apertura**: de pedir la página al primer dibujo | < 5 s |
+   | `viz: primer trazo a … ms desde el inicio de la navegación` | **Apertura**: de pedir la página al primer dibujo | < 5 s (día de hasta 4 MB; por encima, < 5 s desde que arrancó el script, la cifra entre paréntesis) |
    | `viz: ticks decodificados en … ms` | Decodificar `ticks.bin` y `events.bin` | informativa |
    | `viz: redibujo en … ms (… ticks en la vista)` | **Redibujo tras zoom o desplazamiento**: haz 10 zooms con la rueda y arrastres, y anota el mínimo y el máximo | < 100 ms |
    | `viz: cambio de θ en … ms` | **Cambio de θ**: cámbialo 10 veces entre θ pequeños y grandes | < 100 ms |
@@ -264,9 +264,11 @@ sesión limpia (ventana de incógnito o *Disable cache* en DevTools) y red de ca
 
 3. Anota los números en la tabla de "Resultados". **Si una métrica no cumple**,
    el runbook lo dice ahí y se abre una card con `task-create`. ADR-VZ-14 se reabre
-   solo si un día no abre en el navegador o su página pasa de 300 MB en gzip; en un
-   día de más de 10 MB la apertura (< 5 s) y los 4 MB no se exigen, porque es descarga
-   (ITSC-322); sí se exigen redibujo y cambio de θ < 100 ms y que la pestaña no se congele.
+   solo si un día no abre en el navegador o su página pasa de 300 MB en gzip. En un
+   día de más de 4 MB el tiempo de red es informativo, porque es descarga (ITSC-322):
+   la apertura se exige desde que arrancó el script (< 5 s; la misma línea `viz: primer
+   trazo` la trae entre paréntesis), y siguen redibujo y cambio de θ < 100 ms y que la
+   pestaña no se congele. Los 4 MB solo se exigen el 2026-09-30.
 
 Hay **un solo juego de cifras**, el de la tabla de "Resultados" (medido el
 2026-10-06 sobre 2026-09-30, una vez; no se repitió el 2026-10-07). Cumple las
@@ -603,18 +605,21 @@ se toman iguales a `page_bytes` (un solo documento, sin otras peticiones).
 | --- | --- | --- | --- |
 | Ticks del día | | 4 501 514 | 4 717 816 |
 | Página en gzip | | 68,76 MB | 26,91 MB |
-| Apertura (primer trazo desde la navegación) | < 5 s | 35 609 ms (1 003 ms desde el script) | 14 204 ms (436 ms desde el script) |
+| Apertura desde la navegación (informativa, > 4 MB) | | 35 609 ms | 14 204 ms |
+| Apertura desde que arrancó el script | < 5 s | 1 003 ms | 436 ms |
 | Ticks decodificados (informativa) | | 148,9 ms (22 558 348 B) | 291,8 ms (23 694 269 B) |
 | Redibujo tras zoom | < 100 ms | 0,2 a 1,9 ms (hasta 21 949 ticks en la vista) | 0,2 a 9,3 ms (hasta 4 717 816 ticks) |
 | Cambio de θ | < 100 ms | 0,2 a 0,5 ms | 0,2 a 3,2 ms |
 | La pestaña se congela | no | no | no |
 
-Redibujo y cambio de θ cumplen con margen. La apertura no cumple, y es descarga: a
-16 Mbps, 68,76 MB y 26,91 MB tardan 34,4 s y 13,5 s, y el script sale en menos de
-1,1 s. **Decisión: ADR-VZ-14 se acota, sin cambiar el contrato** (TRD-viz §6.14,
-«Días pesados», y §14 ítem 21). En un día de más de 10 MB solo se exige redibujo y
-cambio de θ < 100 ms y que la pestaña no se congele; se reabre si un día no abre o
-su página pasa de 300 MB en gzip.
+Redibujo, cambio de θ y apertura desde el script cumplen con margen. La apertura
+desde la navegación supera los 5 s, y es descarga: a 16 Mbps, 68,76 MB y 26,91 MB
+tardan 34,4 s y 13,5 s, y el script sale en menos de 1,1 s. Los ≈ 16 Mbps son los
+que reportó el humano; no quedó registrado si se midieron aparte. **Decisión:
+ADR-VZ-14 se acota, sin cambiar el contrato** (TRD-viz §6.14, «Días pesados», y §14
+ítem 21). En un día de más de 4 MB el tiempo de red es informativo y se exige la
+apertura < 5 s desde el script, redibujo y cambio de θ < 100 ms y que la pestaña no
+se congele; se reabre si un día no abre o su página pasa de 300 MB en gzip.
 
 **Por confirmar**: el 2025-01-20 tiene más ticks que el 2025-10-10 y pesa menos de
 la mitad, con el mismo `ticks.bin` (≈ 23 MB). La diferencia debe estar en
