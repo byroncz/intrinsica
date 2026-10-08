@@ -4,6 +4,7 @@ requires-python = ">=3.14"
 
 [manifest]
 members = [
+    "dc-frames",
     "dc-pyo3",
     "dq",
     "intrinsica",
@@ -249,6 +250,23 @@ wheels = [
 ]
 
 [[package]]
+name = "dc-frames"
+version = "0.0.0"
+source = { editable = "shared/dc_frames" }
+dependencies = [
+    { name = "numpy" },
+    { name = "pyarrow" },
+    { name = "pyutils" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "numpy", specifier = ">=2.0" },
+    { name = "pyarrow", specifier = ">=25.0.1" },
+    { name = "pyutils", editable = "shared/pyutils" },
+]
+
+[[package]]
 name = "dc-pyo3"
 version = "0.1.0"
 source = { editable = "shared/dc_pyo3" }
@@ -422,6 +440,7 @@ name = "intrinsica"
 version = "0.0.0"
 source = { virtual = "." }
 dependencies = [
+    { name = "dc-frames" },
     { name = "dc-pyo3" },
     { name = "dq", extra = ["reader"] },
     { name = "l1-ingest" },
@@ -439,6 +458,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "dc-frames", editable = "shared/dc_frames" },
     { name = "dc-pyo3", editable = "shared/dc_pyo3" },
     { name = "dq", extras = ["reader"], editable = "shared/dq" },
     { name = "l1-ingest", editable = "layers/l1_ingest" },
