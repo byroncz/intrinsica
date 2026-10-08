@@ -1,0 +1,13 @@
+[project]
+name = "dc_frames"
+version = "0.0.0"
+description = "Lector de tramas de intrinsica: los ticks de cada evento DC por fase, recortando L1 con las fronteras de L2."
+requires-python = ">=3.14"
+dependencies = ["numpy>=2.0", "pyarrow>=25.0.1", "pyutils"]
+
+[build-system]
+requires = ["uv_build"]
+build-backend = "uv_build"
+
+[tool.uv.sources]
+pyutils = { workspace = true }
