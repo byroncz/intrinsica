@@ -665,3 +665,43 @@ la capa y a la card ITSC-293, con un párrafo: qué regla de lectura se cumplió
 cuánto de `wait_s` explica el θ pesado y cuánto la subida, y qué cambio (A, B o
 C) queda como card de implementación. Si la corrida no cumple ninguna de las
 tres reglas, la hipótesis de ITSC-286 estaba mal y se escribe aquí tal cual.
+
+## Duración y tamaño de los eventos por θ (ITSC-338)
+
+`layers/ops_tools/scripts/l2_event_durations.py` mide cuánto duran y cuántos
+ticks tienen los eventos cerrados de cada θ. Con eso se traza la línea entre θ
+de operación (horas a días) y θ de régimen (semanas o meses), y se dimensiona el
+lector de tramas y L3 (el evento más grande en ticks es la cota de RAM del
+lector). Solo lee `events.parquet` de L2, un archivo a la vez; no escribe en el
+lago. Mediana y p99 son aproximados (error relativo <= 0,25 %); máximos y
+conteos son exactos.
+
+1. Sube el script desde Cloud Shell, con el checkout al día:
+
+   ```bash
+   git pull
+   gcloud storage cp layers/ops_tools/scripts/l2_event_durations.py \
+     gs://<proyecto>-ops/scripts/l2_event_durations.py
+   ```
+
+2. Lanza *Actions → Run job* (rama `main`) con `job` = `ops-script`:
+
+   ```text
+   script = gs://<proyecto>-ops/scripts/l2_event_durations.py
+   args   =
+   ```
+
+   Sin `args` lee `gs://<proyecto>-dc-events/l2` (binance, spot, BTCUSDT) y deja
+   el CSV en `gs://<proyecto>-ops/results/<ejecución>/l2_event_durations.csv`.
+   No pases un `--out gs://` fuera de `results/`: la cuenta del job solo crea
+   objetos ahí (`scripts/` es de solo lectura) y el script falla al arrancar.
+
+3. Lee la salida del run. Mientras recorre los ~5.450 archivos imprime una línea
+   `θ=<θ> cerrado: ...` por cada θ; el job vence a los 3.600 s, y si no alcanza
+   queda lo medido hasta ahí. Al final, la tabla por θ, el θ mínimo con eventos
+   de 90, 60 y 30 días o más, y el evento más grande en ticks y MiB. Pega ese
+   resumen en la card ITSC-338.
+
+En local: `uv run layers/ops_tools/scripts/l2_event_durations.py --events-root
+<raíz L2 hive> --out /tmp/o.csv`. Sale con 1 si no hay eventos, y con `FALLO` si
+hay un nulo o un evento con `extreme < reference`.

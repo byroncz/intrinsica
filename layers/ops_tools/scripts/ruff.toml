@@ -1,5 +1,6 @@
-# Estos dos scripts son los originales de gs://intrinsica-dc-ops/scripts/, versionados tal cual
-# (ITSC-311): no se les aplica el formato ni el lint del repo para no alterarlos. El resto de
+# Los dos primeros son los originales de gs://intrinsica-dc-ops/scripts/, versionados tal cual
+# (ITSC-311): no se les aplica el formato ni el lint del repo para no alterarlos. El tercero es
+# una sonda de operación (ITSC-338), excluida como los demás scripts de operación. El resto de
 # la carpeta sigue la configuración raíz.
 extend = "../../../pyproject.toml"
-extend-exclude = ["viz_check_day.py", "viz_probe_ticks.py"]
+extend-exclude = ["viz_check_day.py", "viz_probe_ticks.py", "l2_event_durations.py"]
