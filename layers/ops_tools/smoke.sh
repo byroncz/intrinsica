@@ -8,7 +8,7 @@ set -euo pipefail
 image="${1:?uso: smoke.sh <imagen>}"
 
 docker run --rm --entrypoint python "$image" -c '
-import duckdb, dq, google.cloud.storage, pyarrow, pyutils
+import dc_frames, duckdb, dq, google.cloud.storage, pyarrow, pyutils
 import pyarrow.fs as pafs
 assert hasattr(pafs, "GcsFileSystem"), "pyarrow sin soporte de GCS"
 print("librerías OK, pyarrow", pyarrow.__version__)
