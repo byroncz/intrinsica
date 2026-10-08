@@ -86,7 +86,7 @@ Lo que quede en `results/` lo lees desde Cloud Shell:
   salidas grandes. Termina en `/`.
 - La imagen trae Python 3.14, `pyarrow` (lee `gs://` con
   `pyarrow.fs.FileSystem.from_uri`), `google-cloud-storage`, `duckdb`, `dq`
-  (esquema y lector de hallazgos) y `pyutils`. Una librería nueva es una card
+  (esquema y lector de hallazgos), `dc_frames` (lector de tramas) y `pyutils`. Una librería nueva es una card
   sobre `layers/ops_tools/`, no un `pip install` dentro del script.
 - Lee el lago con prefijos `l1/` o `l2/` (ver "Permisos").
 - Escribe en `results/` con `google-cloud-storage`
@@ -232,6 +232,43 @@ por θ y mes; el script los agrupa por (θ, mes) y compara lo que dejó cada
 ### `permisos.py`: la prueba negativa de 403
 
 Descrita arriba, en "Permisos".
+
+### Sondas del lector de tramas de L3 (ITSC-331)
+
+Dos scripts de `layers/ops_tools/scripts/` que miden el criterio de aceptación del
+lector `shared/dc_frames` ([TRD-L3 §10.3, ADR-L3-09](../TRD/l3.md)). La imagen trae
+`dc_frames` desde `ops_tools` 0.2.0: sin esa versión desplegada, el `import` falla.
+Súbelos como cualquier script (`gcloud storage cp layers/ops_tools/scripts/<script>.py
+gs://<proyecto>-ops/scripts/`) y lánzalos con `job` = `ops-script`. Ambos solo leen y
+toman las raíces de L1 y L2 del proyecto desde `OPS_RESULTS_URI`.
+
+- **`l3_probe_reader.py`**: recorre `read_frames` y mide pared por fase (lectura,
+  decodificación, selección), RSS pico, bytes leídos, row groups decodificados y
+  ticks/s, con eventos y ticks por fase de cada θ, y lo compara con los umbrales de
+  §10.3. Corre una pasada por ejecución (el RSS pico es del proceso), así que cada
+  medición es un run:
+
+  | Medición | `args` |
+  | --- | --- |
+  | Un θ (`θ_min`, uno intermedio y `θ_max`: tres runs) | `--theta 0.00100000 --from 2023-03` |
+  | Los 50 θ en una pasada | `--theta all --from 2023-03` |
+
+  Última línea: `sonda lector: … veredicto=ok|excedido|fallo`; sale con 1 si no es `ok`.
+  La tabla por θ queda también en `results/` como `l3_probe_reader_<fecha>.csv`.
+  Los pies de la salida (`pared por fase`, `bytes leídos`, `RSS pico`) son lo que se
+  copia a la card y al runbook de L3. La sonda envuelve los archivos para contar bytes,
+  lo que serializa las lecturas de un row group: si la pared queda cerca del umbral,
+  repite con `--sin-contar-io` para la pared del lector sin envolver. El umbral de bytes
+  (`--max-bytes-ratio`) solo cuenta los archivos de L1 del rango; los bytes de meses
+  anteriores, donde cae la referencia del primer evento, salen aparte en `bytes leídos`.
+- **`l3_probe_ties.py`**: cuántos `transact_time` distintos hay en un milisegundo de L1
+  y, para cada θ que confirma en él, el tamaño de su grupo de empate (ticks con el
+  `transact_time` de la confirmación, cuántos hasta `C` y cuántos después).
+  `args` = vacío para el 2026-09-30 12:40:26.980 (`--at` cambia el milisegundo; sin zona
+  es UTC, con zona se convierte a UTC). Sale con 1 si el milisegundo no tiene ticks, falta
+  el L1 del mes, no hay ningún `theta=` en L2 o a algún θ le falta su `events.parquet`.
+  Última línea: `sonda empates: ms=… ticks=… distintos=… max_por_tt=… thetas=…
+  max_empate=…`.
 
 ## Prueba de extremo a extremo (criterios de ITSC-298)
 

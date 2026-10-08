@@ -582,6 +582,7 @@ name = "ops-tools"
 version = "0.1.0"
 source = { editable = "layers/ops_tools" }
 dependencies = [
+    { name = "dc-frames" },
     { name = "dq", extra = ["reader"] },
     { name = "google-cloud-storage" },
     { name = "pyarrow" },
@@ -590,6 +591,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "dc-frames", editable = "shared/dc_frames" },
     { name = "dq", extras = ["reader"], editable = "shared/dq" },
     { name = "google-cloud-storage", specifier = ">=3.0.0" },
     { name = "pyarrow", specifier = ">=25.0.1" },
