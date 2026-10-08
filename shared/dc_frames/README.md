@@ -23,7 +23,8 @@ y decisión en ADR-L3-06. Es también el oráculo de las pruebas de L3.
   `(C, E]`, vacío si `E = C`.
 - `Frame(transact_time, price, quantity, is_buyer_maker)`: cuatro arrays de
   Arrow con los tipos de L1. No trae `agg_trade_id` ni `is_best_match`.
-- Errores: `FrameBoundaryError` (una frontera de L2 no es un tick de L1) y
+- Errores: `FrameBoundaryError` (una frontera de L2 no es un tick de L1, o el
+  tick de confirmación no tiene `transact_time = confirm_time`) y
   `FramesInputError` (falta un archivo, el esquema o el orden no cumplen el
   contrato).
 
