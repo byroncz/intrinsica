@@ -251,8 +251,9 @@ sesión limpia (ventana de incógnito o *Disable cache* en DevTools) y red de ca
    | `viz: cambio de θ en … ms` | **Cambio de θ**: cámbialo 10 veces entre θ pequeños y grandes | < 100 ms |
 
 2. **Bytes transferidos**: pestaña *Network*, filtro *Doc*, recarga y lee la
-   columna *Transferred* de `latest.html` (o `index.html`). Es la página en gzip,
-   un solo documento y ninguna otra petición. **Criterio: ≤ 4 MB el 2026-09-30**
+   cifra superior de la columna *Size* de `latest.html` (o `index.html`), o la barra
+   inferior *transferred* (en Firefox la columna se llama *Transferred*). Es la página
+   en gzip, un solo documento y ninguna otra petición. **Criterio: ≤ 4 MB el 2026-09-30**
    (RNF-VZ-02). Confirma de paso, en *Headers*, `content-type: text/html;
    charset=utf-8` y `content-encoding: gzip` (ítem 12 de TRD-viz §14), o:
 
@@ -262,8 +263,10 @@ sesión limpia (ventana de incógnito o *Disable cache* en DevTools) y red de ca
    ```
 
 3. Anota los números en la tabla de "Resultados". **Si una métrica no cumple**,
-   el runbook lo dice ahí y se abre una card con `task-create`; por encima de
-   10 MB de página se reabre ADR-VZ-14.
+   el runbook lo dice ahí y se abre una card con `task-create`. ADR-VZ-14 se reabre
+   solo si un día no abre en el navegador o su página pasa de 300 MB en gzip; en un
+   día de más de 10 MB la apertura (< 5 s) y los 4 MB no se exigen, porque es descarga
+   (ITSC-322); sí se exigen redibujo y cambio de θ < 100 ms y que la pestaña no se congele.
 
 Hay **un solo juego de cifras**, el de la tabla de "Resultados" (medido el
 2026-10-06 sobre 2026-09-30, una vez; no se repitió el 2026-10-07). Cumple las
@@ -536,9 +539,9 @@ máxima **68,76 MB** (2025-10-10, 4 501 514 ticks); **179 días de 365 pesan má
 | 2025-04-07 | 18,67 MB |
 
 El presupuesto de 4 MB (RNF-VZ-02) está medido y se cumple **solo para el
-2026-09-30** (3,66 MB). Más de 10 MB es el umbral que reabre ADR-VZ-14; 25 días de
-2025 lo superan. **La decisión sobre esos días no es de esta card**: es de ITSC-322
-(ver "Cards abiertas").
+2026-09-30** (3,66 MB). Más de 10 MB era el umbral que reabría ADR-VZ-14; 25 días de
+2025 lo superan. ITSC-322 los decidió: ADR-VZ-14 se acota (ver "Días pesados" más
+abajo).
 
 **Costo**
 
@@ -589,10 +592,35 @@ corregirlo.
 | Cambio de θ | < 100 ms | 0,4 a 1,6 ms | sí |
 | Página en gzip, 2026-09-30 | ≤ 4 MB | 3,66 MB | sí |
 
-Las cuatro cumplen, así que esta card no abre una card por incumplimiento. Pero
-ninguna se midió en otro día: **el 2025-10-10 (68,76 MB, 4 501 514 ticks)
-no se abrió en el navegador**, y a ese tamaño la apertura y la decodificación no
-tienen evidencia. Eso queda a ITSC-322.
+Las cuatro cumplen, así que esta card no abre una card por incumplimiento. Ninguna
+se midió en otro día; los dos días pesados los midió ITSC-322:
+
+**Días pesados** (ITSC-322; Chrome, consola con `viz:`, sesión limpia, red de casa
+≈ 16 Mbps, medidas el 2026-10-08). Los bytes transferidos no los registró Chrome:
+se toman iguales a `page_bytes` (un solo documento, sin otras peticiones).
+
+| Métrica | Criterio | 2025-10-10 | 2025-01-20 |
+| --- | --- | --- | --- |
+| Ticks del día | | 4 501 514 | 4 717 816 |
+| Página en gzip | | 68,76 MB | 26,91 MB |
+| Apertura (primer trazo desde la navegación) | < 5 s | 35 609 ms (1 003 ms desde el script) | 14 204 ms (436 ms desde el script) |
+| Ticks decodificados (informativa) | | 148,9 ms (22 558 348 B) | 291,8 ms (23 694 269 B) |
+| Redibujo tras zoom | < 100 ms | 0,2 a 1,9 ms (hasta 21 949 ticks en la vista) | 0,2 a 9,3 ms (hasta 4 717 816 ticks) |
+| Cambio de θ | < 100 ms | 0,2 a 0,5 ms | 0,2 a 3,2 ms |
+| La pestaña se congela | no | no | no |
+
+Redibujo y cambio de θ cumplen con margen. La apertura no cumple, y es descarga: a
+16 Mbps, 68,76 MB y 26,91 MB tardan 34,4 s y 13,5 s, y el script sale en menos de
+1,1 s. **Decisión: ADR-VZ-14 se acota, sin cambiar el contrato** (TRD-viz §6.14,
+«Días pesados», y §14 ítem 21). En un día de más de 10 MB solo se exige redibujo y
+cambio de θ < 100 ms y que la pestaña no se congele; se reabre si un día no abre o
+su página pasa de 300 MB en gzip.
+
+**Por confirmar**: el 2025-01-20 tiene más ticks que el 2025-10-10 y pesa menos de
+la mitad, con el mismo `ticks.bin` (≈ 23 MB). La diferencia debe estar en
+`events.bin` (el día del desplome tiene millones de eventos en θ pequeños). Se
+confirma con `viz_probe_page.py --day 2025-10-10` y `--day 2025-01-20`
+(`events_gzip`, TRD-viz §14 ítem 13).
 
 **`latest`**: `tiles/latest.html` pesa **3 660 213 B**, igual que el `index.html` del
 2026-09-30 al que apunta `latest.json` (verificación de ITSC-320).
@@ -616,9 +644,9 @@ _Pendiente de ITSC-323 al 2026-10-07: el cierre de octubre aún no ocurre._
 
 Lo que esta medición deja fuera de la card, con el motivo:
 
-- **Días de más de 10 MB** (ITSC-322; 25 de 2025, umbral de reapertura de ADR-VZ-14):
-  decisión de fondo sobre la fidelidad frente al tamaño de página. Incluye abrir en el
-  navegador el 2025-10-10.
+- **Días de más de 10 MB** (ITSC-322, resuelta): se abrieron el 2025-10-10 y el
+  2025-01-20, y ADR-VZ-14 se acotó (resultados arriba). Queda solo el `events_gzip` de
+  esos dos días, junto con el ítem 13 de TRD-viz §14 (ITSC-323).
 - **Eficiencia de `viz-tiles`** (ITSC-324; TRD-viz §14 ítems 3, 11 y 19):
   `first_at_price` (31 s por día, casi seis veces el costo de la 2.0), si bastan menos
   vCPU y los binarios duplicados. Obliga a repartir el backfill en tres meses.
