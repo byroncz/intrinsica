@@ -266,3 +266,39 @@ def test_empates_sin_l1_del_mes_falla(tmp_path, capsys):
     )
     assert code == 1
     assert "FALLO l1_faltante" in capsys.readouterr().out
+
+
+def test_empates_convierte_a_utc_una_zona_explicita(tmp_path, capsys):
+    (l1, l2, _, _events), shared = with_ties(tmp_path)
+    probe = load("l3_probe_ties")
+    # El mismo instante, con el reloj de UTC-5 (cinco horas antes).
+    local = iso(shared - 5 * 3_600 * 1_000_000) + "-05:00"
+    assert probe.main(["--at", local, "--l1-root", str(l1), "--l2-root", str(l2)]) == 0
+    assert "transact_time distintos=2" in capsys.readouterr().out
+
+
+def test_empates_sin_directorios_theta_falla(tmp_path, capsys):
+    (l1, _l2, _, _events), shared = with_ties(tmp_path)
+    probe = load("l3_probe_ties")
+    code = probe.main(
+        ["--at", iso(shared), "--l1-root", str(l1), "--l2-root", str(tmp_path / "otra")]
+    )
+    assert code == 1
+    assert "FALLO sin_thetas" in capsys.readouterr().out
+
+
+def test_empates_con_un_events_faltante_falla(tmp_path, capsys):
+    (l1, l2, _, events), shared = with_ties(tmp_path)
+    theta = theta_text(min(events))
+    for path in l2.rglob(f"theta={theta}/**/events.parquet"):
+        path.unlink()
+    probe = load("l3_probe_ties")
+    code = probe.main(["--at", iso(shared), "--l1-root", str(l1), "--l2-root", str(l2)])
+    assert code == 1
+    out = capsys.readouterr().out
+    assert (
+        f"FALLO events_faltante: θ sin events.parquet del mes (no se midieron): {theta}"
+        in out
+    )
+    # La línea de resumen sigue siendo la última.
+    assert out.strip().splitlines()[-1].startswith("sonda empates:")

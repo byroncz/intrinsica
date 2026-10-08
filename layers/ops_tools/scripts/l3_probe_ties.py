@@ -13,7 +13,8 @@ cuántos en su overshoot. Esta sonda lo mide sobre `consolidated.parquet` y `eve
      de `C`, y de esos cuántos caen en el overshoot `(C, E]` del evento.
 
 Args (todos opcionales):
-  --at 2026-09-30T12:40:26.980        (el milisegundo, en UTC; el mes sale de aquí)
+  --at 2026-09-30T12:40:26.980        (el milisegundo; sin zona se toma como UTC, con zona se
+                                      convierte a UTC; el mes sale de aquí)
   --l1-root gs://<proyecto>-landing/l1    (por defecto, los del proyecto según
   --l2-root gs://<proyecto>-dc-events/l2   OPS_RESULTS_URI; también rutas locales)
   --provider binance --market spot --asset BTCUSDT
@@ -21,7 +22,8 @@ Args (todos opcionales):
   --max-listed 40                     (cuántos `transact_time` distintos se listan)
 
 Última línea: `sonda empates: ms=… ticks=… distintos=… max_por_tt=… thetas=… max_empate=…`.
-Sale con 1 si el milisegundo no tiene ticks o falta algún archivo. Solo lee: dónde corre,
+Sale con 1 si el milisegundo no tiene ticks, falta el L1 del mes, no hay ningún directorio
+`theta=` en `--l2-root` o a algún θ le falta su `events.parquet`. Solo lee: dónde corre,
 con `ops-script` (lee `l1/` y `l2/`) o en local con `uv run`.
 """
 
@@ -103,7 +105,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-listed", type=int, default=40)
     ns = parser.parse_args(argv)
 
-    moment = datetime.fromisoformat(ns.at).replace(tzinfo=UTC)
+    moment = datetime.fromisoformat(ns.at)
+    moment = (
+        moment.replace(tzinfo=UTC) if moment.tzinfo is None else moment.astimezone(UTC)
+    )
     low = micros(moment)
     low -= low % 1000
     high = low + 1000
@@ -153,9 +158,12 @@ def main(argv: list[str] | None = None) -> int:
     root = f"{base.rstrip('/')}/{series}"
     thetas = sorted(
         m[1]
-        for info in fs.get_file_info(pafs.FileSelector(root))
+        for info in fs.get_file_info(pafs.FileSelector(root, allow_not_found=True))
         if (m := THETA_DIR.fullmatch(info.base_name)) is not None
     )
+    if not thetas:
+        print(f"FALLO sin_thetas: ningún directorio theta= en {root}")
+        return 1
     print(
         f"{'θ':>12} {'confirm_time':>28} {'C':>14} {'grupo_empate':>13} {'hasta_C':>8} "
         f"{'después_de_C':>13} {'en_overshoot':>13}"
@@ -193,12 +201,14 @@ def main(argv: list[str] | None = None) -> int:
                 f"{until:>8} {after:>13} {overshoot:>13}"
             )
     if missing:
-        print(f"θ sin events.parquet del mes (no se midieron): {', '.join(missing)}")
+        print(
+            f"FALLO events_faltante: θ sin events.parquet del mes (no se midieron): {', '.join(missing)}"
+        )
     print(
         f"sonda empates: ms={render(low)[:-3]} ticks={len(times)} distintos={len(distinct)} "
         f"max_por_tt={int(counts.max())} thetas={confirming} max_empate={biggest}"
     )
-    return 0
+    return 1 if missing else 0
 
 
 if __name__ == "__main__":

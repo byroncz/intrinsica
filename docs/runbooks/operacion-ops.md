@@ -258,11 +258,15 @@ toman las raíces de L1 y L2 del proyecto desde `OPS_RESULTS_URI`.
   Los pies de la salida (`pared por fase`, `bytes leídos`, `RSS pico`) son lo que se
   copia a la card y al runbook de L3. La sonda envuelve los archivos para contar bytes,
   lo que serializa las lecturas de un row group: si la pared queda cerca del umbral,
-  repite con `--sin-contar-io` para la pared del lector sin envolver.
+  repite con `--sin-contar-io` para la pared del lector sin envolver. El umbral de bytes
+  (`--max-bytes-ratio`) solo cuenta los archivos de L1 del rango; los bytes de meses
+  anteriores, donde cae la referencia del primer evento, salen aparte en `bytes leídos`.
 - **`l3_probe_ties.py`**: cuántos `transact_time` distintos hay en un milisegundo de L1
   y, para cada θ que confirma en él, el tamaño de su grupo de empate (ticks con el
   `transact_time` de la confirmación, cuántos hasta `C` y cuántos después).
-  `args` = vacío para el 2026-09-30 12:40:26.980 (`--at` cambia el milisegundo).
+  `args` = vacío para el 2026-09-30 12:40:26.980 (`--at` cambia el milisegundo; sin zona
+  es UTC, con zona se convierte a UTC). Sale con 1 si el milisegundo no tiene ticks, falta
+  el L1 del mes, no hay ningún `theta=` en L2 o a algún θ le falta su `events.parquet`.
   Última línea: `sonda empates: ms=… ticks=… distintos=… max_por_tt=… thetas=…
   max_empate=…`.
 
