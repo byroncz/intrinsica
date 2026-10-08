@@ -14,8 +14,9 @@ Args:
   --l2-root gs://<proyecto>-dc-events/l2   OPS_RESULTS_URI; también rutas locales)
   --provider binance --market spot --asset BTCUSDT
   --max-wall-s N                     (umbral de pared; por defecto 300 con un θ, 1200 con más)
-  --max-bytes-ratio 1.1              (con más de un θ, los bytes de L1 leídos no pasan de esto ×
-                                      el tamaño de los archivos del mes; ver más abajo)
+  --max-bytes-ratio 1.1              (con más de un θ, los bytes leídos de los archivos de L1 del
+                                      rango no pasan de esto × su tamaño; los de meses anteriores,
+                                      donde cae la referencia del primer evento, se reportan aparte)
   --big-event-ticks 100000          (desde cuántos ticks un evento entra a la suma de
                                       eventos abiertos a la vez)
   --sin-contar-io                    (no envuelve los archivos: la pared es la del lector
@@ -74,6 +75,8 @@ class Stats:
     io_in_rg_s: float = 0.0
     rg_s: float = 0.0
     bytes: dict[str, int] = field(default_factory=lambda: {"l1": 0, "l2": 0})
+    # ruta de L1 -> bytes leídos de ese archivo
+    l1_read: dict[str, int] = field(default_factory=dict)
     expected: dict[str, int] = field(default_factory=lambda: {"l1": 0, "l2": 0})
     decodes: dict[str, int] = field(default_factory=lambda: {"l1": 0, "l2": 0})
     l1_ticks: int = 0
@@ -101,9 +104,10 @@ def log(message: str) -> None:
 class _CountedFile:
     """Un archivo de solo lectura que cuenta los bytes y el tiempo de cada lectura."""
 
-    def __init__(self, inner, kind: str) -> None:
+    def __init__(self, inner, kind: str, path: str) -> None:
         self._inner = inner
         self._kind = kind
+        self._path = path
 
     def read(self, nbytes: int = -1) -> bytes:
         start = time.perf_counter()
@@ -114,6 +118,8 @@ class _CountedFile:
         )
         STATS.io_s += time.perf_counter() - start
         STATS.bytes[self._kind] += len(data)
+        if self._kind == "l1":
+            STATS.l1_read[self._path] = STATS.l1_read.get(self._path, 0) + len(data)
         return data
 
     def seek(self, position: int, whence: int = 0) -> int:
@@ -182,7 +188,7 @@ def probe_open_parquet(path: str, what: str) -> pq.ParquetFile:
     kind = "l1" if path.endswith(lake.CONSOLIDATED) else "l2"
     if STATS.count_io:
         source = pa.PythonFile(
-            _CountedFile(fs.open_input_file(resolved), kind), mode="r"
+            _CountedFile(fs.open_input_file(resolved), kind, path), mode="r"
         )
         parquet = _ProbeFile(source, kind, path)
     else:
@@ -315,6 +321,7 @@ def run(ns: argparse.Namespace) -> int:
     )
 
     STATS.count_io = not ns.sin_contar_io
+    original_open_parquet = lake.open_parquet
     lake.open_parquet = probe_open_parquet
     per_theta: dict[Decimal, ThetaStats] = {}
     bigs: list[tuple[int, int, int]] = []
@@ -346,6 +353,8 @@ def run(ns: argparse.Namespace) -> int:
             STATS.events += 1
     except FramesError as exc:
         error = f"{type(exc).__name__}: {exc}"
+    finally:
+        lake.open_parquet = original_open_parquet
     wall = time.perf_counter() - STATS.started
 
     decode = STATS.rg_s - STATS.io_in_rg_s
@@ -375,6 +384,8 @@ def run(ns: argparse.Namespace) -> int:
     earlier_decodes = sum(
         v[2] for path, v in STATS.l1_files.items() if path not in target
     )
+    month_read = sum(n for path, n in STATS.l1_read.items() if path in target)
+    earlier_read = STATS.bytes["l1"] - month_read
     delivered = sum(s.confirmation + s.overshoot for s in per_theta.values())
     events = sum(s.events for s in per_theta.values())
     rate = STATS.l1_ticks / wall if wall else 0.0
@@ -396,8 +407,10 @@ def run(ns: argparse.Namespace) -> int:
     )
     if STATS.count_io:
         log(
-            f"bytes leídos: L1={STATS.bytes['l1']} ({STATS.bytes['l1'] / max(month_bytes, 1):.3f} × "
-            f"los {month_bytes} del mes), L2={STATS.bytes['l2']}; por metadatos L1={STATS.expected['l1']}"
+            f"bytes leídos: L1={STATS.bytes['l1']} (del rango {month_read} = "
+            f"{month_read / max(month_bytes, 1):.3f} × los {month_bytes} de sus archivos; "
+            f"de meses anteriores {earlier_read}), L2={STATS.bytes['l2']}; "
+            f"por metadatos L1={STATS.expected['l1']}"
         )
     else:
         log(
@@ -435,8 +448,8 @@ def run(ns: argparse.Namespace) -> int:
             if STATS.count_io:
                 checks.append(
                     (
-                        f"bytes de L1 {STATS.bytes['l1']} ≤ {ns.max_bytes_ratio} × {month_bytes}",
-                        STATS.bytes["l1"] <= ns.max_bytes_ratio * month_bytes,
+                        f"bytes de L1 del rango {month_read} ≤ {ns.max_bytes_ratio} × {month_bytes}",
+                        month_read <= ns.max_bytes_ratio * month_bytes,
                     )
                 )
     failed = error is not None

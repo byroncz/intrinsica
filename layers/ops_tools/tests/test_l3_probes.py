@@ -4,6 +4,7 @@ Con roots locales, que es como corren en un equipo; en la nube solo cambian los 
 """
 
 import importlib.util
+import re
 import sys
 from pathlib import Path
 
@@ -13,8 +14,17 @@ ROOT = Path(__file__).parents[3]
 SCRIPTS = ROOT / "layers/ops_tools/scripts"
 sys.path.insert(0, str(ROOT / "shared/dc_frames/tests"))
 
+from dc_frames import lake as lake_module
 from dc_frames import read_frames
-from frames_lake import MONTH, build_lake, read_ticks, theta_text
+from frames_lake import (
+    MONTH,
+    build_lake,
+    read_events,
+    read_ticks,
+    theta_text,
+    write_l1,
+    write_l2,
+)
 
 MONTH_TEXT = f"{MONTH[0]:04d}-{MONTH[1]:02d}"
 
@@ -97,6 +107,39 @@ def test_los_bytes_medidos_cubren_lo_que_dicen_los_metadatos(lake, capsys):
     measured = int(line.split("L1=")[1].split()[0])
     expected = int(line.split("por metadatos L1=")[1])
     assert measured >= expected > 0
+
+
+def test_los_bytes_de_meses_anteriores_no_cuentan_contra_el_umbral(tmp_path, capsys):
+    ticks, events = read_ticks(), read_events()
+    # La referencia del primer evento cae en 2017-07: el lector abre ese mes para leerla.
+    reference = min(int(rows[0]["reference_agg_trade_id"]) for rows in events.values())
+    l1, l2 = tmp_path / "l1", tmp_path / "l2"
+    write_l1(l1, [t for t in ticks if t["id"] <= reference], 40, (2017, 7))
+    write_l1(l1, [t for t in ticks if t["id"] > reference], 40)
+    for theta, rows in events.items():
+        write_l2(l2, theta, rows, 3)
+    probe = load("l3_probe_reader")
+    assert probe.main(["--theta", "all", *args(l1, l2, "--max-bytes-ratio", "3")]) == 0
+    out = capsys.readouterr().out
+    line = next(x for x in out.splitlines() if x.startswith("bytes leídos"))
+    earlier = int(line.split("de meses anteriores ")[1].split(")")[0])
+    total = int(re.search(r"bytes_l1=(\d+)", out.strip().splitlines()[-1])[1])
+    in_range = int(re.search(r"bytes de L1 del rango (\d+)", out)[1])
+    assert earlier > 0
+    assert in_range == total - earlier
+
+
+def test_la_sonda_restaura_el_lector_al_terminar(lake, tmp_path, capsys):
+    l1, l2, events = lake
+    original = lake_module.open_parquet
+    probe = load("l3_probe_reader")
+    probe.main(["--theta", theta_text(min(events)), *args(l1, l2)])
+    assert lake_module.open_parquet is original
+    # También cuando el lector falla.
+    ticks = [t for t in read_ticks() if t["id"] != 3101]
+    l1, l2, _, events = build_lake(tmp_path, l1_row_group=40, ticks=ticks)
+    assert probe.main(["--theta", theta_text(min(events)), *args(l1, l2)]) == 1
+    assert lake_module.open_parquet is original
 
 
 def test_sin_contar_io_no_reporta_bytes_medidos(lake, capsys):
