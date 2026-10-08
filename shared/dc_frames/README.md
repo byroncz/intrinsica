@@ -14,8 +14,10 @@ y decisión en ADR-L3-06. Es también el oráculo de las pruebas de L3.
   cada row group de L1 se decodifica una sola vez. Dentro de un θ salen por
   `confirm_agg_trade_id`; entre θ no hay orden.
 - `frames_of(event, l1_root, ...)`: las tramas de un evento cuya fila de L2 ya
-  se tiene (un `RecordBatch` de una fila o un mapa con sus 11 columnas).
-  Decodifica solo los row groups que el evento toca.
+  se tiene (un `RecordBatch` o `Table` de una fila, o un mapa con sus 11
+  columnas). Decodifica solo los row groups que el evento toca. Con un mapa
+  Arrow infiere los tipos (`direction` sale `int64`), así que `event` ya no es
+  la fila de L2 sin transformar.
 - `EventFrames(theta, event, confirmation, overshoot)`: `event` es la fila de L2
   sin transformar; `confirmation` son los ticks de `(R, C]` y `overshoot` los de
   `(C, E]`, vacío si `E = C`.

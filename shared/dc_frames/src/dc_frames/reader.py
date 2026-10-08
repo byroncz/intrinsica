@@ -308,15 +308,20 @@ def frames_of(
     `event` es esa fila (un `RecordBatch` o `Table` de una fila, o un mapa con sus 11
     columnas). Los meses de L1 salen de `reference_time` y `extreme_time`; de ahí solo
     se decodifican los row groups que las estadísticas de `agg_trade_id` piden.
+
+    Con un mapa, Arrow infiere los tipos (`direction` sale `int64` y `theta` con la
+    precisión de su valor), así que `EventFrames.event` no es la fila de L2 sin
+    transformar: solo un `RecordBatch` o una `Table` de L2 la conservan tal cual.
     """
+    rows = 1 if isinstance(event, Mapping) else event.num_rows
+    if rows != 1:
+        raise ValueError(f"frames_of recibe una fila de L2, no {rows}")
     if isinstance(event, Mapping):
         batch = pa.RecordBatch.from_pylist([dict(event)])
     elif isinstance(event, pa.Table):
         batch = event.combine_chunks().to_batches()[0]
     else:
         batch = event
-    if batch.num_rows != 1:
-        raise ValueError(f"frames_of recibe una fila de L2, no {batch.num_rows}")
     row = batch.to_pylist()[0]
     cursor = _Cursor(
         Decimal(row["theta"]).quantize(_THETA_SCALE),

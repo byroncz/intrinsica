@@ -368,3 +368,9 @@ def test_frames_of_matches_read_frames_and_decodes_only_its_row_groups(
         assert spy.reads == last - first + 1
     mapped = {k: v[0] for k, v in event.event.to_pydict().items()}
     assert ids_of(frames_of(mapped, l1_root).confirmation) == ids_of(event.confirmation)
+    # Con un mapa los tipos se infieren: la fila ya no es la de L2.
+    assert frames_of(mapped, l1_root).event.schema != event.event.schema
+    table = pa.Table.from_batches([event.event])
+    assert frames_of(table, l1_root).event.equals(event.event)
+    with pytest.raises(ValueError, match="una fila de L2, no 0"):
+        frames_of(table.slice(0, 0), l1_root)
