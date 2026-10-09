@@ -12,13 +12,17 @@ Por θ reporta:
   - tamaño en ticks (`extreme_agg_trade_id - reference_agg_trade_id`): mediana, p99 y
     máximo. Es una cota superior: incluye los huecos de id del proveedor;
   - eventos con duración >= 1, 7, 30, 60 y 90 días (exactos);
+  - eventos con tamaño >= 1, 5, 10, 20 y 50 millones de ticks (exactos, columnas
+    `ticks_ge_<N>M`): fijan el presupuesto de ticks por evento de L3 (ITSC-339);
   - mes y fecha de inicio del evento más largo y del más grande en ticks.
 
-Imprime la tabla por θ; el θ mínimo con al menos un evento >= 90, 60 y 30 días; y el
-evento más grande del histórico en ticks y en MiB a 48 B por tick (las cinco columnas
-que lee el lector, TRD-L3 §7.1).
+Imprime la tabla por θ; el θ mínimo con al menos un evento >= 90, 60 y 30 días; el total
+de los θ por umbral de ticks; y el evento más grande del histórico en ticks y en MiB a
+48 B por tick (las cinco columnas que lee el lector, TRD-L3 §7.1).
 
-Máximos y conteos son exactos. Mediana y p99 son aproximados: salen de un histograma
+Máximos y conteos son exactos; los de ticks se cuentan sobre el arreglo del archivo en
+curso, no sobre el histograma, cuyos bins de 0,5 % no dan el número exacto en el
+umbral. Mediana y p99 son aproximados: salen de un histograma
 logarítmico de pasos de 0,5 % (error relativo <= 0,25 %), porque el θ más fino tiene
 millones de eventos y retenerlos todos rompería el pico O(lote) de AGENTS.md.
 
@@ -71,6 +75,7 @@ COLUMNS = [
 ]
 DAY_US = 86_400_000_000
 THRESHOLDS = (1, 7, 30, 60, 90)
+TICK_THRESHOLDS = (1, 5, 10, 20, 50)  # millones de ticks
 BYTES_PER_TICK = 48
 LOG_STEP = math.log(1.005)
 EVENTS_FILE = re.compile(
@@ -87,6 +92,7 @@ CSV_HEADER = [
     "ticks_p99",
     "ticks_max",
     *[f"ge_{d}d" for d in THRESHOLDS],
+    *[f"ticks_ge_{m}M" for m in TICK_THRESHOLDS],
     "mes_dias_max",
     "inicio_dias_max",
     "mes_ticks_max",
@@ -157,6 +163,7 @@ class ThetaStats:
         self.days = Hist()  # la duración se guarda en µs
         self.ticks = Hist()
         self.ge = dict.fromkeys(THRESHOLDS, 0)
+        self.ticks_ge = dict.fromkeys(TICK_THRESHOLDS, 0)
         self.longest = Peak()
         self.largest = Peak()
 
@@ -172,6 +179,10 @@ class ThetaStats:
         for d in THRESHOLDS:
             self.ge[d] += pc.sum(
                 pc.cast(pc.greater_equal(duration, d * DAY_US), pa.int64())
+            ).as_py()
+        for m in TICK_THRESHOLDS:
+            self.ticks_ge[m] += pc.sum(
+                pc.cast(pc.greater_equal(size, m * 1_000_000), pa.int64())
             ).as_py()
         self.longest.update(duration, table, month)
         self.largest.update(size, table, month)
@@ -267,6 +278,7 @@ def rows(stats: dict[str, ThetaStats]) -> list[dict]:
                 "ticks_p99": s.ticks.quantile(0.99),
                 "ticks_max": s.ticks.high,
                 **{f"ge_{d}d": s.ge[d] for d in THRESHOLDS},
+                **{f"ticks_ge_{m}M": s.ticks_ge[m] for m in TICK_THRESHOLDS},
                 "mes_dias_max": s.longest.month,
                 "inicio_dias_max": s.longest.start,
                 "mes_ticks_max": s.largest.month,
@@ -304,6 +316,13 @@ def print_summary(table: list[dict], stats: dict[str, ThetaStats]) -> None:
     print()
     for days in (90, 60, 30):
         print(f"θ mínimo con eventos >= {days} días: {min_theta(table, days)}")
+    for m in TICK_THRESHOLDS:
+        total = sum(r[f"ticks_ge_{m}M"] for r in table)
+        gib = m * 1_000_000 * BYTES_PER_TICK / 2**30
+        print(
+            f"eventos con >= {m} M ticks ({gib:.2f} GiB a {BYTES_PER_TICK} B por tick), "
+            f"suma de los θ: {total:,}"
+        )
     theta, best = max(stats.items(), key=lambda item: item[1].largest.value)
     ticks = best.largest.value
     print(

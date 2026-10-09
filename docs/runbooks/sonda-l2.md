@@ -699,8 +699,37 @@ conteos son exactos.
 3. Lee la salida del run. Mientras recorre los ~5.450 archivos imprime una línea
    `θ=<θ> cerrado: ...` por cada θ; el job vence a los 3.600 s, y si no alcanza
    queda lo medido hasta ahí. Al final, la tabla por θ, el θ mínimo con eventos
-   de 90, 60 y 30 días o más, y el evento más grande en ticks y MiB. Pega ese
-   resumen en la card ITSC-338.
+   de 90, 60 y 30 días o más, el total de eventos por umbral de ticks (ver
+   abajo) y el evento más grande en ticks y MiB. Pega ese resumen en la card
+   ITSC-338.
+
+### Eventos por umbral de ticks (ITSC-339)
+
+La tabla y el CSV traen cinco columnas más: `ticks_ge_1M`, `ticks_ge_5M`,
+`ticks_ge_10M`, `ticks_ge_20M` y `ticks_ge_50M`. Cada una es el número de
+eventos del θ cuyo tamaño (`extreme_agg_trade_id - reference_agg_trade_id`) es
+>= 1, 5, 10, 20 o 50 millones de ticks. Tras el θ mínimo, el resumen imprime una
+línea por umbral con la suma de los 50 θ y su equivalente en GiB a 48 B por
+tick (1 M = 0,04; 5 M = 0,22; 10 M = 0,45; 20 M = 0,89; 50 M = 2,24):
+
+```text
+eventos con >= 10 M ticks (0.45 GiB a 48 B por tick), suma de los θ: <N>
+```
+
+Para qué sirven: el motor de L3 carga el evento entero si cabe en el
+presupuesto de ticks por evento; si no, el indicador queda nulo y se emite un
+hallazgo de DQ. Cada línea dice cuántos eventos de todo el histórico caerían en
+el caso nulo con ese presupuesto, y la columna por θ dice en cuáles θ. Se elige
+el umbral más alto cuyo total es tolerable y que cabe en los 8 GiB del job con
+margen (TRD-L3 v1.2, opción B).
+
+Los conteos son exactos, no salen del histograma de mediana y p99 (sus bins de
+0,5 % no dan el número justo en el umbral): se acumulan por archivo sobre los
+tamaños que ya están en memoria y se sueltan con él. No hay segunda pasada ni
+eventos retenidos; el pico de memoria no cambia. Un evento que mide exactamente
+el umbral cuenta (`>=`). Pega las cinco líneas de umbral y la tabla en la card
+ITSC-339. Hay que volver a subir el script a `gs://<proyecto>-ops/scripts/`
+(paso 1) antes de lanzar.
 
 En local: `uv run layers/ops_tools/scripts/l2_event_durations.py --events-root
 <raíz L2 hive> --out /tmp/o.csv`. Sale con 1 si no hay eventos, y con `FALLO` si
