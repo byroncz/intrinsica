@@ -118,6 +118,47 @@ def test_theta_minimo_y_evento_mas_grande(tmp_path, capsys):
     ]
 
 
+def test_eventos_por_umbral_de_ticks(tmp_path, capsys):
+    # Tamaños de θ chico: 999_999 (bajo 1 M), 1_000_000 (justo en el umbral), 6 M y, en
+    # otro mes, 12 M. θ grande: 60 M y uno de 2 M. Los umbrales cuentan con `>=`.
+    t0 = 1_500_000_000_000_000
+    one = (t0, t0 + DAY_US)
+    put(
+        tmp_path,
+        "0.00100000",
+        "2020-01",
+        [(*one, 0, 999_999), (*one, 0, 1_000_000), (*one, 0, 6_000_000)],
+    )
+    put(tmp_path, "0.00100000", "2020-02", [(*one, 0, 12_000_000)])
+    put(
+        tmp_path, "0.02000000", "2020-01", [(*one, 0, 60_000_000), (*one, 0, 2_000_000)]
+    )
+    out = tmp_path / "salida.csv"
+    assert load().main(["--events-root", str(tmp_path), "--out", str(out)]) == 0
+    by_theta = {r["theta"]: r for r in read_csv(out)}
+    names = [f"ticks_ge_{m}M" for m in (1, 5, 10, 20, 50)]
+    assert [int(by_theta["0.00100000"][n]) for n in names] == [3, 2, 1, 0, 0]
+    assert [int(by_theta["0.02000000"][n]) for n in names] == [2, 1, 1, 1, 1]
+    text = capsys.readouterr().out
+    header = next(x for x in text.splitlines() if x.lstrip().startswith("theta"))
+    assert all(n in header.split() for n in names)
+    assert (
+        "eventos con >= 1 M ticks (0.04 GiB a 48 B por tick), suma de los θ: 5" in text
+    )
+    assert (
+        "eventos con >= 5 M ticks (0.22 GiB a 48 B por tick), suma de los θ: 3" in text
+    )
+    assert (
+        "eventos con >= 10 M ticks (0.45 GiB a 48 B por tick), suma de los θ: 2" in text
+    )
+    assert (
+        "eventos con >= 20 M ticks (0.89 GiB a 48 B por tick), suma de los θ: 1" in text
+    )
+    assert (
+        "eventos con >= 50 M ticks (2.24 GiB a 48 B por tick), suma de los θ: 1" in text
+    )
+
+
 def test_mediana_y_p99_aproximadas(tmp_path):
     t0 = 1_500_000_000_000_000
     events = [(t0, t0 + i * DAY_US, 0, 1000 * i) for i in range(1, 201)]
