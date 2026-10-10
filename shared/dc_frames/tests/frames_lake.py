@@ -150,6 +150,46 @@ def write_l2(
     return path
 
 
+SECOND_MONTH = (2017, 9)
+
+
+def boundary_ids(row: dict) -> tuple[int, int, int]:
+    return tuple(int(row[f"{name}_agg_trade_id"]) for name in EVENT_NAMES)
+
+
+def build_two_month_lake(
+    base: Path,
+    l1_row_group: int = 50,
+    l2_row_group: int = 3,
+    ticks: list[dict] | None = None,
+) -> tuple[Path, Path, list[dict], dict[int, list[dict]], int, set[tuple[int, int]]]:
+    """L1 y L2 repartidos en `MONTH` y `SECOND_MONTH`, cortados por la mitad de los ticks.
+
+    Devuelve `(raíz L1, raíz L2, ticks, eventos por θ, corte, tardíos)`. Los ticks con
+    id ≤ `corte` están en el primer mes y los demás en el segundo. Un evento va a la
+    partición del mes que lo cierra: la del segundo si su extremo supera el corte, y
+    además el último evento de cada θ que termina antes del corte, que ADR-L2-06
+    permite (la partición es el mes que confirma al siguiente, no el del extremo).
+    `tardíos` son sus `(θ, confirm_agg_trade_id)`: eventos cuyo extremo es anterior al
+    primer tick del mes de su partición. Con `ticks` el lago usa esos ticks en vez de
+    los del fixture (por ejemplo, con huecos de ids).
+    """
+    ticks = ticks if ticks is not None else read_ticks()
+    events = read_events()
+    cut = ticks[len(ticks) // 2]["id"]
+    l1_root, l2_root = base / "l1", base / "l2"
+    write_l1(l1_root, [t for t in ticks if t["id"] <= cut], l1_row_group, MONTH)
+    write_l1(l1_root, [t for t in ticks if t["id"] > cut], l1_row_group, SECOND_MONTH)
+    late: set[tuple[int, int]] = set()
+    for theta, rows in events.items():
+        before = [r for r in rows if boundary_ids(r)[2] <= cut]
+        after = [r for r in rows if boundary_ids(r)[2] > cut]
+        late.add((theta, boundary_ids(before[-1])[1]))
+        write_l2(l2_root, theta, before[:-1], l2_row_group, MONTH)
+        write_l2(l2_root, theta, [before[-1], *after], l2_row_group, SECOND_MONTH)
+    return l1_root, l2_root, ticks, events, cut, late
+
+
 def build_lake(
     base: Path,
     l1_row_group: int = 500,
@@ -164,3 +204,45 @@ def build_lake(
     for theta, rows in events.items():
         write_l2(l2_root, theta, rows, l2_row_group)
     return l1_root, l2_root, ticks, events
+
+
+FAMILY_SCHEMA = pa.schema(
+    [
+        pa.field("theta", THETA_TYPE, nullable=False),
+        pa.field("confirm_agg_trade_id", pa.int64(), nullable=False),
+        pa.field("n", pa.int64(), nullable=False),
+        pa.field("w", DEC),
+    ]
+)
+
+
+def family_batches(skeleton_path: str | Path) -> list[pa.RecordBatch]:
+    """Un lote por row group del esqueleto, con sus claves y dos columnas derivadas.
+
+    `n` vale el doble del id de confirmación y `w` lo mismo en decimal, con un nulo cada
+    cuatro filas: una familia mínima que el escritor puede repetir sobre cualquier
+    `events.parquet` o `summaries.parquet`.
+    """
+    parquet = pq.ParquetFile(skeleton_path)
+    batches = []
+    for i in range(parquet.num_row_groups):
+        table = parquet.read_row_group(i, columns=["theta", "confirm_agg_trade_id"])
+        ids = table.column("confirm_agg_trade_id").to_pylist()
+        batches.append(
+            pa.RecordBatch.from_pydict(
+                {
+                    "theta": table.column("theta").combine_chunks(),
+                    "confirm_agg_trade_id": pa.array(ids, pa.int64()),
+                    "n": pa.array([2 * i for i in ids], pa.int64()),
+                    "w": pa.array(
+                        [
+                            None if n % 4 == 0 else Decimal(2 * i)
+                            for n, i in enumerate(ids)
+                        ],
+                        DEC,
+                    ),
+                },
+                schema=FAMILY_SCHEMA,
+            )
+        )
+    return batches
