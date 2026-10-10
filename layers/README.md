@@ -6,7 +6,7 @@ Una carpeta por capa del pipeline. Definido en el
 ## Qué contiene
 
 Una carpeta `l<N>_<nombre>/` por capa (`l1_ingest`, `l2_dc_events`,
-`l3_summaries`, `l4_indicators`). Cada una produce **una imagen Docker**,
+`l3_dc_descriptors`, `l4_indicators`). Cada una produce **una imagen Docker**,
 con el modo de ejecución como parámetro (ADR-07). Estructura esperada en
 [`scaffold/layer_template/`](../scaffold/layer_template/README.md).
 
