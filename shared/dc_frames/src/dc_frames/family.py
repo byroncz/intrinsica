@@ -86,24 +86,24 @@ class FamilyWriter:
             )
             if "theta" not in self._skeleton.schema_arrow.names:
                 raise FramesInputError(f"{skeleton_path}: falta la columna 'theta'")
+            meta = self._skeleton.metadata
+            # Los row groups vacíos no se escriben: no hay fila que ponerles.
+            self._groups = [
+                (i, meta.row_group(i).num_rows)
+                for i in range(meta.num_row_groups)
+                if meta.row_group(i).num_rows
+            ]
+            self._schema = schema.remove_metadata()
+            self._writer = PartitionWriter(
+                path,
+                self._schema.with_metadata({"state_version": state_version}),
+                SORT_ORDER,
+                compact_encoding=True,
+            )
+            self._hasher = ContentHasher(self._schema)
         except Exception:
             self._skeleton.close()
             raise
-        meta = self._skeleton.metadata
-        # Los row groups vacíos no se escriben: no hay fila que ponerles.
-        self._groups = [
-            (i, meta.row_group(i).num_rows)
-            for i in range(meta.num_row_groups)
-            if meta.row_group(i).num_rows
-        ]
-        self._schema = schema.remove_metadata()
-        self._writer = PartitionWriter(
-            path,
-            self._schema.with_metadata({"state_version": state_version}),
-            SORT_ORDER,
-            compact_encoding=True,
-        )
-        self._hasher = ContentHasher(self._schema)
         self._written = 0
         self._rows = 0
         self._last_id: int | None = None

@@ -13,6 +13,7 @@ from dc_frames import (
     family_path,
     l2_path,
 )
+from dc_frames import family as family_module
 from frames_lake import (
     FAMILY_SCHEMA,
     KEY,
@@ -217,3 +218,23 @@ def test_arguments_are_validated(partition):
         pytest.raises(ValueError, match="esquema"),
     ):
         writer.write_row_group(family_batches(events)[0].select(["theta"]))
+
+
+@pytest.mark.parametrize("failing", ["PartitionWriter", "ContentHasher"])
+def test_a_failing_constructor_closes_the_skeleton(partition, monkeypatch, failing):
+    events, summaries, _ = partition
+    opened = []
+    real = family_module.open_parquet
+
+    def spy(*args):
+        opened.append(real(*args))
+        return opened[-1]
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("falla al construir")
+
+    monkeypatch.setattr(family_module, "open_parquet", spy)
+    monkeypatch.setattr(family_module, failing, boom)
+    with pytest.raises(RuntimeError, match="falla al construir"):
+        FamilyWriter(summaries, FAMILY_SCHEMA, VERSION, events)
+    assert len(opened) == 1 and opened[0].closed
