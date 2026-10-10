@@ -158,7 +158,10 @@ def boundary_ids(row: dict) -> tuple[int, int, int]:
 
 
 def build_two_month_lake(
-    base: Path, l1_row_group: int = 50, l2_row_group: int = 3
+    base: Path,
+    l1_row_group: int = 50,
+    l2_row_group: int = 3,
+    ticks: list[dict] | None = None,
 ) -> tuple[Path, Path, list[dict], dict[int, list[dict]], int, set[tuple[int, int]]]:
     """L1 y L2 repartidos en `MONTH` y `SECOND_MONTH`, cortados por la mitad de los ticks.
 
@@ -168,9 +171,11 @@ def build_two_month_lake(
     además el último evento de cada θ que termina antes del corte, que ADR-L2-06
     permite (la partición es el mes que confirma al siguiente, no el del extremo).
     `tardíos` son sus `(θ, confirm_agg_trade_id)`: eventos cuyo extremo es anterior al
-    primer tick del mes de su partición.
+    primer tick del mes de su partición. Con `ticks` el lago usa esos ticks en vez de
+    los del fixture (por ejemplo, con huecos de ids).
     """
-    ticks, events = read_ticks(), read_events()
+    ticks = ticks if ticks is not None else read_ticks()
+    events = read_events()
     cut = ticks[len(ticks) // 2]["id"]
     l1_root, l2_root = base / "l1", base / "l2"
     write_l1(l1_root, [t for t in ticks if t["id"] <= cut], l1_row_group, MONTH)

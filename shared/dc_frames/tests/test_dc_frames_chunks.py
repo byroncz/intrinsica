@@ -17,6 +17,8 @@ from frames_lake import (
     boundary_ids,
     build_lake,
     build_two_month_lake,
+    read_events,
+    read_ticks,
 )
 
 PICKED = (100000, 250000)
@@ -267,21 +269,29 @@ def test_chunks_cross_months_and_agree_with_the_oracle(tmp_path):
     assert crossed
 
 
-def test_ticks_before_month_with_a_gap_in_the_ids(tmp_path):
+@pytest.mark.parametrize("chunks", [False, True])
+def test_ticks_before_month_with_a_gap_in_the_ids(tmp_path, chunks):
     """El conteo es de ticks de L1, no de ids: un hueco no suma."""
-    l1_root, l2_root, ticks, events, cut, _ = build_two_month_lake(tmp_path)
+    events = read_events()
+    protected = {i for rows in events.values() for r in rows for i in boundary_ids(r)}
+    # Un hueco en cada tercer tick que no es frontera de ningún θ.
+    thinned = [t for n, t in enumerate(read_ticks()) if t["id"] in protected or n % 3]
+    l1_root, l2_root, ticks, events, cut, _ = build_two_month_lake(
+        tmp_path, ticks=thinned
+    )
     ids = [t["id"] for t in ticks]
     rows = rows_by_key(events)
-    # Hay eventos que abarcan el corte, así que el rango de ids supera al de ticks.
-    spanning = [
-        e
-        for e in read_frames(THETAS, l1_root, l2_root, SECOND_MONTH, SECOND_MONTH)
-        if e.ticks_before_month
-    ]
-    assert spanning
-    for event in spanning:
-        r, _, x = boundary_ids(rows[key_of(event)])
-        assert event.ticks_before_month == len([i for i in ids if r < i <= min(x, cut)])
+    gapped = 0
+    for event in read_frames(
+        THETAS, l1_root, l2_root, SECOND_MONTH, SECOND_MONTH, chunks=chunks
+    ):
+        if not event.ticks_before_month:
+            continue
+        r, _, e = boundary_ids(rows[key_of(event)])
+        want = len([i for i in ids if r < i <= min(e, cut)])
+        assert event.ticks_before_month == want
+        gapped += want < min(e, cut) - r
+    assert gapped
 
 
 def test_frames_of_counts_ticks_before_the_given_month(tmp_path):
