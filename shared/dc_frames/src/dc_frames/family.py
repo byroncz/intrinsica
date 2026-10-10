@@ -187,6 +187,8 @@ class FamilyWriter:
         wanted = self._skeleton.read_row_group(index, columns=list(KEYS))
         for name in KEYS:
             same = pc.equal(batch.column(name), wanted.column(name).combine_chunks())
+            # Una clave nula compara a null: sin `fill_null` pasaría la comprobación.
+            same = same.fill_null(False)
             if not pc.all(same).as_py():
                 row = pc.index(same, False).as_py()
                 raise self._mismatch(

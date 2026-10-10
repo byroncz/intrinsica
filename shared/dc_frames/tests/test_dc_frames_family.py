@@ -129,6 +129,9 @@ def mismatches(partition):
         + [with_keys(2, confirm_agg_trade_id=pa.array([ids[0], ids[1], ids[2] + 1]))]
         + batches[3:],
         "filas desordenadas": [batches[0], swapped, *batches[2:]],
+        "clave nula": batches[:2]
+        + [with_keys(2, confirm_agg_trade_id=pa.array([ids[0], None, ids[2]]))]
+        + batches[3:],
     }
 
 
@@ -140,6 +143,7 @@ MISMATCH_CASES = [
     "ningún row group",
     "otro id",
     "filas desordenadas",
+    "clave nula",
 ]
 
 
