@@ -1,5 +1,6 @@
 """Tipos públicos del lector de tramas (TRD-L3 §7.4)."""
 
+from collections.abc import Iterator
 from dataclasses import dataclass
 from decimal import Decimal
 
@@ -19,6 +20,16 @@ class FrameBoundaryError(FramesError):
 
     El lector no corre el límite al tick vecino: falla (fail-closed).
     """
+
+
+class FamilySkeletonMismatch(FramesError):
+    """Un archivo de familia no repite filas, orden o row groups del esqueleto de la partición.
+
+    Es el hallazgo `family_skeleton_mismatch` (TRD-L3 §7.3): el escritor aborta y no
+    publica nada.
+    """
+
+    check_type = "family_skeleton_mismatch"
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,9 +57,23 @@ class EventFrames:
     `event` es la fila de `events.parquet` sin transformar (un `RecordBatch` de una
     fila). `confirmation` son los ticks de `(R, C]` y `overshoot` los de `(C, E]`;
     el overshoot es vacío (largo 0) si `E = C`.
+
+    En **modo por chunks** (`read_frames(chunks=True)`) cada fase es un iterador de
+    `Frame`, uno por row group con ticks de esa fase, en orden de la serie; el
+    overshoot vacío es un iterador sin elementos. Cada iterador se recorre una sola
+    vez. Solo el último trozo es un slice del row group en curso; los anteriores se
+    releen de L1 al avanzar, de uno en uno.
+
+    `ticks_before_month` son los ticks de `(R, E]` que están en meses de L1 anteriores
+    al de la partición de L2 que cierra el evento; 0 si el evento nació en ese mes.
+
+    `over_budget` marca un evento que supera `max_event_ticks` (modo por evento): sus
+    dos tramas vienen vacías.
     """
 
     theta: Decimal
     event: pa.RecordBatch
-    confirmation: Frame
-    overshoot: Frame
+    confirmation: Frame | Iterator[Frame]
+    overshoot: Frame | Iterator[Frame]
+    ticks_before_month: int = 0
+    over_budget: bool = False
