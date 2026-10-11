@@ -46,7 +46,7 @@ errores del lector, y porque `pyutils` no sabe nada de L3.
   tick de confirmación no tiene `transact_time = confirm_time`),
   `FramesInputError` (falta un archivo, el esquema o el orden no cumplen el
   contrato) y `FamilySkeletonMismatch` (el archivo de familia no repite el
-  esqueleto).
+  esqueleto; el atributo `detail` dice en qué difiere).
 
 ```python
 from dc_frames import read_frames
