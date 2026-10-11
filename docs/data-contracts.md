@@ -304,7 +304,9 @@ comprueba al escribir que iguala la suma de `quantity` de sus ticks.
   `commit`; `content_hash` de `pyutils` sobre el contenido lógico). Re-ejecutar
   un mes de un θ con las mismas entradas da el mismo `content_hash`.
 - **Fail-closed**: la unidad no publica ningún archivo si falta una entrada de
-  L2, si L2 contradice a L1 o si no cuadra la conciliación de ticks del mes.
+  L2, si L2 contradice a L1 o si no cuadra la conciliación de ticks del mes. La
+  publicación es atómica por archivo y secuencial por θ: si falla en uno, los θ ya
+  publicados quedan y re-ejecutar el mes los reescribe igual.
 
 ### Leer
 

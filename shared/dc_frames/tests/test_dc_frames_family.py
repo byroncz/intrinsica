@@ -177,8 +177,9 @@ def test_a_different_theta_aborts(partition):
 
 def test_the_error_says_where_the_skeleton_breaks(partition, mismatches):
     events, summaries, _ = partition
-    with pytest.raises(FamilySkeletonMismatch, match=r"row group 2, fila 8"):
+    with pytest.raises(FamilySkeletonMismatch, match=r"row group 2, fila 8") as error:
         write(summaries, events, mismatches["otro id"])
+    assert error.value.detail.startswith("row group 2, fila 8")
     with pytest.raises(
         FamilySkeletonMismatch, match="tiene 1 filas y el del esqueleto 2"
     ):

@@ -374,3 +374,66 @@ def test_frames_of_matches_read_frames_and_decodes_only_its_row_groups(
     assert frames_of(table, l1_root).event.equals(event.event)
     with pytest.raises(ValueError, match="una fila de L2, no 0"):
         frames_of(table.slice(0, 0), l1_root)
+
+
+def test_columns_projects_the_event_and_keeps_the_boundaries(tmp_path):
+    l1_root, l2_root, _, _ = build_lake(tmp_path, l1_row_group=64)
+    whole = list(read_frames(THETAS[0], l1_root, l2_root, MONTH, MONTH))
+    short = list(
+        read_frames(THETAS[0], l1_root, l2_root, MONTH, MONTH, columns=["direction"])
+    )
+    assert len(short) == len(whole) > 0
+    assert short[0].event.schema.names == [
+        "reference_agg_trade_id",
+        "confirm_agg_trade_id",
+        "extreme_agg_trade_id",
+        "confirm_time",
+        "direction",
+    ]
+    for a, b in zip(whole, short, strict=True):
+        assert b.event.to_pylist()[0] == {
+            name: a.event.to_pylist()[0][name] for name in b.event.schema.names
+        }
+        assert ids_of(a.confirmation) == ids_of(b.confirmation)
+
+
+def test_columns_that_l2_does_not_have_is_an_input_error(tmp_path):
+    l1_root, l2_root, _, _ = build_lake(tmp_path)
+    with pytest.raises(FramesInputError, match="falta la columna 'nope'"):
+        list(read_frames(THETAS[0], l1_root, l2_root, MONTH, MONTH, columns=["nope"]))
+
+
+@pytest.mark.parametrize("which", [0, 1, 2])
+def test_boundary_error_carries_its_fields(tmp_path, which):
+    ticks = read_ticks()
+    rows = read_events()[100000]
+    target = boundaries(rows[40])[which]
+    kept = [t for t in ticks if t["id"] != target]
+    l1_root, l2_root, kept, _ = build_lake(tmp_path, ticks=kept, l1_row_group=64)
+    with pytest.raises(FrameBoundaryError) as error:
+        list(read_frames(THETAS[0], l1_root, l2_root, MONTH, MONTH))
+    assert error.value.theta == "0.00100000"
+    # R de un evento puede ser E o C de otro: el campo es el de la primera frontera que falla.
+    assert error.value.field in {f"{name}_agg_trade_id" for name in EVENT_NAMES}
+    assert error.value.got == str(target)
+    assert error.value.wanted == "un tick de L1"
+
+
+def test_confirm_time_and_early_end_errors_carry_their_fields(tmp_path):
+    ticks = read_ticks()
+    rows = read_events()[100000]
+    c = boundaries(rows[40])[1]
+    moved = [{**t, "time": t["time"] + 1} if t["id"] == c else t for t in ticks]
+    l1_root, l2_root, _, _ = build_lake(tmp_path, ticks=moved)
+    with pytest.raises(FrameBoundaryError) as error:
+        list(read_frames(THETAS[0], l1_root, l2_root, MONTH, MONTH))
+    assert (error.value.theta, error.value.field) == ("0.00100000", "confirm_time")
+    assert int(error.value.got) == int(error.value.wanted) + 1
+
+    cut = boundaries(rows[10])[2]
+    kept = [t for t in ticks if t["id"] <= cut + 2]
+    l1_root, l2_root, _, _ = build_lake(tmp_path / "short", ticks=kept)
+    with pytest.raises(FrameBoundaryError) as error:
+        list(read_frames(THETAS[0], l1_root, l2_root, MONTH, MONTH))
+    assert error.value.field == "extreme_agg_trade_id"
+    assert (error.value.got, error.value.wanted) == ("ausente", "un tick de L1")

@@ -10,6 +10,7 @@ from l3_dc_descriptors.errors import (
     PhaseQuantityMismatch,
     PhaseTicksMismatch,
     PhaseValueError,
+    SkeletonMismatch,
     SummarizeError,
 )
 from l3_dc_descriptors.reconcile import Reconciliation
@@ -26,6 +27,7 @@ __all__ = [
     "PhaseTicksMismatch",
     "PhaseValueError",
     "Reconciliation",
+    "SkeletonMismatch",
     "SummarizeError",
     "ThetaResult",
     "summarize_month",

@@ -1,9 +1,8 @@
 """Esquema de `summaries.parquet` (TRD-L3 §7.2) y su codificación en Arrow.
 
-Las filas se arman en una matriz de enteros: una fila por evento y una columna por
-dato, con los decimales en su escala (10⁻⁸). Al llenar un row group se pasan a Arrow
-sin objetos de Python por valor: el valor de 64 bits es la palabra baja del decimal de
-128 bits.
+Las filas se arman en un buffer de NumPy por columna, con los decimales en su escala
+(10⁻⁸): el valor de 64 bits es la palabra baja del decimal de 128 bits. Al llenar un row
+group, Arrow envuelve esos buffers sin copiarlos y sin objetos de Python por valor.
 """
 
 import numpy as np
@@ -46,39 +45,55 @@ SUMMARIES_SCHEMA = pa.schema(
 )
 WIDTH = len(_COLUMNS)
 COLUMN = {name: i for i, (name, _, _) in enumerate(_COLUMNS)}
-# Los `os_*` nulables son nulos juntos: cuando el overshoot es vacío.
-OVERSHOOT_NULLABLE = tuple(COLUMN[name] for name, _, null in _COLUMNS if null)
+# Los `os_*` nulables son nulos juntos: cuando el overshoot es vacío (`os_ticks` = 0).
 OVERSHOOT_TICKS = COLUMN["os_ticks"]
+_WIDE = tuple(pa.types.is_decimal(kind) for _, kind, _ in _COLUMNS)
 
 
-def _wide(values: np.ndarray) -> np.ndarray:
-    """Los enteros de 64 bits como decimales de 128: palabra baja y extensión de signo."""
-    out = np.empty((len(values), 2), "<i8")
-    out[:, 0] = values
-    out[:, 1] = values >> 63
-    return out
+class RowGroupBuffer:
+    """El row group de salida de un θ, en un buffer de NumPy por columna.
 
-
-def _array(kind: pa.DataType, values: np.ndarray, valid: np.ndarray | None) -> pa.Array:
-    count = len(values)
-    validity, nulls = None, 0
-    if valid is not None and not valid.all():
-        validity = pa.py_buffer(np.packbits(valid, bitorder="little"))
-        nulls = count - int(valid.sum())
-    data = _wide(values) if pa.types.is_decimal(kind) else values.astype("<i8")
-    return pa.Array.from_buffers(kind, count, [validity, pa.py_buffer(data)], nulls)
-
-
-def to_batch(theta: int, rows: np.ndarray) -> pa.RecordBatch:
-    """Un row group de `summaries.parquet` a partir de la matriz de filas.
-
-    `theta` es el θ sin escalar (× 10⁸). Los valores de las columnas nulables se ignoran
-    donde `os_ticks` es 0.
+    Cada evento llena su fila directamente en el buffer de cada columna; los decimales
+    ocupan 16 bytes (palabra baja y extensión de signo). `to_batch` envuelve esos
+    buffers en Arrow sin copiarlos: no hay otra representación del mismo dato.
     """
-    count = len(rows)
-    valid = rows[:, OVERSHOOT_TICKS] > 0
-    arrays = [_array(THETA, np.full(count, theta, np.int64), None)]
-    for i, (_, kind, nullable) in enumerate(_COLUMNS):
-        column = np.ascontiguousarray(rows[:, i])
-        arrays.append(_array(kind, column, valid if nullable else None))
-    return pa.RecordBatch.from_arrays(arrays, schema=SUMMARIES_SCHEMA)
+
+    def __init__(self, size: int) -> None:
+        self.size = size
+        self.fill = 0
+        self._data = [np.empty((size, 2) if wide else size, "<i8") for wide in _WIDE]
+
+    def append(self, values: list[int]) -> None:
+        """La fila del siguiente evento: `WIDTH` enteros, los decimales sin escalar."""
+        i = self.fill
+        for column, wide, value in zip(self._data, _WIDE, values, strict=True):
+            if wide:
+                column[i, 0] = value
+                column[i, 1] = value >> 63
+            else:
+                column[i] = value
+        self.fill += 1
+
+    def to_batch(self, theta: int) -> pa.RecordBatch:
+        """El row group lleno. `theta` es el θ sin escalar (× 10⁸).
+
+        Los valores de las columnas nulables se ignoran donde `os_ticks` es 0.
+        """
+        valid = self._data[OVERSHOOT_TICKS] > 0
+        validity, nulls = None, 0
+        if not valid.all():
+            validity = pa.py_buffer(np.packbits(valid, bitorder="little"))
+            nulls = self.size - int(valid.sum())
+        constant = np.zeros((self.size, 2), "<i8")
+        constant[:, 0] = theta
+        arrays = [
+            pa.Array.from_buffers(THETA, self.size, [None, pa.py_buffer(constant)])
+        ]
+        for column, (_, kind, nullable) in zip(self._data, _COLUMNS, strict=True):
+            buffers = [validity if nullable else None, pa.py_buffer(column)]
+            arrays.append(
+                pa.Array.from_buffers(
+                    kind, self.size, buffers, nulls if nullable else 0
+                )
+            )
+        return pa.RecordBatch.from_arrays(arrays, schema=SUMMARIES_SCHEMA)

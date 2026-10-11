@@ -139,3 +139,21 @@ class PhaseValueError(SummarizeError):
             f"θ {theta}, evento con confirmación {confirm_agg_trade_id}: {message}",
             {"theta": theta, "confirm_agg_trade_id": confirm_agg_trade_id},
         )
+
+
+class SkeletonMismatch(SummarizeError):
+    """El archivo de la familia no repite el esqueleto de L2: filas, orden o row groups (§9.3)."""
+
+    check_type = "family_skeleton_mismatch"
+
+    def __init__(self, theta: str, month: Month, family: str, detail: str) -> None:
+        super().__init__(
+            f"θ {theta}, {month_text(month)}: {family} no repite el esqueleto de L2: "
+            f"{detail}",
+            {
+                "theta": theta,
+                "month": month_text(month),
+                "family": family,
+                "detail": detail,
+            },
+        )

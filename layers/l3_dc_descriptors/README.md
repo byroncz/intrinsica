@@ -57,7 +57,8 @@ de L1 anteriores que ese evento necesita.
    tenga evento pendiente.
 2. **Lectura.** `read_frames(chunks=True)` con todos los θ del mes: una pasada
    sobre L1, un row group en vuelo más el anterior (compartido) y ningún evento
-   retenido. Cada fase llega como un iterador de trozos, uno por row group.
+   retenido. De `events.parquet` solo se decodifican las siete columnas de §7.1
+   (`EVENT_COLUMNS`). Cada fase llega como un iterador de trozos, uno por row group.
 3. **Agregación por fase** (`phase.py`), con Arrow compute sobre cada trozo:
    conteo; cantidad con `is_buyer_maker = false` (`buy`) y `true` (`sell`) y la
    suma de todas; máximo y mínimo de `price`; primer y último `transact_time`;
@@ -71,17 +72,19 @@ de L1 anteriores que ese evento necesita.
    precios del instante, extremo del overshoot, duración y VWAP) se comparan con la
    fila de L2. El VWAP se divide en entero al cerrar y se redondea half-even a
    10⁻⁸.
-5. **Escritura** (`FamilyWriter` de `shared/dc_frames`). Cada θ arma en una
-   matriz de enteros un row group con el mismo número de filas que el row group
+5. **Escritura** (`FamilyWriter` de `shared/dc_frames`). Cada θ arma en
+   un buffer de NumPy por columna un row group con el mismo número de filas que el row group
    de `events.parquet` y lo entrega al escritor, que comprueba filas, orden y
    límites de row group contra `events.parquet`. ZSTD-3, estadísticas, sin
    diccionario, `state_version` en los metadatos.
 6. **Conciliación** por θ y mes: `N_M = (Σ_cerrados − P_M) + Cola_M + U_M`.
    `N_M`, `Cola_M` y `U_M` salen del pie de `consolidated.parquet` y de los ids de
    L2; `Σ_cerrados` y `P_M` (`ticks_before_month` del lector), del resumidor.
-7. **Publicación.** Todo o nada: los archivos se publican (escritura atómica) solo
-   cuando todos los θ del mes pasaron los pasos anteriores. Cualquier error borra
-   los temporales y no deja ningún `summaries.parquet`.
+7. **Publicación.** Atómica por archivo y secuencial por θ: se publica solo cuando todos
+   los θ del mes pasaron los pasos anteriores. Un error de entrada, de resumen o de
+   conciliación borra los temporales y no deja ningún `summaries.parquet`. Si falla la
+   publicación de un θ (p. ej. el `move` a GCS), los ya publicados quedan; re-ejecutar
+   el mes los reescribe con el mismo contenido.
 
 ## Errores
 
@@ -95,17 +98,18 @@ del hallazgo y sus `details` (valores JSON).
 | `L2StateInconsistent.no_pending` | `l2_state_inconsistent` | `theta`, `month`, `direction`, `has_pending_event` |
 | `PhaseQuantityMismatch` | `phase_quantity_mismatch` | `theta`, `confirm_agg_trade_id`, `phase`, `expected`, `got` |
 | `PhaseTicksMismatch` | `phase_ticks_mismatch` | `theta`, `month`, `N_M`, `sigma_closed`, `P_M`, `tail_M`, `U_M` |
+| `SkeletonMismatch` | `family_skeleton_mismatch` | `theta`, `month`, `family`, `detail` (qué difiere del esqueleto de L2) |
 | `PhaseValueError` | ninguno | `theta`, `confirm_agg_trade_id`: un valor no cabe en `DECIMAL(18,8)` |
 
 Los valores de `got` y `wanted` de precios son enteros sin escalar (10⁻⁸). Además
-propaga los errores del lector y del escritor de familias: `FramesInputError`
-(falta o no cumple el contrato un archivo de L1, p. ej. el del mes) y
-`FamilySkeletonMismatch` (`family_skeleton_mismatch`).
+propaga `FramesInputError` del lector: falta o no cumple el contrato un archivo de L1
+(p. ej. el del mes, o un row group sin estadísticas de `agg_trade_id`). Es un L1 fuera
+de contrato, no un fallo de L2.
 
 Un id de frontera de L2 que no existe como tick en L1, o un tick de confirmación
 cuyo `transact_time` no es el `confirm_time` de L2, llegan del lector como
-`FrameBoundaryError`; el resumidor los convierte en `L2StateInconsistent` con el θ,
-el campo y los dos valores.
+`FrameBoundaryError` (con los atributos `theta`, `field`, `got` y `wanted`); el
+resumidor los convierte en `L2StateInconsistent` con esos cuatro valores.
 
 ## Memoria
 

@@ -77,7 +77,9 @@ def summary(event: dict, confirmation: list, overshoot: list) -> dict:
 def from_reader(ev) -> dict:
     """Lo esperado de un `EventFrames` del lector en modo por evento."""
     return summary(
-        ev.event.to_pylist()[0], ticks_of(ev.confirmation), ticks_of(ev.overshoot)
+        ev.event.to_pylist()[0] | {"theta": ev.theta},
+        ticks_of(ev.confirmation),
+        ticks_of(ev.overshoot),
     )
 
 
