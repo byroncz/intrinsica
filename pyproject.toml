@@ -41,6 +41,8 @@ extend-exclude = ["scaffold"]
 extend-select = ["I"]
 
 [tool.pytest.ini_options]
+# El lago sintético del lector (`frames_lake`) también es el de las pruebas de L3.
+pythonpath = ["shared/dc_frames/tests"]
 testpaths = [
     "tests",
     "shared/dc_frames/tests",
