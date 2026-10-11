@@ -67,16 +67,25 @@ def l1_path(root: str | Path, key: tuple[str, str, str], month: Month) -> str:
     return f"{str(root).rstrip('/')}/{_month_dir(*key, month)}/{CONSOLIDATED}"
 
 
-def l2_path(
-    root: str | Path, key: tuple[str, str, str], theta: str, month: Month
+def partition_path(
+    root: str | Path, key: tuple[str, str, str], theta: str, month: Month, name: str
 ) -> str:
-    """`theta` es el texto de la partición (`0.00010000`)."""
+    """El archivo `name` de la partición `theta/year/month`; `theta` es el texto de la
+    partición (`0.00010000`). Lo usan L2 (`events.parquet`) y L3 (un archivo por familia).
+    """
     provider, market, asset = key
     year, number = month
     return (
         f"{str(root).rstrip('/')}/provider={provider}/market={market}/asset={asset}"
-        f"/theta={theta}/year={year:04d}/month={number:02d}/{EVENTS}"
+        f"/theta={theta}/year={year:04d}/month={number:02d}/{name}"
     )
+
+
+def l2_path(
+    root: str | Path, key: tuple[str, str, str], theta: str, month: Month
+) -> str:
+    """`events.parquet` de la partición; `theta` es el texto de la partición."""
+    return partition_path(root, key, theta, month, EVENTS)
 
 
 def open_parquet(path: str, what: str) -> pq.ParquetFile:
@@ -110,11 +119,13 @@ def _single(column: pa.ChunkedArray) -> pa.Array:
 class RowGroup:
     """Un row group de L1 decodificado: `ids` más las cuatro columnas de una trama.
 
-    `ids` es una vista de NumPy sobre el buffer de Arrow, sin copia.
+    `ids` es una vista de NumPy sobre el buffer de Arrow, sin copia. `month` es el mes
+    del archivo de L1 del que salió.
     """
 
     ids: np.ndarray
     columns: tuple[pa.Array, pa.Array, pa.Array, pa.Array]
+    month: Month
 
     @property
     def low(self) -> int:
@@ -178,12 +189,16 @@ class L1:
             month = month_of(month_ordinal(month) - 1)
 
     def row_groups(
-        self, first: Month, last: Month, reference: int, needed: Callable[[int], bool]
+        self,
+        first: Month,
+        last: Month,
+        reference: int,
+        needed: Callable[[int, int], bool],
     ) -> Iterator[RowGroup]:
         """Los row groups de L1 desde el que contiene `reference` hasta `last`.
 
-        Un row group solo se decodifica si `needed(máximo)` lo pide; los demás se
-        saltan con las estadísticas del pie del archivo. Un row group se suelta
+        Un row group solo se decodifica si `needed(mínimo, máximo)` lo pide; los demás
+        se saltan con las estadísticas del pie del archivo. Un row group se suelta
         cuando el llamador pide el siguiente. Si falta un mes intermedio, o los ids
         no crecen entre row groups, falla.
         """
@@ -200,13 +215,15 @@ class L1:
                             f"que no supera el id {previous} anterior"
                         )
                     previous = bounds[1]
-                    if not needed(bounds[1]):
+                    if not needed(*bounds):
                         continue
                     table = parquet.read_row_group(i, columns=list(L1_COLUMNS))
                     columns = [_single(table.column(name)) for name in L1_COLUMNS]
                     del table
                     yield RowGroup(
-                        columns[0].to_numpy(zero_copy_only=True), tuple(columns[1:])
+                        columns[0].to_numpy(zero_copy_only=True),
+                        tuple(columns[1:]),
+                        month,
                     )
                     del columns
 
@@ -216,18 +233,20 @@ class EventGroup:
     """Un row group de `events.parquet`: sus filas y sus tres ids de frontera.
 
     `bounds[i] = (R, C, E)` del evento `i` y `confirm_times[i]` es su `confirm_time`, que
-    el tick `C` debe tener como `transact_time`. `batch` conserva las 11 columnas.
+    el tick `C` debe tener como `transact_time`. `batch` conserva las 11 columnas y
+    `month` es la partición de L2 que cierra a todos los eventos del row group.
     """
 
     batch: pa.RecordBatch
     bounds: np.ndarray
     confirm_times: np.ndarray
+    month: Month
 
     def __len__(self) -> int:
         return len(self.bounds)
 
 
-def event_group(batch: pa.RecordBatch, where: str) -> EventGroup:
+def event_group(batch: pa.RecordBatch, where: str, month: Month) -> EventGroup:
     """Valida el orden de los eventos de `batch` y extrae sus fronteras.
 
     Un evento cumple `R < C ≤ E`, y el siguiente empieza donde el anterior termina o
@@ -246,7 +265,7 @@ def event_group(batch: pa.RecordBatch, where: str) -> EventGroup:
             f"{where}: los eventos no cumplen R < C <= E ni E[i] <= R[i+1]"
         )
     confirm_times = batch.column(CONFIRM_TIME).to_numpy(zero_copy_only=False)
-    return EventGroup(batch, bounds, confirm_times)
+    return EventGroup(batch, bounds, confirm_times, month)
 
 
 def event_groups(
@@ -269,4 +288,6 @@ def event_groups(
                 if parquet.metadata.row_group(i).num_rows == 0:
                     continue
                 table = parquet.read_row_group(i).combine_chunks()
-                yield event_group(table.to_batches()[0], f"{path}, row group {i}")
+                yield event_group(
+                    table.to_batches()[0], f"{path}, row group {i}", month
+                )
