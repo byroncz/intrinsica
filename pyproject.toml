@@ -4,7 +4,7 @@ version = "0.0.0"
 description = "Motor de análisis Directional Change (DC) para mercados financieros."
 readme = "README.md"
 requires-python = ">=3.14"
-dependencies = ["dc_frames", "dc_pyo3", "dq[reader]", "l1_ingest", "l2_dc_events", "ops_tools", "viz_tiles"]
+dependencies = ["dc_frames", "dc_pyo3", "dq[reader]", "l1_ingest", "l2_dc_events", "l3_dc_descriptors", "ops_tools", "viz_tiles"]
 
 [dependency-groups]
 dev = [
@@ -21,6 +21,7 @@ dc_frames = { workspace = true }
 dq = { workspace = true }
 l1_ingest = { workspace = true }
 l2_dc_events = { workspace = true }
+l3_dc_descriptors = { workspace = true }
 ops_tools = { workspace = true }
 viz_tiles = { workspace = true }
 dc_pyo3 = { workspace = true }
@@ -48,6 +49,7 @@ testpaths = [
     "shared/dc_pyo3/tests",
     "layers/l1_ingest/tests",
     "layers/l2_dc_events/tests",
+    "layers/l3_dc_descriptors/tests",
     "layers/ops_tools/tests",
     "layers/viz_tiles/tests",
 ]
