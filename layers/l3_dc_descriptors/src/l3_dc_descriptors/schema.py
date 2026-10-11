@@ -16,7 +16,7 @@ THETA = pa.decimal128(9, 8)
 SCALE = 8
 LIMIT = 10**18  # los valores de DECIMAL(18,8) son menores que 10^18 sin escalar
 
-# (nombre, tipo, nulable) de las 18 columnas que van en la matriz, tras `theta`.
+# (nombre, tipo, nulable) de las 18 columnas que van en el buffer de cada columna, tras `theta`.
 _COLUMNS = (
     ("confirm_agg_trade_id", pa.int64(), False),
     ("c_ticks", pa.int64(), False),
