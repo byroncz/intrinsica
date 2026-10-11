@@ -5,6 +5,7 @@ Con roots locales, que es como corren en un equipo; en la nube solo cambian los 
 
 import importlib.util
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -40,6 +41,17 @@ def args(l1, l2, *extra: str) -> list[str]:
     return ["--from", MONTH_TEXT, "--l1-root", str(l1), "--l2-root", str(l2), *extra]
 
 
+def run_probe(*argv: str) -> tuple[int, str]:
+    """La sonda en un proceso aparte: su RSS pico es el suyo y no el de pytest, que arrastra el de las demás pruebas."""
+    done = subprocess.run(
+        [sys.executable, str(SCRIPTS / "l3_probe_reader.py"), *argv],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return done.returncode, done.stdout
+
+
 @pytest.fixture
 def lake(tmp_path):
     l1, l2, _ticks, events = build_lake(tmp_path, l1_row_group=40, l2_row_group=3)
@@ -60,12 +72,11 @@ def oracle(l1, l2, thetas):
     return events, confirmation, overshoot
 
 
-def test_un_theta_cuenta_lo_mismo_que_el_lector(lake, capsys):
+def test_un_theta_cuenta_lo_mismo_que_el_lector(lake):
     l1, l2, events = lake
     theta = theta_text(min(events))
-    probe = load("l3_probe_reader")
-    assert probe.main(["--theta", theta, *args(l1, l2)]) == 0
-    out = capsys.readouterr().out
+    code, out = run_probe("--theta", theta, *args(l1, l2))
+    assert code == 0, out
     n, conf, over = oracle(l1, l2, theta)
     row = next(
         line.split() for line in out.splitlines() if line.lstrip().startswith(theta)
@@ -142,16 +153,13 @@ def test_la_sonda_restaura_el_lector_al_terminar(lake, tmp_path, capsys):
     assert lake_module.open_parquet is original
 
 
-def test_sin_contar_io_no_reporta_bytes_medidos(lake, capsys):
+def test_sin_contar_io_no_reporta_bytes_medidos(lake):
     l1, l2, events = lake
-    probe = load("l3_probe_reader")
-    assert (
-        probe.main(
-            ["--theta", theta_text(min(events)), *args(l1, l2, "--sin-contar-io")]
-        )
-        == 0
+    code, out = run_probe(
+        "--theta", theta_text(min(events)), *args(l1, l2, "--sin-contar-io")
     )
-    final = last_line(capsys)
+    assert code == 0, out
+    final = out.strip().splitlines()[-1]
     assert "lectura_s=n/d" in final and "bytes_l1=n/d" in final
 
 
