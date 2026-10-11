@@ -10,6 +10,7 @@ suma comprueba algo.
 from dataclasses import dataclass
 
 import numpy as np
+from dc_frames import FramesInputError
 from dc_frames.lake import Month, l1_path, open_parquet
 
 from l3_dc_descriptors.errors import PhaseTicksMismatch
@@ -53,7 +54,7 @@ class L1Month:
             stats = group.column(index).statistics
             if stats is None or not stats.has_min_max:
                 self._parquet.close()
-                raise ValueError(
+                raise FramesInputError(
                     f"{path}: el row group {i} no trae estadísticas de agg_trade_id"
                 )
             self._groups.append((i, group.num_rows, stats.min, stats.max))
