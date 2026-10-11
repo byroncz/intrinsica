@@ -213,12 +213,12 @@ def write_carry_over(
             f"{name}_time": 0,
             f"{name}_agg_trade_id": tick,
         }
+    # `pending_confirm` es relleno: L3 no lo lee, así que copia la referencia.
     for name in ("pending_reference", "pending_confirm"):
-        tick = pending_reference if pending_reference is not None else None
         row |= {
-            f"{name}_price": Decimal(1) if tick is not None else None,
-            f"{name}_time": 0 if tick is not None else None,
-            f"{name}_agg_trade_id": tick,
+            f"{name}_price": Decimal(1) if pending_reference is not None else None,
+            f"{name}_time": 0 if pending_reference is not None else None,
+            f"{name}_agg_trade_id": pending_reference,
         }
     path = (
         partition(root, month).parent.parent
