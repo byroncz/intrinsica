@@ -20,7 +20,8 @@ errores del lector, y porque `pyutils` no sabe nada de L3.
   iterador de `EventFrames`, uno por evento cerrado de los meses `start`..`end`
   (tuplas `(año, mes)`, inclusivas, de las particiones de L2). `thetas` es un θ
   (`Decimal` o `str`) o varios; con varios, cada row group de L1 se decodifica
-  una sola vez. Dentro de un θ salen por `confirm_agg_trade_id`; entre θ no hay
+  una sola vez (en modo por chunks, salvo por los eventos que abarcan más de dos
+  row groups, ver [Modos de lectura](#modos-de-lectura)). Dentro de un θ salen por `confirm_agg_trade_id`; entre θ no hay
   orden.
 - `frames_of(event, l1_root, ..., month=None)`: las tramas de un evento cuya
   fila de L2 ya se tiene (un `RecordBatch` o `Table` de una fila, o un mapa con
@@ -71,18 +72,26 @@ for event in read_frames(thetas, l1_root, l2_root, start, end, chunks=True):
         ...
 ```
 
-- Cada iterador se recorre una sola vez. Se puede consumir después de pedir el
-  siguiente evento: no depende del estado del lector.
-- El lector no retiene ningún evento. El último trozo de una fase es un slice
-  del row group en curso; los anteriores se releen de L1 al avanzar el
-  iterador, de uno en uno, solo para el evento que cruza row groups. Los
-  eventos dentro de un row group no releen nada.
+- Cada iterador se recorre una sola vez. **Se consume antes de pedir el
+  siguiente evento**: consumirlo después funciona, pero ancla los row groups de
+  sus trozos hasta entonces, y ese costo es del consumidor.
+- El lector no retiene ningún evento. Conserva **una sola copia del row group
+  anterior**, compartida por todos los θ, mientras algún evento abierto la
+  necesite. Un evento que cruza un borde toma de ahí sus ticks del row group
+  anterior (un slice sin copia) y el último trozo de cada fase es un slice del
+  row group en curso. Los eventos dentro de un row group no releen nada.
+- **Contrato de decodificación.** Con varios θ, cada row group de L1 se
+  decodifica una vez, salvo por los eventos que abarcan más de dos row groups:
+  de esos se releen de L1, de uno en uno, solo los row groups que sobran (los
+  anteriores al row group previo). Su costo lo mide la sonda de TRD-L3 §14.
 - El pico es O(row group) con cualquier número de θ y de eventos: el row group
-  del pase, el que se relee y los buffers de decodificación (unos 5 row groups
-  de 48 B por tick medidos en la prueba de memoria). En modo por evento el
-  mismo evento de 10 row groups pica a más de 20.
+  del pase, el anterior y los buffers de decodificación (unos 5 row groups de
+  48 B por tick medidos en la prueba de memoria). Un evento de más de dos row
+  groups suma el que relee (unos 6 en la prueba, con un evento de 10). En modo
+  por evento el mismo evento pica a más de 20.
 - Conservar un trozo ancla el row group del que es slice. Si el consumidor
-  guarda `EventFrames` sin recorrerlos, ancla el row group en curso de cada uno.
+  guarda `EventFrames` sin recorrerlos, ancla el row group en curso y el
+  anterior de cada uno.
 - No admite `max_event_ticks` (`ValueError`): no tiene presupuesto.
 
 ## Presupuesto de ticks (`max_event_ticks`)

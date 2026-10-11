@@ -19,6 +19,8 @@ from frames_lake import (
     build_two_month_lake,
     read_events,
     read_ticks,
+    write_l1,
+    write_l2,
 )
 
 PICKED = (100000, 250000)
@@ -116,15 +118,7 @@ def test_chunks_can_be_consumed_after_the_pass_moves_on(tmp_path):
 
 def test_chunks_reread_only_the_row_groups_of_a_crossing_event(tmp_path, monkeypatch):
     l1_root, l2_root, ticks, _ = build_lake(tmp_path, l1_row_group=ROW_GROUP)
-    reads = []
-    original = pq.ParquetFile.read_row_group
-
-    def read_row_group(parquet, i, columns=None, **kwargs):
-        if columns is not None:
-            reads.append(i)
-        return original(parquet, i, columns=columns, **kwargs)
-
-    monkeypatch.setattr(pq.ParquetFile, "read_row_group", read_row_group)
+    reads = count_reads(monkeypatch)
     groups = pq.ParquetFile(next(l1_root.rglob("consolidated.parquet"))).num_row_groups
     event = None
     for event in read_frames(THETAS[0], l1_root, l2_root, MONTH, MONTH, chunks=True):
@@ -146,12 +140,108 @@ def test_chunks_reread_only_the_row_groups_of_a_crossing_event(tmp_path, monkeyp
         bisect.bisect_right(ids, r) // ROW_GROUP,
         bisect.bisect_left(ids, x) // ROW_GROUP,
     )
-    assert last > first
-    # Relee los row groups anteriores al del cierre; el del cierre ya viene en el evento.
-    assert len(reads) == last - first
+    assert last - first >= 2
+    # El del cierre y el anterior ya vienen en el evento: solo se releen los que sobran.
+    assert len(reads) == last - first - 1
     assert sum(len(c) for c in spanned) == bisect.bisect_right(
         ids, x
     ) - bisect.bisect_right(ids, r)
+
+
+FAN_GROUP = 100
+FAN_GROUPS = 8
+
+
+def fan_event(reference: int, confirm: int, extreme: int) -> dict:
+    row = {"direction": 1}
+    for name, tick in (
+        ("reference", reference),
+        ("confirm", confirm),
+        ("extreme", extreme),
+    ):
+        row[f"{name}_price"] = Decimal(1)
+        row[f"{name}_time"] = tick
+        row[f"{name}_agg_trade_id"] = tick
+    return row
+
+
+def build_fan_lake(tmp_path, events: dict[int, list[dict]]):
+    ticks = [
+        {"id": i, "price": Decimal(1), "time": i} for i in range(FAN_GROUPS * FAN_GROUP)
+    ]
+    write_l1(tmp_path / "l1", ticks, FAN_GROUP)
+    for theta, rows in events.items():
+        write_l2(tmp_path / "l2", theta, rows, 100)
+    return tmp_path / "l1", tmp_path / "l2", [t["id"] for t in ticks]
+
+
+def count_reads(monkeypatch) -> list[int]:
+    """Cada llamada de L1 a `read_row_group` con columnas (las de L3, no las de los pies)."""
+    reads: list[int] = []
+    original = pq.ParquetFile.read_row_group
+
+    def read_row_group(parquet, i, columns=None, **kwargs):
+        if columns is not None:
+            reads.append(i)
+        return original(parquet, i, columns=columns, **kwargs)
+
+    monkeypatch.setattr(pq.ParquetFile, "read_row_group", read_row_group)
+    return reads
+
+
+def test_fan_out_decodes_each_row_group_once(tmp_path, monkeypatch):
+    # Tres θ cuyos eventos cruzan cada borde de row group y abarcan dos como máximo.
+    shifts = {100000: 10, 200000: 20, 300000: 30}
+    events = {
+        theta: [
+            fan_event(b - shift, b + 5, b + shift)
+            for b in range(FAN_GROUP, FAN_GROUPS * FAN_GROUP, FAN_GROUP)
+        ]
+        for theta, shift in shifts.items()
+    }
+    l1_root, l2_root, ids = build_fan_lake(tmp_path, events)
+    reads = count_reads(monkeypatch)
+    thetas = [Decimal(t).scaleb(-8) for t in shifts]
+    rows = rows_by_key(events)
+
+    seen = 0
+    for event in read_frames(thetas, l1_root, l2_root, MONTH, MONTH, chunks=True):
+        # Se consume antes de pedir el siguiente evento (contrato de §7.4).
+        confirmation, overshoot = phases(ids, rows[key_of(event)])
+        assert merged_ids(drain(event.confirmation)) == confirmation
+        assert merged_ids(drain(event.overshoot)) == overshoot
+        seen += 1
+    assert seen == len(thetas) * (FAN_GROUPS - 1)
+    # Con N θ, cada row group se decodifica una vez, no hasta N veces.
+    assert sorted(reads) == list(range(FAN_GROUPS))
+
+
+def test_an_event_over_two_row_groups_rereads_only_the_extra_ones(
+    tmp_path, monkeypatch
+):
+    # El largo (θ 100000) empieza en el row group 0 y cierra en el 5: abarca seis. La
+    # confirmación termina en el último tick del row group 1, así que ninguna fase
+    # comparte row group releído con la otra. El otro θ cruza los bordes 1..5.
+    long = fan_event(50, 199, 560)
+    short = [fan_event(b - 10, b + 5, b + 20) for b in range(100, 600, 100)]
+    events = {100000: [long], 200000: short}
+    l1_root, l2_root, ids = build_fan_lake(tmp_path, events)
+    reads = count_reads(monkeypatch)
+    thetas = [Decimal(t).scaleb(-8) for t in events]
+    rows = rows_by_key(events)
+
+    held = list(read_frames(thetas, l1_root, l2_root, MONTH, MONTH, chunks=True))
+    assert len(held) == 1 + len(short)
+    # El pase decodifica una vez los seis row groups que tocan los eventos.
+    assert sorted(reads) == list(range(6))
+    reads.clear()
+    for event in held:
+        confirmation, overshoot = phases(ids, rows[key_of(event)])
+        assert merged_ids(drain(event.confirmation)) == confirmation
+        assert merged_ids(drain(event.overshoot)) == overshoot
+    # Del largo se relee lo que no es ni el row group del cierre (5) ni el anterior (4):
+    # los row groups 0..3. Los eventos que abarcan dos no releen nada.
+    assert sorted(reads) == [0, 1, 2, 3]
 
 
 def test_over_budget_event_comes_without_frames(tmp_path):

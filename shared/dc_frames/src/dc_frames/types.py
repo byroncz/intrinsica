@@ -61,8 +61,9 @@ class EventFrames:
     En **modo por chunks** (`read_frames(chunks=True)`) cada fase es un iterador de
     `Frame`, uno por row group con ticks de esa fase, en orden de la serie; el
     overshoot vacío es un iterador sin elementos. Cada iterador se recorre una sola
-    vez. Solo el último trozo es un slice del row group en curso; los anteriores se
-    releen de L1 al avanzar, de uno en uno.
+    vez y se consume antes de pedir el siguiente evento: después, ancla los row groups
+    de sus trozos. Los dos últimos trozos son slices del row group en curso y del
+    anterior; los que preceden se releen de L1 al avanzar, de uno en uno.
 
     `ticks_before_month` son los ticks de `(R, E]` que están en meses de L1 anteriores
     al de la partición de L2 que cierra el evento; 0 si el evento nació en ese mes.

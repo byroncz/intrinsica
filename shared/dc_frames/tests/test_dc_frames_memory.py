@@ -121,8 +121,9 @@ def test_chunks_peak_is_a_row_group_and_does_not_grow_with_events(tmp_path):
     few, many = peak(tmp_path, "few", "chunks"), peak(tmp_path, "many", "chunks")
     whole = peak(tmp_path, "many", "event")
     assert many["ticks"] > few["ticks"] > 2 * LONG
-    # O(row group): unos pocos row groups (el del pase, el que se relee y los buffers
-    # de decodificación), muy por debajo de los 10 row groups del evento largo.
+    # O(row group): unos pocos row groups (el del pase, el anterior, el que se relee
+    # en el evento largo y los buffers de decodificación), muy por debajo de los 10
+    # row groups del evento largo.
     assert few["peak"] < 8 * ROW_GROUP_BYTES
     assert many["peak"] < 8 * ROW_GROUP_BYTES
     # Diez veces más eventos no suben el pico.

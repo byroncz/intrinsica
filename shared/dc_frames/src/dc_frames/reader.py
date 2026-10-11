@@ -34,6 +34,18 @@ _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 L1_TYPES = tuple(kind for name, kind in L1_COLUMNS.items() if name != "agg_trade_id")
 
 
+class _Previous:
+    """El row group anterior al del pase: una sola copia que comparten todos los θ.
+
+    Solo el modo por chunks lo usa. El pase lo deja aquí mientras algún evento abierto
+    lo necesite (ver `_Cursor.holds`); así, al entregar un evento que cruza el borde, su
+    fase toma los ticks de este row group sin releerlos de L1, sea cual sea el número de θ.
+    """
+
+    def __init__(self) -> None:
+        self.rg: RowGroup | None = None
+
+
 class _Cursor:
     """El avance de un θ sobre sus eventos: cuál es el que sigue y qué ticks lleva ya.
 
@@ -41,7 +53,7 @@ class _Cursor:
     por evento lo que ya se leyó de él se guarda **copiado** en `_conf` y `_over` (una
     lista de arrays por columna), para no anclar el row group del que salió. En modo
     por chunks no se guarda ningún tick: solo cuántos van (`_conf_n`, `_over_n`), para
-    saber si hay que releerlos al entregar el evento.
+    saber si quedan ticks por tomar del row group anterior (`previous`) o por releer de L1.
     """
 
     def __init__(
@@ -51,11 +63,13 @@ class _Cursor:
         l1: L1,
         chunks: bool = False,
         max_event_ticks: int | None = None,
+        previous: _Previous | None = None,
     ) -> None:
         self.theta = theta
         self._groups = groups
         self._l1 = l1
         self._chunks = chunks
+        self._previous = previous
         self._budget = max_event_ticks
         self._group = next(groups, None)
         self._k = 0
@@ -77,6 +91,10 @@ class _Cursor:
     def reference(self) -> int:
         """Referencia del evento en curso. Solo si no está `done`."""
         return int(self._group.bounds[self._k, 0])
+
+    def holds(self, rg: RowGroup) -> bool:
+        """Si su evento en curso ya empezó en `rg` o antes y sigue abierto: necesitará `rg`."""
+        return self._group is not None and self.reference <= rg.high
 
     def describe(self) -> str:
         r, c, e = (int(x) for x in self._group.bounds[self._k])
@@ -181,25 +199,12 @@ class _Cursor:
         if over:
             return EventFrames(self.theta, row, _empty(), _empty(), before, True)
         if self._chunks:
+            ref, conf, ext = (int(x) for x in group.bounds[index])
             return EventFrames(
                 self.theta,
                 row,
-                _phase(
-                    self._l1,
-                    rg.frame(r, c),
-                    rg.month,
-                    self._conf_n if first else 0,
-                    (int(group.bounds[index, 0]), int(group.bounds[index, 1])),
-                    rg.low,
-                ),
-                _phase(
-                    self._l1,
-                    rg.frame(c, e),
-                    rg.month,
-                    self._over_n if first else 0,
-                    (int(group.bounds[index, 1]), int(group.bounds[index, 2])),
-                    rg.low,
-                ),
+                self._chunked(rg, (r, c), (ref, conf), self._conf_n if first else 0),
+                self._chunked(rg, (c, e), (conf, ext), self._over_n if first else 0),
                 before,
             )
         if first:
@@ -208,6 +213,33 @@ class _Cursor:
         else:
             confirmation, overshoot = rg.frame(r, c), rg.frame(c, e)
         return EventFrames(self.theta, row, confirmation, overshoot, before)
+
+    def _chunked(
+        self, rg: RowGroup, edges: tuple[int, int], span: tuple[int, int], passed: int
+    ) -> Iterator[Frame]:
+        """El iterador de una fase: `edges` son sus posiciones en `rg` y `span`, sus ids.
+
+        De los `passed` ticks que la fase tiene en row groups anteriores, los del row
+        group anterior se toman ya, como slice sin copia (así el iterador no depende del
+        estado del lector); el resto se relee de L1 al consumirlo.
+        """
+        previous = self._previous.rg if self._previous is not None else None
+        head = None
+        if previous is not None and passed:
+            after, until = span
+            start = int(np.searchsorted(previous.ids, after, "right"))
+            stop = int(np.searchsorted(previous.ids, until, "right"))
+            if stop > start:
+                head = previous.frame(start, stop)
+        return _phase(
+            self._l1,
+            head,
+            rg.frame(*edges),
+            rg.month,
+            passed,
+            span,
+            (rg if previous is None else previous).low,
+        )
 
     @staticmethod
     def _keep(parts: list[list[pa.Array]], rg: RowGroup, start: int, stop: int) -> None:
@@ -279,6 +311,7 @@ def _empty() -> Frame:
 
 def _phase(
     l1: L1,
+    head: Frame | None,
     tail: Frame,
     month: Month,
     passed: int,
@@ -287,14 +320,17 @@ def _phase(
 ) -> Iterator[Frame]:
     """Los trozos de una fase `(after, until]`, uno por row group, en orden de la serie.
 
-    `tail` es lo que cae en el row group en curso (el primero con id `limit`). Si la fase
-    ya pasó `passed` ticks por row groups anteriores, se releen de L1 de uno en uno
-    (a lo más un row group en memoria) y se entregan antes de `tail`. Un row group sin
+    `tail` es lo que cae en el row group en curso y `head`, lo que cae en el anterior
+    (ambos slices sin copia, tomados al entregar el evento). Si la fase ya pasó `passed`
+    ticks por row groups anteriores y `head` no los cubre, el resto está en row groups de
+    ids menores que `limit` (el primero de `head`): se releen de L1 de uno en uno (a lo
+    más un row group en memoria) y se entregan antes de `head` y `tail`. Un row group sin
     ticks de la fase no entrega trozo. No toca el estado del lector: se puede consumir
-    después de pedir el siguiente evento.
+    después de pedir el siguiente evento, pero hasta entonces ancla los row groups de
+    `head` y `tail`.
     """
     after, until = span
-    if passed:
+    if passed > (len(head) if head is not None else 0):
         rows = l1.row_groups(
             month,
             month,
@@ -310,12 +346,18 @@ def _phase(
                 del rg
         finally:
             rows.close()
+    if head is not None:
+        yield head
     if len(tail):
         yield tail
 
 
 def _drive(
-    l1: L1, cursors: list[_Cursor], first: Month, last: Month
+    l1: L1,
+    cursors: list[_Cursor],
+    first: Month,
+    last: Month,
+    previous: _Previous | None = None,
 ) -> Iterator[EventFrames]:
     live = [c for c in cursors if not c.done]
     if not live:
@@ -327,7 +369,8 @@ def _drive(
 
     rows = l1.row_groups(first, last, reference, needed)
     try:
-        # Se suelta el row group antes de pedir el siguiente: nunca hay dos en vuelo.
+        # Se suelta el row group antes de pedir el siguiente. Solo el modo por chunks
+        # conserva uno más, el anterior (`previous`), mientras un evento abierto lo use.
         rg = None
         while True:
             rg = None
@@ -339,6 +382,8 @@ def _drive(
             live = [c for c in live if not c.done]
             if not live:
                 return
+            if previous is not None:
+                previous.rg = rg if any(c.holds(rg) for c in live) else None
     finally:
         rows.close()
     raise FrameBoundaryError(
@@ -380,7 +425,8 @@ def read_frames(
     evento pertenece al mes que lo cierra y sus ticks pueden estar en meses anteriores
     a `start`, que el lector también lee. Dentro de cada θ salen por
     `confirm_agg_trade_id` ascendente; entre θ no hay orden garantizado. Con varios θ
-    cada row group de L1 se decodifica una sola vez.
+    cada row group de L1 se decodifica una sola vez, salvo en el modo por chunks por los
+    eventos que abarcan más de dos row groups (ver abajo).
 
     Modo por evento (por defecto): cada fase es un `Frame` con todos sus ticks.
     Memoria: un row group de L1, un row group de eventos por θ y el evento en curso de
@@ -391,9 +437,13 @@ def read_frames(
     recorre sus row groups para validar las fronteras y contar `ticks_before_month`).
 
     Modo por chunks (`chunks=True`): cada fase es un iterador de `Frame`, uno por row
-    group (ver `EventFrames`). El lector no retiene ningún evento: el pico es un row
-    group de L1 en el pase, más el que relee un evento que cruza row groups, y un row
-    group de eventos por θ, con cualquier número de θ y de eventos. No admite
+    group (ver `EventFrames`). El lector no retiene ningún evento. Conserva una sola
+    copia del row group anterior, compartida por todos los θ, mientras algún evento
+    abierto la necesite: el pico es de dos row groups de L1 (el del pase y ese) y un row
+    group de eventos por θ, con cualquier número de θ y de eventos. Un evento que abarca
+    más de dos row groups relee de L1 solo los que sobran, de uno en uno, y suma ese al
+    pico. Los iteradores de fase de un evento se consumen antes de pedir el siguiente:
+    consumirlos después ancla los row groups de sus trozos. No admite
     `max_event_ticks`: no tiene presupuesto.
 
     Errores: `FramesInputError` si falta un archivo o no cumple su contrato;
@@ -430,6 +480,7 @@ def _read(
     max_event_ticks: int | None,
 ) -> Iterator[EventFrames]:
     l1 = L1(l1_root, key)
+    previous = _Previous() if chunks else None
     cursors = [
         _Cursor(
             t,
@@ -437,10 +488,11 @@ def _read(
             l1,
             chunks,
             max_event_ticks,
+            previous,
         )
         for t in thetas
     ]
-    yield from _drive(l1, cursors, start, end)
+    yield from _drive(l1, cursors, start, end, previous)
 
 
 def _month_of_time(microseconds: int) -> Month:
