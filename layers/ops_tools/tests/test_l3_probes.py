@@ -4,11 +4,13 @@ Con roots locales, que es como corren en un equipo; en la nube solo cambian los 
 """
 
 import importlib.util
+import io
 import re
 import subprocess
 import sys
 from pathlib import Path
 
+import pyarrow.fs as pafs
 import pytest
 
 ROOT = Path(__file__).parents[3]
@@ -84,13 +86,25 @@ def test_un_theta_cuenta_lo_mismo_que_el_lector(lake):
     assert row[1:4] == [str(n), str(conf), str(over)]
     assert "veredicto=ok" in out
     assert "ok pared" in out and "ok RSS pico" in out
+    # Por defecto consume el lector en modo por chunks, con el umbral de 1 GiB.
+    assert "modo=chunks over_budget=0" in out
+    assert "≤ 1 GiB (modo chunks) (1024 MiB)" in out
 
 
 def test_todos_los_theta_decodifican_cada_row_group_una_vez(lake, capsys):
     l1, l2, events = lake
     probe = load("l3_probe_reader")
     # El archivo de fixtures pesa 300 KB y su pie se lee más de una vez: el 1,1 × no aplica.
-    assert probe.main(["--theta", "all", *args(l1, l2, "--max-bytes-ratio", "3")]) == 0
+    assert (
+        probe.main(
+            [
+                "--theta",
+                "all",
+                *args(l1, l2, "--modo", "evento", "--max-bytes-ratio", "3"),
+            ]
+        )
+        == 0
+    )
     out = capsys.readouterr().out
     thetas = [theta_text(t) for t in sorted(events)]
     n, conf, over = oracle(l1, l2, thetas)
@@ -107,6 +121,184 @@ def test_todos_los_theta_decodifican_cada_row_group_una_vez(lake, capsys):
     assert "ok row groups de L1 decodificados más de una vez: 0" in out
     assert "ok bytes de L1" in out
     assert conf + over > 0
+
+
+def chunk_oracle(l1, l2, thetas):
+    """Eventos y ticks por fase según el lector en modo por chunks, sumando los trozos."""
+    events = confirmation = overshoot = 0
+    for frames in read_frames(thetas, l1, l2, MONTH, MONTH, chunks=True):
+        events += 1
+        confirmation += sum(len(frame) for frame in frames.confirmation)
+        overshoot += sum(len(frame) for frame in frames.overshoot)
+    return events, confirmation, overshoot
+
+
+def test_el_modo_chunks_mide_el_pico_en_un_subproceso_y_cuenta_como_el_lector(lake):
+    l1, l2, events = lake
+    thetas = ",".join(theta_text(t) for t in sorted(events))
+    # Un subproceso: el RSS pico es el de la sonda y no el de pytest.
+    code, out = run_probe(
+        "--theta",
+        thetas,
+        *args(l1, l2, "--modo", "chunks", "--max-bytes-ratio", "1000"),
+    )
+    assert code == 0, out
+    final = out.strip().splitlines()[-1]
+    assert "modo=chunks over_budget=0 veredicto=ok" in final
+    assert int(re.search(r"rss_pico_mib=(\d+)", final)[1]) < 1024
+    n, conf, over = chunk_oracle(l1, l2, thetas.split(","))
+    assert f"eventos={n}" in final
+    assert (n, conf, over) == oracle(l1, l2, thetas.split(","))
+    totals = [
+        line.split()
+        for line in out.splitlines()
+        if line.lstrip().startswith("0.") and len(line.split()) == 7
+    ]
+    assert sum(int(row[1]) for row in totals) == n
+    assert sum(int(row[2]) for row in totals) == conf
+    assert sum(int(row[3]) for row in totals) == over
+
+
+def test_el_modo_chunks_admite_las_relecturas_de_eventos_largos(lake, capsys):
+    l1, l2, _ = lake
+    probe = load("l3_probe_reader")
+    # row group de 40 ticks: hay eventos de más de dos row groups, que el lector relee.
+    code = probe.main(["--theta", "all", *args(l1, l2, "--max-bytes-ratio", "1000")])
+    out = capsys.readouterr().out
+    assert code == 0, out
+    match = re.search(
+        r"decodificados más de una vez: (\d+) \(relecturas admitidas[^:]*: (\d+)\)", out
+    )
+    assert 0 < int(match[1]) <= int(match[2])
+
+
+def test_el_modo_evento_pasa_el_presupuesto_y_cuenta_los_over_budget(lake):
+    l1, l2, events = lake
+    theta = theta_text(max(events))
+    budget = 300
+    expected = [
+        f
+        for f in read_frames(theta, l1, l2, MONTH, MONTH, max_event_ticks=budget)
+        if f.over_budget
+    ]
+    total = sum(1 for _ in read_frames(theta, l1, l2, MONTH, MONTH))
+    assert 0 < len(expected) < total
+    code, out = run_probe(
+        "--theta",
+        theta,
+        *args(l1, l2, "--modo", "evento", "--max-event-ticks", str(budget)),
+    )
+    assert code == 0, out
+    final = out.strip().splitlines()[-1]
+    assert f"modo=evento over_budget={len(expected)} " in final
+    assert f"over_budget)={len(expected)}" in out
+    assert f"≤ 1 GiB + presupuesto de {budget} ticks" in out
+    row = next(x.split() for x in out.splitlines() if x.lstrip().startswith(theta))
+    assert row[-1] == str(len(expected))
+    # Los eventos sobre el presupuesto no suman ticks.
+    delivered = [
+        f
+        for f in read_frames(theta, l1, l2, MONTH, MONTH, max_event_ticks=budget)
+        if not f.over_budget
+    ]
+    assert int(row[2]) == sum(len(f.confirmation.price) for f in delivered)
+
+
+def test_el_umbral_de_rss_del_modo_evento_suma_el_presupuesto(lake, capsys):
+    l1, l2, events = lake
+    probe = load("l3_probe_reader")
+    probe.main(
+        [
+            "--theta",
+            theta_text(min(events)),
+            *args(l1, l2, "--modo", "evento", "--max-event-ticks", "20000000"),
+        ]
+    )
+    limit_mib = (1 << 30) / (1 << 20) + 20_000_000 * probe.BYTES_PER_TICK / (1 << 20)
+    assert f"({limit_mib:.0f} MiB)" in capsys.readouterr().out
+
+
+def test_modo_chunks_no_pasa_el_presupuesto_al_lector(lake):
+    l1, l2, events = lake
+    # `read_frames` rechaza chunks con presupuesto: la sonda no debe combinarlos.
+    code, out = run_probe(
+        "--theta", theta_text(min(events)), *args(l1, l2, "--max-event-ticks", "5")
+    )
+    assert code == 0, out
+    assert "modo=chunks over_budget=0" in out
+
+
+class RangedFile(io.BytesIO):
+    """Un archivo como el de GCS: `seek(0, 2)` lee desde el final y el rango no existe."""
+
+    def read(self, size=-1):
+        if self.tell() >= len(self.getvalue()) and size != 0:
+            raise OSError("Request range not satisfiable")
+        return super().read(size)
+
+    def seek(self, offset, whence=0):
+        if whence == 2:
+            raise OSError("Request range not satisfiable")
+        return super().seek(offset, whence)
+
+
+def test_el_envoltorio_resuelve_el_seek_al_final_con_el_tamano_conocido():
+    probe = load("l3_probe_reader")
+    data = bytes(range(100))
+    wrapped = probe._CountedFile(RangedFile(data), "l1", "ruta", len(data))
+    assert wrapped.seek(0, 2) == 100
+    assert wrapped.tell() == 100
+    assert wrapped.seek(-10, 2) == 90
+    assert wrapped.read(10) == data[90:]
+    assert wrapped.seek(5) == 5
+    assert wrapped.read(3) == data[5:8]
+    # El archivo falso sí falla si se le pide el final directamente.
+    with pytest.raises(OSError, match="Request range"):
+        RangedFile(data).seek(0, 2)
+
+
+class FlatFS:
+    """Un bucket: los directorios `theta=` no existen como entradas, solo los objetos."""
+
+    def __init__(self, inner):
+        self._inner = inner
+
+    def get_file_info(self, selector):
+        if isinstance(selector, pafs.FileSelector) and not selector.recursive:
+            return []
+        if isinstance(selector, pafs.FileSelector):
+            return [
+                info
+                for info in self._inner.get_file_info(selector)
+                if info.type == pafs.FileType.File
+            ]
+        return self._inner.get_file_info(selector)
+
+
+def test_la_sonda_lista_los_theta_de_forma_recursiva(lake, monkeypatch):
+    _l1, l2, events = lake
+    probe = load("l3_probe_reader")
+    real = probe.resolve_fs
+    monkeypatch.setattr(
+        probe, "resolve_fs", lambda root: (FlatFS(real(root)[0]), real(root)[1])
+    )
+    found = probe.lake_thetas(str(l2), ("binance", "spot", "BTCUSDT"), MONTH, MONTH)
+    assert found == [theta_text(t) for t in sorted(events)]
+
+
+def test_la_sonda_de_theta_all_omite_los_que_no_tienen_todo_el_rango(lake, capsys):
+    _l1, l2, events = lake
+    probe = load("l3_probe_reader")
+    # Un θ con events.parquet solo de otro mes no tiene L2 en el rango.
+    theta = theta_text(min(events))
+    source = next(l2.rglob(f"theta={theta}/**/events.parquet"))
+    other = source.parents[1] / "month=09" / "events.parquet"
+    other.parent.mkdir(parents=True)
+    other.write_bytes(source.read_bytes())
+    source.unlink()
+    found = probe.lake_thetas(str(l2), ("binance", "spot", "BTCUSDT"), MONTH, MONTH)
+    assert theta not in found and len(found) == len(events) - 1
+    assert f"omitidos: {theta}" in capsys.readouterr().out
 
 
 def test_los_bytes_medidos_cubren_lo_que_dicen_los_metadatos(lake, capsys):
@@ -130,7 +322,16 @@ def test_los_bytes_de_meses_anteriores_no_cuentan_contra_el_umbral(tmp_path, cap
     for theta, rows in events.items():
         write_l2(l2, theta, rows, 3)
     probe = load("l3_probe_reader")
-    assert probe.main(["--theta", "all", *args(l1, l2, "--max-bytes-ratio", "3")]) == 0
+    assert (
+        probe.main(
+            [
+                "--theta",
+                "all",
+                *args(l1, l2, "--modo", "evento", "--max-bytes-ratio", "3"),
+            ]
+        )
+        == 0
+    )
     out = capsys.readouterr().out
     line = next(x for x in out.splitlines() if x.startswith("bytes leídos"))
     earlier = int(line.split("de meses anteriores ")[1].split(")")[0])
@@ -295,10 +496,55 @@ def test_empates_sin_directorios_theta_falla(tmp_path, capsys):
     assert "FALLO sin_thetas" in capsys.readouterr().out
 
 
+def test_empates_lista_los_theta_de_forma_recursiva(tmp_path):
+    (_l1, l2, _, events), _shared = with_ties(tmp_path)
+    probe = load("l3_probe_ties")
+    root = f"{l2}/provider=binance/market=spot/asset=BTCUSDT"
+    fs = FlatFS(pafs.LocalFileSystem())
+    assert probe.lake_thetas(fs, root) == [theta_text(t) for t in sorted(events)]
+    assert probe.lake_thetas(fs, f"{l2}/otra") == []
+
+
+def test_empates_el_ms_por_defecto_es_el_de_los_4090_ticks(tmp_path, capsys):
+    probe = load("l3_probe_ties")
+    code = probe.main(["--l1-root", str(tmp_path), "--l2-root", str(tmp_path)])
+    assert code == 1
+    # Sin L1 no hay ms que medir, pero el mes pedido es el de 2026-09.
+    assert "year=2026/month=09/consolidated.parquet" in capsys.readouterr().out
+    assert "2026-09-30T12:40:26.942" in (SCRIPTS / "l3_probe_ties.py").read_text()
+
+
+def test_empates_sin_ticks_informa_el_ms_mas_poblado_del_segundo(tmp_path, capsys):
+    (l1, l2, _, _events), shared = with_ties(tmp_path)
+    probe = load("l3_probe_ties")
+    # El ms siguiente al de los empates no tiene ticks; el de los empates tiene 4.
+    empty = iso(shared - shared % 1000 + 1000)
+    code = probe.main(["--at", empty, "--l1-root", str(l1), "--l2-root", str(l2)])
+    assert code == 1
+    out = capsys.readouterr().out
+    assert "FALLO sin_ticks" in out
+    assert "el ms más poblado del segundo" in out
+    assert f"es {iso(shared).replace('T', ' ')} con 4 ticks" in out
+
+
+def test_empates_sin_ticks_en_el_segundo_lo_dice(lake, capsys):
+    l1, l2, _ = lake
+    probe = load("l3_probe_ties")
+    probe.main(
+        ["--at", "2017-08-18T00:00:00.000", "--l1-root", str(l1), "--l2-root", str(l2)]
+    )
+    out = capsys.readouterr().out
+    assert "FALLO sin_ticks" in out and "ningún tick en el segundo" in out
+
+
 def test_empates_con_un_events_faltante_falla(tmp_path, capsys):
     (l1, l2, _, events), shared = with_ties(tmp_path)
     theta = theta_text(min(events))
     for path in l2.rglob(f"theta={theta}/**/events.parquet"):
+        # El θ sigue en el lago con otro mes, pero sin el del milisegundo.
+        other = path.parents[1] / "month=09" / path.name
+        other.parent.mkdir(parents=True)
+        other.write_bytes(path.read_bytes())
         path.unlink()
     probe = load("l3_probe_ties")
     code = probe.main(["--at", iso(shared), "--l1-root", str(l1), "--l2-root", str(l2)])

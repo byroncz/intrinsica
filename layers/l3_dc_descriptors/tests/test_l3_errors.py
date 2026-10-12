@@ -114,3 +114,16 @@ def test_l1_without_id_statistics_is_an_input_error(lake):
     )
     with pytest.raises(FramesInputError, match="estadísticas de agg_trade_id"):
         run(lake)
+
+
+def test_errors_no_evalua_anotaciones_al_importar():
+    """En Python 3.12 (Colab) `-> L2StateInconsistent` dentro de su clase falla al importar.
+
+    Con `from __future__ import annotations` la anotación queda como texto en cualquier
+    versión; sin él, en 3.14 se evalúa perezosa y devolvería la clase.
+    """
+    from l3_dc_descriptors import errors
+
+    assert errors.L2StateInconsistent.mismatch.__annotations__["return"] == (
+        "L2StateInconsistent"
+    )
