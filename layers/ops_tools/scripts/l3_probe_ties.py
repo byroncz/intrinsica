@@ -1,7 +1,7 @@
 """Sonda de empates: cuántos `transact_time` distintos hay dentro de un milisegundo de L1.
 
 L2 agrupa los ticks por `transact_time` en µs (ADR-L2-03) y la página de viz por ms
-(TRD-viz §7.5). El 2026-09-30 12:40:26.980 hay 4 090 ticks en un mismo milisegundo; de
+(TRD-viz §7.5). El 2026-09-30 12:40:26.942 hay 4 090 ticks en un mismo milisegundo; de
 si comparten un µs o solo el ms depende cuántos quedan en la confirmación de un evento y
 cuántos en su overshoot. Esta sonda lo mide sobre `consolidated.parquet` y `events.parquet`:
 
@@ -13,7 +13,7 @@ cuántos en su overshoot. Esta sonda lo mide sobre `consolidated.parquet` y `eve
      de `C`, y de esos cuántos caen en el overshoot `(C, E]` del evento.
 
 Args (todos opcionales):
-  --at 2026-09-30T12:40:26.980        (el milisegundo; sin zona se toma como UTC, con zona se
+  --at 2026-09-30T12:40:26.942        (el milisegundo; sin zona se toma como UTC, con zona se
                                       convierte a UTC; el mes sale de aquí)
   --l1-root gs://<proyecto>-landing/l1    (por defecto, los del proyecto según
   --l2-root gs://<proyecto>-dc-events/l2   OPS_RESULTS_URI; también rutas locales)
@@ -22,8 +22,8 @@ Args (todos opcionales):
   --max-listed 40                     (cuántos `transact_time` distintos se listan)
 
 Última línea: `sonda empates: ms=… ticks=… distintos=… max_por_tt=… thetas=… max_empate=…`.
-Sale con 1 si el milisegundo no tiene ticks, falta el L1 del mes, no hay ningún directorio
-`theta=` en `--l2-root` o a algún θ le falta su `events.parquet`. Solo lee: dónde corre,
+Sale con 1 si el milisegundo no tiene ticks (antes informa el ms más poblado de ese segundo),
+falta el L1 del mes, no hay ningún `events.parquet` en `--l2-root` o a algún θ le falta el del mes. Solo lee: dónde corre,
 con `ops-script` (lee `l1/` y `l2/`) o en local con `uv run`.
 """
 
@@ -39,7 +39,9 @@ import pyarrow.fs as pafs
 import pyarrow.parquet as pq
 from pyutils import resolve_fs
 
-THETA_DIR = re.compile(r"theta=(0\.\d{8})")
+EVENTS_FILE = re.compile(
+    r"/theta=(0\.\d{8})/year=(\d{4})/month=(\d{2})/events\.parquet$"
+)
 
 
 def default_roots() -> tuple[str, str]:
@@ -93,9 +95,45 @@ def read_window(
     return pa.concat_tables(tables) if tables else None
 
 
+def lake_thetas(fs: pafs.FileSystem, root: str) -> list[str]:
+    """Los θ con algún `events.parquet` bajo `root`, listando los archivos de forma recursiva.
+
+    En GCS un prefijo `theta=` no es una entrada: un listado no recursivo no lo devuelve.
+    """
+    selector = pafs.FileSelector(root, recursive=True, allow_not_found=True)
+    return sorted(
+        {
+            m[1]
+            for info in fs.get_file_info(selector)
+            if info.type == pafs.FileType.File
+            and (m := EVENTS_FILE.search(info.path)) is not None
+        }
+    )
+
+
+def busiest_ms(parquet: pq.ParquetFile, second: int) -> str:
+    """El ms con más ticks del segundo que empieza en `second` (µs), para reorientar al pedir
+    un ms vacío.
+    """
+    window = read_window(
+        parquet, "transact_time", ["transact_time"], second, second + 1_000_000
+    )
+    if window is None or window.num_rows == 0:
+        return f"ningún tick en el segundo {render(second)[:-7]}"
+    values, counts = np.unique(
+        window["transact_time"].to_numpy() // 1000, return_counts=True
+    )
+    top = int(np.argmax(counts))
+    return (
+        f"el ms más poblado del segundo {render(second)[:-7]} es "
+        f"{render(int(values[top]) * 1000)[:-3]} con {int(counts[top])} ticks "
+        f"(de {len(values)} ms con ticks)"
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--at", default="2026-09-30T12:40:26.980")
+    parser.add_argument("--at", default="2026-09-30T12:40:26.942")
     parser.add_argument("--l1-root")
     parser.add_argument("--l2-root")
     parser.add_argument("--provider", default="binance")
@@ -128,10 +166,12 @@ def main(argv: list[str] | None = None) -> int:
     ticks = read_window(
         l1, "transact_time", ["agg_trade_id", "transact_time"], low, high
     )
-    l1.close()
     if ticks is None or ticks.num_rows == 0:
         print(f"FALLO sin_ticks: ningún tick en el ms {render(low)[:-3]} de {l1_path}")
+        print(busiest_ms(l1, low - low % 1_000_000))
+        l1.close()
         return 1
+    l1.close()
     ids = ticks["agg_trade_id"].to_numpy()
     times = ticks["transact_time"].to_numpy()
     distinct, counts = np.unique(times, return_counts=True)
@@ -156,13 +196,9 @@ def main(argv: list[str] | None = None) -> int:
 
     fs, base = resolve_fs(l2_root)
     root = f"{base.rstrip('/')}/{series}"
-    thetas = sorted(
-        m[1]
-        for info in fs.get_file_info(pafs.FileSelector(root, allow_not_found=True))
-        if (m := THETA_DIR.fullmatch(info.base_name)) is not None
-    )
+    thetas = lake_thetas(fs, root)
     if not thetas:
-        print(f"FALLO sin_thetas: ningún directorio theta= en {root}")
+        print(f"FALLO sin_thetas: ningún events.parquet de L2 bajo {root}")
         return 1
     print(
         f"{'θ':>12} {'confirm_time':>28} {'C':>14} {'grupo_empate':>13} {'hasta_C':>8} "

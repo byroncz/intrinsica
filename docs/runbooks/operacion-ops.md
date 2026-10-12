@@ -237,10 +237,13 @@ Descrita arriba, en "Permisos".
 
 Dos scripts de `layers/ops_tools/scripts/` que miden el criterio de aceptación del
 lector `shared/dc_frames` ([TRD-L3 §10.3, ADR-L3-09](../TRD/l3.md)). La imagen trae
-`dc_frames` desde `ops_tools` 0.2.0: sin esa versión desplegada, el `import` falla.
+`dc_frames` desde `ops_tools` 0.2.0 y su modo por chunks (`chunks=True`,
+`max_event_ticks`) desde la 0.3.0: sin esa versión desplegada, el `import` o la sonda fallan.
 Súbelos como cualquier script (`gcloud storage cp layers/ops_tools/scripts/<script>.py
-gs://<proyecto>-ops/scripts/`) y lánzalos con `job` = `ops-script`. Ambos solo leen y
-toman las raíces de L1 y L2 del proyecto desde `OPS_RESULTS_URI`.
+gs://<proyecto>-ops/scripts/`) y lánzalos con `job` = `ops-script`. Ambos solo leen, toman
+las raíces de L1 y L2 del proyecto desde `OPS_RESULTS_URI` y listan los θ de L2 de forma
+recursiva por `events.parquet`, porque en GCS los directorios `theta=` no existen como
+entradas.
 
 - **`l3_probe_reader.py`**: recorre `read_frames` y mide pared por fase (lectura,
   decodificación, selección), RSS pico, bytes leídos, row groups decodificados y
@@ -251,7 +254,24 @@ toman las raíces de L1 y L2 del proyecto desde `OPS_RESULTS_URI`.
   | Medición | `args` |
   | --- | --- |
   | Un θ (`θ_min`, uno intermedio y `θ_max`: tres runs) | `--theta 0.00100000 --from 2023-03` |
-  | Los 50 θ en una pasada | `--theta all --from 2023-03` |
+  | Los 50 θ en una pasada (modo chunks, el de L3) | `--theta all --from 2023-03` |
+  | Los 50 θ en modo evento, con presupuesto | `--theta all --from 2023-03 --modo evento` |
+  | Un θ en modo evento con otro presupuesto | `--theta 0.00100000 --from 2023-03 --modo evento --max-event-ticks 50000000` |
+
+  Banderas nuevas (ITSC-343):
+
+  - `--modo chunks|evento`: por defecto `chunks`, que llama a `read_frames(chunks=True)` y
+    cuenta los ticks de cada trozo; el lector no retiene ningún evento, así que la pasada de
+    50 θ cabe en el job. `evento` entrega cada fase entera, como antes.
+  - `--max-event-ticks N` (solo en modo `evento`; por defecto 20 000 000, ADR-L3-13): un
+    evento mayor llega sin tramas y se cuenta como `over_budget` (columna de la tabla por θ,
+    línea de resumen y `over_budget=` en la última línea). En modo chunks se ignora, porque
+    ese modo no tiene presupuesto.
+  - Umbral de RSS de §10.3 con un solo θ: 1 GiB en modo chunks; en modo evento, 1 GiB más
+    el presupuesto (`--max-event-ticks` × 40 B por tick). En la pasada de 50 θ el RSS se
+    reporta sin umbral.
+  - En modo chunks, el lector relee los row groups que sobran de un evento de más de dos. La
+    sonda los topa (`relecturas admitidas`) y no los cuenta contra `--max-bytes-ratio`.
 
   Última línea: `sonda lector: … veredicto=ok|excedido|fallo`; sale con 1 si no es `ok`.
   La tabla por θ queda también en `results/` como `l3_probe_reader_<fecha>.csv`.
@@ -264,9 +284,10 @@ toman las raíces de L1 y L2 del proyecto desde `OPS_RESULTS_URI`.
 - **`l3_probe_ties.py`**: cuántos `transact_time` distintos hay en un milisegundo de L1
   y, para cada θ que confirma en él, el tamaño de su grupo de empate (ticks con el
   `transact_time` de la confirmación, cuántos hasta `C` y cuántos después).
-  `args` = vacío para el 2026-09-30 12:40:26.980 (`--at` cambia el milisegundo; sin zona
-  es UTC, con zona se convierte a UTC). Sale con 1 si el milisegundo no tiene ticks, falta
-  el L1 del mes, no hay ningún `theta=` en L2 o a algún θ le falta su `events.parquet`.
+  `args` = vacío para el 2026-09-30 12:40:26.942, el milisegundo de los 4 090 ticks (`--at`
+  cambia el milisegundo; sin zona es UTC, con zona se convierte a UTC). Sale con 1 si el
+  milisegundo no tiene ticks (antes informa el ms más poblado de ese segundo), falta el L1
+  del mes, no hay ningún `events.parquet` en L2 o a algún θ le falta el del mes.
   Última línea: `sonda empates: ms=… ticks=… distintos=… max_por_tt=… thetas=…
   max_empate=…`.
 

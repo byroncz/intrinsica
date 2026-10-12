@@ -17,14 +17,27 @@ Args:
   --max-bytes-ratio 1.1              (con más de un θ, los bytes leídos de los archivos de L1 del
                                       rango no pasan de esto × su tamaño; los de meses anteriores,
                                       donde cae la referencia del primer evento, se reportan aparte)
+  --modo chunks|evento               (cómo consume el lector; por defecto `chunks`, el modo de
+                                      las pasadas de L3: cada fase llega en trozos de un row
+                                      group y la sonda cuenta los ticks de cada trozo)
+  --max-event-ticks 20000000         (solo en `--modo evento`: presupuesto de ticks por evento,
+                                      ADR-L3-13; uno mayor llega sin tramas y se cuenta como
+                                      `over_budget`)
   --big-event-ticks 100000          (desde cuántos ticks un evento entra a la suma de
                                       eventos abiertos a la vez)
   --sin-contar-io                    (no envuelve los archivos: la pared es la del lector
                                       tal cual, pero sin bytes leídos ni fase de lectura)
 
+RSS (§10.3, umbral 2, con un solo θ): 1 GiB en modo chunks, que no retiene ningún evento; en
+modo evento, 1 GiB más el presupuesto de ticks (`--max-event-ticks` × 40 B por tick), que es lo
+que puede pesar el evento más grande que el lector entrega entero.
+
 Row groups: TRD-L3 §10.3 pide tantas decodificaciones como row groups del mes. El lector salta
-por estadísticas los que ningún evento necesita (el tramo tras el último evento cerrado), así
-que la sonda exige que ninguno se decodifique más de una vez y reporta cuántos se saltaron.
+por estadísticas los que ningún evento necesita (el tramo tras el último evento cerrado) y la
+sonda reporta cuántos se saltaron. En modo evento exige que ninguno se decodifique más de una
+vez. En modo chunks admite las relecturas de los eventos de más de dos row groups (el lector
+retiene dos), las acota con los trozos de cada evento y resta de los bytes del rango solo las
+de los archivos del rango: las de meses anteriores ya quedan fuera de ellos.
 Los bytes incluyen los pies de Parquet, que el lector abre más de una vez por mes: en un
 archivo real pesan nada, en uno de fixtures dominan (por eso `--max-bytes-ratio`).
 
@@ -35,7 +48,8 @@ Decodificación: lo que tarda `read_row_group` sin su lectura. Selección: el re
 (`searchsorted`, slices, validaciones y el conteo de la propia sonda).
 
 Última línea: `sonda lector: thetas=… meses=… eventos=… ticks_l1=… pared_s=… lectura_s=…
-decodificación_s=… selección_s=… rss_pico_mib=… bytes_l1=… ticks_s=… veredicto=ok|excedido|fallo`.
+decodificación_s=… selección_s=… rss_pico_mib=… bytes_l1=… ticks_s=… modo=chunks|evento
+over_budget=… veredicto=ok|excedido|fallo`.
 Con `OPS_RESULTS_URI` deja además `l3_probe_reader_<fecha>.csv` con la tabla por θ.
 
 Solo lee. Dónde corre: con `ops-script` (la service account lee `l1/` y `l2/`) o en local con
@@ -84,6 +98,11 @@ class Stats:
     l1_files: dict[str, list[int]] = field(default_factory=dict)
     l1_seen: set[tuple[str, int]] = field(default_factory=set)
     l1_repeated: int = 0
+    # Bytes por metadatos de esas decodificaciones repetidas, por ruta de L1 (solo se restan
+    # los de los archivos del rango), y cota de las que el modo por chunks admite: los
+    # trozos de cada evento más allá de los dos que retiene el lector.
+    l1_repeated_bytes: dict[str, int] = field(default_factory=dict)
+    reread_allowed: int = 0
     started: float = 0.0
     last_progress: float = 0.0
     events: int = 0
@@ -104,10 +123,11 @@ def log(message: str) -> None:
 class _CountedFile:
     """Un archivo de solo lectura que cuenta los bytes y el tiempo de cada lectura."""
 
-    def __init__(self, inner, kind: str, path: str) -> None:
+    def __init__(self, inner, kind: str, path: str, size: int) -> None:
         self._inner = inner
         self._kind = kind
         self._path = path
+        self._size = size
 
     def read(self, nbytes: int = -1) -> bytes:
         start = time.perf_counter()
@@ -123,6 +143,11 @@ class _CountedFile:
         return data
 
     def seek(self, position: int, whence: int = 0) -> int:
+        # `pa.PythonFile` pide el tamaño con `seek(0, 2)`; en GCS el archivo interno lo
+        # resuelve leyendo desde el final y responde "Request range not satisfiable".
+        # El tamaño ya se conoce: se pasa a un seek absoluto, que no lee nada.
+        if whence == 2:
+            return self._inner.seek(self._size + position, 0)
         return self._inner.seek(position, whence)
 
     def tell(self) -> int:
@@ -165,15 +190,19 @@ class _ProbeFile(pq.ParquetFile):
         STATS.decodes[self._kind] += 1
         group = self.metadata.row_group(i)
         names = self.schema_arrow.names
-        for name in columns or names:
-            STATS.expected[self._kind] += group.column(
-                names.index(name)
-            ).total_compressed_size
+        size = sum(
+            group.column(names.index(name)).total_compressed_size
+            for name in columns or names
+        )
+        STATS.expected[self._kind] += size
         if self._kind == "l1":
             STATS.l1_ticks += table.num_rows
             STATS.l1_files[self._probe_path][2] += 1
             if (self._probe_path, i) in STATS.l1_seen:
                 STATS.l1_repeated += 1
+                STATS.l1_repeated_bytes[self._probe_path] = (
+                    STATS.l1_repeated_bytes.get(self._probe_path, 0) + size
+                )
             STATS.l1_seen.add((self._probe_path, i))
         progress()
         return table
@@ -188,7 +217,8 @@ def probe_open_parquet(path: str, what: str) -> pq.ParquetFile:
     kind = "l1" if path.endswith(lake.CONSOLIDATED) else "l2"
     if STATS.count_io:
         source = pa.PythonFile(
-            _CountedFile(fs.open_input_file(resolved), kind, path), mode="r"
+            _CountedFile(fs.open_input_file(resolved), kind, path, info.size),
+            mode="r",
         )
         parquet = _ProbeFile(source, kind, path)
     else:
@@ -216,6 +246,9 @@ class ThetaStats:
     overshoot: int = 0
     biggest_ticks: int = 0
     biggest_bytes: int = 0
+    # Eventos sobre el presupuesto (modo evento) y el mayor de ellos, por ids de L2 (cota).
+    over_budget: int = 0
+    over_budget_max: int = 0
 
 
 def frame_bytes(*frames) -> int:
@@ -229,6 +262,54 @@ def frame_bytes(*frames) -> int:
             frame.is_buyer_maker,
         )
     )
+
+
+def tally(
+    event, per_theta: dict[Decimal, ThetaStats], bigs: list[tuple[int, int, int]], ns
+) -> None:
+    """Suma los ticks de un evento a su θ. Una función aparte para que, al volver, no quede
+    ninguna referencia a las tramas (ni a sus trozos) antes de pedir el siguiente evento.
+    """
+    row = event.event
+    reference = row.column("reference_agg_trade_id")[0].as_py()
+    extreme = row.column("extreme_agg_trade_id")[0].as_py()
+    stats = per_theta.get(event.theta)
+    if stats is None:
+        stats = per_theta[event.theta] = ThetaStats()
+    stats.events += 1
+    STATS.events += 1
+    if event.over_budget:
+        stats.over_budget += 1
+        stats.over_budget_max = max(stats.over_budget_max, extreme - reference)
+        return
+    confirmation = overshoot = size = 0
+    if ns.modo == "chunks":
+        # Cada fase es un iterador de trozos; se consume antes del siguiente evento.
+        chunks = 0
+        for frame in event.confirmation:
+            chunks += 1
+            confirmation += len(frame)
+            size += frame_bytes(frame)
+        for frame in event.overshoot:
+            chunks += 1
+            overshoot += len(frame)
+            size += frame_bytes(frame)
+        # Un evento de k row groups da a lo sumo k + 1 trozos (el del borde entre fases
+        # sale en ambas) y el lector relee k - 2 de ellos. La cota `chunks - 2` es holgada:
+        # llega a k - 1 cuando la confirmación cae en un row group releído.
+        STATS.reread_allowed += max(0, chunks - 2)
+    else:
+        confirmation = len(event.confirmation.transact_time)
+        overshoot = len(event.overshoot.transact_time)
+        size = frame_bytes(event.confirmation, event.overshoot)
+    ticks = confirmation + overshoot
+    stats.confirmation += confirmation
+    stats.overshoot += overshoot
+    if ticks > stats.biggest_ticks:
+        stats.biggest_ticks = ticks
+        stats.biggest_bytes = size
+    if ticks >= ns.big_event_ticks:
+        bigs.append((reference, extreme, ticks))
 
 
 def default_roots() -> tuple[str, str]:
@@ -248,27 +329,30 @@ def parse_month(text: str) -> tuple[int, int]:
     return int(match[1]), int(match[2])
 
 
+EVENTS_FILE = re.compile(
+    r"/theta=(0\.\d{8})/year=(\d{4})/month=(\d{2})/events\.parquet$"
+)
+
+
 def lake_thetas(l2_root: str, key: tuple[str, str, str], first, last) -> list[str]:
-    """Los θ de L2 que tienen `events.parquet` en todos los meses de `first`..`last`."""
+    """Los θ de L2 que tienen `events.parquet` en todos los meses de `first`..`last`.
+
+    Se listan los archivos de forma recursiva y no los directorios `theta=`: en GCS un
+    prefijo no es una entrada, así que un listado no recursivo no los devuelve.
+    """
     fs, base = resolve_fs(l2_root)
     provider, market, asset = key
-    prefix = f"{base.rstrip('/')}/provider={provider}/market={market}/asset={asset}"
-    found = []
-    for info in fs.get_file_info(pafs.FileSelector(prefix)):
-        match = re.fullmatch(r"theta=(0\.\d{8})", info.base_name)
-        if match is not None and info.type == pafs.FileType.Directory:
-            found.append(match[1])
-    complete = [
-        theta
-        for theta in sorted(found)
-        if all(
-            fs.get_file_info(lake.l2_path(base, key, theta, month)).type
-            == pafs.FileType.File
-            for month in lake.months(first, last)
-        )
-    ]
-    if len(complete) != len(found):
-        skipped = sorted(set(found) - set(complete))
+    series = f"{base.rstrip('/')}/provider={provider}/market={market}/asset={asset}"
+    selector = pafs.FileSelector(series, recursive=True, allow_not_found=True)
+    present: dict[str, set[str]] = {}
+    for info in fs.get_file_info(selector):
+        match = EVENTS_FILE.search(info.path)
+        if match is not None and info.type == pafs.FileType.File:
+            present.setdefault(match[1], set()).add(f"{match[2]}-{match[3]}")
+    needed = {f"{y:04d}-{m:02d}" for y, m in lake.months(first, last)}
+    complete = sorted(theta for theta, found in present.items() if needed <= found)
+    if len(complete) != len(present):
+        skipped = sorted(set(present) - set(complete))
         log(f"θ sin L2 en todo el rango, omitidos: {', '.join(skipped)}")
     return complete
 
@@ -328,29 +412,15 @@ def run(ns: argparse.Namespace) -> int:
     error = None
     STATS.started = STATS.last_progress = time.perf_counter()
     try:
-        for event in read_frames(thetas, l1_root, l2_root, first, last, *key):
-            confirmation = len(event.confirmation.transact_time)
-            overshoot = len(event.overshoot.transact_time)
-            ticks = confirmation + overshoot
-            stats = per_theta.get(event.theta)
-            if stats is None:
-                stats = per_theta[event.theta] = ThetaStats()
-            stats.events += 1
-            stats.confirmation += confirmation
-            stats.overshoot += overshoot
-            if ticks > stats.biggest_ticks:
-                stats.biggest_ticks = ticks
-                stats.biggest_bytes = frame_bytes(event.confirmation, event.overshoot)
-            if ticks >= ns.big_event_ticks:
-                row = event.event
-                bigs.append(
-                    (
-                        row.column("reference_agg_trade_id")[0].as_py(),
-                        row.column("extreme_agg_trade_id")[0].as_py(),
-                        ticks,
-                    )
-                )
-            STATS.events += 1
+        options = {"chunks": True}
+        if ns.modo == "evento":
+            options = {"max_event_ticks": ns.max_event_ticks}
+        for event in read_frames(
+            thetas, l1_root, l2_root, first, last, *key, **options
+        ):
+            tally(event, per_theta, bigs, ns)
+            # Suelta el evento antes de que el lector entregue el siguiente.
+            del event
     except FramesError as exc:
         error = f"{type(exc).__name__}: {exc}"
     finally:
@@ -365,10 +435,10 @@ def run(ns: argparse.Namespace) -> int:
     else:
         phases = f"lectura+decodificación={STATS.rg_s:.1f} s, selección={wall - STATS.rg_s:.1f} s"
 
-    header = f"{'θ':>12} {'eventos':>10} {'ticks_confirmación':>19} {'ticks_overshoot':>16} {'evento_máx_ticks':>17} {'evento_máx_MiB':>15}"
+    header = f"{'θ':>12} {'eventos':>10} {'ticks_confirmación':>19} {'ticks_overshoot':>16} {'evento_máx_ticks':>17} {'evento_máx_MiB':>15} {'over_budget':>12}"
     lines = [
         f"{theta:>12} {s.events:>10} {s.confirmation:>19} {s.overshoot:>16} "
-        f"{s.biggest_ticks:>17} {s.biggest_bytes / MIB:>15.1f}"
+        f"{s.biggest_ticks:>17} {s.biggest_bytes / MIB:>15.1f} {s.over_budget:>12}"
         for theta, s in sorted(per_theta.items())
     ]
     log(header)
@@ -393,6 +463,14 @@ def run(ns: argparse.Namespace) -> int:
     big_open = open_sweep(bigs)
     small_open = len(thetas) * (ns.big_event_ticks - 1)
     rss = rss_bytes()
+    over_budget = sum(s.over_budget for s in per_theta.values())
+    over_budget_max = max((s.over_budget_max for s in per_theta.values()), default=0)
+    if ns.modo == "evento":
+        limit = GIB + int(ns.max_event_ticks * BYTES_PER_TICK)
+        limit_text = f"1 GiB + presupuesto de {ns.max_event_ticks} ticks"
+    else:
+        limit = GIB
+        limit_text = "1 GiB (modo chunks)"
 
     log(f"pared por fase: {phases}; total {wall:.1f} s")
     log(
@@ -421,6 +499,11 @@ def run(ns: argparse.Namespace) -> int:
         f"suma máxima de eventos abiertos ≥{ns.big_event_ticks} ticks={big_open} "
         f"({big_open * BYTES_PER_TICK / MIB:.0f} MiB), los menores aportan a lo sumo {small_open}"
     )
+    if ns.modo == "evento":
+        log(
+            f"eventos sobre el presupuesto de {ns.max_event_ticks} ticks (over_budget)={over_budget}; "
+            f"el mayor tiene a lo sumo {over_budget_max} ticks (por ids de L2)"
+        )
     if rate:
         log(
             f"extrapolación al histórico ({HISTORY_TICKS // 1_000_000} M de ticks) a esa tasa: "
@@ -431,25 +514,39 @@ def run(ns: argparse.Namespace) -> int:
     if error is None:
         checks.append((f"pared {wall:.0f} s ≤ {max_wall:.0f} s", wall <= max_wall))
         if not multi:
-            limit = GIB + biggest
             checks.append(
                 (
-                    f"RSS pico {rss / MIB:.0f} MiB ≤ 1 GiB + evento más grande ({limit / MIB:.0f} MiB)",
+                    f"RSS pico {rss / MIB:.0f} MiB ≤ {limit_text} ({limit / MIB:.0f} MiB)",
                     rss <= limit,
                 )
             )
         else:
+            # El modo por chunks relee los row groups que sobran de un evento de más de dos
+            # (TRD-L3 §10.3, umbral 3): esas relecturas se miden aparte y no cuentan en los bytes.
+            allowed = STATS.reread_allowed if ns.modo == "chunks" else 0
             checks.append(
                 (
-                    f"row groups de L1 decodificados más de una vez: {STATS.l1_repeated}",
-                    STATS.l1_repeated == 0,
+                    (
+                        f"row groups de L1 decodificados más de una vez: {STATS.l1_repeated} "
+                        f"(relecturas admitidas de eventos de más de dos row groups: {allowed})"
+                    ),
+                    STATS.l1_repeated <= allowed,
                 )
             )
             if STATS.count_io:
+                counted = month_read - (
+                    sum(
+                        n
+                        for path, n in STATS.l1_repeated_bytes.items()
+                        if path in target
+                    )
+                    if ns.modo == "chunks"
+                    else 0
+                )
                 checks.append(
                     (
-                        f"bytes de L1 del rango {month_read} ≤ {ns.max_bytes_ratio} × {month_bytes}",
-                        month_read <= ns.max_bytes_ratio * month_bytes,
+                        f"bytes de L1 del rango {counted} ≤ {ns.max_bytes_ratio} × {month_bytes}",
+                        counted <= ns.max_bytes_ratio * month_bytes,
                     )
                 )
     failed = error is not None
@@ -464,7 +561,7 @@ def run(ns: argparse.Namespace) -> int:
         f"ticks_l1={STATS.l1_ticks} pared_s={wall:.1f} lectura_s={'n/d' if reading is None else f'{reading:.1f}'} "
         f"decodificación_s={'n/d' if reading is None else f'{decode:.1f}'} selección_s={selection:.1f} "
         f"rss_pico_mib={rss / MIB:.0f} bytes_l1={STATS.bytes['l1'] if STATS.count_io else 'n/d'} "
-        f"ticks_s={rate:.0f} veredicto={verdict}"
+        f"ticks_s={rate:.0f} modo={ns.modo} over_budget={over_budget} veredicto={verdict}"
     )
     return 1 if failed else 0
 
@@ -498,6 +595,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--asset", default="BTCUSDT")
     parser.add_argument("--max-wall-s", type=float)
     parser.add_argument("--max-bytes-ratio", type=float, default=1.1)
+    parser.add_argument("--modo", choices=("chunks", "evento"), default="chunks")
+    parser.add_argument("--max-event-ticks", type=int, default=20_000_000)
     parser.add_argument("--big-event-ticks", type=int, default=100_000)
     parser.add_argument("--sin-contar-io", action="store_true")
     return run(parser.parse_args(argv))

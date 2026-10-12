@@ -6,6 +6,8 @@ cadenas, enteros y booleanos). Un error sin `check_type` no tiene hallazgo propi
 unidad aborta igual y no escribe nada.
 """
 
+from __future__ import annotations
+
 from dc_frames.lake import Month
 
 
