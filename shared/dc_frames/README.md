@@ -16,13 +16,15 @@ errores del lector, y porque `pyutils` no sabe nada de L3.
 ## Qué contiene
 
 - `read_frames(thetas, l1_root, l2_root, start, end, provider="binance",
-  market="spot", asset="BTCUSDT", chunks=False, max_event_ticks=None)`:
+  market="spot", asset="BTCUSDT", chunks=False, max_event_ticks=None,
+  columns=None)`:
   iterador de `EventFrames`, uno por evento cerrado de los meses `start`..`end`
   (tuplas `(año, mes)`, inclusivas, de las particiones de L2). `thetas` es un θ
   (`Decimal` o `str`) o varios; con varios, cada row group de L1 se decodifica
   una sola vez (en modo por chunks, salvo por los eventos que abarcan más de dos
   row groups, ver [Modos de lectura](#modos-de-lectura)). Dentro de un θ salen por `confirm_agg_trade_id`; entre θ no hay
-  orden.
+  orden. `columns` proyecta las columnas de `events.parquet` que se decodifican
+  (siempre se leen además las tres fronteras y `confirm_time`); sin él, las 11.
 - `frames_of(event, l1_root, ..., month=None)`: las tramas de un evento cuya
   fila de L2 ya se tiene (un `RecordBatch` o `Table` de una fila, o un mapa con
   sus 11 columnas). Decodifica solo los row groups que el evento toca. Con un
@@ -39,11 +41,12 @@ errores del lector, y porque `pyutils` no sabe nada de L3.
   `family_path(root, key, theta, month, family)` y `l2_path(root, key, theta,
   month)`: el escritor de familias y las rutas de la partición. Ver
   [Escritor de familias](#escritor-de-familias).
-- Errores: `FrameBoundaryError` (una frontera de L2 no es un tick de L1, o el
+- Errores: `FrameBoundaryError` (con los atributos `theta`, `field`, `got` y `wanted`;
+  una frontera de L2 no es un tick de L1, o el
   tick de confirmación no tiene `transact_time = confirm_time`),
   `FramesInputError` (falta un archivo, el esquema o el orden no cumplen el
   contrato) y `FamilySkeletonMismatch` (el archivo de familia no repite el
-  esqueleto).
+  esqueleto; el atributo `detail` dice en qué difiere).
 
 ```python
 from dc_frames import read_frames

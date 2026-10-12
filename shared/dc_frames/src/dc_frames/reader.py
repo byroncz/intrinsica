@@ -7,7 +7,7 @@ group, para todos los eventos del row group a la vez; el único bucle de Python 
 por evento, que arma sus slices.
 """
 
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -16,6 +16,7 @@ import numpy as np
 import pyarrow as pa
 
 from dc_frames.lake import (
+    BOUNDARY_COLUMNS,
     L1,
     L1_COLUMNS,
     EventGroup,
@@ -288,7 +289,11 @@ class _Cursor:
             raise FrameBoundaryError(
                 f"θ {self.theta}: el tick de confirmación {bounds[i, 1]} (evento con "
                 f"referencia {bounds[i, 0]}) tiene transact_time {found[wrong[0]]} y L2 "
-                f"dice confirm_time {wanted[wrong[0]]}: L1 y L2 no cuadran"
+                f"dice confirm_time {wanted[wrong[0]]}: L1 y L2 no cuadran",
+                theta=f"{self.theta:.8f}",
+                field="confirm_time",
+                got=found[wrong[0]],
+                wanted=wanted[wrong[0]],
             )
 
     def _boundary_error(
@@ -300,7 +305,11 @@ class _Cursor:
             f"θ {self.theta}: el id de {_NAMES[j]} {event[j]} del evento "
             f"(referencia {event[0]}, confirmación {event[1]}, extremo {event[2]}) "
             f"no es un tick de L1: cae en un hueco del proveedor o L1 y L2 no cuadran "
-            f"(row group de L1 con ids {rg.low}..{rg.high})"
+            f"(row group de L1 con ids {rg.low}..{rg.high})",
+            theta=f"{self.theta:.8f}",
+            field=BOUNDARY_COLUMNS[j],
+            got=event[j],
+            wanted="un tick de L1",
         )
 
 
@@ -388,7 +397,11 @@ def _drive(
         rows.close()
     raise FrameBoundaryError(
         "L1 terminó antes de cerrar todos los eventos; el extremo no existe como tick. "
-        + "; ".join(c.describe() for c in live)
+        + "; ".join(c.describe() for c in live),
+        theta=f"{live[0].theta:.8f}",
+        field="extreme_agg_trade_id",
+        got="ausente",
+        wanted="un tick de L1",
     )
 
 
@@ -418,6 +431,7 @@ def read_frames(
     asset: str = DEFAULT_KEY[2],
     chunks: bool = False,
     max_event_ticks: int | None = None,
+    columns: Sequence[str] | None = None,
 ) -> Iterator[EventFrames]:
     """Los eventos cerrados de los θ en los meses `start`..`end`, con sus tramas.
 
@@ -446,6 +460,10 @@ def read_frames(
     consumirlos después ancla los row groups de sus trozos. No admite
     `max_event_ticks`: no tiene presupuesto.
 
+    `columns` proyecta las columnas de `events.parquet` que se decodifican: `EventFrames.event`
+    trae esas más las tres fronteras y `confirm_time`, que el lector siempre lee. Sin él
+    trae las 11.
+
     Errores: `FramesInputError` si falta un archivo o no cumple su contrato;
     `FrameBoundaryError` si una frontera de L2 no es un tick de L1 o el tick de
     confirmación no tiene `transact_time = confirm_time`.
@@ -466,7 +484,9 @@ def read_frames(
     if start > end:
         raise ValueError(f"start {start} es posterior a end {end}")
     key = (provider, market, asset)
-    return _read(values, l1_root, l2_root, start, end, key, chunks, max_event_ticks)
+    return _read(
+        values, l1_root, l2_root, start, end, key, chunks, max_event_ticks, columns
+    )
 
 
 def _read(
@@ -478,13 +498,14 @@ def _read(
     key: tuple[str, str, str],
     chunks: bool,
     max_event_ticks: int | None,
+    columns: Sequence[str] | None,
 ) -> Iterator[EventFrames]:
     l1 = L1(l1_root, key)
     previous = _Previous() if chunks else None
     cursors = [
         _Cursor(
             t,
-            event_groups(l2_root, key, f"{t:.8f}", start, end),
+            event_groups(l2_root, key, f"{t:.8f}", start, end, columns),
             l1,
             chunks,
             max_event_ticks,

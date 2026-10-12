@@ -10,6 +10,7 @@ members = [
     "intrinsica",
     "l1-ingest",
     "l2-dc-events",
+    "l3-dc-descriptors",
     "ops-tools",
     "pyutils",
     "viz-tiles",
@@ -445,6 +446,7 @@ dependencies = [
     { name = "dq", extra = ["reader"] },
     { name = "l1-ingest" },
     { name = "l2-dc-events" },
+    { name = "l3-dc-descriptors" },
     { name = "ops-tools" },
     { name = "viz-tiles" },
 ]
@@ -463,6 +465,7 @@ requires-dist = [
     { name = "dq", extras = ["reader"], editable = "shared/dq" },
     { name = "l1-ingest", editable = "layers/l1_ingest" },
     { name = "l2-dc-events", editable = "layers/l2_dc_events" },
+    { name = "l3-dc-descriptors", editable = "layers/l3_dc_descriptors" },
     { name = "ops-tools", editable = "layers/ops_tools" },
     { name = "viz-tiles", editable = "layers/viz_tiles" },
 ]
@@ -512,6 +515,25 @@ requires-dist = [
     { name = "pyarrow", specifier = ">=25.0.1" },
     { name = "pyutils", editable = "shared/pyutils" },
     { name = "pyyaml", specifier = ">=6.0" },
+]
+
+[[package]]
+name = "l3-dc-descriptors"
+version = "0.1.0"
+source = { editable = "layers/l3_dc_descriptors" }
+dependencies = [
+    { name = "dc-frames" },
+    { name = "numpy" },
+    { name = "pyarrow" },
+    { name = "pyutils" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "dc-frames", editable = "shared/dc_frames" },
+    { name = "numpy", specifier = ">=2.0" },
+    { name = "pyarrow", specifier = ">=25.0.1" },
+    { name = "pyutils", editable = "shared/pyutils" },
 ]
 
 [[package]]

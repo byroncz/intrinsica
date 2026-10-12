@@ -1,0 +1,19 @@
+[project]
+name = "l3_dc_descriptors"
+version = "0.1.0"
+description = "Capa L3 de intrinsica: descriptores por evento DC y θ, a partir de L1 y L2 con el lector de tramas."
+requires-python = ">=3.14"
+dependencies = [
+    "dc_frames",
+    "numpy>=2.0",
+    "pyarrow>=25.0.1",
+    "pyutils",
+]
+
+[build-system]
+requires = ["uv_build"]
+build-backend = "uv_build"
+
+[tool.uv.sources]
+dc_frames = { workspace = true }
+pyutils = { workspace = true }

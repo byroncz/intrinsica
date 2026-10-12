@@ -240,6 +240,85 @@ events = pq.read_table(
 )
 ```
 
+## Salida Parquet de L3
+
+Contrato hacia L4: el resumen por fase de cada evento de L2, una fila por evento
+y θ, en la misma partición que su fila de L2. Fuente de diseño:
+[TRD-L3 §7.2](TRD/l3.md#72-salida--summariesparquet-contrato-hacia-l4) y
+[§7.3](TRD/l3.md#73-directorio-de-la-capa-y-esqueleto-común). Fuente en código:
+`SUMMARIES_SCHEMA` en
+[`layers/l3_dc_descriptors/src/l3_dc_descriptors/schema.py`](../layers/l3_dc_descriptors/src/l3_dc_descriptors/schema.py).
+Una prueba (`layers/l3_dc_descriptors/tests/test_l3_contract_doc.py`) rompe el CI
+si la tabla se desvía del código.
+
+La fase de confirmación es `(R, C]` y el overshoot, `(C, E]`, con `R`, `C` y `E`
+los `agg_trade_id` de referencia, confirmación y extremo de la fila de L2. Las
+cantidades y los precios son el entero sin escalar de un `DECIMAL(18,8)`; los
+tiempos y las duraciones, microsegundos. `is_buyer_maker = false` suma en
+`*_quantity_buy` y `true`, en `*_quantity_sell`.
+
+### Esquema de `summaries.parquet`
+
+| Columna | Tipo Arrow/Parquet | Nulable | Descripción |
+|---|---|---|---|
+| `theta` | decimal128(9, 8) | no | θ del evento; clave, redundante con la partición |
+| `confirm_agg_trade_id` | int64 | no | Clave: con `theta` identifica al evento y une con su fila de L2 |
+| `c_ticks` | int64 | no | Ticks de la fase de confirmación; al menos 1 |
+| `c_quantity_buy` | decimal128(18, 8) | no | Cantidad con agresor comprador en la confirmación |
+| `c_quantity_sell` | decimal128(18, 8) | no | Cantidad con agresor vendedor en la confirmación |
+| `c_price_max` | decimal128(18, 8) | no | Precio máximo real de la confirmación |
+| `c_price_min` | decimal128(18, 8) | no | Precio mínimo real de la confirmación |
+| `c_duration` | int64 | no | Último menos primer `transact_time` de la confirmación; 0 si todos comparten el instante |
+| `c_vwap` | decimal128(18, 8) | no | `Σ price·quantity / Σ quantity` de la confirmación, half-even a 10⁻⁸ |
+| `os_ticks` | int64 | no | Ticks del overshoot; 0 si el overshoot es vacío (`E = C`) |
+| `os_quantity_buy` | decimal128(18, 8) | no | Como `c_quantity_buy`, en el overshoot; 0 si está vacío |
+| `os_quantity_sell` | decimal128(18, 8) | no | Como `c_quantity_sell`, en el overshoot; 0 si está vacío |
+| `os_price_max` | decimal128(18, 8) | sí | Precio máximo del overshoot; nulo si está vacío |
+| `os_price_min` | decimal128(18, 8) | sí | Precio mínimo del overshoot; nulo si está vacío |
+| `os_duration` | int64 | sí | Duración del overshoot; nula si está vacío |
+| `os_vwap` | decimal128(18, 8) | sí | VWAP del overshoot; nulo si está vacío |
+| `confirm_instant_ticks` | int64 | no | Ticks de la confirmación con `transact_time = confirm_time`; al menos 1 |
+| `confirm_instant_price_best` | decimal128(18, 8) | no | Precio más favorable del instante de confirmación: el máximo en un upturn, el mínimo en un downturn |
+| `confirm_instant_price_worst` | decimal128(18, 8) | no | Precio menos favorable del instante: el mínimo en un upturn, el máximo en un downturn |
+
+La cantidad total de una fase no es columna: es `buy + sell` y el resumidor
+comprueba al escribir que iguala la suma de `quantity` de sus ticks.
+
+### Disposición física
+
+- **Raíz**: una ruta local o `gs://<bucket>/<prefijo>` de L3.
+- **Partición**: la de L2,
+  `<raíz>/provider=<p>/market=<m>/asset=<a>/theta=<t>/year=YYYY/month=MM/`, con
+  `summaries.parquet` dentro. Una fila va en la partición del mes que cierra su
+  evento, la misma de su fila de `events.parquet`.
+- **Esqueleto**: las mismas filas que `events.parquet` de la partición, en el
+  mismo orden (`confirm_agg_trade_id` ascendente) y con los mismos límites de row
+  group: la fila `i` de un archivo es la fila `i` del otro, también por row
+  group. Lo exige el escritor de familias de `shared/dc_frames`, que aborta con
+  `family_skeleton_mismatch` si no coincide.
+- **Formato**: Parquet con ZSTD nivel 3, estadísticas por columna,
+  `sorting_columns` por `confirm_agg_trade_id` y sin diccionario (las columnas
+  enteras en `DELTA_BINARY_PACKED` y las demás en `PLAIN`). La `state_version`
+  del archivo (semver) va en los metadatos del esquema.
+- **Sobrescritura atómica e idempotencia**: igual que en L2 (temporal y
+  `commit`; `content_hash` de `pyutils` sobre el contenido lógico). Re-ejecutar
+  un mes de un θ con las mismas entradas da el mismo `content_hash`.
+- **Fail-closed**: la unidad no publica ningún archivo si falta una entrada de
+  L2, si L2 contradice a L1 o si no cuadra la conciliación de ticks del mes. La
+  publicación es atómica por archivo y secuencial por θ: si falla en uno, los θ ya
+  publicados quedan y re-ejecutar el mes los reescribe igual.
+
+### Leer
+
+```python
+import pyarrow.parquet as pq
+
+summaries = pq.read_table(
+    "<raíz>/provider=binance/market=spot/asset=BTCUSDT"
+    "/theta=0.00010000/year=2020/month=01/summaries.parquet"
+)
+```
+
 ## Lago de hallazgos de calidad de datos
 
 Contrato del lago donde toda capa deja sus hallazgos de calidad de datos (DQ).

@@ -150,6 +150,86 @@ def write_l2(
     return path
 
 
+def _point(name: str, nullable: bool = False) -> list[pa.Field]:
+    return [
+        pa.field(f"{name}_price", DEC, nullable=nullable),
+        pa.field(f"{name}_time", pa.int64(), nullable=nullable),
+        pa.field(f"{name}_agg_trade_id", pa.int64(), nullable=nullable),
+    ]
+
+
+# `carry_over.parquet` de L2 (TRD-L2 §7.4): L3 lo lee para conciliar los ticks del mes.
+CARRY_SCHEMA = pa.schema(
+    [
+        pa.field("provider", pa.string(), nullable=False),
+        pa.field("market", pa.string(), nullable=False),
+        pa.field("asset", pa.string(), nullable=False),
+        pa.field("theta", THETA_TYPE, nullable=False),
+        pa.field("year", pa.int32(), nullable=False),
+        pa.field("month", pa.int32(), nullable=False),
+        pa.field("state_version", pa.string(), nullable=False),
+        pa.field("direction", pa.int8(), nullable=False),
+        *_point("ext_high"),
+        *_point("ext_low"),
+        pa.field("has_pending_event", pa.bool_(), nullable=False),
+        *_point("pending_reference", nullable=True),
+        *_point("pending_confirm", nullable=True),
+    ]
+)
+
+
+def write_carry_over(
+    root: Path,
+    theta: int,
+    month: tuple[int, int],
+    direction: int,
+    *,
+    pending_reference: int | None = None,
+    ext_high: int = 0,
+    ext_low: int = 0,
+    has_pending: bool | None = None,
+) -> Path:
+    """El carry-over de un θ al cierre de `month`, con solo los campos que L3 lee.
+
+    `pending_reference` es la referencia del evento pendiente (`has_pending_event` vale
+    `True` si se da, salvo que `has_pending` diga otra cosa); `ext_high` y `ext_low` son
+    los ids de los extremos. Los precios y tiempos son de relleno.
+    """
+    pending = pending_reference is not None if has_pending is None else has_pending
+    row: dict = {
+        "provider": KEY[0],
+        "market": KEY[1],
+        "asset": KEY[2],
+        "theta": Decimal(theta).scaleb(-8),
+        "year": month[0],
+        "month": month[1],
+        "state_version": "1.0.0",
+        "direction": direction,
+        "has_pending_event": pending,
+    }
+    for name, tick in (("ext_high", ext_high), ("ext_low", ext_low)):
+        row |= {
+            f"{name}_price": Decimal(1),
+            f"{name}_time": 0,
+            f"{name}_agg_trade_id": tick,
+        }
+    # `pending_confirm` es relleno: L3 no lo lee, así que copia la referencia.
+    for name in ("pending_reference", "pending_confirm"):
+        row |= {
+            f"{name}_price": Decimal(1) if pending_reference is not None else None,
+            f"{name}_time": 0 if pending_reference is not None else None,
+            f"{name}_agg_trade_id": pending_reference,
+        }
+    path = (
+        partition(root, month).parent.parent
+        / f"theta={theta_text(theta)}"
+        / f"year={month[0]:04d}/month={month[1]:02d}/carry_over.parquet"
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pq.write_table(pa.Table.from_pylist([row], schema=CARRY_SCHEMA), path)
+    return path
+
+
 SECOND_MONTH = (2017, 9)
 
 

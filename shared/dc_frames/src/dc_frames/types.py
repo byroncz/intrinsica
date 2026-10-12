@@ -18,18 +18,33 @@ class FramesInputError(FramesError):
 class FrameBoundaryError(FramesError):
     """L1 y L2 no cuadran: una frontera de un evento no existe como tick en L1.
 
-    El lector no corre el límite al tick vecino: falla (fail-closed).
+    El lector no corre el límite al tick vecino: falla (fail-closed). `theta` (con 8
+    decimales), `field` (la columna de L2 que no cuadra), `got` y `wanted` describen el
+    fallo sin tener que leer el mensaje.
     """
+
+    def __init__(
+        self, message: str, *, theta: str, field: str, got: object, wanted: object
+    ) -> None:
+        super().__init__(message)
+        self.theta = theta
+        self.field = field
+        self.got = str(got)
+        self.wanted = str(wanted)
 
 
 class FamilySkeletonMismatch(FramesError):
     """Un archivo de familia no repite filas, orden o row groups del esqueleto de la partición.
 
     Es el hallazgo `family_skeleton_mismatch` (TRD-L3 §7.3): el escritor aborta y no
-    publica nada.
+    publica nada. `detail` dice qué difiere.
     """
 
     check_type = "family_skeleton_mismatch"
+
+    def __init__(self, message: str, detail: str) -> None:
+        super().__init__(message)
+        self.detail = detail
 
 
 @dataclass(frozen=True, slots=True)

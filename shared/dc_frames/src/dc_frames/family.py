@@ -166,7 +166,8 @@ class FamilyWriter:
     def _mismatch(self, detail: str) -> FamilySkeletonMismatch:
         return FamilySkeletonMismatch(
             f"family_skeleton_mismatch: {self.path} no repite el esqueleto de "
-            f"{self.skeleton_path}: {detail}"
+            f"{self.skeleton_path}: {detail}",
+            detail,
         )
 
     def _check_order(self, batch: pa.RecordBatch, n: int) -> None:

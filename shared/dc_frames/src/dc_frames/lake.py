@@ -4,7 +4,7 @@ Solo se leen archivos Parquet por nombre de columna: aquí no se importa nada de
 ni de L2 (las capas no se importan entre sí, RNF-14 del maestro).
 """
 
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
@@ -233,8 +233,8 @@ class EventGroup:
     """Un row group de `events.parquet`: sus filas y sus tres ids de frontera.
 
     `bounds[i] = (R, C, E)` del evento `i` y `confirm_times[i]` es su `confirm_time`, que
-    el tick `C` debe tener como `transact_time`. `batch` conserva las 11 columnas y
-    `month` es la partición de L2 que cierra a todos los eventos del row group.
+    el tick `C` debe tener como `transact_time`. `batch` conserva las 11 columnas, o las
+    proyectadas si se pidieron, y `month` es la partición de L2 que cierra a todos los eventos del row group.
     """
 
     batch: pa.RecordBatch
@@ -274,9 +274,15 @@ def event_groups(
     theta: str,
     first: Month,
     last: Month,
+    columns: Sequence[str] | None = None,
 ) -> Iterator[EventGroup]:
-    """Los row groups de eventos de un θ, mes a mes, de uno en uno y sin vacíos."""
+    """Los row groups de eventos de un θ, mes a mes, de uno en uno y sin vacíos.
+
+    Con `columns` solo se decodifican esas columnas más las cuatro que el lector exige
+    (las tres fronteras y `confirm_time`); sin él, las 11 de `events.parquet`.
+    """
     expected = {name: pa.int64() for name in (*BOUNDARY_COLUMNS, CONFIRM_TIME)}
+    wanted = None if columns is None else list(dict.fromkeys([*expected, *columns]))
     for month in months(first, last):
         path = l2_path(root, key, theta, month)
         parquet = open_parquet(
@@ -284,10 +290,13 @@ def event_groups(
         )
         with closing(parquet):
             check_columns(parquet.schema_arrow, expected, path)
+            for name in wanted or ():
+                if name not in parquet.schema_arrow.names:
+                    raise FramesInputError(f"{path}: falta la columna {name!r}")
             for i in range(parquet.metadata.num_row_groups):
                 if parquet.metadata.row_group(i).num_rows == 0:
                     continue
-                table = parquet.read_row_group(i).combine_chunks()
+                table = parquet.read_row_group(i, columns=wanted).combine_chunks()
                 yield event_group(
                     table.to_batches()[0], f"{path}, row group {i}", month
                 )
