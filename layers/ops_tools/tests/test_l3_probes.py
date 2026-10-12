@@ -341,6 +341,47 @@ def test_los_bytes_de_meses_anteriores_no_cuentan_contra_el_umbral(tmp_path, cap
     assert in_range == total - earlier
 
 
+def test_en_modo_chunks_solo_se_restan_las_relecturas_de_archivos_del_rango(
+    tmp_path, capsys, monkeypatch
+):
+    ticks, events = read_ticks(), read_events()
+    reference = min(int(rows[0]["reference_agg_trade_id"]) for rows in events.values())
+    l1, l2 = tmp_path / "l1", tmp_path / "l2"
+    earlier_path = str(
+        write_l1(l1, [t for t in ticks if t["id"] <= reference], 5, (2017, 7))
+    )
+    write_l1(l1, [t for t in ticks if t["id"] > reference], 40)
+    for theta, rows in events.items():
+        write_l2(l2, theta, rows, 3)
+    probe = load("l3_probe_reader")
+    read_row_group = probe._ProbeFile.read_row_group
+
+    def read_twice_in_earlier_month(self, i, columns=None, **kwargs):
+        # El fixture solo hace releer al lector en el mes del rango: aquí se fuerza una
+        # relectura en el mes previo, que el lector abre hacia atrás.
+        table = read_row_group(self, i, columns, **kwargs)
+        if self._probe_path == earlier_path:
+            read_row_group(self, i, columns, **kwargs)
+        return table
+
+    monkeypatch.setattr(probe._ProbeFile, "read_row_group", read_twice_in_earlier_month)
+    probe.main(
+        [
+            "--theta",
+            "all",
+            *args(l1, l2, "--modo", "chunks", "--max-bytes-ratio", "1000"),
+        ]
+    )
+    out = capsys.readouterr().out
+    repeated = probe.STATS.l1_repeated_bytes
+    in_range_repeated = sum(n for path, n in repeated.items() if path != earlier_path)
+    month_read = int(re.search(r"del rango (\d+) =", out)[1])
+    counted = int(re.search(r"bytes de L1 del rango (\d+)", out)[1])
+    assert repeated[earlier_path] > 0
+    assert in_range_repeated > 0
+    assert counted == month_read - in_range_repeated
+
+
 def test_la_sonda_restaura_el_lector_al_terminar(lake, tmp_path, capsys):
     l1, l2, events = lake
     original = lake_module.open_parquet

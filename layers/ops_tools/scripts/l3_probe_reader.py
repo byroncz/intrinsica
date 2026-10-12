@@ -33,8 +33,11 @@ modo evento, 1 GiB más el presupuesto de ticks (`--max-event-ticks` × 40 B por
 que puede pesar el evento más grande que el lector entrega entero.
 
 Row groups: TRD-L3 §10.3 pide tantas decodificaciones como row groups del mes. El lector salta
-por estadísticas los que ningún evento necesita (el tramo tras el último evento cerrado), así
-que la sonda exige que ninguno se decodifique más de una vez y reporta cuántos se saltaron.
+por estadísticas los que ningún evento necesita (el tramo tras el último evento cerrado) y la
+sonda reporta cuántos se saltaron. En modo evento exige que ninguno se decodifique más de una
+vez. En modo chunks admite las relecturas de los eventos de más de dos row groups (el lector
+retiene dos), las acota con los trozos de cada evento y resta de los bytes del rango solo las
+de los archivos del rango: las de meses anteriores ya quedan fuera de ellos.
 Los bytes incluyen los pies de Parquet, que el lector abre más de una vez por mes: en un
 archivo real pesan nada, en uno de fixtures dominan (por eso `--max-bytes-ratio`).
 
@@ -95,9 +98,10 @@ class Stats:
     l1_files: dict[str, list[int]] = field(default_factory=dict)
     l1_seen: set[tuple[str, int]] = field(default_factory=set)
     l1_repeated: int = 0
-    # Bytes por metadatos de esas decodificaciones repetidas y cota de las que el modo por
-    # chunks admite: los trozos de cada evento más allá de los dos que retiene el lector.
-    l1_repeated_bytes: int = 0
+    # Bytes por metadatos de esas decodificaciones repetidas, por ruta de L1 (solo se restan
+    # los de los archivos del rango), y cota de las que el modo por chunks admite: los
+    # trozos de cada evento más allá de los dos que retiene el lector.
+    l1_repeated_bytes: dict[str, int] = field(default_factory=dict)
     reread_allowed: int = 0
     started: float = 0.0
     last_progress: float = 0.0
@@ -196,7 +200,9 @@ class _ProbeFile(pq.ParquetFile):
             STATS.l1_files[self._probe_path][2] += 1
             if (self._probe_path, i) in STATS.l1_seen:
                 STATS.l1_repeated += 1
-                STATS.l1_repeated_bytes += size
+                STATS.l1_repeated_bytes[self._probe_path] = (
+                    STATS.l1_repeated_bytes.get(self._probe_path, 0) + size
+                )
             STATS.l1_seen.add((self._probe_path, i))
         progress()
         return table
@@ -289,7 +295,8 @@ def tally(
             overshoot += len(frame)
             size += frame_bytes(frame)
         # Un evento de k row groups da a lo sumo k + 1 trozos (el del borde entre fases
-        # sale en ambas) y el lector relee k - 2 de ellos: cota de las relecturas.
+        # sale en ambas) y el lector relee k - 2 de ellos. La cota `chunks - 2` es holgada:
+        # llega a k - 1 cuando la confirmación cae en un row group releído.
         STATS.reread_allowed += max(0, chunks - 2)
     else:
         confirmation = len(event.confirmation.transact_time)
@@ -528,7 +535,13 @@ def run(ns: argparse.Namespace) -> int:
             )
             if STATS.count_io:
                 counted = month_read - (
-                    STATS.l1_repeated_bytes if ns.modo == "chunks" else 0
+                    sum(
+                        n
+                        for path, n in STATS.l1_repeated_bytes.items()
+                        if path in target
+                    )
+                    if ns.modo == "chunks"
+                    else 0
                 )
                 checks.append(
                     (
