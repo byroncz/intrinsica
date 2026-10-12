@@ -238,7 +238,7 @@ Descrita arriba, en "Permisos".
 Dos scripts de `layers/ops_tools/scripts/` que miden el criterio de aceptación del
 lector `shared/dc_frames` ([TRD-L3 §10.3, ADR-L3-09](../TRD/l3.md)). La imagen trae
 `dc_frames` desde `ops_tools` 0.2.0 y su modo por chunks (`chunks=True`,
-`max_event_ticks`) desde la 0.3.1: sin esa versión desplegada, el `import` o la sonda fallan.
+`max_event_ticks`) desde la 0.3.0: sin esa versión desplegada, el `import` o la sonda fallan.
 Súbelos como cualquier script (`gcloud storage cp layers/ops_tools/scripts/<script>.py
 gs://<proyecto>-ops/scripts/`) y lánzalos con `job` = `ops-script`. Ambos solo leen, toman
 las raíces de L1 y L2 del proyecto desde `OPS_RESULTS_URI` y listan los θ de L2 de forma
