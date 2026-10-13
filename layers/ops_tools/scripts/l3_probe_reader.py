@@ -121,21 +121,36 @@ def log(message: str) -> None:
 
 
 class _CountedFile:
-    """Un archivo de solo lectura que cuenta los bytes y el tiempo de cada lectura."""
+    """Un archivo de solo lectura que cuenta los bytes y el tiempo de cada lectura.
+
+    Lleva la posición él mismo (`_position`) y nunca le pasa al archivo interno un seek a un
+    offset ≥ tamaño: el archivo de GCS reabre la lectura del objeto en cada seek y GCS
+    responde "Request range not satisfiable" a cualquier offset igual o mayor que el tamaño.
+    """
 
     def __init__(self, inner, kind: str, path: str, size: int) -> None:
         self._inner = inner
         self._kind = kind
         self._path = path
         self._size = size
+        self._position = 0
+        # Dónde está el archivo interno; solo se mueve cuando una lectura lo necesita.
+        self._inner_position = 0
 
     def read(self, nbytes: int = -1) -> bytes:
+        if self._position >= self._size:
+            return b""
         start = time.perf_counter()
+        if self._inner_position != self._position:
+            self._inner.seek(self._position, 0)
+            self._inner_position = self._position
         data = (
             self._inner.read()
             if nbytes is None or nbytes < 0
             else self._inner.read(nbytes)
         )
+        self._position += len(data)
+        self._inner_position += len(data)
         STATS.io_s += time.perf_counter() - start
         STATS.bytes[self._kind] += len(data)
         if self._kind == "l1":
@@ -143,15 +158,23 @@ class _CountedFile:
         return data
 
     def seek(self, position: int, whence: int = 0) -> int:
-        # `pa.PythonFile` pide el tamaño con `seek(0, 2)`; en GCS el archivo interno lo
-        # resuelve leyendo desde el final y responde "Request range not satisfiable".
-        # El tamaño ya se conoce: se pasa a un seek absoluto, que no lee nada.
-        if whence == 2:
-            return self._inner.seek(self._size + position, 0)
-        return self._inner.seek(position, whence)
+        # `pa.PythonFile` pide el tamaño con `seek(0, 2)`. Se calcula la posición nueva sin
+        # tocar el archivo interno: `read` lo posiciona justo antes de leer.
+        if whence == 0:
+            target = position
+        elif whence == 1:
+            target = self._position + position
+        elif whence == 2:
+            target = self._size + position
+        else:
+            raise ValueError(f"whence inválido: {whence}")
+        if target < 0:
+            raise OSError(f"seek a una posición negativa: {target}")
+        self._position = target
+        return target
 
     def tell(self) -> int:
-        return self._inner.tell()
+        return self._position
 
     def readable(self) -> bool:
         return True

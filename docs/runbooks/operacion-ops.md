@@ -281,6 +281,15 @@ entradas.
   repite con `--sin-contar-io` para la pared del lector sin envolver. El umbral de bytes
   (`--max-bytes-ratio`) solo cuenta los archivos de L1 del rango; los bytes de meses
   anteriores, donde cae la referencia del primer evento, salen aparte en `bytes leídos`.
+  - **Por qué el envoltorio no reenvía seeks al final (ITSC-344).** El archivo de GCS de
+    pyarrow reabre la lectura del objeto en cada seek, y GCS rechaza con 416 ("Request range
+    not satisfiable") cualquier offset igual o mayor que el tamaño, no solo `whence=2`.
+    `pa.PythonFile` hace `seek(0, 2)` para medir el archivo, así que `_CountedFile` lleva la
+    posición él mismo: `seek` solo la calcula, `tell` la devuelve, y `read` mueve el archivo
+    interno justo antes de leer, nunca a un offset ≥ tamaño (desde el final devuelve `b""`).
+    El archivo falso de las pruebas (`RangedFile`) debe modelar lo mismo: rechazar con
+    `OSError("Request range not satisfiable")` todo seek a offset ≥ tamaño, con cualquier
+    `whence`, y toda lectura desde ahí. Uno que solo rechaza `whence=2` dejó pasar este fallo.
 - **`l3_probe_ties.py`**: cuántos `transact_time` distintos hay en un milisegundo de L1
   y, para cada θ que confirma en él, el tamaño de su grupo de empate (ticks con el
   `transact_time` de la confirmación, cuántos hasta `C` y cuántos después).

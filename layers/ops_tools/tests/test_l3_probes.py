@@ -10,7 +10,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pyarrow as pa
 import pyarrow.fs as pafs
+import pyarrow.parquet as pq
 import pytest
 
 ROOT = Path(__file__).parents[3]
@@ -229,7 +231,7 @@ def test_modo_chunks_no_pasa_el_presupuesto_al_lector(lake):
 
 
 class RangedFile(io.BytesIO):
-    """Un archivo como el de GCS: `seek(0, 2)` lee desde el final y el rango no existe."""
+    """Un archivo como el de GCS: reabre el rango en cada seek y rechaza todo offset ≥ tamaño."""
 
     def read(self, size=-1):
         if self.tell() >= len(self.getvalue()) and size != 0:
@@ -237,24 +239,57 @@ class RangedFile(io.BytesIO):
         return super().read(size)
 
     def seek(self, offset, whence=0):
-        if whence == 2:
+        base = {0: 0, 1: self.tell(), 2: len(self.getvalue())}[whence]
+        if base + offset >= len(self.getvalue()):
             raise OSError("Request range not satisfiable")
-        return super().seek(offset, whence)
+        return super().seek(base + offset)
 
 
-def test_el_envoltorio_resuelve_el_seek_al_final_con_el_tamano_conocido():
+def test_el_archivo_falso_rechaza_todo_offset_desde_el_tamano():
+    data = bytes(range(100))
+    for offset, whence in [(100, 0), (101, 0), (0, 2), (10, 2)]:
+        with pytest.raises(OSError, match="Request range"):
+            RangedFile(data).seek(offset, whence)
+    file = RangedFile(data)
+    file.seek(99)
+    with pytest.raises(OSError, match="Request range"):
+        file.seek(1, 1)
+    assert file.seek(-1, 2) == 99
+    assert file.read(1) == data[99:]
+    with pytest.raises(OSError, match="Request range"):
+        file.read(1)
+
+
+def test_el_envoltorio_no_reenvia_seeks_al_final_ni_lecturas_desde_el_final():
     probe = load("l3_probe_reader")
     data = bytes(range(100))
     wrapped = probe._CountedFile(RangedFile(data), "l1", "ruta", len(data))
     assert wrapped.seek(0, 2) == 100
     assert wrapped.tell() == 100
-    assert wrapped.seek(-10, 2) == 90
-    assert wrapped.read(10) == data[90:]
+    assert wrapped.read() == b""
+    assert wrapped.seek(-8, 2) == 92
+    assert wrapped.read(8) == data[-8:]
+    assert wrapped.tell() == 100
+    assert wrapped.seek(100, 0) == 100
+    assert wrapped.read() == b""
     assert wrapped.seek(5) == 5
     assert wrapped.read(3) == data[5:8]
-    # El archivo falso sí falla si se le pide el final directamente.
-    with pytest.raises(OSError, match="Request range"):
-        RangedFile(data).seek(0, 2)
+    assert wrapped.tell() == 8
+    assert wrapped.seek(2, 1) == 10
+    assert wrapped.read(2) == data[10:12]
+
+
+def test_un_parquet_real_se_abre_a_traves_del_envoltorio():
+    probe = load("l3_probe_reader")
+    sink = io.BytesIO()
+    table = pa.table({"x": list(range(1000)), "y": [float(i) for i in range(1000)]})
+    pq.write_table(table, sink, row_group_size=400)
+    data = sink.getvalue()
+    wrapped = probe._CountedFile(RangedFile(data), "l1", "ruta", len(data))
+    parquet = pq.ParquetFile(pa.PythonFile(wrapped, mode="r"))
+    assert parquet.metadata.num_rows == 1000
+    assert parquet.num_row_groups == 3
+    assert parquet.read_row_group(1).equals(table.slice(400, 400))
 
 
 class FlatFS:
