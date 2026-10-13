@@ -136,11 +136,20 @@ def test_chunks_peak_is_a_row_group_and_does_not_grow_with_events(tmp_path):
 # La entrega por row group: un row group en vuelo y ninguno retenido, con cualquier
 # número de eventos y aunque uno abarque 10 row groups. El consumidor suelta el elemento
 # antes de pedir el siguiente.
+#
+# El lector de Parquet decodifica las columnas de un row group con hilos y suelta sus
+# buffers con retraso; el máximo del pool depende entonces de cuántos se solapan. En 25
+# corridas por lago (ITSC-333) el pico de `few` fue de 11,4 a 13,0 MB (cota: 14,4) y el de
+# `many`, de 11,4 a 17,8 MB: la prueba fallaba 1 de cada 3 sin que el código cambiara. Con
+# un solo hilo de CPU y de E/S el pico es el mismo en todas las corridas (10,1 MB, razón
+# 1,002), y lo que se afirma (O(row group), sin crecer con los eventos) sigue a la vista.
 ROW_GROUPS_PROBE = """
 import json, sys
 import pyarrow as pa
 from dc_frames import read_row_groups
 
+pa.set_cpu_count(1)
+pa.set_io_thread_count(1)
 l1, l2 = sys.argv[1], sys.argv[2]
 ticks = events = 0
 for delivery in read_row_groups(["0.001", "0.002"], l1, l2, (2017, 8), (2017, 8)):

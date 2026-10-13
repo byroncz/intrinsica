@@ -13,12 +13,16 @@ from l3_dc_descriptors.errors import PhaseQuantityMismatch, PhaseValueError
 from l3_dc_descriptors.schema import LIMIT, SCALE
 
 # Los `Decimal` de 38 dígitos se escalan sin que el contexto por defecto (28) los redondee.
-_WIDE = Context(prec=80)
+_PRECISION = 80
 
 
 def scaled(value, scale: int = SCALE) -> int:
-    """El entero sin escalar de un `Decimal` con `scale` decimales."""
-    return int(value.scaleb(scale, _WIDE))
+    """El entero sin escalar de un `Decimal` con `scale` decimales.
+
+    El contexto es propio de cada llamada: un `Context` de módulo acumula banderas y
+    lo compartirían los hilos (la agregación por θ debe poder correr en paralelo).
+    """
+    return int(value.scaleb(scale, Context(prec=_PRECISION)))
 
 
 class PhaseSummary:

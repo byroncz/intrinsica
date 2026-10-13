@@ -5,6 +5,8 @@ Las filas se arman en un buffer de NumPy por columna, con los decimales en su es
 group, Arrow envuelve esos buffers sin copiarlos y sin objetos de Python por valor.
 """
 
+from types import MappingProxyType
+
 import numpy as np
 import pyarrow as pa
 
@@ -44,7 +46,7 @@ SUMMARIES_SCHEMA = pa.schema(
     ]
 )
 WIDTH = len(_COLUMNS)
-COLUMN = {name: i for i, (name, _, _) in enumerate(_COLUMNS)}
+COLUMN = MappingProxyType({name: i for i, (name, _, _) in enumerate(_COLUMNS)})
 # Los `os_*` nulables son nulos juntos: cuando el overshoot es vacío (`os_ticks` = 0).
 OVERSHOOT_TICKS = COLUMN["os_ticks"]
 _WIDE = tuple(pa.types.is_decimal(kind) for _, kind, _ in _COLUMNS)

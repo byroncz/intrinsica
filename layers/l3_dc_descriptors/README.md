@@ -3,13 +3,95 @@
 Capa L3: describe lo que pasó entre las fronteras de cada evento DC. Diseño en
 [`docs/TRD/l3.md`](../../docs/TRD/l3.md); contrato de la salida en
 [`docs/data-contracts.md`](../../docs/data-contracts.md) ("Salida Parquet de
-L3"). Este paquete es el **núcleo del resumidor**: de `consolidated.parquet` de L1
-y `events.parquet` de L2 a `summaries.parquet`, un mes y una lista de θ por
-llamada. Todavía no tiene CLI, imagen ni frontera por θ: eso lo trae la capa
-ejecutable, que llama a `summarize_month` y convierte sus errores en hallazgos de
-DQ.
+L3"). El paquete tiene dos partes: el **núcleo del resumidor** (`summarize_month`: de
+`consolidated.parquet` de L1 y `events.parquet` de L2 a `summaries.parquet`, un mes y una
+lista de θ por llamada) y la **imagen** (`python -m l3_dc_descriptors`), que recorre la
+cadena de meses por θ con ese núcleo, lleva la frontera de cada θ y convierte sus
+errores en hallazgos de DQ.
 
-## Uso en local
+## Imagen y CLI
+
+```sh
+python -m l3_dc_descriptors --mode backfill --series-start 2020-01      # lo que falte
+python -m l3_dc_descriptors --mode backfill --from 2023-03 --to 2023-03 --thetas 0.00010000
+python -m l3_dc_descriptors --mode backfill --force --from 2023-03     # reprocesa
+python -m l3_dc_descriptors --mode monthly --series-start 2020-01      # el mes anterior
+```
+
+Un solo proceso, un mes a la vez, y en cada mes el fan-out de los θ que lo necesitan. Un mes
+que ningún θ necesita se salta sin leer L1.
+
+| Opción | Qué hace |
+|---|---|
+| `--mode backfill\|monthly` | `backfill` recorre `--from`..`--to`; `monthly` es el backfill de un mes ([TRD-L3 §8.3](../../docs/TRD/l3.md#83-modo-monthly-incremental)) |
+| `--from`, `--to` (`YYYY-MM`) | `backfill`: sin `--from`, la frontera de cada θ decide desde dónde avanza (el piso es `--series-start`); sin `--to`, el último mes con `consolidated.parquet` en L1. `monthly`: `--from` o el mes anterior al actual (UTC); no admite `--to` |
+| `--series-start` / `L3_SERIES_START` | Primer mes de la serie de L2, el único sin mes anterior. Se declara, no se infiere |
+| `--thetas` | Acota el catálogo, en decimal como en la ruta (`0.00010000,0.00031313`) |
+| `--force` | Reprocesa el rango ignorando la frontera. Exige `--from`; solo en `backfill` |
+| `--family` | `summaries` (la predeterminada y única por ahora); otro valor es código 2 |
+| `--thetas-uri` / `L3_THETAS_URI` | **Obligatorio.** El catálogo de θ: el mismo objeto `l2/thetas.yaml` que usa L2 (ruta local o `gs://`). L3 no lleva copia |
+| `--asset` | Activo; por defecto `BTCUSDT` |
+
+Entorno: `L3_LANDING_ROOT` (L1), `L3_EVENTS_ROOT` (L2), `L3_SUMMARIES_ROOT` (L3) y
+`L3_DQ_ROOT` (lago de hallazgos), además de `L3_SERIES_START` y `L3_THETAS_URI`.
+`CLOUD_RUN_TASK_INDEX` distinto de 0 es código 2. `IMAGE_VERSION` la fija la imagen.
+
+**Códigos de salida** ([§8.4](../../docs/TRD/l3.md#84-códigos-de-salida)): 0 éxito; 1 fallo
+de la unidad (entrada de L1 o L2 ausente, L2 incoherente, esqueleto, conciliación) o `monthly`
+sin ningún θ listo y con rezagados; 2 uso o configuración (no escribe nada).
+
+**Frontera** ([§8.2](../../docs/TRD/l3.md#82-modo-backfill-histórico)): por θ, el último mes de
+su serie contigua desde `--series-start` cuyo `summaries.parquet` es válido (esquema, `theta`,
+`state_version` y filas por row group iguales a `events.parquet` de L2 del mes). Sale de un
+listado de la raíz de L3 más el pie del archivo de cada θ; no se consulta cada partición. Un
+mes sin `events.parquet` y `carry_over.parquet` de L2 detiene el rango de ese θ con
+`l2_input_missing` (los demás siguen, la corrida termina con código 1). En `monthly`, un θ
+que no llegó al mes previo (`l3_frontier`) o al que L2 no le ha llegado (`l2_missing`) deja
+`theta_behind_frontier` y no falla la unidad mientras otro avance.
+
+**Hallazgos**: el catálogo de `check_type` y sus `details` están en
+[`docs/data-contracts.md`](../../docs/data-contracts.md). Cada excepción tipada del núcleo
+(tabla de abajo) se traduce a su hallazgo con los `details` que ya trae. `unit_timing` lleva lo
+que necesita la medición del umbral 3 de [§10.3](../../docs/TRD/l3.md#103-sonda-del-lector-de-tramas--umbrales-de-aceptación-se-escriben-antes-de-medir):
+pared total y por fase (`read_s` lectura y decodificación, `aggregate_s`, `write_s`),
+`rss_peak_mib` (`VmHWM`, reiniciado al empezar la unidad), `row_groups_month` y
+`row_groups_previous` (decodificaciones de L1 del mes y de meses anteriores, contadas con un
+gancho sobre `dc_frames.lake.open_parquet` como hace la sonda de `ops_tools`),
+`row_groups_repeated` (debe ser 0), eventos y ticks por θ y en total, y el límite efectivo de
+CPU.
+
+## Estructura paralelizable, sin paralelizar todavía
+
+La CLI corre todo en serie. Los hilos por θ y los meses en paralelo los decide ITSC-335 con la
+medición; lo que esta capa garantiza es que nada lo impide:
+
+- **Sin estado global.** Ningún módulo guarda un contenedor mutable ni usa `global`
+  (`tests/test_l3_parallel.py` lo comprueba). El trabajo por θ sobre un row group,
+  `_Lane.add(Prefixes, ThetaEvents)`, solo lee sus argumentos y escribe en su propio `_Lane`
+  (su agregador, su escritor, su buffer de salida y sus cuentas); `Prefixes` se calcula una vez
+  por row group y es de solo lectura.
+- **La unidad por mes es una función sin estado entre meses.** `pipeline.process_unit(unit, ctx,
+  thetas)` recibe datos inmutables (`Unit`, `RunContext`) y devuelve un `Result` con sus
+  hallazgos y tiempos; la CLI los emite al volver. Se puede invocar desde otra tarea o hilo.
+- **Hallazgos y tiempos por unidad.** `Phases`, `RowGroupCount` y `Timing` los crea la unidad.
+  El único punto de proceso es el gancho de `open_parquet`: se instala una vez, delega en el
+  original y cuenta en un `ContextVar`, así que dos unidades en hilos distintos no se mezclan.
+- **Prueba.** Agregar los θ de cada row group con un `ThreadPoolExecutor` en vez del bucle
+  secuencial da exactamente la misma tabla y el mismo `content_hash` sobre el fixture. No mide
+  velocidad: demuestra que no hay estado compartido que el GIL estuviera tapando.
+
+**Límite conocido para los hilos.** Los tramos pesados ya están en NumPy y Arrow, que sueltan
+el GIL: los prefijos y las diferencias de `Segments`, `reduceat`, la codificación ZSTD y el
+hash del escritor. Lo que queda en Python puro y lo retiene: la **recomposición de
+`Σ price·quantity`** en entero de Python por segmento (`_vwaps` y `Segments.words.tolist()`),
+el **VWAP** (`divide_half_even`) y, solo si una comprobación del lote falla, el camino por
+evento de `build_row`. Con 50 θ y millones de eventos por mes ese tramo crece con los eventos,
+no con los ticks, y los hilos no lo aceleran. Si pesa, ITSC-335 decide entre procesos por θ,
+tareas por mes (la unidad no tiene estado entre meses) o dejarlo así. Dos cosas más que no son
+por unidad en un proceso con meses en paralelo: `rss_peak_mib` y `cpu_throttled_s` son del
+proceso.
+
+## Uso en local del núcleo
 
 ```python
 from l3_dc_descriptors import summarize_month

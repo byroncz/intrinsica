@@ -308,6 +308,30 @@ comprueba al escribir que iguala la suma de `quantity` de sus ticks.
   publicación es atómica por archivo y secuencial por θ: si falla en uno, los θ ya
   publicados quedan y re-ejecutar el mes los reescribe igual.
 
+### Quién lo escribe y hasta dónde llegó
+
+Lo escribe la imagen `l3_dc_descriptors` (`python -m l3_dc_descriptors --mode
+backfill|monthly`, [TRD-L3 §8](TRD/l3.md#8-pipeline-interno-y-modos-de-ejecución)),
+con `--family summaries` (la única familia por ahora). Lee `L3_LANDING_ROOT` (L1) y
+`L3_EVENTS_ROOT` (L2), escribe bajo `L3_SUMMARIES_ROOT` y deja sus hallazgos en
+`L3_DQ_ROOT`. El catálogo de θ no es de L3: `L3_THETAS_URI` (o `--thetas-uri`) apunta al
+mismo objeto `l2/thetas.yaml` que usa L2, y sin él la corrida termina con código 2.
+
+No hay manifiesto de L3: la **frontera** de un θ, hasta qué mes llegó, sale del lago. Es
+el último mes de su serie de `summaries.parquet` contigua desde `--series-start` cuyo
+archivo es válido, es decir, que:
+
+- existe y se lee;
+- su esquema es `SUMMARIES_SCHEMA`, su `state_version` es el de la imagen y la
+  estadística de `theta` de cada row group es el θ de la partición;
+- tiene las mismas filas por row group que `events.parquet` de L2 del mismo mes.
+
+Se calcula con un listado recursivo de la raíz de L3 y la lectura del pie del archivo de la
+frontera; si ese archivo no cumple, la frontera retrocede al mes anterior. Nunca supera la de
+L2: un mes sin `events.parquet` y `carry_over.parquet` de L2 no se procesa
+(`l2_input_missing`). Por eso cambiar `STATE_VERSION` o el esquema hace que el siguiente
+`backfill` reescriba la serie del θ sin `--force`.
+
 ### Leer
 
 ```python
@@ -336,7 +360,7 @@ desvía del código.
 | `finding_id` | string (UUID) | no | Identidad del hallazgo; se repite en todos los eventos del mismo hallazgo |
 | `detected_at` | int64 | no | Marca del evento, en microsegundos desde la época (UTC) |
 | `layer` | string | no | Capa que emite el hallazgo, p. ej. `l1` |
-| `mode` | string | no | Modo de ejecución: `backfill`, `daily`, `monthly-close`, `seam-check` o `monthly` (L2, [TRD-L2 §8.3](TRD/l2.md#83-modo-monthly-incremental)); `tiles` o `render` (viz, [TRD-viz §8](TRD/viz.md#8-pipeline-interno-y-modos-de-ejecución)) |
+| `mode` | string | no | Modo de ejecución: `backfill`, `daily`, `monthly-close`, `seam-check` o `monthly` (L2 y L3, [TRD-L2 §8.3](TRD/l2.md#83-modo-monthly-incremental) y [TRD-L3 §8.3](TRD/l3.md#83-modo-monthly-incremental)); `tiles` o `render` (viz, [TRD-viz §8](TRD/viz.md#8-pipeline-interno-y-modos-de-ejecución)) |
 | `check_type` | string | no | Chequeo que lo generó (ver TRD-L1 §9) |
 | `severity` | string | no | `info`, `warning` o `error` |
 | `stage` | string | no | `provisional` o `canonical` |
@@ -538,6 +562,77 @@ Cada hallazgo, además de la fila en el lago, deja una línea de log JSON
   principal esperó a tramos que ese θ cerró último) y `queued_s` (lo que sus
   bloques esperaron en cola). Va aparte de `events_summary` porque sus tiempos cambian en cada
   corrida y el de `events_summary` no puede.
+
+`check_type` de L3 (`layer = l3`, `stage = canonical`, `mode` `backfill` o `monthly`). Son
+los de [TRD-L3 §9.3](TRD/l3.md#93-tipos-de-chequeo-check_type) que aplican a la familia
+`summaries` (`event_over_budget` es de las familias de serie completa y no existe todavía).
+A diferencia de L2, el θ de `details` es el texto de la partición (`"0.00010000"`), el
+mismo que traen las excepciones del resumidor, de las que sale la mayoría de los
+`details`. Cada unidad (un mes) emite sus hallazgos al terminar, también si falla; `year` y
+`month` son los de la unidad.
+
+- **`l2_input_missing`** (`error`, `fail`): falta `events.parquet` o `carry_over.parquet`
+  de L2 de `(θ, mes)` (`details.theta`, `details.month`, `details.file`; uno por archivo).
+  En `backfill`, antes de procesar el mes, detiene el rango de ese θ (los demás siguen) y
+  la corrida termina con código 1. También lo lanza la compuerta de entrada si falta el
+  `carry_over.parquet` del mes anterior.
+- **`l2_state_inconsistent`** (`error`, `fail`): L2 contradice a L1 o a sí mismo. Con
+  `details.field`, `details.got` y `details.wanted` (una frontera que no es tick, una fila
+  que viola un invariante de `summaries.parquet`; `details.message` lleva el texto del
+  lector) o, para un carry-over con `direction ≠ 0` sin evento pendiente,
+  `details.direction` y `details.has_pending_event`. La unidad aborta sin escribir.
+- **`phase_quantity_mismatch`** (`error`, `fail`): `buy + sell` de una fase no es la suma
+  de `quantity` de sus ticks (`details.theta`, `details.confirm_agg_trade_id`,
+  `details.phase`, `details.expected`, `details.got`). Es un defecto, no un caso de mercado.
+- **`family_skeleton_mismatch`** (`error`, `fail`): el archivo de la familia no repite
+  filas, orden ni row groups de `events.parquet` (`details.theta`, `details.month`,
+  `details.family`, `details.detail`). No se publica nada.
+- **`phase_ticks_mismatch`** (`error`, `fail`): no cuadra la conciliación de ticks del mes,
+  `N_M = (Σ_cerrados − P_M) + Cola_M + U_M` ([TRD-L3 §9.1](TRD/l3.md#91-conciliación-de-ticks)):
+  `details.N_M`, `details.sigma_closed`, `details.P_M`, `details.tail_M` y `details.U_M`.
+- **`input_missing`** (`error`, `fail`) e **`input_provisional_only`** (`error`, `fail`): el
+  mes de L1 no tiene `consolidated.parquet` (`details.expected_path`) o solo tiene
+  provisionales (`details.provisionals`); L3 espera el `monthly-close` de L1. Se comprueban
+  antes de leer, y un mes que ningún θ necesita no se comprueba.
+- **`theta_catalog_invalid`** (`error`, `fail`): el catálogo de θ no se indicó
+  (`details.source = null`), no se puede leer o incumple
+  [TRD-L2 §7.3](TRD/l2.md#73-el-catálogo-de-θ) (`details.source`, `details.problems`).
+  Código 2, sin escribir datos; `year` y `month` son los del primer mes que iba a procesar.
+- **`theta_behind_frontier`** (`warning`, `fail`): `monthly` no procesó un θ
+  (`details.theta`, `details.frontier` en `YYYY-MM` o `null`, `details.reason`). `reason` es
+  `l2_missing` si L2 no tiene el mes de ese θ, y `l3_frontier` si su serie de L3 no llega al
+  mes previo (se agregó al catálogo sin backfill, o tiene un hueco); si pasan las dos,
+  `l2_missing`, que es lo que bloquea. No falla la unidad mientras otros θ avancen o ya
+  tengan el mes; si ninguno está listo ni lo tiene, `monthly` termina con código 1 sin leer
+  L1. Se resuelve lanzando `backfill` sin `--from`.
+- **`theta_config_drift`** (`info`, `pass`): el lago de L3 tiene particiones de un θ que el
+  catálogo ya no incluye (`details.theta`, `details.months`, `details.last_month`;
+  `metric_value` = meses). Informa, nunca es error: quitar un θ no borra nada.
+- **`summaries_summary`** (`info`, `pass`): uno por θ y mes al terminar. `metric_value` es
+  `details.rows`, las filas escritas; `details` lleva además `family`, el `content_hash` de
+  `summaries.parquet`, `l2_events_content_hash` y `l2_carry_over_content_hash` (los de las
+  entradas de L2 que usó, calculados igual que L2 en su `events_summary`, que es donde
+  se comparan) y `unassigned_ticks` (`U_M` de la conciliación). Es la huella de la
+  corrida y el linaje contra L2: si L2 se reprocesa y cambia, estos hashes ya no coinciden
+  con los suyos y el mes está obsoleto (`--force --from <mes> --thetas <θ>`).
+- **`unit_timing`** (`info`, `pass`): uno por unidad (mes), no por θ. `metric_value` es la
+  pared (`wall_s`). `details` lleva la pared por fase, todas del hilo principal y, con
+  `other_s`, sumando `wall_s`: `gate_s` (compuerta de entrada), `read_s` (lectura y
+  decodificación: lo que se esperó al lector por cada row group), `aggregate_s`,
+  `write_s` (armar y escribir los row groups de salida y publicar), `reconcile_s`
+  (conciliación) y `lineage_s` (hash de las entradas de L2). Además: `rss_peak_mib`
+  (`VmHWM`) con `rss_peak_scope` (`unit` si el pico se reinició al empezar la unidad,
+  `process` si el sistema no lo permite y es el de todo el proceso); las decodificaciones
+  de row group de L1, `row_groups_month` (del archivo del mes), `row_groups_previous` (de
+  meses anteriores, por los eventos que cruzan el borde), `row_groups_repeated` (debe ser
+  0: cada row group se decodifica una vez) y `row_groups_month_total` (los del archivo del
+  mes); `bytes_in` (bytes comprimidos de esas columnas); `events` y `ticks` en total
+  (`ticks` son los de los eventos cerrados, también los de meses anteriores) y
+  `theta_stats`, una entrada por θ con `theta`, `events`, `ticks` y `ticks_before_month`; y
+  el límite efectivo de CPU (`cores`, `cores_visible`, `cores_source`, `cpu_throttled_s`,
+  `null` si el cgroup no lo expone). No cuenta las lecturas de la conciliación (solo
+  `agg_trade_id` de los row groups de las fronteras). Va aparte de `summaries_summary`
+  porque sus tiempos cambian en cada corrida y el de `summaries_summary` no puede.
 
 ### Estado actual de un hallazgo
 

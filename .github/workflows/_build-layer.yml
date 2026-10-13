@@ -71,6 +71,10 @@ jobs:
             ${{ vars.GCP_ARTIFACT_REGISTRY || 'local' }}/${{ inputs.layer }}:${{ github.sha }}
 
       # Si la capa trae layers/<capa>/smoke.sh, corre un día real en el contenedor.
+      # uv es para los humos que arman su lago con el generador de las pruebas (L3).
+      - uses: astral-sh/setup-uv@v7
+        if: env.PUBLISH != 'true' && hashFiles(format('layers/{0}/smoke.sh', inputs.layer)) != ''
+
       - name: Humo de la imagen
         if: env.PUBLISH != 'true' && hashFiles(format('layers/{0}/smoke.sh', inputs.layer)) != ''
         run: layers/${{ inputs.layer }}/smoke.sh "${{ vars.GCP_ARTIFACT_REGISTRY || 'local' }}/${{ inputs.layer }}:${{ steps.version.outputs.value }}"
