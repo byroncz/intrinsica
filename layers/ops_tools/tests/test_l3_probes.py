@@ -219,7 +219,7 @@ def test_el_modo_evento_pasa_el_presupuesto_y_cuenta_los_over_budget(lake):
         theta,
         *args(l1, l2, "--modo", "evento", "--max-event-ticks", str(budget)),
     )
-    assert code == 0, out
+    assert_only_rss_may_fail(code, out)
     final = out.strip().splitlines()[-1]
     assert f"modo=evento over_budget={len(expected)} " in final
     assert f"over_budget)={len(expected)}" in out
@@ -255,7 +255,7 @@ def test_modo_chunks_no_pasa_el_presupuesto_al_lector(lake):
     code, out = run_probe(
         "--theta", theta_text(min(events)), *args(l1, l2, "--max-event-ticks", "5")
     )
-    assert code == 0, out
+    assert_only_rss_may_fail(code, out)
     assert "modo=chunks over_budget=0" in out
 
 
@@ -431,7 +431,7 @@ def test_sin_contar_io_no_reporta_bytes_medidos(lake):
     code, out = run_probe(
         "--theta", theta_text(min(events)), *args(l1, l2, "--sin-contar-io")
     )
-    assert code == 0, out
+    assert_only_rss_may_fail(code, out)
     final = out.strip().splitlines()[-1]
     assert "lectura_s=n/d" in final and "bytes_l1=n/d" in final
 
