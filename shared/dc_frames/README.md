@@ -1,6 +1,6 @@
 # dc_frames
 
-Lector de tramas y escritor común de archivos de familia de L3.
+Lector de tramas (por evento, por chunks y por row group) y escritor común de archivos de familia de L3.
 
 El lector entrega los ticks de cada evento DC, por fase, recortando L1 con las
 fronteras de L2. No guarda nada: las tramas se leen, no se materializan.
@@ -25,6 +25,11 @@ errores del lector, y porque `pyutils` no sabe nada de L3.
   row groups, ver [Modos de lectura](#modos-de-lectura)). Dentro de un θ salen por `confirm_agg_trade_id`; entre θ no hay
   orden. `columns` proyecta las columnas de `events.parquet` que se decodifican
   (siempre se leen además las tres fronteras y `confirm_time`); sin él, las 11.
+- `read_row_groups(thetas, l1_root, l2_root, start, end, provider="binance",
+  market="spot", asset="BTCUSDT", columns=None)`: la entrega por row group
+  (ADR-L3-14). Iterador de `RowGroupFrames`, uno por row group de L1 del pase,
+  con los eventos de todos los θ que lo tocan como arreglos de posiciones. Ver
+  [Entrega por row group](#entrega-por-row-group).
 - `frames_of(event, l1_root, ..., month=None)`: las tramas de un evento cuya
   fila de L2 ya se tiene (un `RecordBatch` o `Table` de una fila, o un mapa con
   sus 11 columnas). Decodifica solo los row groups que el evento toca. Con un
@@ -35,6 +40,9 @@ errores del lector, y porque `pyutils` no sabe nada de L3.
 - `EventFrames(theta, event, confirmation, overshoot, ticks_before_month,
   over_budget)`: `event` es la fila de L2 sin transformar; `confirmation` son
   los ticks de `(R, C]` y `overshoot` los de `(C, E]`, vacío si `E = C`.
+- `RowGroupFrames(month, before_start, frame, thetas)` y `ThetaEvents(theta,
+  events, positions, starts_before, ends_after, ticks_before_month)`: lo que
+  entrega `read_row_groups`.
 - `Frame(transact_time, price, quantity, is_buyer_maker)`: cuatro arrays de
   Arrow con los tipos de L1. No trae `agg_trade_id` ni `is_best_match`.
 - `FamilyWriter(path, schema, state_version, skeleton_path)`,
@@ -96,6 +104,62 @@ for event in read_frames(thetas, l1_root, l2_root, start, end, chunks=True):
   guarda `EventFrames` sin recorrerlos, ancla el row group en curso y el
   anterior de cada uno.
 - No admite `max_event_ticks` (`ValueError`): no tiene presupuesto.
+
+## Entrega por row group
+
+La usa el resumidor y las familias por chunks (ADR-L3-14). No arma un objeto por
+evento: por cada row group de L1 del pase, **una vez para todos los θ**, entrega los
+cuatro arrays del row group y, por θ, las posiciones de las fronteras de los eventos
+que lo tocan.
+
+```python
+from dc_frames import read_row_groups
+
+for delivery in read_row_groups(thetas, l1_root, l2_root, start, end):
+    frame = delivery.frame  # cuatro pa.Array, vistas del row group
+    for te in delivery.thetas:  # solo los θ con eventos en este row group
+        r, c, e = te.positions.T  # arreglos de n posiciones
+        # confirmación = ticks [r, c); overshoot = ticks [c, e)
+        ...
+    del delivery  # antes de pedir el siguiente
+```
+
+- **Convención de posiciones.** `positions[i] = (R, C, E)` del evento `i` son
+  `searchsorted(agg_trade_id, id, "right")`: cuántos ticks del row group tienen id ≤
+  la frontera. La confirmación es `[R, C)` y el overshoot `[C, E)`, medio abiertos, y
+  las fases consecutivas de un θ comparten corte (`E_i = R_{i+1}`). Una frontera fuera
+  del row group queda en 0 (anterior) o en su largo (posterior); un overshoot vacío es
+  `E = C`.
+- **Qué eventos salen.** Uno aparece en cada row group desde el que contiene su
+  referencia hasta el que contiene su extremo, incluso sin ticks en él (la referencia
+  es el último tick del row group). `starts_before` y `ends_after` (booleanos por
+  evento) dicen si empieza antes o termina después; con `starts_before` falso abre
+  aquí y con `ends_after` falso cierra aquí. El consumidor completa los eventos que
+  cruzan con su acumulador parcial: **nada se relee**.
+- **`ticks_before_month`** (arreglo por evento) vale lo mismo que en `read_frames` y
+  viene en el row group donde el evento cierra; en los demás es 0. El lector lo
+  acumula sin guardar ticks.
+- **`events`** son las filas de L2 de esos eventos: las siete columnas de TRD-L3 §7.1
+  (`reference_`, `confirm_` y `extreme_agg_trade_id`, `confirm_time`, `direction`,
+  `confirm_price` y `extreme_price`) o las de `columns` más las cuatro que el lector
+  siempre lee. Es un slice sin copia del row group de eventos de L2; si los eventos
+  vienen de dos, la unión es una copia de solo esas filas.
+- **`month` y `before_start`.** El pase retrocede al row group más antiguo que
+  necesita algún evento de `start`; los row groups de meses anteriores salen con
+  `before_start = True`.
+- **Garantías de pertenencia.** Las de TRD-L3 §7.4 (1 a 4) se validan por evento con
+  `FrameBoundaryError`: toda frontera dentro del row group existe como tick
+  (`ids[pos - 1] == id`) y en `C`, además, `transact_time = confirm_time`; un hueco de
+  ids no corre la pertenencia. Si L1 termina antes de cerrar un evento, también falla.
+- **Memoria.** Un row group de L1 en vuelo y ninguno retenido, más un row group de
+  eventos de L2 por θ. El `for` conserva el elemento anterior hasta recibir el nuevo:
+  suéltalo con `del` antes de pedir el siguiente o conviven dos row groups. Medido: el
+  pico es el de decodificar un row group (unos 2,4 de 48 B por tick) y no sube con 10
+  veces más eventos ni con un evento de 10 row groups; el modo por chunks llega a más
+  de 5.
+- Cada row group del pase se decodifica **exactamente una vez**, sea cual sea el
+  número de θ y la longitud de los eventos. Un row group que ningún evento abierto
+  necesita se salta con las estadísticas del pie.
 
 ## Presupuesto de ticks (`max_event_ticks`)
 
@@ -204,7 +268,10 @@ esqueleto (`family_batches`).
   puro.
 - `test_dc_frames_chunks.py`: modo por chunks, `max_event_ticks` y
   `ticks_before_month` contra un conteo independiente.
+- `test_dc_frames_row_groups.py`: la entrega por row group contra un oráculo con
+  `bisect`, los slices por posiciones contra `read_frames`, bordes de row group,
+  huecos de ids, fallos de frontera y el conteo de decodificaciones.
 - `test_dc_frames_family.py`: el escritor, sus propiedades físicas y cada forma
   de romper el esqueleto.
-- `test_dc_frames_memory.py`: el pico de memoria, medido en un proceso aparte
-  con el pool de Arrow.
+- `test_dc_frames_memory.py`: el pico de memoria de los modos por chunks y por
+  row group, medido en un proceso aparte con el pool de Arrow.

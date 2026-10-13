@@ -131,3 +131,56 @@ def test_chunks_peak_is_a_row_group_and_does_not_grow_with_events(tmp_path):
     # El modo por evento, en cambio, concatena el evento largo.
     assert whole["ticks"] == many["ticks"]
     assert whole["peak"] > 15 * ROW_GROUP_BYTES
+
+
+# La entrega por row group: un row group en vuelo y ninguno retenido, con cualquier
+# número de eventos y aunque uno abarque 10 row groups. El consumidor suelta el elemento
+# antes de pedir el siguiente.
+ROW_GROUPS_PROBE = """
+import json, sys
+import pyarrow as pa
+from dc_frames import read_row_groups
+
+l1, l2 = sys.argv[1], sys.argv[2]
+ticks = events = 0
+for delivery in read_row_groups(["0.001", "0.002"], l1, l2, (2017, 8), (2017, 8)):
+    ticks += len(delivery.frame)
+    events += sum(len(t) for t in delivery.thetas)
+    del delivery
+print(json.dumps({
+    "ticks": ticks, "events": events, "peak": pa.default_memory_pool().max_memory()
+}))
+"""
+
+
+def row_groups_peak(root, l2: str) -> dict:
+    out = subprocess.run(
+        [sys.executable, "-c", ROW_GROUPS_PROBE, str(root / "l1"), str(root / l2)],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return json.loads(out.stdout)
+
+
+def test_row_groups_peak_is_a_row_group_and_does_not_grow_with_events(tmp_path):
+    ticks = [
+        {"id": i, "price": Decimal(1), "time": i} for i in range(GROUPS * ROW_GROUP)
+    ]
+    write_l1(tmp_path / "l1", ticks, ROW_GROUP)
+    for name, small in (("few", 10), ("many", 100)):
+        write_l2(tmp_path / name, 100000, theta_events(0, small), 100)
+        write_l2(tmp_path / name, 200000, theta_events(7, small), 100)
+
+    few, many = row_groups_peak(tmp_path, "few"), row_groups_peak(tmp_path, "many")
+    chunks = peak(tmp_path, "many", "chunks")
+    # El pase se detiene en el row group donde cierra el último evento (el 10); cada tick
+    # se entrega una vez y los eventos largos salen en cada row group que cruzan.
+    assert few["ticks"] == many["ticks"] > LONG
+    assert many["events"] > few["events"] > 2 * GROUPS
+    # Un row group con sus buffers de decodificación (un solo read_row_group pica en
+    # ~2,1 row groups de 48 B por tick); el modo por chunks llega a más de 5.
+    assert few["peak"] < 3 * ROW_GROUP_BYTES
+    assert many["peak"] < 1.25 * few["peak"]
+    # Sin el row group anterior ni relecturas, por debajo del modo por chunks.
+    assert many["peak"] < chunks["peak"]
