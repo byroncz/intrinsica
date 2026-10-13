@@ -48,8 +48,13 @@ Decodificación: lo que tarda `read_row_group` sin su lectura. Selección: el re
 (`searchsorted`, slices, validaciones y el conteo de la propia sonda).
 
 Última línea: `sonda lector: thetas=… meses=… eventos=… ticks_l1=… pared_s=… lectura_s=…
-decodificación_s=… selección_s=… rss_pico_mib=… bytes_l1=… ticks_s=… modo=chunks|evento
-over_budget=… veredicto=ok|excedido|fallo`.
+decodificación_s=… selección_s=… rss_pico_mib=… arrow_pool=… arrow_max_mib=… bytes_l1=…
+ticks_s=… modo=chunks|evento over_budget=… veredicto=ok|excedido|fallo`.
+`arrow_pool` es el backend del pool de Arrow (`mimalloc`, `jemalloc` o `system`) y
+`arrow_max_mib` el máximo de `pa.total_allocated_bytes()` visto con cada trozo en mano (modo
+chunks) o con el evento entregado (modo evento) y al cerrar cada evento. Separan
+lo que Arrow tiene asignado de lo que pesa el proceso (`rss_pico_mib`): si el RSS se dispara y
+`arrow_max_mib` no, el pico no es de datos del lector (pool que no devuelve páginas, entorno).
 Con `OPS_RESULTS_URI` deja además `l3_probe_reader_<fecha>.csv` con la tabla por θ.
 
 Solo lee. Dónde corre: con `ops-script` (la service account lee `l1/` y `l2/`) o en local con
@@ -106,14 +111,28 @@ class Stats:
     started: float = 0.0
     last_progress: float = 0.0
     events: int = 0
+    # Máximo de `pa.total_allocated_bytes()` visto con cada trozo o evento en mano y al cerrar cada evento.
+    arrow_max: int = 0
 
 
 STATS = Stats()
 
 
 def rss_bytes() -> int:
+    """El RSS pico del proceso. En Linux, `VmHWM`: `ru_maxrss` hereda el pico del padre al hacer exec."""
+    try:
+        with open("/proc/self/status") as status:
+            for line in status:
+                if line.startswith("VmHWM:"):
+                    return int(line.split()[1]) * 1024
+    except OSError:
+        pass
     peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     return peak if sys.platform == "darwin" else peak * 1024
+
+
+def sample_arrow() -> None:
+    STATS.arrow_max = max(STATS.arrow_max, pa.total_allocated_bytes())
 
 
 def log(message: str) -> None:
@@ -290,10 +309,12 @@ def tally(
             chunks += 1
             confirmation += len(frame)
             size += frame_bytes(frame)
+            sample_arrow()
         for frame in event.overshoot:
             chunks += 1
             overshoot += len(frame)
             size += frame_bytes(frame)
+            sample_arrow()
         # Un evento de k row groups da a lo sumo k + 1 trozos (el del borde entre fases
         # sale en ambas) y el lector relee k - 2 de ellos. La cota `chunks - 2` es holgada:
         # llega a k - 1 cuando la confirmación cae en un row group releído.
@@ -302,6 +323,7 @@ def tally(
         confirmation = len(event.confirmation.transact_time)
         overshoot = len(event.overshoot.transact_time)
         size = frame_bytes(event.confirmation, event.overshoot)
+        sample_arrow()
     ticks = confirmation + overshoot
     stats.confirmation += confirmation
     stats.overshoot += overshoot
@@ -419,6 +441,7 @@ def run(ns: argparse.Namespace) -> int:
             thetas, l1_root, l2_root, first, last, *key, **options
         ):
             tally(event, per_theta, bigs, ns)
+            sample_arrow()
             # Suelta el evento antes de que el lector entregue el siguiente.
             del event
     except FramesError as exc:
@@ -560,7 +583,8 @@ def run(ns: argparse.Namespace) -> int:
         f"sonda lector: thetas={len(thetas)} meses={months[0]}..{months[-1]} eventos={events} "
         f"ticks_l1={STATS.l1_ticks} pared_s={wall:.1f} lectura_s={'n/d' if reading is None else f'{reading:.1f}'} "
         f"decodificación_s={'n/d' if reading is None else f'{decode:.1f}'} selección_s={selection:.1f} "
-        f"rss_pico_mib={rss / MIB:.0f} bytes_l1={STATS.bytes['l1'] if STATS.count_io else 'n/d'} "
+        f"rss_pico_mib={rss / MIB:.0f} arrow_pool={pa.default_memory_pool().backend_name} "
+        f"arrow_max_mib={STATS.arrow_max / MIB:.1f} bytes_l1={STATS.bytes['l1'] if STATS.count_io else 'n/d'} "
         f"ticks_s={rate:.0f} modo={ns.modo} over_budget={over_budget} veredicto={verdict}"
     )
     return 1 if failed else 0
