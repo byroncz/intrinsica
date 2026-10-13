@@ -659,7 +659,7 @@ Lo que esta medición deja fuera de la card, con el motivo:
 - **Backfill del histórico restante** (ITSC-325; ítems 2, 10 y 16): depende de ITSC-324.
   Cada rango se lanza con la revisión del cupo del paso 1.
 - **Verificar el acceso de `ops-script` a `tiles/`** (ITSC-321; ítem 20): tras el
-  apply del stack `ops` por el humano, `permisos.py` (`11 de 11`) y `viz_check_page.py`
+  apply del stack `ops` por el humano, `permisos.py` (`13 de 13`) y `viz_check_page.py`
   con `--tiles-root gs://<proyecto>-viz/tiles` sobre el último día, con `fallos=0`.
 - **Primer encadenamiento real y mediciones del humano** (ITSC-323; ítems 12, 13, 15 y
   16): las cuatro ejecuciones del cierre de octubre (paso 5), el `content-type` y
