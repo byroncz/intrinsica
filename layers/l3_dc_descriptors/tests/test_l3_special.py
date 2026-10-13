@@ -3,6 +3,7 @@
 from dataclasses import replace
 from decimal import Decimal
 
+import numpy as np
 import oracle
 import pyarrow.parquet as pq
 import pytest
@@ -10,7 +11,7 @@ from l3_dc_descriptors import (
     SUMMARIES_SCHEMA,
     PhaseQuantityMismatch,
     PhaseValueError,
-    phase,
+    rowgroup,
     summarize_month,
 )
 from l3_dc_descriptors.phase import divide_half_even
@@ -48,16 +49,29 @@ def test_notional_that_overflows_int64_is_exact(tmp_path):
 
 def test_forced_quantity_difference_aborts(tmp_path, monkeypatch):
     lake = build_lake(tmp_path, fixture_ticks(), thetas=THETAS)
-    real = phase._side_sum
-    monkeypatch.setattr(phase, "_side_sum", lambda q, mask: real(q, mask) + 1)
+    real = rowgroup.Prefixes.__init__
+
+    def skewed(self, frame):
+        real(self, frame)
+        self.buy += np.arange(len(self.buy))  # cada tick suma 10⁻⁸ de más a `buy`
+
+    monkeypatch.setattr(rowgroup.Prefixes, "__init__", skewed)
     with pytest.raises(PhaseQuantityMismatch) as error:
         run(lake)
     assert error.value.check_type == "phase_quantity_mismatch"
     details = error.value.details
     assert set(details) == {"theta", "confirm_agg_trade_id", "phase", "expected", "got"}
     assert details["phase"] == "confirmación"
-    # buy + sell se pasa de la suma de quantity en 2 unidades de 10⁻⁸ (una por lado).
-    assert Decimal(details["got"]) - Decimal(details["expected"]) == Decimal("2e-8")
+    # buy + sell se pasa de la suma de quantity en 10⁻⁸ por cada tick de la fase.
+    theta = Decimal(details["theta"])
+    event = next(
+        e
+        for e in lake.events[int(theta.scaleb(8)), M1]
+        if e["confirm_agg_trade_id"] == details["confirm_agg_trade_id"]
+    )
+    wanted = oracle.from_ticks(event | {"theta": theta}, lake.all_ticks())
+    excess = Decimal(details["got"]) - Decimal(details["expected"])
+    assert excess == wanted["c_ticks"] * Decimal("1e-8")
     assert files(lake) == []
 
 
