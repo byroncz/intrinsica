@@ -267,6 +267,8 @@ entradas.
     evento mayor llega sin tramas y se cuenta como `over_budget` (columna de la tabla por θ,
     línea de resumen y `over_budget=` en la última línea). En modo chunks se ignora, porque
     ese modo no tiene presupuesto.
+  - El RSS pico es `VmHWM` de `/proc/self/status` en Linux (ITSC-345): `ru_maxrss` hereda el
+    pico del proceso que lanzó la sonda al hacer exec, y inflaba el RSS cuando la lanzaba pytest.
   - Umbral de RSS de §10.3 con un solo θ: 1 GiB en modo chunks; en modo evento, 1 GiB más
     el presupuesto (`--max-event-ticks` × 40 B por tick). En la pasada de 50 θ el RSS se
     reporta sin umbral.
@@ -274,6 +276,12 @@ entradas.
     sonda los topa (`relecturas admitidas`) y no los cuenta contra `--max-bytes-ratio`.
 
   Última línea: `sonda lector: … veredicto=ok|excedido|fallo`; sale con 1 si no es `ok`.
+  Trae `arrow_pool=<backend>` y `arrow_max_mib=<MiB>` (ITSC-345): el backend del pool de Arrow
+  y el máximo de `pa.total_allocated_bytes()` muestreado con cada trozo (o evento) en mano y al
+  cerrar cada evento; en fixtures chicos sale `0.0`. Si
+  `rss_pico_mib` es anómalo y `arrow_max_mib` no, el pico no son datos del lector sino el
+  pool o el entorno. El veredicto solo cubre el RSS con un θ; con varios, esta línea es la
+  evidencia.
   La tabla por θ queda también en `results/` como `l3_probe_reader_<fecha>.csv`.
   Los pies de la salida (`pared por fase`, `bytes leídos`, `RSS pico`) son lo que se
   copia a la card y al runbook de L3. La sonda envuelve los archivos para contar bytes,
