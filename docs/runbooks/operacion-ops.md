@@ -275,7 +275,8 @@ entradas.
 
   Última línea: `sonda lector: … veredicto=ok|excedido|fallo`; sale con 1 si no es `ok`.
   Trae `arrow_pool=<backend>` y `arrow_max_mib=<MiB>` (ITSC-345): el backend del pool de Arrow
-  y el máximo de `pa.total_allocated_bytes()` muestreado al cerrar cada evento. Si
+  y el máximo de `pa.total_allocated_bytes()` muestreado con cada trozo (o evento) en mano y al
+  cerrar cada evento; en fixtures chicos sale `0.0`. Si
   `rss_pico_mib` es anómalo y `arrow_max_mib` no, el pico no son datos del lector sino el
   pool o el entorno. El veredicto solo cubre el RSS con un θ; con varios, esta línea es la
   evidencia.

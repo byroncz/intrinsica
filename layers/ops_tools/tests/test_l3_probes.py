@@ -149,7 +149,7 @@ def test_el_modo_chunks_mide_el_pico_en_un_subproceso_y_cuenta_como_el_lector(la
     # no pasa de 4 × el de un solo θ sobre el mismo fixture, medido en otro subproceso igual.
     rss = int(re.search(r"rss_pico_mib=(\d+)", final)[1])
     assert rss > 0
-    assert re.search(r"arrow_pool=\w+ arrow_max_mib=\d+ ", final)
+    assert re.search(r"arrow_pool=\w+ arrow_max_mib=\d+\.\d ", final)
     _, base_out = run_probe(
         "--theta",
         thetas.split(",")[0],
