@@ -111,7 +111,7 @@ class Stats:
     started: float = 0.0
     last_progress: float = 0.0
     events: int = 0
-    # Máximo de `pa.total_allocated_bytes()` visto al cerrar un evento.
+    # Máximo de `pa.total_allocated_bytes()` visto con cada trozo o evento en mano y al cerrar cada evento.
     arrow_max: int = 0
 
 
