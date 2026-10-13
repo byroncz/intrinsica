@@ -145,7 +145,18 @@ def test_el_modo_chunks_mide_el_pico_en_un_subproceso_y_cuenta_como_el_lector(la
     assert code == 0, out
     final = out.strip().splitlines()[-1]
     assert "modo=chunks over_budget=0 veredicto=ok" in final
-    assert int(re.search(r"rss_pico_mib=(\d+)", final)[1]) < 1024
+    # El RSS depende de la máquina: no se afirma un valor absoluto, solo que se midió y que
+    # no pasa de 4 × el de un solo θ sobre el mismo fixture, medido en otro subproceso igual.
+    rss = int(re.search(r"rss_pico_mib=(\d+)", final)[1])
+    assert rss > 0
+    assert re.search(r"arrow_pool=\w+ arrow_max_mib=\d+ ", final)
+    _, base_out = run_probe(
+        "--theta",
+        thetas.split(",")[0],
+        *args(l1, l2, "--modo", "chunks", "--max-bytes-ratio", "1000"),
+    )
+    base = int(re.search(r"rss_pico_mib=(\d+)", base_out.strip().splitlines()[-1])[1])
+    assert rss <= 4 * base, (rss, base)
     n, conf, over = chunk_oracle(l1, l2, thetas.split(","))
     assert f"eventos={n}" in final
     assert (n, conf, over) == oracle(l1, l2, thetas.split(","))

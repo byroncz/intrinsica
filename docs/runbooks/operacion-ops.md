@@ -274,6 +274,11 @@ entradas.
     sonda los topa (`relecturas admitidas`) y no los cuenta contra `--max-bytes-ratio`.
 
   Última línea: `sonda lector: … veredicto=ok|excedido|fallo`; sale con 1 si no es `ok`.
+  Trae `arrow_pool=<backend>` y `arrow_max_mib=<MiB>` (ITSC-345): el backend del pool de Arrow
+  y el máximo de `pa.total_allocated_bytes()` muestreado al cerrar cada evento. Si
+  `rss_pico_mib` es anómalo y `arrow_max_mib` no, el pico no son datos del lector sino el
+  pool o el entorno. El veredicto solo cubre el RSS con un θ; con varios, esta línea es la
+  evidencia.
   La tabla por θ queda también en `results/` como `l3_probe_reader_<fecha>.csv`.
   Los pies de la salida (`pared por fase`, `bytes leídos`, `RSS pico`) son lo que se
   copia a la card y al runbook de L3. La sonda envuelve los archivos para contar bytes,
