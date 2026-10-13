@@ -5,7 +5,7 @@ Contrato en `docs/TRD/l3.md` §7.4.
 
 from dc_frames.family import FamilyWriter, family_path
 from dc_frames.lake import l2_path
-from dc_frames.reader import frames_of, read_frames
+from dc_frames.reader import frames_of, read_frames, read_row_groups
 from dc_frames.types import (
     EventFrames,
     FamilySkeletonMismatch,
@@ -13,6 +13,8 @@ from dc_frames.types import (
     FrameBoundaryError,
     FramesError,
     FramesInputError,
+    RowGroupFrames,
+    ThetaEvents,
 )
 
 __all__ = [
@@ -23,8 +25,11 @@ __all__ = [
     "FrameBoundaryError",
     "FramesError",
     "FramesInputError",
+    "RowGroupFrames",
+    "ThetaEvents",
     "family_path",
     "frames_of",
     "l2_path",
     "read_frames",
+    "read_row_groups",
 ]

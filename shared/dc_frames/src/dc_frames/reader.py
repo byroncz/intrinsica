@@ -15,8 +15,8 @@ from pathlib import Path
 import numpy as np
 import pyarrow as pa
 
+from dc_frames.delivery import deliver
 from dc_frames.lake import (
-    BOUNDARY_COLUMNS,
     L1,
     L1_COLUMNS,
     EventGroup,
@@ -25,11 +25,15 @@ from dc_frames.lake import (
     event_group,
     event_groups,
 )
-from dc_frames.types import EventFrames, Frame, FrameBoundaryError, FramesInputError
+from dc_frames.track import Track, locate, unclosed_error
+from dc_frames.types import (
+    EventFrames,
+    Frame,
+    RowGroupFrames,
+)
 
 DEFAULT_KEY = ("binance", "spot", "BTCUSDT")
 _THETA_SCALE = Decimal("1e-8")
-_NAMES = ("referencia", "confirmación", "extremo")
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 # Tipos de las cuatro columnas de una trama, en el orden de `Frame`.
 L1_TYPES = tuple(kind for name, kind in L1_COLUMNS.items() if name != "agg_trade_id")
@@ -47,14 +51,14 @@ class _Previous:
         self.rg: RowGroup | None = None
 
 
-class _Cursor:
-    """El avance de un θ sobre sus eventos: cuál es el que sigue y qué ticks lleva ya.
+class _Cursor(Track):
+    """El avance de un θ sobre sus eventos en los modos por evento y por chunks.
 
-    Solo el primer evento sin entregar puede estar a medias (`E_i ≤ R_{i+1}`): en modo
-    por evento lo que ya se leyó de él se guarda **copiado** en `_conf` y `_over` (una
-    lista de arrays por columna), para no anclar el row group del que salió. En modo
-    por chunks no se guarda ningún tick: solo cuántos van (`_conf_n`, `_over_n`), para
-    saber si quedan ticks por tomar del row group anterior (`previous`) o por releer de L1.
+    En modo por evento lo que ya se leyó del evento a medias se guarda **copiado** en
+    `_conf` y `_over` (una lista de arrays por columna), para no anclar el row group del
+    que salió. En modo por chunks no se guarda ningún tick: solo cuántos van (`_conf_n`,
+    `_over_n`), para saber si quedan ticks por tomar del row group anterior (`previous`)
+    o por releer de L1.
     """
 
     def __init__(
@@ -66,42 +70,20 @@ class _Cursor:
         max_event_ticks: int | None = None,
         previous: _Previous | None = None,
     ) -> None:
-        self.theta = theta
-        self._groups = groups
+        super().__init__(theta, groups)
         self._l1 = l1
         self._chunks = chunks
         self._previous = previous
         self._budget = max_event_ticks
-        self._group = next(groups, None)
-        self._k = 0
-        # Qué fronteras del evento `k` ya se vieron como ticks de L1: (R, C, E).
-        self._seen = np.zeros(3, bool)
         self._conf: list[list[pa.Array]] = [[], [], [], []]
         self._over: list[list[pa.Array]] = [[], [], [], []]
-        # Ticks de cada fase y ticks anteriores al mes del evento `k` en row groups ya
-        # soltados.
+        # Ticks de cada fase del evento a medias, en row groups ya soltados.
         self._conf_n = 0
         self._over_n = 0
-        self._before = 0
-
-    @property
-    def done(self) -> bool:
-        return self._group is None
-
-    @property
-    def reference(self) -> int:
-        """Referencia del evento en curso. Solo si no está `done`."""
-        return int(self._group.bounds[self._k, 0])
 
     def holds(self, rg: RowGroup) -> bool:
         """Si su evento en curso ya empezó en `rg` o antes y sigue abierto: necesitará `rg`."""
         return self._group is not None and self.reference <= rg.high
-
-    def describe(self) -> str:
-        r, c, e = (int(x) for x in self._group.bounds[self._k])
-        return (
-            f"θ {self.theta}, evento con referencia {r}, confirmación {c} y extremo {e}"
-        )
 
     def feed(self, rg: RowGroup) -> Iterator[EventFrames]:
         """Entrega los eventos que cierran en este row group y deja a medias el que no."""
@@ -114,34 +96,14 @@ class _Cursor:
                 return
             self._next_group()
 
-    def _next_group(self) -> None:
-        last_extreme = int(self._group.bounds[-1, 2])
-        self._group = next(self._groups, None)
-        self._k = 0
-        self._seen = np.zeros(3, bool)
-        if self._group is not None and self._group.bounds[0, 0] < last_extreme:
-            raise FramesInputError(
-                f"θ {self.theta}: un row group de eventos empieza en la referencia "
-                f"{self._group.bounds[0, 0]}, antes del extremo {last_extreme} del anterior"
-            )
-
     def _process(
         self, rg: RowGroup, group: EventGroup, touched: int
     ) -> Iterator[EventFrames]:
         k = self._k
         bounds = group.bounds[k:touched]
-        left = np.searchsorted(rg.ids, bounds, "left")
-        right = np.searchsorted(rg.ids, bounds, "right")
-        inside = (bounds >= rg.low) & (bounds <= rg.high)
-        seen = np.zeros(bounds.shape, bool)
-        seen[0] = self._seen
-        # Una frontera dentro del rango del row group debe ser un tick; una anterior a
-        # él debe haberse visto en un row group previo, o cae en un hueco entre ambos.
-        bad = (inside & (left == right)) | ((bounds < rg.low) & ~seen)
-        if bad.any():
-            raise self._boundary_error(bounds, bad, rg)
-        self._check_confirm_times(rg, group, bounds, left, inside[:, 1])
-        seen |= inside
+        right, seen = locate(
+            self.theta, rg, bounds, group.confirm_times[k:touched], self._seen
+        )
 
         closed = int(np.count_nonzero(bounds[:, 2] <= rg.high))
         # `right` es la posición siguiente a la frontera: las fases son
@@ -267,51 +229,6 @@ class _Cursor:
             pieces.clear()
         return Frame(*columns)
 
-    def _check_confirm_times(
-        self,
-        rg: RowGroup,
-        group: EventGroup,
-        bounds: np.ndarray,
-        left: np.ndarray,
-        inside: np.ndarray,
-    ) -> None:
-        """El tick `C` de cada evento cuya confirmación cae en este row group debe tener
-        `transact_time = confirm_time` (TRD-L3 §7.4, garantía 1): si no, L1 y L2 no cuadran.
-        """
-        rows = np.flatnonzero(inside)
-        if not rows.size:
-            return
-        found = rg.columns[0].to_numpy(zero_copy_only=False)[left[rows, 1]]
-        wanted = group.confirm_times[self._k + rows]
-        wrong = np.flatnonzero(found != wanted)
-        if wrong.size:
-            i = int(rows[wrong[0]])
-            raise FrameBoundaryError(
-                f"θ {self.theta}: el tick de confirmación {bounds[i, 1]} (evento con "
-                f"referencia {bounds[i, 0]}) tiene transact_time {found[wrong[0]]} y L2 "
-                f"dice confirm_time {wanted[wrong[0]]}: L1 y L2 no cuadran",
-                theta=f"{self.theta:.8f}",
-                field="confirm_time",
-                got=found[wrong[0]],
-                wanted=wanted[wrong[0]],
-            )
-
-    def _boundary_error(
-        self, bounds: np.ndarray, bad: np.ndarray, rg: RowGroup
-    ) -> FrameBoundaryError:
-        i, j = (int(x) for x in np.argwhere(bad)[0])
-        event = bounds[i]
-        return FrameBoundaryError(
-            f"θ {self.theta}: el id de {_NAMES[j]} {event[j]} del evento "
-            f"(referencia {event[0]}, confirmación {event[1]}, extremo {event[2]}) "
-            f"no es un tick de L1: cae en un hueco del proveedor o L1 y L2 no cuadran "
-            f"(row group de L1 con ids {rg.low}..{rg.high})",
-            theta=f"{self.theta:.8f}",
-            field=BOUNDARY_COLUMNS[j],
-            got=event[j],
-            wanted="un tick de L1",
-        )
-
 
 def _empty() -> Frame:
     """Una trama de largo 0 que no ancla ningún row group."""
@@ -395,14 +312,7 @@ def _drive(
                 previous.rg = rg if any(c.holds(rg) for c in live) else None
     finally:
         rows.close()
-    raise FrameBoundaryError(
-        "L1 terminó antes de cerrar todos los eventos; el extremo no existe como tick. "
-        + "; ".join(c.describe() for c in live),
-        theta=f"{live[0].theta:.8f}",
-        field="extreme_agg_trade_id",
-        got="ausente",
-        wanted="un tick de L1",
-    )
+    raise unclosed_error(live)
 
 
 def _theta(value: Decimal | str) -> Decimal:
@@ -418,6 +328,22 @@ def _theta(value: Decimal | str) -> Decimal:
 def _check_month(name: str, month: Month) -> None:
     if not 1 <= month[1] <= 12:
         raise ValueError(f"{name} {month}: el mes debe estar entre 1 y 12")
+
+
+def _check_request(
+    thetas: Decimal | str | Iterable[Decimal | str], start: Month, end: Month
+) -> list[Decimal]:
+    """Valida θ y meses de una lectura y devuelve los θ ya normalizados."""
+    if isinstance(thetas, Decimal | str):
+        thetas = [thetas]
+    values = [_theta(t) for t in thetas]
+    if not values or len(set(values)) != len(values):
+        raise ValueError("thetas debe traer al menos un θ y sin repetidos")
+    _check_month("start", start)
+    _check_month("end", end)
+    if start > end:
+        raise ValueError(f"start {start} es posterior a end {end}")
+    return values
 
 
 def read_frames(
@@ -474,15 +400,7 @@ def read_frames(
         )
     if max_event_ticks is not None and max_event_ticks < 0:
         raise ValueError(f"max_event_ticks {max_event_ticks} no puede ser negativo")
-    if isinstance(thetas, Decimal | str):
-        thetas = [thetas]
-    values = [_theta(t) for t in thetas]
-    if not values or len(set(values)) != len(values):
-        raise ValueError("thetas debe traer al menos un θ y sin repetidos")
-    _check_month("start", start)
-    _check_month("end", end)
-    if start > end:
-        raise ValueError(f"start {start} es posterior a end {end}")
+    values = _check_request(thetas, start, end)
     key = (provider, market, asset)
     return _read(
         values, l1_root, l2_root, start, end, key, chunks, max_event_ticks, columns
@@ -514,6 +432,49 @@ def _read(
         for t in thetas
     ]
     yield from _drive(l1, cursors, start, end, previous)
+
+
+def read_row_groups(
+    thetas: Decimal | str | Iterable[Decimal | str],
+    l1_root: str | Path,
+    l2_root: str | Path,
+    start: Month,
+    end: Month,
+    provider: str = DEFAULT_KEY[0],
+    market: str = DEFAULT_KEY[1],
+    asset: str = DEFAULT_KEY[2],
+    columns: Sequence[str] | None = None,
+) -> Iterator[RowGroupFrames]:
+    """Los row groups de L1 del pase, uno por elemento, con los eventos de todos los θ.
+
+    Es la entrega por row group de TRD-L3 §7.4 (ADR-L3-14), la que usan el resumidor y
+    las familias por chunks. Los parámetros son los de `read_frames`, sin `chunks` ni
+    `max_event_ticks`. El pase retrocede al row group más antiguo que necesita algún
+    evento de `start` y recorre desde ahí cada row group **una sola vez**, en orden, para
+    todos los θ a la vez: los eventos que cruzan row groups o meses no releen nada,
+    porque el consumidor los completa con su acumulador parcial.
+
+    Cada `RowGroupFrames` trae los cuatro arrays del row group como vistas sin copia y,
+    por θ, las filas de L2 de los eventos que lo tocan con sus posiciones `R`, `C` y `E`
+    (ver `ThetaEvents`). Un evento sale en cada row group desde el de su referencia hasta
+    el de su extremo, y su `ticks_before_month` sale en el que lo cierra.
+
+    Memoria: un row group de L1 en vuelo y ninguno retenido, más un row group de
+    eventos de L2 por θ. El consumidor debe soltar el elemento antes de pedir el
+    siguiente (`del`): el `for` conserva el anterior hasta recibir el nuevo y, sin el
+    `del`, conviven dos row groups.
+
+    `columns` proyecta las columnas de `events.parquet` que se entregan, más las cuatro
+    que el lector siempre lee (las tres fronteras y `confirm_time`). Sin él trae las
+    siete de TRD-L3 §7.1, no las 11 de `read_frames`.
+
+    Errores: los de `read_frames`. Una frontera de un evento que cae dentro de un row
+    group y no es un tick, o un tick de confirmación con otro `transact_time`, lanza
+    `FrameBoundaryError` al entregar el row group.
+    """
+    values = _check_request(thetas, start, end)
+    key = (provider, market, asset)
+    return deliver(values, l1_root, l2_root, start, end, key, columns)
 
 
 def _month_of_time(microseconds: int) -> Month:
