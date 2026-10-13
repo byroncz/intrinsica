@@ -11,10 +11,15 @@
 #   viz-tiles (ITSC-307) y viz-render (ITSC-310) rechazan series_start, script y
 #   args; to igual a from se omite
 #
-# --to se omite si es igual a from, salvo en l2-backfill (ITSC-292). En L1 la
-# CLI asume to = from cuando falta, y la de l2-monthly rechaza --to. En
-# l2-backfill, desde 0.6.0 (ITSC-285), to ausente significa "hasta el último mes
-# con consolidated.parquet en L1": omitirlo convertiría un mes en un rango abierto.
+# --to se omite si es igual a from, salvo en l2-backfill (ITSC-292) y
+# l3-backfill (ITSC-334). En L1 la CLI asume to = from cuando falta, y la de
+# l2-monthly rechaza --to. En l2-backfill, desde 0.6.0 (ITSC-285), to ausente
+# significa "hasta el último mes con consolidated.parquet en L1": omitirlo
+# convertiría un mes en un rango abierto.
+# l3-backfill tiene la misma semántica (la CLI de L3 toma el último mes con
+# consolidated.parquet en L1). La de l3-monthly rechaza --to y --force con código
+# 2: run-job-tasks.sh ya rechaza un to distinto de from, y aquí se corta force
+# antes de gastar una ejecución.
 set -euo pipefail
 
 [[ $# -ge 1 && $# -le 7 ]] || {
@@ -57,11 +62,17 @@ if [[ ( "$job" == viz-tiles || "$job" == viz-render ) && ( -n "$series_start" ||
   exit 2
 fi
 
+# l3-monthly procesa un mes y no reprocesa (TRD-L3 §8.3): la CLI exige código 2.
+if [[ "$job" == l3-monthly && "$force" == "true" ]]; then
+  echo "run-job-args: l3-monthly no admite force" >&2
+  exit 2
+fi
+
 args="--mode,${job#*-}"
 if [[ -n "$from" ]]; then
   args="${args},--from=${from}"
 fi
-if [[ -n "$to" && ( "$to" != "$from" || "$job" == l2-backfill ) ]]; then
+if [[ -n "$to" && ( "$to" != "$from" || "$job" == l2-backfill || "$job" == l3-backfill ) ]]; then
   args="${args},--to=${to}"
 fi
 if [[ "$force" == "true" ]]; then

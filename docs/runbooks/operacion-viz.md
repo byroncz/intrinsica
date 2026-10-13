@@ -299,7 +299,7 @@ igual que el `index.html` del 2026-09-30 (la verificación de ITSC-320).
 
 El workflow `l1-run-job` ejecuta el job del modo sin overrides y encadena los
 `next_jobs` del modo: con `monthly-close`, **`l1-monthly-close`, luego
-`l2-monthly` y luego `viz-tiles`**, cada uno solo si el anterior terminó con éxito
+`l2-monthly`, luego `viz-tiles` y luego `l3-monthly`**, cada uno solo si el anterior terminó con éxito
 (sin argumentos: cada job toma el mes anterior). Se lanza desde Cloud Shell:
 
 ```bash

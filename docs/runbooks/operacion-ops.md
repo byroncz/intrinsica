@@ -127,7 +127,7 @@ gcloud storage cp docs/runbooks/ops-scripts/permisos.py gs://<proyecto>-ops/scri
 ```
 
 Lánzalo con `script` = ese URI y sin `args`. Esperas la línea final
-`permisos: 11 de 11 como se esperaba` y el código de salida 0. Una línea `FALLO`
+`permisos: 13 de 13 como se esperaba` y el código de salida 0. Una línea `FALLO`
 dice qué permiso no es el esperado; si una escritura que debía dar 403 tuvo
 éxito, el script deja un objeto `ops-permisos-*` en ese bucket: bórralo y
 corrige el IAM antes de seguir. Se corre una vez tras el primer apply y cada vez
@@ -315,7 +315,7 @@ La hace el humano una vez que `ops_tools` está publicada y el stack aplicado:
 1. `seam_l2.py` desde Actions: el resumen trae URI, generation, SHA-256, el
    contenido y la línea final `θ: 50; bordes: 5400 (ok: 5400; fallos: 0)`. Debe
    terminar en minutos, no en horas.
-2. `permisos.py`: `permisos: 11 de 11 como se esperaba`.
+2. `permisos.py`: `permisos: 13 de 13 como se esperaba`.
 3. Un script de una línea, `import sys; sys.exit(1)`: la ejecución queda en rojo
    y el resumen muestra `Código de salida | 1`.
 

@@ -273,7 +273,7 @@ def test_permisos_pasa_con_los_permisos_de_ops_script(monkeypatch, capsys):
     monkeypatch.setattr(storage, "Client", lambda: fake)
     monkeypatch.setenv("OPS_RESULTS_URI", "gs://proj-ops/results/e1/")
     assert permisos.main() == 0
-    assert last_line(capsys) == "permisos: 11 de 11 como se esperaba"
+    assert last_line(capsys) == "permisos: 13 de 13 como se esperaba"
 
 
 def test_permisos_avisa_si_la_cuenta_puede_escribir_de_mas(monkeypatch, capsys):
@@ -286,7 +286,7 @@ def test_permisos_avisa_si_la_cuenta_puede_escribir_de_mas(monkeypatch, capsys):
     assert permisos.main() == 1
     out = capsys.readouterr().out
     assert "FALLO escribir en landing: esperado 403, obtenido ok" in out
-    assert out.strip().endswith("permisos: 10 de 11 como se esperaba")
+    assert out.strip().endswith("permisos: 12 de 13 como se esperaba")
 
 
 def test_permisos_avisa_si_la_cuenta_puede_escribir_en_viz(monkeypatch, capsys):
@@ -299,4 +299,26 @@ def test_permisos_avisa_si_la_cuenta_puede_escribir_en_viz(monkeypatch, capsys):
     assert permisos.main() == 1
     out = capsys.readouterr().out
     assert "FALLO escribir en viz: esperado 403, obtenido ok" in out
-    assert out.strip().endswith("permisos: 10 de 11 como se esperaba")
+    assert out.strip().endswith("permisos: 12 de 13 como se esperaba")
+
+
+@pytest.mark.parametrize(
+    ("prefijo", "falla"),
+    [
+        ("proj-frames/l3/", "escribir en frames"),
+        ("proj-dq-findings/l3/", "escribir en dq-findings de L3"),
+    ],
+)
+def test_permisos_avisa_si_la_cuenta_puede_escribir_en_lo_de_l3(
+    monkeypatch, capsys, prefijo, falla
+):
+    from google.cloud import storage
+
+    permisos = load("permisos")
+    fake = FakeGcs(writable={"proj-ops/results/", prefijo})
+    monkeypatch.setattr(storage, "Client", lambda: fake)
+    monkeypatch.setenv("OPS_RESULTS_URI", "gs://proj-ops/results/e1/")
+    assert permisos.main() == 1
+    out = capsys.readouterr().out
+    assert f"FALLO {falla}: esperado 403, obtenido ok" in out
+    assert out.strip().endswith("permisos: 12 de 13 como se esperaba")

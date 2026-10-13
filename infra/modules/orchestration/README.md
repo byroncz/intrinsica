@@ -26,13 +26,13 @@ TRD-L1 §10.1 y §11.
 `next_jobs` en una entrada de `schedules` es una lista ordenada de nombres de
 Cloud Run Jobs (de la capa o de otras). Corren uno tras otro: cada uno solo
 cuando el anterior terminó bien, y el primero cuando termina el job del modo.
-Ejemplo, el cierre mensual de L1 encadena `l2-monthly` y luego `viz-tiles`:
+Ejemplo, el cierre mensual de L1 encadena `l2-monthly`, luego `viz-tiles` y luego `l3-monthly`:
 
 ```hcl
 monthly-close = {
   schedule = "0 6 8 * *"
   # ...
-  next_jobs = ["l2-monthly", "viz-tiles"]
+  next_jobs = ["l2-monthly", "viz-tiles", "l3-monthly"]
 }
 ```
 

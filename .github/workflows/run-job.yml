@@ -11,6 +11,13 @@
 # quedó; l2-monthly procesa un mes. Por eso run-job-tasks.sh devuelve una sola
 # unidad para los jobs l2 y el workflow lanza --tasks 1.
 #
+# L3 (ITSC-334) tampoco usa task array, aunque sin carry-over sus meses son
+# independientes: la partición por mes la decide ITSC-335 con la medición.
+# l3-backfill va en una sola tarea que recorre el rango y la frontera de cada θ
+# decide desde dónde avanza (from vacío); l3-monthly resume un mes (vacío, el mes
+# anterior; lo decide la CLI) y no admite to distinto de from ni force. Ambos
+# admiten series_start.
+#
 # ops-script (ITSC-298) no es una capa de datos: corre un script Python de
 # gs://<proyecto>-ops/scripts/ (input script, con args libres en args) y deja
 # en el resumen su URI, generation, hash, contenido y las últimas líneas de su
@@ -44,24 +51,26 @@ on:
           - l1-seam-check
           - l2-backfill
           - l2-monthly
+          - l3-backfill
+          - l3-monthly
           - ops-script
           - viz-render
           - viz-tiles
         required: true
       from:
-        description: "Inicio: YYYY-MM (backfill, monthly, monthly-close) o YYYY-MM-DD (l1-daily). Solo l2-backfill admite vacío: la frontera de cada θ decide desde dónde avanza. viz-tiles y viz-render: YYYY-MM; vacío = el mes anterior (lo decide la CLI)"
+        description: "Inicio: YYYY-MM (backfill, monthly, monthly-close) o YYYY-MM-DD (l1-daily). l2-backfill y l3-backfill admiten vacío: la frontera de cada θ decide desde dónde avanza. l3-monthly, viz-tiles y viz-render: YYYY-MM; vacío = el mes anterior (lo decide la CLI)"
         type: string
         required: false
       to:
-        description: "Fin inclusivo, mismo formato que from. Por defecto, igual a from; l2-monthly no admite otro valor. Excepción l2-backfill: vacío = hasta el último mes cerrado de L1; to = from = un solo mes"
+        description: "Fin inclusivo, mismo formato que from. Por defecto, igual a from; l2-monthly y l3-monthly no admiten otro valor. Excepción l2-backfill y l3-backfill: vacío = hasta el último mes cerrado de L1; to = from = un solo mes"
         type: string
         required: false
       force:
-        description: "Reprocesar aunque ya esté hecho. L1: el .CHECKSUM coincide con el manifiesto (úsalo si cambió el código). L2 (backfill): arrancar en from aunque los meses ya tengan carry-over; exige from. viz-tiles: regenerar los tiles aunque su input_hash no haya cambiado; viz-render: regenerar las páginas aunque la huella de la plantilla no haya cambiado; ambos exigen from"
+        description: "Reprocesar aunque ya esté hecho. L1: el .CHECKSUM coincide con el manifiesto (úsalo si cambió el código). L2 (backfill): arrancar en from aunque los meses ya tengan carry-over; exige from. L3 (backfill): reprocesar desde from ignorando la frontera de cada θ; exige from; l3-monthly no lo admite. viz-tiles: regenerar los tiles aunque su input_hash no haya cambiado; viz-render: regenerar las páginas aunque la huella de la plantilla no haya cambiado; ambos exigen from"
         type: boolean
         default: false
       series_start:
-        description: "Solo L2: primer mes de la serie, YYYY-MM (vacío: la CLI usa L2_SERIES_START del stack)"
+        description: "Solo L2 y L3: primer mes de la serie, YYYY-MM (vacío: la CLI usa L2_SERIES_START o L3_SERIES_START del stack)"
         type: string
         required: false
       script:
@@ -98,8 +107,13 @@ jobs:
         run: |
           # La CLI de L1 no define --series-start: argparse saldría con 2 dentro
           # de Cloud Run y gastaría una ejecución.
-          if [[ -n "$SERIES_START" && "$JOB" != l2-* ]]; then
-            echo "::error::series_start solo aplica a los jobs l2-*, no a $JOB"
+          if [[ -n "$SERIES_START" && "$JOB" != l2-* && "$JOB" != l3-* ]]; then
+            echo "::error::series_start solo aplica a los jobs l2-* y l3-*, no a $JOB"
+            exit 1
+          fi
+          # l3-monthly resume un mes y no reprocesa: su CLI sale con 2 con --force.
+          if [[ "$JOB" == l3-monthly && "$FORCE" == "true" ]]; then
+            echo "::error::force no aplica a l3-monthly: usa l3-backfill con from"
             exit 1
           fi
           # ops-script no tiene rango ni reproceso: aceptar estos inputs
@@ -140,10 +154,10 @@ jobs:
           TASKS: ${{ steps.tasks.outputs.tasks }}
         run: |
           # run-job-args.sh arma los argumentos (ITSC-292). Semántica de to:
-          # en L1 y l2-monthly se omite si es igual a from (la CLI asume
-          # to = from; la de l2-monthly rechaza --to). En l2-backfill siempre
-          # se pasa: to vacío = hasta el último mes cerrado de L1; to = from =
-          # un solo mes.
+          # en L1, l2-monthly y l3-monthly se omite si es igual a from (la CLI
+          # asume to = from; las de l2-monthly y l3-monthly rechazan --to). En
+          # l2-backfill y l3-backfill siempre se pasa: to vacío = hasta el último
+          # mes cerrado de L1; to = from = un solo mes.
           # Para ops-script devuelve --script y --script-args con el separador
           # ;; de gcloud, porque el texto libre puede llevar comas.
           args="$(.github/scripts/run-job-args.sh "$JOB" "$FROM" "$TO" "$FORCE" "$SERIES_START" "$SCRIPT" "$SCRIPT_ARGS")"

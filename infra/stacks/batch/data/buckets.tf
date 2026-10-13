@@ -120,7 +120,8 @@ resource "google_storage_bucket" "dc_events" {
   depends_on = [google_project_service.apis]
 }
 
-# Salida de L3: frames.
+# Salida de L3: descriptores por evento (l3/), ITSC-334; el nombre viene del
+# diseño de tramas descartado el 2026-10-08.
 resource "google_storage_bucket" "frames" {
   name                        = "${var.project_id}-frames"
   project                     = google_project.this.project_id
