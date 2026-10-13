@@ -9,6 +9,7 @@ Cada θ arma su row group de salida (el mismo número de filas que el de `events
 en un buffer por columna y lo entrega al escritor de familias.
 """
 
+import time
 from collections.abc import Iterable
 from contextlib import ExitStack, closing
 from dataclasses import dataclass
@@ -39,6 +40,7 @@ from l3_dc_descriptors.schema import (
     SUMMARIES_SCHEMA,
     RowGroupBuffer,
 )
+from l3_dc_descriptors.timing import Phases
 
 DEFAULT_KEY = ("binance", "spot", "BTCUSDT")
 C_TICKS, OS_TICKS = COLUMN["c_ticks"], COLUMN["os_ticks"]
@@ -58,6 +60,10 @@ class ThetaResult:
 class _Lane:
     """El avance de un θ en la pasada: su agregador, su escritor, su row group de salida y
     sus cuentas.
+
+    Es lo único que `add` escribe: recibe `Prefixes` y `ThetaEvents` solo para leerlos, así
+    que los θ de un row group se pueden agregar en hilos distintos sin coordinarse.
+    `write_s` son los segundos que este θ gastó armando y escribiendo sus row groups.
     """
 
     def __init__(
@@ -79,6 +85,7 @@ class _Lane:
         self._sizes = iter(writer.row_groups)
         self._rows: RowGroupBuffer | None = None
         self.rows = 0
+        self.write_s = 0.0
         self.closed_ticks = 0
         self.before_month = 0
         self.first_reference: int | None = None
@@ -91,7 +98,11 @@ class _Lane:
         closed = self.aggregator.feed(agg, events)
         if closed is None:
             return
-        self._write(closed)
+        started = time.perf_counter()
+        try:
+            self._write(closed)
+        finally:
+            self.write_s += time.perf_counter() - started
         self.rows += len(closed.rows)
         self.closed_ticks += int(
             closed.rows[:, C_TICKS].sum() + closed.rows[:, OS_TICKS].sum()
@@ -126,10 +137,13 @@ class _Lane:
 
     def commit(self) -> str:
         """Publica el archivo del θ y devuelve su `content_hash`."""
+        started = time.perf_counter()
         try:
             return self.writer.commit()
         except FamilySkeletonMismatch as error:
             raise self._mismatch(error.detail) from error
+        finally:
+            self.write_s += time.perf_counter() - started
 
 
 def _consume(rg: RowGroupFrames, lanes: dict[Decimal, _Lane]) -> None:
@@ -137,6 +151,17 @@ def _consume(rg: RowGroupFrames, lanes: dict[Decimal, _Lane]) -> None:
     agg = Prefixes(rg.frame)
     for events in rg.thetas:
         lanes[events.theta].add(agg, events)
+
+
+def _timed_next(row_groups, phases: Phases) -> RowGroupFrames | None:
+    """El siguiente row group (o `None`), sumando a `read_s` lo que tardó el lector en
+    leerlo, decodificarlo y entregarlo con las posiciones de todos los θ.
+    """
+    started = time.perf_counter()
+    try:
+        return next(row_groups, None)
+    finally:
+        phases.read_s += time.perf_counter() - started
 
 
 def _theta(value: Decimal | str) -> Decimal:
@@ -170,6 +195,7 @@ def summarize_month(
     provider: str = DEFAULT_KEY[0],
     market: str = DEFAULT_KEY[1],
     asset: str = DEFAULT_KEY[2],
+    phases: Phases | None = None,
 ) -> dict[Decimal, ThetaResult]:
     """Escribe `summaries.parquet` del mes para cada θ y devuelve lo que dejó de cada uno.
 
@@ -183,7 +209,13 @@ def summarize_month(
     no deja ningún archivo y borra los temporales. Si la publicación misma falla en un θ
     (por ejemplo, el `move` a GCS), los θ ya publicados quedan: re-ejecutar el mes los
     reescribe con el mismo contenido.
+
+    Sin estado: todo lo que la unidad acumula (los `_Lane`, los tiempos) es suyo y muere
+    con ella. `phases`, si se pasa, recibe los segundos de la compuerta, la lectura, la
+    agregación, la escritura y la conciliación (ver `timing`).
     """
+    phases = phases if phases is not None else Phases()
+    started = time.perf_counter()
     l1_root, l2_root, l3_root = str(l1_root), str(l2_root), str(l3_root)
     key = (provider, market, asset)
     values = [_theta(t) for t in thetas]
@@ -207,6 +239,7 @@ def summarize_month(
             before = month_of(month_ordinal(month) - 1)
             previous = read_carry_over(l2_root, key, text, before).direction
         carries[theta] = (carry, previous)
+    phases.gate_s += time.perf_counter() - started
 
     with ExitStack() as stack:
         lanes: dict[Decimal, _Lane] = {}
@@ -220,21 +253,33 @@ def summarize_month(
             stack.enter_context(writer)
             lanes[theta] = _Lane(theta, text, month, writer, *carries[theta])
         l1 = stack.enter_context(closing(L1Month(l1_root, key, month)))
+        row_groups = stack.enter_context(
+            closing(
+                read_row_groups(
+                    values,
+                    l1_root,
+                    l2_root,
+                    month,
+                    month,
+                    *key,
+                    columns=EVENT_COLUMNS,
+                )
+            )
+        )
+        consumed = 0.0
         try:
-            for rg in read_row_groups(
-                values,
-                l1_root,
-                l2_root,
-                month,
-                month,
-                *key,
-                columns=EVENT_COLUMNS,
-            ):
+            while (rg := _timed_next(row_groups, phases)) is not None:
+                begun = time.perf_counter()
                 _consume(rg, lanes)
+                consumed += time.perf_counter() - begun
                 del rg  # el siguiente row group no convive con este
         except FrameBoundaryError as error:
             raise _inconsistent(error, month) from error
+        # `consumed` incluye lo que los θ escribieron: la agregación es el resto.
+        written = sum(lane.write_s for lane in lanes.values())
+        phases.aggregate_s += max(0.0, consumed - written)
 
+        begun = time.perf_counter()
         reconciled = {
             theta: reconcile(
                 l1,
@@ -249,10 +294,12 @@ def summarize_month(
             )
             for theta, lane in lanes.items()
         }
+        phases.reconcile_s += time.perf_counter() - begun
         results = {}
         for theta, lane in lanes.items():
             digest = lane.commit()
             results[theta] = ThetaResult(
                 lane.writer.path, lane.rows, digest, reconciled[theta]
             )
+        phases.write_s += sum(lane.write_s for lane in lanes.values())
     return results

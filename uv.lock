@@ -523,17 +523,21 @@ version = "0.1.0"
 source = { editable = "layers/l3_dc_descriptors" }
 dependencies = [
     { name = "dc-frames" },
+    { name = "dq" },
     { name = "numpy" },
     { name = "pyarrow" },
     { name = "pyutils" },
+    { name = "pyyaml" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "dc-frames", editable = "shared/dc_frames" },
+    { name = "dq", editable = "shared/dq" },
     { name = "numpy", specifier = ">=2.0" },
     { name = "pyarrow", specifier = ">=25.0.1" },
     { name = "pyutils", editable = "shared/pyutils" },
+    { name = "pyyaml", specifier = ">=6.0" },
 ]
 
 [[package]]

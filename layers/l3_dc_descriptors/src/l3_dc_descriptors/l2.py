@@ -7,6 +7,7 @@ incoherente.
 
 from contextlib import closing
 from dataclasses import dataclass
+from types import MappingProxyType
 
 import pyarrow as pa
 import pyarrow.fs as pafs
@@ -18,13 +19,15 @@ from l3_dc_descriptors.errors import L2InputMissing, L2StateInconsistent
 EVENTS = "events.parquet"
 CARRY_OVER = "carry_over.parquet"
 
-_COLUMNS = {
-    "direction": pa.int8(),
-    "has_pending_event": pa.bool_(),
-    "pending_reference_agg_trade_id": pa.int64(),
-    "ext_high_agg_trade_id": pa.int64(),
-    "ext_low_agg_trade_id": pa.int64(),
-}
+_COLUMNS = MappingProxyType(
+    {
+        "direction": pa.int8(),
+        "has_pending_event": pa.bool_(),
+        "pending_reference_agg_trade_id": pa.int64(),
+        "ext_high_agg_trade_id": pa.int64(),
+        "ext_low_agg_trade_id": pa.int64(),
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
