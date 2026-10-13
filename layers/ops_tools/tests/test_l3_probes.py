@@ -44,7 +44,7 @@ def args(l1, l2, *extra: str) -> list[str]:
 
 
 def run_probe(*argv: str) -> tuple[int, str]:
-    """La sonda en un proceso aparte: su RSS pico es el suyo y no el de pytest, que arrastra el de las demás pruebas."""
+    """La sonda en un proceso aparte. Su RSS pico es el suyo (`VmHWM`, no `ru_maxrss`, que en Linux hereda el pico de pytest)."""
     done = subprocess.run(
         [sys.executable, str(SCRIPTS / "l3_probe_reader.py"), *argv],
         capture_output=True,
@@ -168,6 +168,19 @@ def test_el_modo_chunks_mide_el_pico_en_un_subproceso_y_cuenta_como_el_lector(la
     assert sum(int(row[1]) for row in totals) == n
     assert sum(int(row[2]) for row in totals) == conf
     assert sum(int(row[3]) for row in totals) == over
+
+
+@pytest.mark.skipif(not Path("/proc/self/status").exists(), reason="VmHWM es de Linux")
+def test_el_rss_de_la_sonda_no_hereda_el_pico_de_quien_la_lanza(lake):
+    l1, l2, events = lake
+    held = bytearray(512 << 20)
+    for offset in range(0, len(held), 4096):
+        held[offset] = 1
+    # Con `ru_maxrss` el hijo mediría al menos los 512 MiB del padre tras el exec.
+    _, out = run_probe("--theta", theta_text(min(events)), *args(l1, l2))
+    del held
+    rss = int(re.search(r"rss_pico_mib=(\d+)", out.strip().splitlines()[-1])[1])
+    assert 0 < rss < 512, out
 
 
 def test_el_modo_chunks_admite_las_relecturas_de_eventos_largos(lake, capsys):
