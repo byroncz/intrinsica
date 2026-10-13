@@ -267,6 +267,8 @@ entradas.
     evento mayor llega sin tramas y se cuenta como `over_budget` (columna de la tabla por θ,
     línea de resumen y `over_budget=` en la última línea). En modo chunks se ignora, porque
     ese modo no tiene presupuesto.
+  - El RSS pico es `VmHWM` de `/proc/self/status` en Linux (ITSC-345): `ru_maxrss` hereda el
+    pico del proceso que lanzó la sonda al hacer exec, y inflaba el RSS cuando la lanzaba pytest.
   - Umbral de RSS de §10.3 con un solo θ: 1 GiB en modo chunks; en modo evento, 1 GiB más
     el presupuesto (`--max-event-ticks` × 40 B por tick). En la pasada de 50 θ el RSS se
     reporta sin umbral.
