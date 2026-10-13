@@ -74,6 +74,19 @@ class RowGroupBuffer:
                 column[i] = value
         self.fill += 1
 
+    def extend(self, block: np.ndarray) -> None:
+        """Las filas de varios eventos: `block` es `(k, WIDTH)` de `int64`, con los
+        decimales sin escalar. Es `append` por columna, sin bucle por evento.
+        """
+        i, k = self.fill, len(block)
+        for j, (column, wide) in enumerate(zip(self._data, _WIDE, strict=True)):
+            if wide:
+                column[i : i + k, 0] = block[:, j]
+                column[i : i + k, 1] = block[:, j] >> 63
+            else:
+                column[i : i + k] = block[:, j]
+        self.fill += k
+
     def to_batch(self, theta: int) -> pa.RecordBatch:
         """El row group lleno. `theta` es el θ sin escalar (× 10⁸).
 

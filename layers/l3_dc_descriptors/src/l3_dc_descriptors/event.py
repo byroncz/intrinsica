@@ -1,12 +1,17 @@
-"""La fila de `summaries.parquet` de un evento cerrado (TRD-L3 §7.2, §8.1 pasos 3 y 6)."""
+"""La fila de `summaries.parquet` de un evento cerrado (TRD-L3 §7.2, §8.1 paso 6).
+
+`build_row` es el cierre escalar de un evento: recibe sus dos fases ya agregadas, comprueba
+las cantidades y los invariantes de fila contra L2 y arma la fila. Lo usan el resumidor,
+para el evento que cruza row groups y para explicar el primer fallo de un lote (el cierre
+vectorizado de `rowgroup` solo decide si el lote está sano), y el oráculo por evento.
+"""
 
 from typing import NamedTuple
 
-from dc_frames import EventFrames
 from dc_frames.lake import Month
 
 from l3_dc_descriptors.errors import L2StateInconsistent
-from l3_dc_descriptors.phase import PhaseAcc, PhaseSummary, close_phase, scaled
+from l3_dc_descriptors.phase import PhaseSummary, close_phase, scaled
 from l3_dc_descriptors.schema import COLUMN, WIDTH
 
 # Las siete columnas de L2 que el resumidor usa (§7.1).
@@ -29,14 +34,18 @@ class EventRow(NamedTuple):
     extreme: int
 
 
-def summarize_event(ev: EventFrames, theta: str, month: Month) -> EventRow:
-    """Agrega las dos fases del evento y arma su fila, de `WIDTH` enteros.
+def build_row(
+    theta: str, month: Month, l2: dict, confirmation, overshoot, instant
+) -> EventRow:
+    """Cierra las dos fases del evento y arma su fila, de `WIDTH` enteros.
 
-    Consume los dos iteradores de fase. Los decimales quedan sin escalar (10⁻⁸) y los
-    nulos del overshoot vacío, en 0. Lanza `PhaseQuantityMismatch` si las cantidades
-    de una fase no cuadran y `L2StateInconsistent` si la fila contradice a los ticks.
+    `l2` es la fila de L2 (`EVENT_COLUMNS`); `confirmation` y `overshoot` traen los
+    agregados de cada fase y `instant` los del instante de confirmación (los atributos
+    que usa `close_phase` y `ticks`, `high` y `low`). Los decimales quedan sin escalar
+    (10⁻⁸) y los nulos del overshoot vacío, en 0. Lanza `PhaseQuantityMismatch` si las
+    cantidades de una fase no cuadran y `L2StateInconsistent` si la fila contradice a los
+    ticks.
     """
-    l2 = ev.event.select(EVENT_COLUMNS).to_pylist()[0]
     reference = l2["reference_agg_trade_id"]
     confirm = l2["confirm_agg_trade_id"]
     extreme = l2["extreme_agg_trade_id"]
@@ -46,11 +55,6 @@ def summarize_event(ev: EventFrames, theta: str, month: Month) -> EventRow:
             theta, month, "direction", direction, "1 o -1"
         )
 
-    confirmation = PhaseAcc(l2["confirm_time"])
-    confirmation.consume(ev.confirmation)
-    overshoot = PhaseAcc()
-    overshoot.consume(ev.overshoot)
-    instant = confirmation.instant
     c = close_phase(confirmation, theta, confirm, "confirmación")
     o = close_phase(overshoot, theta, confirm, "overshoot")
 
@@ -167,4 +171,4 @@ def _check_invariants(
         )
 
 
-__all__ = ["EVENT_COLUMNS", "summarize_event"]
+__all__ = ["EVENT_COLUMNS", "EventRow", "build_row"]

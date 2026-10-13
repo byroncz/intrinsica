@@ -1,10 +1,12 @@
 """El resumidor: de L1 y L2 de un mes a `summaries.parquet` de cada θ (TRD-L3 §8.1).
 
-Una pasada por mes y por lista de θ, sin estado entre meses (ADR-L3-12). Los eventos
-llegan del lector en modo por chunks y con fan-out: un row group de L1 en vuelo más el
-anterior, compartido; los ticks de cada fase se agregan y se sueltan antes de pedir el
-siguiente evento. Cada θ arma su row group de salida (el mismo número de filas que el
-de `events.parquet`) en un buffer por columna y lo entrega al escritor de familias.
+Una pasada por mes y por lista de θ, sin estado entre meses (ADR-L3-12). El lector
+entrega cada row group de L1 una vez, con las fronteras de los eventos de todos los θ como
+posiciones (ADR-L3-14): `Prefixes` calcula lo común a los θ y, por θ, `ThetaAggregator`
+agrega todos los eventos del row group en llamadas vectorizadas y completa el evento
+abierto con su acumulador parcial. El row group se suelta antes de pedir el siguiente.
+Cada θ arma su row group de salida (el mismo número de filas que el de `events.parquet`)
+en un buffer por columna y lo entrega al escritor de familias.
 """
 
 from collections.abc import Iterable
@@ -14,20 +16,22 @@ from decimal import Decimal
 from pathlib import Path
 
 from dc_frames import (
-    EventFrames,
     FamilySkeletonMismatch,
     FamilyWriter,
     FrameBoundaryError,
+    RowGroupFrames,
+    ThetaEvents,
     family_path,
     l2_path,
-    read_frames,
+    read_row_groups,
 )
 from dc_frames.lake import Month, month_of, month_ordinal
 
 from l3_dc_descriptors.errors import L2StateInconsistent, SkeletonMismatch, month_text
-from l3_dc_descriptors.event import EVENT_COLUMNS, summarize_event
+from l3_dc_descriptors.event import EVENT_COLUMNS
 from l3_dc_descriptors.l2 import EVENTS, CarryOver, read_carry_over, require
 from l3_dc_descriptors.reconcile import L1Month, Reconciliation, reconcile
+from l3_dc_descriptors.rowgroup import Closed, Prefixes, ThetaAggregator
 from l3_dc_descriptors.schema import (
     COLUMN,
     FAMILY,
@@ -52,7 +56,9 @@ class ThetaResult:
 
 
 class _Lane:
-    """El avance de un θ en la pasada: su escritor, su row group de salida y sus cuentas."""
+    """El avance de un θ en la pasada: su agregador, su escritor, su row group de salida y
+    sus cuentas.
+    """
 
     def __init__(
         self,
@@ -68,6 +74,7 @@ class _Lane:
         self.writer = writer
         self.carry = carry
         self.previous_direction = previous_direction
+        self.aggregator = ThetaAggregator(text, month)
         self._theta = int(theta.scaleb(8))
         self._sizes = iter(writer.row_groups)
         self._rows: RowGroupBuffer | None = None
@@ -80,30 +87,42 @@ class _Lane:
     def _mismatch(self, detail: str) -> SkeletonMismatch:
         return SkeletonMismatch(self.text, self.month, FAMILY, detail)
 
-    def add(self, ev: EventFrames) -> None:
-        event = summarize_event(ev, self.text, self.month)
-        if self._rows is None:
-            size = next(self._sizes, None)
-            if size is None:
-                raise self._mismatch(
-                    f"el esqueleto tiene {len(self.writer.row_groups)} row groups y "
-                    f"se escribe otro ({self.writer.path})"
-                )
-            self._rows = RowGroupBuffer(size)
-        self._rows.append(event.values)
-        self.rows += 1
-        self.closed_ticks += event.values[C_TICKS] + event.values[OS_TICKS]
-        self.before_month += ev.ticks_before_month
+    def add(self, agg: Prefixes, events: ThetaEvents) -> None:
+        closed = self.aggregator.feed(agg, events)
+        if closed is None:
+            return
+        self._write(closed)
+        self.rows += len(closed.rows)
+        self.closed_ticks += int(
+            closed.rows[:, C_TICKS].sum() + closed.rows[:, OS_TICKS].sum()
+        )
+        self.before_month += closed.before_month
         if self.first_reference is None:
-            self.first_reference = event.reference
-        self.last_extreme = event.extreme
-        if self._rows.fill == self._rows.size:
-            batch = self._rows.to_batch(self._theta)
-            try:
-                self.writer.write_row_group(batch)
-            except FamilySkeletonMismatch as error:
-                raise self._mismatch(error.detail) from error
-            self._rows = None
+            self.first_reference = closed.first_reference
+        self.last_extreme = closed.last_extreme
+
+    def _write(self, closed: Closed) -> None:
+        """Pasa las filas al row group de salida; lo escribe cada vez que se llena."""
+        done = 0
+        while done < len(closed.rows):
+            if self._rows is None:
+                size = next(self._sizes, None)
+                if size is None:
+                    raise self._mismatch(
+                        f"el esqueleto tiene {len(self.writer.row_groups)} row groups y "
+                        f"se escribe otro ({self.writer.path})"
+                    )
+                self._rows = RowGroupBuffer(size)
+            take = min(self._rows.size - self._rows.fill, len(closed.rows) - done)
+            self._rows.extend(closed.rows[done : done + take])
+            done += take
+            if self._rows.fill == self._rows.size:
+                batch = self._rows.to_batch(self._theta)
+                try:
+                    self.writer.write_row_group(batch)
+                except FamilySkeletonMismatch as error:
+                    raise self._mismatch(error.detail) from error
+                self._rows = None
 
     def commit(self) -> str:
         """Publica el archivo del θ y devuelve su `content_hash`."""
@@ -111,6 +130,13 @@ class _Lane:
             return self.writer.commit()
         except FamilySkeletonMismatch as error:
             raise self._mismatch(error.detail) from error
+
+
+def _consume(rg: RowGroupFrames, lanes: dict[Decimal, _Lane]) -> None:
+    """Agrega un row group en todos los θ que lo tocan; al volver no queda nada de él."""
+    agg = Prefixes(rg.frame)
+    for events in rg.thetas:
+        lanes[events.theta].add(agg, events)
 
 
 def _theta(value: Decimal | str) -> Decimal:
@@ -195,17 +221,17 @@ def summarize_month(
             lanes[theta] = _Lane(theta, text, month, writer, *carries[theta])
         l1 = stack.enter_context(closing(L1Month(l1_root, key, month)))
         try:
-            for ev in read_frames(
+            for rg in read_row_groups(
                 values,
                 l1_root,
                 l2_root,
                 month,
                 month,
                 *key,
-                chunks=True,
                 columns=EVENT_COLUMNS,
             ):
-                lanes[ev.theta].add(ev)
+                _consume(rg, lanes)
+                del rg  # el siguiente row group no convive con este
         except FrameBoundaryError as error:
             raise _inconsistent(error, month) from error
 
