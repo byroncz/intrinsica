@@ -7,7 +7,7 @@ Comprueba que la cuenta hace lo que debe y falla con 403 en lo demás:
   - escribir bajo OPS_RESULTS_URI                              -> debe poder
   - escribir en scripts/ del bucket ops                        -> 403
   - escribir en landing, dc-events, dq-findings, manifest y viz -> 403
-  - escribir en frames (l3/) y en dq-findings bajo l3/ (L3)    -> 403
+  - escribir en dc-descriptors (l3/) y en dq-findings bajo l3/ (L3) -> 403
   - pisar un objeto ya escrito en results/ (sin borrar)        -> 403
 
 Una escritura que "debe fallar" y no falla deja un objeto `ops-permisos-*` en el
@@ -84,7 +84,11 @@ def main() -> int:
         ("escribir en manifest", "403", write(f"{project}-manifest", f"l2/{name}")),
         ("escribir en viz", "403", write(f"{project}-viz", f"tiles/{name}")),
         # L3 (ITSC-334): sus descriptores y hallazgos son suyos, no de ops-script.
-        ("escribir en frames", "403", write(f"{project}-frames", f"l3/{name}")),
+        (
+            "escribir en dc-descriptors",
+            "403",
+            write(f"{project}-dc-descriptors", f"l3/{name}"),
+        ),
         (
             "escribir en dq-findings de L3",
             "403",

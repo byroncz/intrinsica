@@ -16,15 +16,15 @@ output "region" {
 output "buckets" {
   description = "Mapa sufijo → nombre real de cada bucket."
   value = {
-    "tfstate"     = google_storage_bucket.tfstate.name
-    "landing"     = google_storage_bucket.landing.name
-    "dc-events"   = google_storage_bucket.dc_events.name
-    "frames"      = google_storage_bucket.frames.name
-    "indicators"  = google_storage_bucket.indicators.name
-    "dq-findings" = google_storage_bucket.dq_findings.name
-    "manifest"    = google_storage_bucket.manifest.name
-    "ops"         = google_storage_bucket.ops.name
-    "viz"         = google_storage_bucket.viz.name
+    "tfstate"        = google_storage_bucket.tfstate.name
+    "landing"        = google_storage_bucket.landing.name
+    "dc-events"      = google_storage_bucket.dc_events.name
+    "dc-descriptors" = google_storage_bucket.dc_descriptors.name
+    "indicators"     = google_storage_bucket.indicators.name
+    "dq-findings"    = google_storage_bucket.dq_findings.name
+    "manifest"       = google_storage_bucket.manifest.name
+    "ops"            = google_storage_bucket.ops.name
+    "viz"            = google_storage_bucket.viz.name
   }
 }
 

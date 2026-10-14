@@ -305,7 +305,7 @@ def test_permisos_avisa_si_la_cuenta_puede_escribir_en_viz(monkeypatch, capsys):
 @pytest.mark.parametrize(
     ("prefijo", "falla"),
     [
-        ("proj-frames/l3/", "escribir en frames"),
+        ("proj-dc-descriptors/l3/", "escribir en dc-descriptors"),
         ("proj-dq-findings/l3/", "escribir en dq-findings de L3"),
     ],
 )
