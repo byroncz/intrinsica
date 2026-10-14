@@ -46,6 +46,9 @@ Parquet puede tener huecos de `agg_trade_id` solo donde el proveedor los
 tenga, nunca por las marcas. Detalle en el runbook
 [Marcas de Binance](runbooks/operacion-l1.md#marcas-de-binance).
 
+Además, `agg_trade_id` es único dentro de la partición (TRD-L1 §9.2): L2 (por
+posición) y L3 (por valor de id) lo asumen.
+
 ### Disposición física
 
 - **Raíz**: una ruta local o `gs://<bucket landing>/l1`. El stack `l1` solo
