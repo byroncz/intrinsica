@@ -347,6 +347,33 @@ SHA-256 esperados de los ZIP corregidos son `2017-12`
 `45261b647c70862edd60e788ce20f32d3b78d0753f9841ba3ca0e50afdbfbefe` y `2018-01`
 `645f8f581a6e4828df12f16b73f9f7451f12bef2ab24d4fc4b0466805e793e7d`.
 
+## Ids repetidos (ITSC-351)
+
+L1 entrega cada `agg_trade_id` una sola vez (TRD-L1 §9.2). Dos filas con el
+mismo id e idéntico contenido se reducen a una y `aggid_duplicate` queda en
+`warning` / `corrected` con `metric_value` = filas eliminadas. Si difieren en
+alguna columna, `aggid_duplicate` sale en `error` / `fail` con el id y las dos
+filas en `details`, y la unidad falla sin escribir Parquet ni manifiesto: no
+hay reintento que lo arregle, hay que mirar el ZIP del proveedor.
+
+**Si L1 ya había publicado un mes con repetidos** (imagen anterior a 0.8.2),
+reprocesa en cascada, cada paso con éxito antes del siguiente. Caso real:
+2026-02, con 2 000 ticks repetidos desde `agg_trade_id` 3856672511.
+
+1. `l1-backfill` con `from = to = 2026-02` y `force` marcado. Esperado:
+   `aggid_duplicate` en `warning` con 2 000 eliminados y un
+   `consolidated.parquet` con 2 000 filas menos. Anota ambos conteos.
+2. `l1-seam-check` sobre `2026-01` a `2026-03`: sin `seam_discontinuity` ni
+   `daily_monthly_drift`.
+3. `l2-backfill` con `force`, `from = 2026-02`, `to = 2026-09`. Anota los
+   `content_hash` de L2 de 2026-02 antes y después: deben cambiar.
+4. `viz-tiles` con `force`, `from = 2026-02`, `to = 2026-09`.
+5. `l3-backfill` con `force` y `from = 2026-02`, sin `to`: debe completar sin
+   `l2_state_inconsistent`.
+
+Por qué la cascada llega hasta L3: L2 procesó el bloque repetido como precios
+reales y su carry-over encadena los meses siguientes.
+
 ## Consultar los hallazgos
 
 Los hallazgos son Parquet append-only bajo
