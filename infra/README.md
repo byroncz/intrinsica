@@ -472,10 +472,34 @@ del humano, 2026-10-14 (revierte la del 2026-10-13); detalle en
 `gs://<proyecto>-manifest/l2/thetas.yaml`, el mismo objeto que usa L2. El stack
 `l3` no lo siembra ni lo copia (lo siembra `l2`); si falta, L3 sale con código 2.
 
-**Cómputo, provisional.** 4 vCPU, 4 GiB, `max_retries = 1` y una sola tarea
-(TRD-L3 §10.2, hipótesis sin medir). Timeouts: `l3-monthly` 7 200 s y
-`l3-backfill` 86 400 s (el tope del módulo). ITSC-335 mide el job real y fija
-tamaño, timeouts y la partición por mes, con la regla de TRD-L2 §10.2.
+**Cómputo, provisional hasta el histórico.** 4 vCPU, 4 GiB, `max_retries = 1` y
+una sola tarea en un solo hilo. ITSC-335 midió `l3-backfill` sobre 2023-03
+(2026-10-14): pared 873 s, RSS pico 598 MiB (14,6 % de 4 GiB), sin OOM; cumple el
+umbral 3 de TRD-L3 §10.3. Timeouts: `l3-monthly` 7 200 s (8,2 veces esa pared) y
+`l3-backfill` 86 400 s (el tope del módulo). Se confirman con el mes más pesado
+y la suma reales del histórico (regla de TRD-L2 §10.2).
+
+**Backfill histórico por rangos.** La suma estimada de los 109 meses es de
+≈ 29 000 s (≈ 8 h), más que las 6 h que espera el run de Actions. Cloud Run no
+corta la tarea, pero el run fallaría. Por eso se lanza *Run job* → `l3-backfill`
+en este orden, uno a la vez, cada uno con éxito antes del siguiente:
+
+| # | `from` | `to` |
+|---|---|---|
+| 1 | `2017-08` | `2020-12` |
+| 2 | `2021-01` | `2021-12` |
+| 3 | `2022-01` | `2023-02` |
+| 4 | vacío | `2024-12` |
+| 5 | vacío | `2026-08` |
+| 6 | vacío | vacío (debe salir en segundos sin escribir) |
+
+La frontera de cada θ es contigua desde `series_start`: con 2023-03 ya construido,
+tras el rango 3 la serie llega hasta 2023-03, y los rangos 4 y 5 arrancan en el mes
+siguiente sin `from`. Por la misma razón el rango 5 termina en 2026-08: 2026-09
+ya está hecho y, si `to` quedara vacío, se reconstruiría. Si el run de un rango
+agota las 6 h de Actions, la tarea sigue en Cloud Run: el humano la sigue en
+*Cloud Run → Jobs* y lanza el siguiente rango cuando termine. Relanzar un rango
+interrumpido es seguro: la frontera retoma donde quedó.
 
 **Cadena mensual.** El stack `l1` pasa a
 `next_jobs = ["l2-monthly", "viz-tiles", "l3-monthly"]` en `monthly-close`: el
