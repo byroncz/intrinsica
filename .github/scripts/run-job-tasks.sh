@@ -2,7 +2,9 @@
 # Imprime una línea por unidad de trabajo del rango; run-job.yml cuenta las
 # líneas para fijar --tasks. En L1 cada tarea del job toma from +
 # CLOUD_RUN_TASK_INDEX. L2 no usa task array: sus meses son secuenciales (cada
-# uno lee el carry-over del anterior), así que su CLI exige una sola tarea.
+# uno lee el carry-over del anterior), así que su CLI exige una sola tarea. L3
+# tampoco, aunque sin carry-over (CLOUD_RUN_TASK_INDEX distinto de 0 es código 2):
+# la partición por mes la decide ITSC-335.
 #
 # Uso: run-job-tasks.sh <job> <from> [to] [script]   (job = <capa>-<modo>)
 #   l1-backfill, l1-monthly-close: meses YYYY-MM del rango inclusivo
@@ -13,6 +15,12 @@
 #                                  desde dónde avanza) y entonces to, si viene,
 #                                  se valida solo
 #   l2-monthly:                    una sola unidad ("1"); to vacío o igual a from
+#   l3-backfill:                   igual que l2-backfill: una sola unidad ("1") para todo
+#                                  el rango y from puede ir vacío (L3 no tiene carry-over,
+#                                  pero la frontera de cada θ decide desde dónde avanza)
+#   l3-monthly:                    una sola unidad ("1"); from vacío = el mes anterior (lo
+#                                  decide la CLI); to vacío o igual a from, y sin from no
+#                                  admite to
 #   ops-script:                    una sola unidad ("1"); exige script (URI
 #                                  gs://<bucket>/<objeto>) y no admite from ni to
 #   viz-tiles, viz-render:         una sola unidad ("1") para todo el rango; from y to
@@ -82,7 +90,7 @@ case "$job" in
     check_month_range
     echo 1
     ;;
-  l2-backfill)
+  l2-backfill | l3-backfill)
     if [[ -z "$from" ]]; then
       # Sin from no hay rango que comparar: solo se valida to, si vino.
       [[ -z "${3:-}" ]] || valid_month "$to" || fail "to inválido '$to': se espera YYYY-MM"
@@ -94,6 +102,15 @@ case "$job" in
   l2-monthly)
     valid_month "$from" || fail "from inválido '$from': se espera YYYY-MM"
     [[ "$to" == "$from" ]] || fail "l2-monthly procesa un solo mes: to '$to' debe estar vacío o ser igual a from '$from'"
+    echo 1
+    ;;
+  l3-monthly)
+    if [[ -z "$from" ]]; then
+      [[ -z "${3:-}" ]] || fail "to exige from: sin from la CLI toma el mes anterior"
+    else
+      valid_month "$from" || fail "from inválido '$from': se espera YYYY-MM"
+      [[ "$to" == "$from" ]] || fail "l3-monthly procesa un solo mes: to '$to' debe estar vacío o ser igual a from '$from'"
+    fi
     echo 1
     ;;
   ops-script)
@@ -118,6 +135,6 @@ case "$job" in
     echo 1
     ;;
   *)
-    fail "job inválido '$job': l1-backfill, l1-daily, l1-monthly-close, l1-seam-check, l2-backfill, l2-monthly, ops-script, viz-tiles o viz-render"
+    fail "job inválido '$job': l1-backfill, l1-daily, l1-monthly-close, l1-seam-check, l2-backfill, l2-monthly, l3-backfill, l3-monthly, ops-script, viz-tiles o viz-render"
     ;;
 esac

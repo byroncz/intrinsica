@@ -299,18 +299,18 @@ igual que el `index.html` del 2026-09-30 (la verificación de ITSC-320).
 
 El workflow `l1-run-job` ejecuta el job del modo sin overrides y encadena los
 `next_jobs` del modo: con `monthly-close`, **`l1-monthly-close`, luego
-`l2-monthly` y luego `viz-tiles`**, cada uno solo si el anterior terminó con éxito
+`l2-monthly`, luego `viz-tiles` y luego `l3-monthly`**, cada uno solo si el anterior terminó con éxito
 (sin argumentos: cada job toma el mes anterior). Se lanza desde Cloud Shell:
 
 ```bash
 gcloud workflows run l1-run-job --location=us-east1 --data '{"mode":"monthly-close"}'
-gcloud run jobs executions list --region us-east1 --limit=6   # los tres nombres nuevos
+gcloud run jobs executions list --region us-east1 --limit=8   # los cuatro nombres nuevos
 ```
 
-El workflow espera a cada eslabón menos al último: `viz-tiles` queda ejecutándose
+El workflow espera a cada eslabón menos al último: `l3-monthly` queda ejecutándose
 cuando el workflow ya terminó; sigue su ejecución en *Cloud Run → Jobs →
-viz-tiles*. Anota el nombre de las tres ejecuciones (`l1-monthly-close-…`,
-`l2-monthly-…`, `viz-tiles-…`) y la pared de cada una. En el repo, el
+l3-monthly*. Anota el nombre de las cuatro ejecuciones (`l1-monthly-close-…`,
+`l2-monthly-…`, `viz-tiles-…`, `l3-monthly-…`) y la pared de cada una. En el repo, el
 scheduler de `monthly-close` (día 8) está con `paused = true`
 (`infra/stacks/batch/l1/main.tf`); verifica su estado real antes de contar con él.
 
@@ -320,7 +320,7 @@ que se registra es el de octubre de 2026 (Scheduler del 8 de noviembre, o
 sobre 2026-09, ya procesado (decisión del humano, comentario en ITSC-311,
 2026-10-07). Cuando ocurra, el
 humano reporta las cifras en la card y se anotan en "Encadenamiento" de
-"Resultados": los tres nombres, el mes, la pared y el resultado de cada ejecución, y
+"Resultados": los cuatro nombres, el mes, la pared y el resultado de cada ejecución, y
 que `latest.html` avanzó al último día de octubre (paso 4).
 
 **La cadena solo prospera si L1 cerró el mes.** El 2026-09-30, `l2-monthly-xdtrf`
@@ -521,7 +521,7 @@ reportaron en la card. Stack `viz` con 4 vCPU / 4 GiB e imagen `viz_tiles:1.1.1`
 | --- | --- | --- | --- | --- | --- | --- |
 | Backfill del año medido | 37570918667 | `viz-tiles-tc5gb` | 2025-01 a 2025-12 | 365 / 0 | 3 h 24 min (04:19 a 07:43 UTC) | 0 |
 | Relanzar con los mismos inputs | 37634503346 | `viz-tiles-j85kx` | igual | 0 / 365 | 10 min | 0 |
-| Encadenamiento (`l1-run-job`) | _pendiente: primer cierre real, ITSC-323_ | `l1-monthly-close-…`, `l2-monthly-…`, `viz-tiles-…` | 2026-10 | _pendiente_ | _pendiente_ | _pendiente_ |
+| Encadenamiento (`l1-run-job`) | _pendiente: primer cierre real, ITSC-323_ | `l1-monthly-close-…`, `l2-monthly-…`, `viz-tiles-…`, `l3-monthly-…` | 2026-10 | _pendiente_ | _pendiente_ | _pendiente_ |
 
 El backfill no dejó **ningún hallazgo** fuera de `tiles_summary`. El relanzamiento
 confirma la idempotencia: saltó los 365 días, no escribió y, aun así, tardó 10 min
@@ -638,7 +638,8 @@ antecedente de la cadena es el fallo de `l2-monthly-xdtrf` del 2026-09-30 (cread
 mes (paso 5, "La cadena solo prospera si L1 cerró el mes"). Queda
 pendiente del primer cierre real, el de octubre (a partir del 8 de noviembre de
 2026): con L1 ya publicado, se lanza el comando del paso 5 y se anota aquí, en una
-tabla, por ejecución: nombre (`l1-monthly-close-…`, `l2-monthly-…`, `viz-tiles-…`),
+tabla, por ejecución: nombre (`l1-monthly-close-…`, `l2-monthly-…`, `viz-tiles-…`,
+`l3-monthly-…`),
 mes procesado, pared, resultado, y si `latest.html` avanzó al último día de octubre.
 Si una ejecución falla, se lee con la guía de arriba (`describe` más `logging read`
 con `jsonPayload.message`) y se abre la card que corresponda.
@@ -658,10 +659,10 @@ Lo que esta medición deja fuera de la card, con el motivo:
 - **Backfill del histórico restante** (ITSC-325; ítems 2, 10 y 16): depende de ITSC-324.
   Cada rango se lanza con la revisión del cupo del paso 1.
 - **Verificar el acceso de `ops-script` a `tiles/`** (ITSC-321; ítem 20): tras el
-  apply del stack `ops` por el humano, `permisos.py` (`11 de 11`) y `viz_check_page.py`
+  apply del stack `ops` por el humano, `permisos.py` (`13 de 13`) y `viz_check_page.py`
   con `--tiles-root gs://<proyecto>-viz/tiles` sobre el último día, con `fallos=0`.
 - **Primer encadenamiento real y mediciones del humano** (ITSC-323; ítems 12, 13, 15 y
-  16): las tres ejecuciones del cierre de octubre (paso 5), el `content-type` y
+  16): las cuatro ejecuciones del cierre de octubre (paso 5), el `content-type` y
   `content-encoding` guardados (paso 3, ítem 12), `events_gzip` de `viz_probe_page.py`
   (ítem 13) y la validación de la ventana de tres eventos (ítem 15).
 

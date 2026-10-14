@@ -187,14 +187,15 @@ resource "google_project_iam_custom_role" "bucket_iam_admin" {
 }
 
 # Solo sobre los buckets a los que las capas y los jobs ops-script y viz-tiles
-# piden acceso. En viz basta este rol para el binding del visor del stack viz:
-# deploy-github no tiene ningún rol de objetos sobre ese bucket, porque
-# Terraform no publica nada ahí.
+# piden acceso (frames, el stack l3, ITSC-334). En viz basta este rol para el
+# binding del visor del stack viz: deploy-github no tiene ningún rol de objetos
+# sobre ese bucket, porque Terraform no publica nada ahí.
 resource "google_storage_bucket_iam_member" "deploy_bucket_iam" {
   for_each = {
     landing     = google_storage_bucket.landing.name
     dc-events   = google_storage_bucket.dc_events.name
     dq-findings = google_storage_bucket.dq_findings.name
+    frames      = google_storage_bucket.frames.name
     manifest    = google_storage_bucket.manifest.name
     ops         = google_storage_bucket.ops.name
     viz         = google_storage_bucket.viz.name

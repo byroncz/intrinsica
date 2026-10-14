@@ -148,3 +148,59 @@ def test_viz_render_rechaza_script():
     out = run("viz-render", "", "", URI)
     assert out.returncode == 2
     assert "viz-render no usa script" in out.stderr
+
+
+@pytest.mark.parametrize(
+    ("desde", "hasta"),
+    [
+        ("", ""),
+        ("2023-03", ""),
+        ("", "2024-01"),
+        ("2023-03", "2023-03"),
+        ("2023-03", "2024-01"),
+    ],
+)
+def test_l3_backfill_es_una_sola_unidad_para_todo_el_rango(desde, hasta):
+    # Igual que l2-backfill: from vacío lo decide la frontera de cada θ.
+    assert units("l3-backfill", desde, hasta) == ["1"]
+
+
+@pytest.mark.parametrize(
+    ("desde", "hasta", "mensaje"),
+    [
+        ("2023-13", "", "from inválido"),
+        ("2023-03", "2023-1", "to inválido"),
+        ("2023-05", "2023-03", "menor que from"),
+        ("", "2023-1", "to inválido"),
+    ],
+)
+def test_l3_backfill_rechaza_rangos_invalidos(desde, hasta, mensaje):
+    out = run("l3-backfill", desde, hasta)
+    assert out.returncode == 2
+    assert mensaje in out.stderr
+
+
+@pytest.mark.parametrize(
+    ("desde", "hasta"), [("", ""), ("2023-03", ""), ("2023-03", "2023-03")]
+)
+def test_l3_monthly_es_una_sola_unidad(desde, hasta):
+    # Vacío, la CLI toma el mes anterior.
+    assert units("l3-monthly", desde, hasta) == ["1"]
+
+
+@pytest.mark.parametrize(
+    ("desde", "hasta", "mensaje"),
+    [
+        ("2023-03", "2023-04", "un solo mes"),
+        ("", "2023-04", "to exige from"),
+        ("2023-3", "", "from inválido"),
+    ],
+)
+def test_l3_monthly_rechaza_to_distinto_de_from_y_from_invalido(desde, hasta, mensaje):
+    out = run("l3-monthly", desde, hasta)
+    assert out.returncode == 2
+    assert mensaje in out.stderr
+
+
+def test_job_invalido_nombra_los_jobs_l3():
+    assert "l3-backfill, l3-monthly" in run("l9-x", "2023-03").stderr

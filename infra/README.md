@@ -172,6 +172,10 @@ Lo hace el humano, en este orden. Ningún agente ejecuta el apply.
    prefijo. Sin este apply, el de `l2` falla con 403 al crear los
    `google_storage_bucket_iam_member` de `dc-events`.
 
+   Aplica `data` también antes del primer apply de `l3` (ITSC-334):
+   `deploy-github` necesita `bucketIamAdmin` sobre `frames`. Sin este apply, el de
+   `l3` falla con 403 al crear los `google_storage_bucket_iam_member` de `frames`.
+
 2. Crea el environment `gcp` del repositorio (*Settings → Environments →
    New environment*) con tu usuario como revisor requerido. Debe existir
    antes del paso 3: un run que referencia un environment inexistente lo crea
@@ -428,6 +432,77 @@ memoria no cambia. En `l2-backfill` también puede quitar `client` y
 `client_version`, que `gcloud run jobs update` deja puestos y el módulo no fija;
 eso es parte de cerrar la deriva. Cualquier otro cambio es una sorpresa y se
 revisa antes de aprobar el `apply`.
+
+## Stack l3 (Descriptores por evento)
+
+Instancia del módulo `layer` con dos modos: `l3-backfill` y `l3-monthly`, cada
+uno con su service account y una sola tarea (sin task array). Imagen
+`l3_dc_descriptors:<VERSION>`, de `layers/l3_dc_descriptors/VERSION`. Diseño y
+decisiones en [TRD-L3 §11](../docs/TRD/l3.md#11-operaciones).
+
+**Buckets y accesos.** Las dos cuentas tienen el mismo acceso y nada más:
+
+| Bucket | Rol | Prefijo | Para qué |
+|---|---|---|---|
+| `landing` | `objectViewer` | `l1/` | `consolidated.parquet` de L1 |
+| `dc-events` | `objectViewer` | `l2/` | eventos y carry-over de L2 |
+| `manifest` | `objectViewer` | `l2/` | catálogo de θ (`l2/thetas.yaml`) |
+| `frames` | `objectUser` | `l3/` | descriptores (`summaries.parquet`) |
+| `dq-findings` | `objectUser` | `l3/` | hallazgos de DQ |
+
+Escribir fuera de `l3/` da 403. Lo comprueba `permisos.py` del job `ops-script`
+(`13 de 13`), que ahora incluye la escritura en `frames` y en `dq-findings/l3/`
+(ver el [runbook de operación ad hoc](../docs/runbooks/operacion-ops.md)).
+
+**El bucket `frames` conserva un nombre desfasado.** `data` lo creó como "salida de
+L3" para las tramas que la decisión del 2026-10-08 descartó (L3 guarda
+descriptores, no tramas). Estaba vacío y ninguna otra capa lo usa. Se reutiliza
+porque un bucket no se renombra, crear otro exige aplicar `data` desde Cloud
+Shell, y el módulo `layer` admite un solo rol por bucket: en `dc-events`, L3 no
+podría leer `l2/` y escribir `l3/`. Decisión del humano, 2026-10-13.
+
+**El catálogo de θ es el de L2.** `L3_THETAS_URI` apunta a
+`gs://<proyecto>-manifest/l2/thetas.yaml`, el mismo objeto que usa L2. El stack
+`l3` no lo siembra ni lo copia (lo siembra `l2`); si falta, L3 sale con código 2.
+
+**Cómputo, provisional.** 4 vCPU, 4 GiB, `max_retries = 1` y una sola tarea
+(TRD-L3 §10.2, hipótesis sin medir). Timeouts: `l3-monthly` 7 200 s y
+`l3-backfill` 86 400 s (el tope del módulo). ITSC-335 mide el job real y fija
+tamaño, timeouts y la partición por mes, con la regla de TRD-L2 §10.2.
+
+**Cadena mensual.** El stack `l1` pasa a
+`next_jobs = ["l2-monthly", "viz-tiles", "l3-monthly"]` en `monthly-close`: el
+workflow corre cada job solo si el anterior terminó bien, y L3 queda al final.
+Costo asumido: si `viz-tiles` falla un mes, `l3-monthly` no corre y el humano lo
+lanza desde *Run job*. Ninguno recibe overrides: `l3-monthly` toma el mes anterior.
+
+**Orden de apply, todo por el humano**:
+
+1. `data` desde Cloud Shell, con el checkout de la rama del PR: agrega `frames` a
+   `deploy_bucket_iam` para que `deploy-github` pueda fijar el IAM del bucket
+   (`bucketIamAdmin`, ver "Habilitar el despliegue desde GitHub Actions"). El
+   bucket no cambia; solo cambia su comentario. Sin este apply, el apply de `l3`
+   falla con 403 al crear los bindings de `frames`.
+2. `l3`, tras mergear y cuando CI publique `l3_dc_descriptors:<versión>`. Va
+   **antes** que `l1`.
+3. `l1`: el workflow de la orquestación recibe `run.invoker` y `run.viewer`
+   sobre `l3-monthly`, que debe existir. Si `l1` se aplica primero, falla.
+
+El plan de `l3` en el PR muestra las dos cuentas, sus bindings y los dos jobs; el
+de `l1`, el workflow `l1-run-job` con la cadena nueva y dos bindings nuevos:
+`run.invoker` sobre `l3-monthly` y `run.viewer` sobre `viz-tiles`, que ahora el
+workflow espera.
+
+**Lanzar los jobs.** *Actions → Run job* (nunca un agente):
+
+- `l3-backfill`: `from` y `to` son meses `YYYY-MM`. Sin `from`, la frontera de cada
+  θ decide desde dónde avanza; sin `to`, llega al último mes con
+  `consolidated.parquet` en L1. `force` reprocesa desde `from` e ignora la
+  frontera (exige `from`). `series_start` es opcional.
+- `l3-monthly`: `from` es el mes (vacío = el mes anterior); `to` vacío o igual a
+  `from`; no admite `force`.
+
+Regla: no lanzar a mano el mismo mes y modo que Scheduler esté ejecutando.
 
 ## Stack ops (scripts de operación)
 

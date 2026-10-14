@@ -178,3 +178,43 @@ def test_viz_render_rechaza_series_start_script_y_args(extra):
     )
     assert out.returncode == 2
     assert "viz-render no usa" in out.stderr
+
+
+def test_l3_backfill_un_mes_conserva_to():
+    # Como l2-backfill: sin --to, la CLI de L3 recorre hasta el último mes de L1.
+    assert (
+        args("l3-backfill", "2023-03", "2023-03", "true", "2017-08")
+        == "--mode,backfill,--from=2023-03,--to=2023-03,--force,--series-start=2017-08"
+    )
+
+
+def test_l3_backfill_sin_to_queda_abierto():
+    assert args("l3-backfill", "2023-03") == "--mode,backfill,--from=2023-03"
+
+
+def test_l3_backfill_sin_from_deja_decidir_a_la_frontera():
+    assert args("l3-backfill") == "--mode,backfill"
+    assert args("l3-backfill", "", "2024-01") == "--mode,backfill,--to=2024-01"
+
+
+def test_l3_monthly_omite_to_igual_a_from_y_admite_series_start():
+    assert (
+        args("l3-monthly", "2023-03", "2023-03", "", "2017-08")
+        == "--mode,monthly,--from=2023-03,--series-start=2017-08"
+    )
+
+
+def test_l3_monthly_sin_from_solo_pasa_el_modo():
+    # Vacío, la CLI toma el mes anterior.
+    assert args("l3-monthly") == "--mode,monthly"
+
+
+def test_l3_monthly_rechaza_force():
+    out = subprocess.run(
+        [SCRIPT, "l3-monthly", "2023-03", "", "true"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert out.returncode == 2
+    assert "l3-monthly no admite force" in out.stderr

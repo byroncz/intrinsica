@@ -26,13 +26,13 @@ TRD-L1 §10.1 y §11.
 `next_jobs` en una entrada de `schedules` es una lista ordenada de nombres de
 Cloud Run Jobs (de la capa o de otras). Corren uno tras otro: cada uno solo
 cuando el anterior terminó bien, y el primero cuando termina el job del modo.
-Ejemplo, el cierre mensual de L1 encadena `l2-monthly` y luego `viz-tiles`:
+Ejemplo, el cierre mensual de L1 encadena `l2-monthly`, luego `viz-tiles` y luego `l3-monthly`:
 
 ```hcl
 monthly-close = {
   schedule = "0 6 8 * *"
   # ...
-  next_jobs = ["l2-monthly", "viz-tiles"]
+  next_jobs = ["l2-monthly", "viz-tiles", "l3-monthly"]
 }
 ```
 
@@ -55,7 +55,8 @@ Casos de borde:
   ejecución y el resultado se ve en Cloud Run.
 - **Un eslabón falla** (o se cancela): el workflow termina con error, con un
   mensaje que nombra la ejecución fallida y el job que no se ejecuta, y los
-  eslabones que siguen no corren. Si falla `l2-monthly`, `viz-tiles` no corre.
+  eslabones que siguen no corren. Si falla `l2-monthly`, ni `viz-tiles` ni
+  `l3-monthly` corren.
 
 Como el workflow espera, su ejecución dura lo que duren los jobs esperados
 (hasta su timeout, más el reintento): se ve en Workflows como "Active" todo ese
@@ -64,13 +65,14 @@ tiempo.
 Requisito: los jobs de `next_jobs` deben existir antes del apply, porque el IAM
 se da sobre ellos (aplica primero sus stacks).
 
-### Cierre mensual de L1: `l2-monthly` y `viz-tiles`
+### Cierre mensual de L1: `l2-monthly`, `viz-tiles` y `l3-monthly`
 
 `l1-run-job` con `monthly-close` ejecuta `l1-monthly-close`, luego
-`l2-monthly` y luego `viz-tiles`, sin overrides. `viz-tiles` sin argumentos
-construye el mes anterior al actual (UTC): el mismo que `l2-monthly` acaba de
-cerrar, porque el scheduler corre el día 8. Los stacks `l2` y `viz` deben estar
-aplicados antes del apply de `l1`.
+`l2-monthly`, luego `viz-tiles` y luego `l3-monthly`, sin overrides.
+`viz-tiles` sin argumentos construye el mes anterior al actual (UTC): el mismo
+que `l2-monthly` acaba de cerrar, porque el scheduler corre el día 8.
+`l3-monthly` es el último y el único que no se espera. Los stacks `l2`, `viz` y
+`l3` deben estar aplicados antes del apply de `l1`.
 
 ### Probarlo a mano
 
@@ -82,13 +84,15 @@ gcloud workflows run l1-run-job --location=us-east1 --data '{"mode":"monthly-clo
 ```
 
 El comando espera el resultado. Qué se espera ver: en Cloud Run Jobs, las
-ejecuciones de `l1-monthly-close`, después de `l2-monthly` y después de
-`viz-tiles`, en ese orden, cada una iniciada cuando la anterior terminó bien.
-El comando devuelve el nombre de la operación de `viz-tiles` apenas la acepta
-(esa última ejecución no se espera); sus tiles del mes aparecen en el bucket
-viz. Si `monthly-close` falló, el estado es `FAILED` con el motivo y no hay
-ejecución de `l2-monthly` ni de `viz-tiles`; si falló `l2-monthly`, no hay
-ejecución de `viz-tiles`. Con `{"mode":"daily"}` el workflow no encadena nada.
+ejecuciones de `l1-monthly-close`, después de `l2-monthly`, después de
+`viz-tiles` y después de `l3-monthly`, en ese orden, cada una iniciada cuando
+la anterior terminó bien. El comando devuelve el nombre de la operación de
+`l3-monthly` apenas la acepta (esa última ejecución no se espera); los tiles
+del mes aparecen en el bucket viz y los descriptores en `l3/` del bucket
+frames. Si `monthly-close` falló, el estado es `FAILED` con el motivo y no hay
+ejecución de `l2-monthly`, `viz-tiles` ni `l3-monthly`; si falló `l2-monthly`,
+no hay ejecución de `viz-tiles` ni de `l3-monthly`; si falló `viz-tiles`, no hay
+ejecución de `l3-monthly`. Con `{"mode":"daily"}` el workflow no encadena nada.
 
 ## Encender un scheduler
 
