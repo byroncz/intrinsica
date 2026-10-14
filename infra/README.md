@@ -172,9 +172,10 @@ Lo hace el humano, en este orden. Ningún agente ejecuta el apply.
    prefijo. Sin este apply, el de `l2` falla con 403 al crear los
    `google_storage_bucket_iam_member` de `dc-events`.
 
-   Aplica `data` también antes del primer apply de `l3` (ITSC-334):
-   `deploy-github` necesita `bucketIamAdmin` sobre `frames`. Sin este apply, el de
-   `l3` falla con 403 al crear los `google_storage_bucket_iam_member` de `frames`.
+   Aplica `data` también antes del primer apply de `l3` (ITSC-334, ITSC-350):
+   `deploy-github` necesita `bucketIamAdmin` sobre `dc-descriptors`. Sin este
+   apply, el de `l3` falla con 403 al crear los `google_storage_bucket_iam_member`
+   de `dc-descriptors`.
 
 2. Crea el environment `gcp` del repositorio (*Settings → Environments →
    New environment*) con tu usuario como revisor requerido. Debe existir
@@ -447,19 +448,25 @@ decisiones en [TRD-L3 §11](../docs/TRD/l3.md#11-operaciones).
 | `landing` | `objectViewer` | `l1/` | `consolidated.parquet` de L1 |
 | `dc-events` | `objectViewer` | `l2/` | eventos y carry-over de L2 |
 | `manifest` | `objectViewer` | `l2/` | catálogo de θ (`l2/thetas.yaml`) |
-| `frames` | `objectUser` | `l3/` | descriptores (`summaries.parquet`) |
+| `dc-descriptors` | `objectUser` | `l3/` | descriptores (`summaries.parquet`) |
 | `dq-findings` | `objectUser` | `l3/` | hallazgos de DQ |
 
 Escribir fuera de `l3/` da 403. Lo comprueba `permisos.py` del job `ops-script`
-(`13 de 13`), que ahora incluye la escritura en `frames` y en `dq-findings/l3/`
+(`13 de 13`), que ahora incluye la escritura en `dc-descriptors` y en `dq-findings/l3/`
 (ver el [runbook de operación ad hoc](../docs/runbooks/operacion-ops.md)).
 
-**El bucket `frames` conserva un nombre desfasado.** `data` lo creó como "salida de
-L3" para las tramas que la decisión del 2026-10-08 descartó (L3 guarda
-descriptores, no tramas). Estaba vacío y ninguna otra capa lo usa. Se reutiliza
-porque un bucket no se renombra, crear otro exige aplicar `data` desde Cloud
-Shell, y el módulo `layer` admite un solo rol por bucket: en `dc-events`, L3 no
-podría leer `l2/` y escribir `l3/`. Decisión del humano, 2026-10-13.
+**El bucket de L3 es `dc-descriptors`, no `frames`.** ITSC-334 reutilizó el bucket
+`frames` (creado para las tramas que la decisión del 2026-10-08 descartó) para
+ahorrar un apply de `data`, pero ese apply hizo falta de todos modos, así que el
+argumento desapareció. El nombre `frames` no dice qué contiene; `dc-descriptors`
+sigue la convención de nombrar cada bucket por su contenido y es simétrico con la
+capa `l3_dc_descriptors`. Un bucket no se renombra: ITSC-350 crea el nuevo en
+`data`, apunta L3 a él y elimina `frames`, que está vacío; hacerlo después de la
+primera corrida (ITSC-335) exigiría copiar gigabytes y reverificar `content_hash`.
+Se usa un bucket propio y no `dc-events` porque el módulo `layer` admite un solo
+rol por bucket: en `dc-events`, L3 no podría leer `l2/` y escribir `l3/`. Decisión
+del humano, 2026-10-14 (revierte la del 2026-10-13); detalle en
+[TRD-L3 §11](../docs/TRD/l3.md#11-operaciones), historial 1.3.4.
 
 **El catálogo de θ es el de L2.** `L3_THETAS_URI` apunta a
 `gs://<proyecto>-manifest/l2/thetas.yaml`, el mismo objeto que usa L2. El stack
@@ -476,17 +483,34 @@ workflow corre cada job solo si el anterior terminó bien, y L3 queda al final.
 Costo asumido: si `viz-tiles` falla un mes, `l3-monthly` no corre y el humano lo
 lanza desde *Run job*. Ninguno recibe overrides: `l3-monthly` toma el mes anterior.
 
-**Orden de apply, todo por el humano**:
+**Orden de apply de un despliegue desde cero, todo por el humano**:
 
-1. `data` desde Cloud Shell, con el checkout de la rama del PR: agrega `frames` a
-   `deploy_bucket_iam` para que `deploy-github` pueda fijar el IAM del bucket
-   (`bucketIamAdmin`, ver "Habilitar el despliegue desde GitHub Actions"). El
-   bucket no cambia; solo cambia su comentario. Sin este apply, el apply de `l3`
-   falla con 403 al crear los bindings de `frames`.
+1. `data` desde Cloud Shell: da a `deploy-github` el IAM de `dc-descriptors` en
+   `deploy_bucket_iam` (`bucketIamAdmin`, ver "Habilitar el despliegue desde
+   GitHub Actions"). Sin este apply, el de `l3` falla con 403 al crear los
+   bindings de `dc-descriptors`.
 2. `l3`, tras mergear y cuando CI publique `l3_dc_descriptors:<versión>`. Va
    **antes** que `l1`.
 3. `l1`: el workflow de la orquestación recibe `run.invoker` y `run.viewer`
    sobre `l3-monthly`, que debe existir. Si `l1` se aplica primero, falla.
+
+**Migración de `frames` a `dc-descriptors` (ITSC-350)**, sobre un proyecto que ya
+tiene `l3` aplicado con `frames`. Todo por el humano, después del merge:
+
+0. En Cloud Shell: `gcloud storage ls gs://<proyecto>-frames/` debe salir vacío.
+   Si no lo está, se detiene todo y se avisa.
+1. `data` desde Cloud Shell, con el checkout de `main`. El plan debe mostrar **1
+   bucket a crear (`dc-descriptors`), 1 a destruir (`frames`, vacío) y el IAM de
+   `deploy-github` movido de uno a otro**. Quitar el bloque de `frames` del código
+   basta para destruirlo: `prevent_destroy` solo protege mientras el bloque
+   existe. Si aun así Terraform lo rechaza, se hace en dos pasos: primero
+   `prevent_destroy = false` sobre `frames` y apply; luego quitar el bloque y
+   apply.
+2. `l3` en el environment `gcp`. El plan debe mostrar **los 2 bindings de
+   `frames` destruidos, 2 creados sobre `dc-descriptors` y los 2 jobs
+   actualizados en `L3_SUMMARIES_ROOT`**. Sin apply de `l1`: la cadena no cambia.
+3. `permisos.py` desde *Run job* (`ops-script`): la última línea debe ser
+   `permisos: 13 de 13 como se esperaba`.
 
 El plan de `l3` en el PR muestra las dos cuentas, sus bindings y los dos jobs; el
 de `l1`, el workflow `l1-run-job` con la cadena nueva y dos bindings nuevos:

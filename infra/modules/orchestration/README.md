@@ -89,7 +89,7 @@ ejecuciones de `l1-monthly-close`, después de `l2-monthly`, después de
 la anterior terminó bien. El comando devuelve el nombre de la operación de
 `l3-monthly` apenas la acepta (esa última ejecución no se espera); los tiles
 del mes aparecen en el bucket viz y los descriptores en `l3/` del bucket
-frames. Si `monthly-close` falló, el estado es `FAILED` con el motivo y no hay
+dc-descriptors. Si `monthly-close` falló, el estado es `FAILED` con el motivo y no hay
 ejecución de `l2-monthly`, `viz-tiles` ni `l3-monthly`; si falló `l2-monthly`,
 no hay ejecución de `viz-tiles` ni de `l3-monthly`; si falló `viz-tiles`, no hay
 ejecución de `l3-monthly`. Con `{"mode":"daily"}` el workflow no encadena nada.

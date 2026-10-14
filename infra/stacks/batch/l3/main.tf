@@ -16,17 +16,14 @@ locals {
   # TRD-L3 §11: L3 lee L1 (consolidated.parquet), L2 (eventos y carry-over) y el
   # catálogo de θ de L2, y escribe solo bajo l3/. El catálogo lo edita el humano
   # y lo siembra el stack l2, así que esta cuenta solo lo lee. Los descriptores
-  # van al bucket frames: lo creó data para las tramas que la decisión del
-  # 2026-10-08 descartó, estaba vacío y ninguna otra capa lo usa. El nombre
-  # queda desfasado; se reutiliza porque un bucket no se renombra y porque el
-  # módulo layer da un solo rol por bucket: en dc-events L3 no podría leer l2/ y
-  # escribir l3/.
+  # van a su propio bucket, dc-descriptors (ITSC-350): el módulo layer da un solo
+  # rol por bucket y en dc-events L3 no podría leer l2/ y escribir l3/.
   access = {
-    (local.buckets["landing"])     = { role = "roles/storage.objectViewer", prefixes = ["l1/"] }
-    (local.buckets["dc-events"])   = { role = "roles/storage.objectViewer", prefixes = ["l2/"] }
-    (local.buckets["manifest"])    = { role = "roles/storage.objectViewer", prefixes = ["l2/"] }
-    (local.buckets["frames"])      = { role = "roles/storage.objectUser", prefixes = ["l3/"] }
-    (local.buckets["dq-findings"]) = { role = "roles/storage.objectUser", prefixes = ["l3/"] }
+    (local.buckets["landing"])        = { role = "roles/storage.objectViewer", prefixes = ["l1/"] }
+    (local.buckets["dc-events"])      = { role = "roles/storage.objectViewer", prefixes = ["l2/"] }
+    (local.buckets["manifest"])       = { role = "roles/storage.objectViewer", prefixes = ["l2/"] }
+    (local.buckets["dc-descriptors"]) = { role = "roles/storage.objectUser", prefixes = ["l3/"] }
+    (local.buckets["dq-findings"])    = { role = "roles/storage.objectUser", prefixes = ["l3/"] }
   }
 }
 
@@ -66,7 +63,7 @@ module "layer" {
   env = {
     L3_LANDING_ROOT   = "gs://${local.buckets["landing"]}/l1"
     L3_EVENTS_ROOT    = "gs://${local.buckets["dc-events"]}/l2"
-    L3_SUMMARIES_ROOT = "gs://${local.buckets["frames"]}/l3"
+    L3_SUMMARIES_ROOT = "gs://${local.buckets["dc-descriptors"]}/l3"
     L3_DQ_ROOT        = "gs://${local.buckets["dq-findings"]}/l3"
     # Primer mes de la serie de L2: el único sin mes anterior. Se declara, no se
     # infiere.
