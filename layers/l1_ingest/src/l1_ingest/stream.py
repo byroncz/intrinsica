@@ -2,7 +2,7 @@
 
 Cada lote se conforma, se verifica de forma incremental, se escribe al Parquet
 y se suelta antes de pedir el siguiente. Los chequeos dan el mismo resultado
-que `conform`, `ensure_order` y `check_agg_trade_id` sobre la tabla completa
+que `conform`, `ensure_order` y `dedupe_agg_trade_id` sobre la tabla completa
 mientras los datos lleguen en orden (lo normal en Binance). Si no llegan, se
 lanza `NotStreamable` y el llamador usa la ruta materializada.
 """
@@ -16,7 +16,7 @@ from pyutils import ContentHasher
 
 from l1_ingest.checks import CheckResult
 from l1_ingest.conform import classify_unit, conform_batch, unit_check, unit_error
-from l1_ingest.integrity import DETAILS_MAX, aggid_results
+from l1_ingest.integrity import DETAILS_MAX, aggid_results, conflict_error
 from l1_ingest.marks import MarkFilter
 from l1_ingest.schema import OUTPUT_SCHEMA
 from l1_ingest.write import output_writer
@@ -36,23 +36,31 @@ def _last(column: pa.Array) -> pa.Array:
 
 
 class _SequenceCheck:
-    """Orden y huecos/duplicados de agg_trade_id, lote a lote con el borde del anterior."""
+    """Orden, huecos y duplicados de agg_trade_id, lote a lote con el borde del anterior.
+
+    Con ids que no retroceden, un id repetido ocupa filas contiguas: cada fila
+    repetida se compara con la anterior. Si es idéntica se elimina; si difiere,
+    `AggIdConflict`.
+    """
 
     def __init__(self) -> None:
         self._time: pa.Array | None = None
         self._id: pa.Array | None = None
+        self._row: dict | None = None  # última fila del lote anterior, sin buffers
         self._last_was_repeat = False
         self.n_gaps = 0
         self.gaps: list[list[int]] = []
         self.n_duplicates = 0
         self.duplicates: list[int] = []
 
-    def feed(self, batch: pa.RecordBatch) -> None:
+    def feed(self, batch: pa.RecordBatch) -> pa.RecordBatch:
+        """Devuelve el lote sin las filas repetidas; si no hay, la misma instancia."""
         time = _extend(self._time, batch.column("transact_time"))
         ids = _extend(self._id, batch.column("agg_trade_id"))
         self._time, self._id = _last(time), _last(ids)
+        previous, self._row = self._row, batch.slice(len(batch) - 1).to_pylist()[0]
         if len(ids) < 2:
-            return
+            return batch
 
         t_prev, t_next = time.slice(0, len(time) - 1), time.slice(1)
         i_prev, i_next = ids.slice(0, len(ids) - 1), ids.slice(1)
@@ -75,17 +83,46 @@ class _SequenceCheck:
             ).to_pylist()
             self.gaps += [list(g) for g in zip(gap_from, gap_to)]
 
-        # Un id repetido k veces deja k-1 pasos en cero y cuenta una sola vez.
+        # Un id repetido k veces deja k-1 pasos en cero: son k-1 filas eliminadas,
+        # y su id entra una sola vez a los detalles.
         repeat = pc.equal(step, 0)
+        n_repeats = pc.sum(repeat).as_py() or 0
+        if n_repeats == 0:
+            self._last_was_repeat = False
+            return batch
+        self.n_duplicates += n_repeats
         before = pa.concat_arrays([pa.array([self._last_was_repeat]), repeat[:-1]])
         first_repeat = pc.and_(repeat, pc.invert(before))
-        self.n_duplicates += pc.sum(first_repeat).as_py() or 0
         if len(self.duplicates) < DETAILS_MAX:
             room = DETAILS_MAX - len(self.duplicates)
             self.duplicates += (
                 pc.filter(i_next, first_repeat).slice(0, room).to_pylist()
             )
         self._last_was_repeat = repeat[-1].as_py()
+        return self._drop_repeats(batch, repeat, previous)
+
+    def _drop_repeats(
+        self, batch: pa.RecordBatch, repeat: pa.Array, previous: dict | None
+    ) -> pa.RecordBatch:
+        # `repeat[k]` habla de la fila k del lote si hay borde previo; si no, de la k+1.
+        is_repeat = (
+            repeat if previous else pa.concat_arrays([pa.array([False]), repeat])
+        )
+        if previous and is_repeat[0].as_py():
+            first = batch.slice(0, 1).to_pylist()[0]
+            if first != previous:
+                raise conflict_error(previous, first)
+        if len(batch) > 1:
+            same = None
+            for column in batch.columns:
+                equal = pc.equal(column.slice(1), column.slice(0, len(batch) - 1))
+                same = equal if same is None else pc.and_(same, equal)
+            divergent = pc.and_(is_repeat.slice(1), pc.invert(same))
+            if pc.any(divergent).as_py():
+                k = pc.index(divergent, True).as_py()
+                first, second = batch.slice(k, 2).to_pylist()
+                raise conflict_error(first, second)
+        return batch.filter(pc.invert(is_repeat))
 
     def results(self) -> list[CheckResult]:
         return [
@@ -102,10 +139,12 @@ def stream_partition(
     Los hallazgos vienen en el orden del pipeline: unidad de tiempo, reorden,
     huecos y duplicados, marcas del proveedor. Si la unidad temporal no es válida
     lanza `TimestampUnitError` con el mín y máx de toda la unidad; si hay filas
-    con price o quantity <= 0 que no son marca, `ValueRangeError`. Ninguna deja archivo.
+    con price o quantity <= 0 que no son marca, `ValueRangeError`; si un
+    agg_trade_id se repite con contenido distinto, `AggIdConflict`. Ninguna deja archivo.
 
     La integridad de ids se calcula sobre los ids crudos y las marcas se
-    descartan después, para que no aparezcan como huecos falsos.
+    descartan después, para que no aparezcan como huecos falsos. Los
+    duplicados idénticos se eliminan antes de las marcas.
     """
     hasher = ContentHasher(OUTPUT_SCHEMA)
     sequence = _SequenceCheck()
@@ -130,7 +169,7 @@ def stream_partition(
                 continue
             out = conform_batch(batch, unit)
             del batch
-            sequence.feed(out)
+            out = sequence.feed(out)  # suelta el lote conformado si quitó repetidas
             clean = marks.feed(out)
             if clean is not out:
                 del out

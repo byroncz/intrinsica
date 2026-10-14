@@ -1,6 +1,7 @@
 import pyarrow as pa
+import pytest
 from dq import Severity, Status
-from l1_ingest.integrity import check_agg_trade_id, ensure_order
+from l1_ingest.integrity import AggIdConflict, dedupe_agg_trade_id, ensure_order
 from l1_ingest.schema import RAW_SCHEMA
 
 
@@ -57,8 +58,10 @@ def test_tabla_vacia_y_de_una_fila_estan_ordenadas():
 
 
 def test_ids_sanos():
-    gap, dup = check_agg_trade_id(make_table([1, 2, 3], [1, 2, 3]))
+    table = make_table([1, 2, 3], [1, 2, 3])
+    out, (gap, dup) = dedupe_agg_trade_id(table)
 
+    assert out is table
     assert (gap.check_type, dup.check_type) == ("aggid_gap", "aggid_duplicate")
     for check in (gap, dup):
         assert (check.severity, check.status) == (Severity.INFO, Status.PASS)
@@ -66,7 +69,7 @@ def test_ids_sanos():
 
 
 def test_un_hueco():
-    gap, dup = check_agg_trade_id(make_table([1, 2, 3], [1, 2, 6]))
+    _, (gap, dup) = dedupe_agg_trade_id(make_table([1, 2, 3], [1, 2, 6]))
 
     assert (gap.severity, gap.status) == (Severity.WARNING, Status.FAIL)
     assert gap.metric_value == 1
@@ -74,30 +77,95 @@ def test_un_hueco():
     assert dup.status == Status.PASS
 
 
-def test_un_duplicado():
-    gap, dup = check_agg_trade_id(make_table([1, 2, 3, 4], [1, 2, 2, 3]))
+def test_un_duplicado_identico_se_elimina():
+    table = make_table([1, 2, 2, 3], [1, 2, 2, 3])
+    out, (gap, dup) = dedupe_agg_trade_id(table)
 
+    assert out.column("agg_trade_id").to_pylist() == [1, 2, 3]
+    assert out.column("transact_time").to_pylist() == [1, 2, 3]
     assert gap.status == Status.PASS
-    assert (dup.severity, dup.status) == (Severity.WARNING, Status.FAIL)
+    assert (dup.severity, dup.status) == (Severity.WARNING, Status.CORRECTED)
     assert dup.metric_value == 1
     assert dup.details["ids"] == [2]
 
 
-def test_combinacion_desordenada_no_modifica_la_tabla():
+def test_bloque_duplicado_identico_cuenta_filas_eliminadas():
+    # El bloque 3, 4, 5 viene dos veces seguidas: mismo id, tiempo y contenido.
+    table = make_table(
+        [10, 20, 30, 40, 50, 30, 40, 50, 60], [1, 2, 3, 4, 5, 3, 4, 5, 6]
+    )
+    ordered, _ = ensure_order(table)
+    out, (gap, dup) = dedupe_agg_trade_id(ordered)
+
+    assert out.column("agg_trade_id").to_pylist() == [1, 2, 3, 4, 5, 6]
+    assert out.num_rows == table.num_rows - 3
+    assert dup.metric_value == 3
+    assert dup.details["ids"] == [3, 4, 5]
+    assert gap.status == Status.PASS
+
+
+def test_filtro_elimina_exactamente_las_repetidas():
+    # Referencia: la primera fila de cada id en el orden de la tabla, como en
+    # el antiguo filtro por posiciones (posiciones repetidas = `removed`).
+    ids = [1, 2, 2, 3, 5, 5, 5, 6, 8, 8, 9]
+    times = [10 * i for i in ids]
+    table, _ = ensure_order(make_table(times, ids))
+    seen: set[int] = set()
+    removed = []
+    for pos, i in enumerate(ids):
+        if i in seen:
+            removed.append(pos)
+        seen.add(i)
+    expected = [r for pos, r in enumerate(table.to_pylist()) if pos not in removed]
+
+    out, (_, dup) = dedupe_agg_trade_id(table)
+
+    assert out.to_pylist() == expected
+    assert dup.metric_value == len(removed)
+
+
+def test_repetidas_no_contiguas_fallan_en_vez_de_quedar():
+    # Fuera de la precondición (tabla sin ensure_order) no publica ids repetidos.
+    table = make_table([10, 30, 20, 30], [1, 3, 2, 3])
+
+    with pytest.raises(ValueError, match="ensure_order"):
+        dedupe_agg_trade_id(table)
+
+
+def test_duplicado_con_price_distinto_aborta():
+    table = make_table([1, 2, 2, 3], [1, 2, 2, 3])
+    prices = table.column("price").to_pylist()
+    prices[2] = "2"
+    table = table.set_column(1, "price", pa.array(prices, pa.string()))
+
+    with pytest.raises(AggIdConflict) as exc:
+        dedupe_agg_trade_id(table)
+
+    check = exc.value.check
+    assert check.check_type == "aggid_duplicate"
+    assert (check.severity, check.status) == (Severity.ERROR, Status.FAIL)
+    assert check.details["agg_trade_id"] == 2
+    assert [row["price"] for row in check.details["rows"]] == ["1", "2"]
+
+
+def test_combinacion_desordenada_no_modifica_la_entrada():
     table = make_table([1, 2, 3, 4, 5, 6], [7, 1, 2, 2, 2, 4])
+    # Los tres ids 2 pasan a ser idénticos (mismo tiempo): quedan dos eliminadas.
+    table = table.set_column(5, "transact_time", pa.array([1, 2, 3, 3, 3, 6]))
     before = table.to_pydict()
-    gap, dup = check_agg_trade_id(table)
+    out, (gap, dup) = dedupe_agg_trade_id(table)
 
     assert gap.metric_value == 2
     assert gap.details["gaps"] == [[3, 3], [5, 6]]
-    assert dup.metric_value == 1
+    assert dup.metric_value == 2
     assert dup.details["ids"] == [2]
     assert table.to_pydict() == before
+    assert out.column("agg_trade_id").to_pylist() == [7, 1, 2, 4]
 
 
 def test_details_limitado_a_10():
     ids = list(range(1, 60, 2))
-    gap, _ = check_agg_trade_id(make_table(list(range(len(ids))), ids))
+    _, (gap, _) = dedupe_agg_trade_id(make_table(list(range(len(ids))), ids))
 
     assert gap.metric_value == len(ids) - 1
     assert len(gap.details["gaps"]) == 10

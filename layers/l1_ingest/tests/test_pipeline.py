@@ -2,9 +2,11 @@ import functools
 import hashlib
 import shutil
 
+import pyarrow.parquet as pq
 import pytest
 from l1_ingest import download, pipeline
 from l1_ingest.download import ChecksumError, fetch
+from l1_ingest.integrity import AggIdConflict
 from l1_ingest.manifest import last_sha256
 from l1_ingest.marks import ValueRangeError
 from l1_ingest.pipeline import RunContext, Unit, process_unit
@@ -306,5 +308,50 @@ def test_fila_corrupta_emite_price_out_of_range_y_no_escribe(tmp_path, publish_z
     rows = current_findings(tmp_path / "dq").to_pylist()
     failed = [r for r in rows if r["check_type"] == "price_out_of_range"]
     assert [(r["severity"], r["status"]) for r in failed] == [("error", "fail")]
+    assert _files(tmp_path / "landing") == []
+    assert not (tmp_path / "manifest").exists()
+
+
+ORDERED = [
+    "1,100.10000000,0.50000000,1,1,1709600000000,True,True",
+    "2,100.20000000,1.00000000,2,2,1709600000100,False,True",
+    "2,100.20000000,1.00000000,2,2,1709600000100,False,True",
+    "3,100.30000000,2.00000000,3,3,1709600000300,True,True",
+]
+ORDERED_DIVERGENT = [*ORDERED[:2], ORDERED[1].replace("100.2", "100.9"), ORDERED[3]]
+UNORDERED_DIVERGENT = [ORDERED[0], ORDERED[3], ORDERED[1], ORDERED_DIVERGENT[2]]
+
+
+@pytest.mark.parametrize("rows", [ORDERED, None], ids=["por-lotes", "materializada"])
+def test_duplicado_identico_se_elimina_y_se_reporta(tmp_path, publish_zip, rows):
+    publish, base = publish_zip
+    publish(rows=rows)
+    result = process_unit(Unit(2024, 3), _ctx(tmp_path, base))
+
+    (dup,) = [f for f in result.findings if f.check_type == "aggid_duplicate"]
+    assert (dup.severity, dup.status, dup.metric_value) == ("warning", "corrected", 1)
+    assert dup.details == {"ids": [2]}
+    ids = pq.read_table(result.path)["agg_trade_id"].to_pylist()
+    assert len(ids) == len(set(ids))
+
+
+@pytest.mark.parametrize(
+    "rows", [ORDERED_DIVERGENT, UNORDERED_DIVERGENT], ids=["por-lotes", "materializada"]
+)
+def test_duplicado_con_price_distinto_aborta_sin_escribir(tmp_path, publish_zip, rows):
+    publish, base = publish_zip
+    publish(rows=rows)
+    with pytest.raises(AggIdConflict):
+        process_unit(Unit(2024, 3), _ctx(tmp_path, base))
+
+    from dq.reader import current_findings
+
+    found = current_findings(tmp_path / "dq").to_pylist()
+    (failed,) = [r for r in found if r["check_type"] == "aggid_duplicate"]
+    assert (failed["severity"], failed["status"]) == ("error", "fail")
+    assert '"agg_trade_id": 2' in failed["details"]
+    assert (
+        '"100.20000000"' in failed["details"] and '"100.90000000"' in failed["details"]
+    )
     assert _files(tmp_path / "landing") == []
     assert not (tmp_path / "manifest").exists()

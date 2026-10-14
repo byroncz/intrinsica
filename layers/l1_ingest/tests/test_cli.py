@@ -77,7 +77,7 @@ def test_main_day_end_to_end(tmp_path, publish_zip):
     partition = next((tmp_path / "landing").rglob("provisional-day=06.parquet"))
     table = pq.read_table(partition)
     assert table.schema.equals(OUTPUT_SCHEMA)
-    assert table.num_rows == 5
+    assert table.num_rows == 4  # el id 2 viene repetido e idéntico: queda una
     assert table["transact_time"].to_pylist()[0] == 1_709_600_000_000_000
 
     findings = current_findings(tmp_path / "dq").to_pylist()
