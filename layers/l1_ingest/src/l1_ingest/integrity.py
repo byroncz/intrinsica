@@ -2,6 +2,7 @@
 
 from decimal import Decimal
 
+import numpy as np
 import pyarrow as pa
 import pyarrow.compute as pc
 from dq import Severity, Status
@@ -124,8 +125,10 @@ def dedupe_agg_trade_id(table: pa.Table) -> tuple[pa.Table, list[CheckResult]]:
         removed = pc.filter(order.slice(1), repeat)
         _raise_if_divergent(table, kept, removed)
         repeated = pc.unique(pc.filter(nxt, repeat)).slice(0, DETAILS_MAX).to_pylist()
-        drop = pc.is_in(pa.array(range(table.num_rows), pa.int64()), value_set=removed)
-        table = table.filter(pc.invert(drop))
+        # Máscara de un byte por fila: evita materializar N índices int64.
+        keep = np.ones(table.num_rows, dtype=bool)
+        keep[removed.to_numpy()] = False
+        table = table.filter(pa.array(keep))
 
     checks = aggid_results(
         len(gap_from),

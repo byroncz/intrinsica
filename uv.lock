@@ -484,6 +484,7 @@ source = { editable = "layers/l1_ingest" }
 dependencies = [
     { name = "dq" },
     { name = "fsspec" },
+    { name = "numpy" },
     { name = "pyarrow" },
     { name = "pyutils" },
 ]
@@ -492,6 +493,7 @@ dependencies = [
 requires-dist = [
     { name = "dq", editable = "shared/dq" },
     { name = "fsspec", specifier = ">=2026.9.0" },
+    { name = "numpy", specifier = ">=2.0" },
     { name = "pyarrow", specifier = ">=25.0.1" },
     { name = "pyutils", editable = "shared/pyutils" },
 ]
