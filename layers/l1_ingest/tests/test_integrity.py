@@ -94,13 +94,42 @@ def test_bloque_duplicado_identico_cuenta_filas_eliminadas():
     table = make_table(
         [10, 20, 30, 40, 50, 30, 40, 50, 60], [1, 2, 3, 4, 5, 3, 4, 5, 6]
     )
-    out, (gap, dup) = dedupe_agg_trade_id(table)
+    ordered, _ = ensure_order(table)
+    out, (gap, dup) = dedupe_agg_trade_id(ordered)
 
     assert out.column("agg_trade_id").to_pylist() == [1, 2, 3, 4, 5, 6]
     assert out.num_rows == table.num_rows - 3
     assert dup.metric_value == 3
     assert dup.details["ids"] == [3, 4, 5]
     assert gap.status == Status.PASS
+
+
+def test_filtro_elimina_exactamente_las_repetidas():
+    # Referencia: la primera fila de cada id en el orden de la tabla, como en
+    # el antiguo filtro por posiciones (posiciones repetidas = `removed`).
+    ids = [1, 2, 2, 3, 5, 5, 5, 6, 8, 8, 9]
+    times = [10 * i for i in ids]
+    table, _ = ensure_order(make_table(times, ids))
+    seen: set[int] = set()
+    removed = []
+    for pos, i in enumerate(ids):
+        if i in seen:
+            removed.append(pos)
+        seen.add(i)
+    expected = [r for pos, r in enumerate(table.to_pylist()) if pos not in removed]
+
+    out, (_, dup) = dedupe_agg_trade_id(table)
+
+    assert out.to_pylist() == expected
+    assert dup.metric_value == len(removed)
+
+
+def test_repetidas_no_contiguas_fallan_en_vez_de_quedar():
+    # Fuera de la precondición (tabla sin ensure_order) no publica ids repetidos.
+    table = make_table([10, 30, 20, 30], [1, 3, 2, 3])
+
+    with pytest.raises(ValueError, match="ensure_order"):
+        dedupe_agg_trade_id(table)
 
 
 def test_duplicado_con_price_distinto_aborta():

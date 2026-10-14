@@ -103,9 +103,15 @@ def dedupe_agg_trade_id(table: pa.Table) -> tuple[pa.Table, list[CheckResult]]:
     """Huecos y duplicados de agg_trade_id (§9.2), sobre la tabla completa.
 
     Dos filas con el mismo id e igual contenido se reducen a la primera de la
-    tabla. Si difieren en alguna columna lanza `AggIdConflict`. Evalúa sobre los
-    ids ordenados (orden estable), así que no depende del orden de la tabla.
-    Un hueco es el rango de ids ausentes [desde, hasta], ambos inclusive.
+    tabla. Si difieren en alguna columna lanza `AggIdConflict`. Huecos y
+    repetidos se evalúan sobre los ids ordenados (orden estable), sin depender
+    del orden de la tabla. Un hueco es el rango de ids ausentes [desde, hasta],
+    ambos inclusive.
+
+    Precondición: la tabla viene de `ensure_order`. Ahí dos filas idénticas
+    (mismo id y mismo transact_time) quedan contiguas, así que el filtro solo
+    compara cada id con el de la fila anterior; si la máscara no elimina
+    exactamente las filas repetidas, falla en vez de publicar ids repetidos.
     """
     ids = table.column("agg_trade_id").combine_chunks()
     order = pc.sort_indices(ids)
@@ -124,11 +130,14 @@ def dedupe_agg_trade_id(table: pa.Table) -> tuple[pa.Table, list[CheckResult]]:
         removed = pc.filter(order.slice(1), repeat)
         _raise_if_divergent(table, kept, removed)
         repeated = pc.unique(pc.filter(nxt, repeat)).slice(0, DETAILS_MAX).to_pylist()
-        # Posiciones 0..N-1 generadas en C++ (sin bucle en Python); el filtro
-        # se arma con pyarrow puro para no declarar numpy en la capa.
-        n = table.num_rows
-        idx = pc.subtract(pc.cumulative_sum(pa.repeat(pa.scalar(1, pa.int64()), n)), 1)
-        keep = pc.invert(pc.is_in(idx, value_set=removed))
+        # Máscara de un byte por fila en el orden de la tabla, sin arreglo de
+        # posiciones: con la precondición, la repetida sigue a la que se queda.
+        ids = table.column("agg_trade_id").combine_chunks()
+        keep = pa.concat_arrays(
+            [pa.array([True]), pc.not_equal(ids.slice(1), ids.slice(0, len(ids) - 1))]
+        )
+        if pc.sum(pc.invert(keep)).as_py() != n_removed:
+            raise ValueError("dedupe_agg_trade_id exige una tabla de ensure_order")
         table = table.filter(keep)
 
     checks = aggid_results(
