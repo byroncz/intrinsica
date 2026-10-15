@@ -62,8 +62,9 @@ CPU.
 
 ## Estructura paralelizable, sin paralelizar todavía
 
-La CLI corre todo en serie. Los hilos por θ y los meses en paralelo los decide ITSC-335 con la
-medición; lo que esta capa garantiza es que nada lo impide:
+La CLI corre todo en serie. ITSC-335 midió el histórico y decidió dejarlo así (TRD-L3 §10.2): la
+suma de los 110 meses cabe en el timeout. Lo que esta capa garantiza es que nada impide paralelizar
+si una card futura lo pide:
 
 - **Sin estado global.** Ningún módulo guarda un contenedor mutable ni usa `global`
   (`tests/test_l3_parallel.py` lo comprueba). El trabajo por θ sobre un row group,
@@ -86,8 +87,9 @@ hash del escritor. Lo que queda en Python puro y lo retiene: la **recomposición
 `Σ price·quantity`** en entero de Python por segmento (`_vwaps` y `Segments.words.tolist()`),
 el **VWAP** (`divide_half_even`) y, solo si una comprobación del lote falla, el camino por
 evento de `build_row`. Con 50 θ y millones de eventos por mes ese tramo crece con los eventos,
-no con los ticks, y los hilos no lo aceleran. Si pesa, ITSC-335 decide entre procesos por θ,
-tareas por mes (la unidad no tiene estado entre meses) o dejarlo así. Dos cosas más que no son
+no con los ticks, y los hilos no lo aceleran. ITSC-335 lo midió: el job usa ≈ 15 % de los 4 vCPU
+y la pared sigue a los eventos (24,9 s por millón), así que las palancas son procesos por θ o
+bajar los vCPU, no hilos. Dos cosas más que no son
 por unidad en un proceso con meses en paralelo: `rss_peak_mib` y `cpu_throttled_s` son del
 proceso.
 

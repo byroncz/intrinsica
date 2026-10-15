@@ -40,19 +40,18 @@ module "layer" {
   region     = local.data.region
   image      = "${local.data.artifact_registry}/l3_dc_descriptors:${trimspace(file("${path.module}/../../../../layers/l3_dc_descriptors/VERSION"))}"
 
-  # PROVISIONAL. Arranque de TRD-L3 §10.2, hipótesis sin medir: el tamaño de L2
-  # (4 vCPU y 4 GiB), a cuyo mes más pesado se espera que L3 se parezca. Una sola
-  # tarea, sin task array: sin carry-over los meses de L3 son independientes y
-  # una tarea por mes sería posible, pero la partición la decide la sonda. Lo
-  # cierra ITSC-335, que mide el job real (l3-backfill sobre 2023-03) y fija
-  # tamaño, timeouts y partición.
+  # Definitivo (ITSC-335, histórico de 110 meses, 2026-10-15; TRD-L3 §10.2). 4 vCPU
+  # y 4 GiB, el tamaño de L2: RSS pico máximo 1 267 MiB (2018-01, 31 % de 4 GiB),
+  # sin OOM. Una tarea y un hilo: la suma medida de los 110 meses (41 256 s) con
+  # margen 1,5 son 61 884 s, bajo 86 400 s, así que no hace falta paralelizar. El
+  # job usa ≈ 15 % de los vCPU; usarlos (procesos por θ) o bajarlos es una
+  # mejora aparte, no medida.
   cpu    = "4"
   memory = "4Gi"
 
-  # PROVISIONAL, el de monthly: un solo mes. 7200 s es un valor de partida
-  # generoso, sin pared medida detrás. ITSC-335 lo fija con la regla de TRD-L2
-  # §10.2: al menos 6 veces la pared del mes más pesado medida.
-  timeout = 7200
+  # El de monthly: 10 800 s son 7,6 veces la pared del mes más pesado (2021-01,
+  # 1 419 s), sobre el mínimo de 6 veces de TRD-L2 §10.2 (8 514 s).
+  timeout = 10800
 
   # 1 y no 0, como L1 y L2: el reintento cubre fallos transitorios de
   # infraestructura y uno determinista (OOM, timeout, conciliación) lo resuelve
@@ -76,10 +75,11 @@ module "layer" {
   # Una service account por modo. Ambos modos leen y escriben lo mismo; la
   # separación deja revocar o auditar cada uno por su cuenta.
   modes = {
-    # PROVISIONAL: 86 400 s es el tope del módulo. Una sola tarea recorre los
-    # 109 meses; ITSC-335 fija el timeout con la suma medida de los meses (regla
-    # de TRD-L2 §10.2: al menos 1,5 veces, sin pasar de 86 400 s) y decide si
-    # el backfill se parte en una tarea por mes.
+    # 86 400 s, el tope del módulo, son 2,1 veces la suma medida de los 110 meses
+    # (41 256 s; el mínimo de la regla de TRD-L2 §10.2 es 1,5 veces, 61 884 s). Una
+    # sola tarea recorre el rango. Cloud Run no la corta, pero el run de Actions
+    # espera 6 h como máximo (41 meses tomaron 4 h 57 min): el histórico va por
+    # rangos (ver infra/README.md, stack l3).
     backfill = { timeout = 86400, access = local.access }
     monthly  = { access = local.access }
   }

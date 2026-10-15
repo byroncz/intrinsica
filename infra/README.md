@@ -472,10 +472,69 @@ del humano, 2026-10-14 (revierte la del 2026-10-13); detalle en
 `gs://<proyecto>-manifest/l2/thetas.yaml`, el mismo objeto que usa L2. El stack
 `l3` no lo siembra ni lo copia (lo siembra `l2`); si falta, L3 sale con código 2.
 
-**Cómputo, provisional.** 4 vCPU, 4 GiB, `max_retries = 1` y una sola tarea
-(TRD-L3 §10.2, hipótesis sin medir). Timeouts: `l3-monthly` 7 200 s y
-`l3-backfill` 86 400 s (el tope del módulo). ITSC-335 mide el job real y fija
-tamaño, timeouts y la partición por mes, con la regla de TRD-L2 §10.2.
+**Cómputo, definitivo (ITSC-335, 2026-10-15).** 4 vCPU, 4 GiB, `max_retries = 1`
+y una sola tarea en un solo hilo. Medido sobre los 110 meses (2017-08 a 2026-09):
+RSS pico máximo 1 267 MiB (2018-01, 31 % de 4 GiB), sin OOM; mes más pesado
+2021-01 con 1 419 s (no 2023-03, 873 s: la pared sigue a los eventos más que a los
+ticks); suma de `wall_s` 41 256 s (11,5 h). Timeouts con la regla de TRD-L2 §10.2:
+`l3-monthly` 10 800 s (7,6 veces 1 419 s; el mínimo son 8 514 s) y `l3-backfill`
+86 400 s (2,1 veces la suma; el mínimo son 61 884 s; es el tope del módulo).
+Decisión y cifras en [TRD-L3 §10.2](../docs/TRD/l3.md#102-dimensionamiento--hipótesis-de-partida-y-primera-medición).
+El job usa ≈ 15 % de los vCPU y su backfill completo (≈ 165 000 vCPU-s, ≈ 3,3 USD
+de lista) es el 92 % del cupo gratuito mensual de Cloud Run **solo si L3 corriera
+aislado**: el cupo es de la cuenta de facturación y lo comparten L1, L2, viz y L3.
+En octubre la cuenta lo rebasó (2,2 veces en CPU y 1,9 en memoria), L3 fue el
+41 % del CPU del mes y los créditos cubrieron el costo de lista (facturado 0;
+[TRD-L3 §10.5](../docs/TRD/l3.md#105-costo)).
+
+**Backfill histórico por rangos.** La suma de los 110 meses son 11,5 h, más que
+las 6 h que espera el run de Actions (un rango de 41 meses tomó 4 h 57 min).
+Cloud Run no corta la tarea, pero el run fallaría. Por eso el histórico se lanzó
+con *Run job* → `l3-backfill`, uno a la vez, cada uno con éxito antes del
+siguiente:
+
+| # | `from` | `to` | Resultado |
+|---|---|---|---|
+| 1 | `2017-08` | `2020-12` | 4 h 57 min (41 meses) |
+| 2 | `2021-01` | `2021-12` | 2 h 09 min |
+| 3 | `2022-01` | `2023-02` | 2 h 07 min |
+| 4 | vacío | `2024-12` | 1 h 07 min |
+| 5 | vacío | `2026-08` | Falló: construyó 2025-01 a 2026-01 (13 meses, suma de `wall_s` 2 269 s) y abortó en 2026-02. Su reintento de Cloud Run y un relanzamiento fallaron igual |
+| 6 | vacío | vacío | 19 min, tras ITSC-351: construyó 2026-02 a 2026-08 y reconstruyó 2026-09 |
+| 7 | vacío | vacío | Run 38771287050 (`l3-backfill-74t6c`), sin `--force`: salida 0, los 50 θ con frontera en 2026-09, las 110 unidades saltadas («ningún θ la necesita»), sin escrituras, sin `theta_behind_frontier` y con la misma `generation`. Log final: «backfill: los 50 θ están al día en el rango» |
+
+La frontera de cada θ es contigua desde `series_start`: un rango sin `from`
+arranca en el mes siguiente al último construido. Con 2023-03 y 2026-09 ya
+hechos fuera de orden, los rangos 3 y 5 terminaron un mes antes de cada uno para
+no reconstruirlos (el 4 arrancó en 2023-04, porque la serie ya era contigua hasta
+2023-03). Si el run de un rango agota las 6 h de Actions, la tarea sigue
+en Cloud Run: el humano la sigue en *Cloud Run → Jobs* y lanza el siguiente rango
+cuando termine. Relanzar un rango interrumpido es seguro: la frontera retoma donde
+quedó.
+
+El rango 5 abortó en 2026-02 con `l2_state_inconsistent`: L1 había dejado 2 000
+`agg_trade_id` repetidos en ese mes (2 000 ids repetidos, 3 000 filas sobrantes, según
+midió ITSC-351) y la compuerta de TRD-L3 §9.2 los detectó.
+ITSC-351 lo corrigió en L1 y reprocesó en cascada L1 → L2 → viz desde 2026-02
+(ver el [runbook de operación de L1](../docs/runbooks/operacion-l1.md)). Con esa
+cascada hecha, el rango 6 (run 38674127712) corrió sin `from` ni `to`: la serie
+era contigua hasta 2026-01, así que arrancó en 2026-02 y llegó hasta 2026-09, que
+reconstruyó con los mismos 50 `content_hash` de la primera corrida (run
+38493995515). Los `unit_timing` de la suma de 41 256 s salen de los runs 1 a 5
+(103 meses, 40 294 s) y del 6 (2026-02 a 2026-08); la reconstrucción de 2026-09 no
+se suma dos veces.
+
+**Regla para un backfill futuro de la serie completa** (por ejemplo, al agregar una
+familia): fija cada rango por su **pared estimada**, no por su número de meses. La
+suma de los `wall_s` esperados del rango debe quedar en **≈ 5 h (18 000 s) o menos**,
+para dejar holgura bajo las 6 h de Actions. Estima cada mes con el ajuste de
+[TRD-L3 §10.2](../docs/TRD/l3.md#102-dimensionamiento--hipótesis-de-partida-y-primera-medición)
+o con los `unit_timing` de `dq-findings/l3/`. El número de meses no sirve de medida:
+los 41 meses de 2017-08 a 2020-12 promediaron ≈ 7,2 min por mes (suma de
+`wall_s` 17 792 s), pero 2021 promedió ≈ 10,75 min por mes (2 h 09 min en 12 meses)
+y el más pesado, 2021-01, tomó 24 min; un rango de 41 meses que cubriera 2020-2022
+rondaría 7 h. Lo más simple es repetir los rangos de la tabla (1 a 4 y el resto
+hasta el último mes), que ya se sabe que caben.
 
 **Cadena mensual.** El stack `l1` pasa a
 `next_jobs = ["l2-monthly", "viz-tiles", "l3-monthly"]` en `monthly-close`: el
