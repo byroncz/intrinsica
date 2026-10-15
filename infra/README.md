@@ -480,9 +480,12 @@ ticks); suma de `wall_s` 41 256 s (11,5 h). Timeouts con la regla de TRD-L2 §10
 `l3-monthly` 10 800 s (7,6 veces 1 419 s; el mínimo son 8 514 s) y `l3-backfill`
 86 400 s (2,1 veces la suma; el mínimo son 61 884 s; es el tope del módulo).
 Decisión y cifras en [TRD-L3 §10.2](../docs/TRD/l3.md#102-dimensionamiento--hipótesis-de-partida-y-primera-medición).
-El job usa ≈ 15 % de los vCPU y su backfill completo (≈ 165 000 vCPU-s) es el
-92 % del cupo gratuito mensual de Cloud Run: el cupo es compartido con L1, L2 y
-viz.
+El job usa ≈ 15 % de los vCPU y su backfill completo (≈ 165 000 vCPU-s, ≈ 3,3 USD
+de lista) es el 92 % del cupo gratuito mensual de Cloud Run **solo si L3 corriera
+aislado**: el cupo es de la cuenta de facturación y lo comparten L1, L2, viz y L3.
+En octubre la cuenta lo rebasó (2,2 veces en CPU y 1,9 en memoria), L3 fue el
+41 % del CPU del mes y los créditos cubrieron el costo de lista (facturado 0;
+[TRD-L3 §10.5](../docs/TRD/l3.md#105-costo)).
 
 **Backfill histórico por rangos.** La suma de los 110 meses son 11,5 h, más que
 las 6 h que espera el run de Actions (un rango de 41 meses tomó 4 h 57 min).
@@ -498,6 +501,7 @@ siguiente:
 | 4 | vacío | `2024-12` | 1 h 07 min |
 | 5 | vacío | `2026-08` | Falló: construyó 2025-01 a 2026-01 (13 meses, suma de `wall_s` 2 269 s) y abortó en 2026-02. Su reintento de Cloud Run y un relanzamiento fallaron igual |
 | 6 | vacío | vacío | 19 min, tras ITSC-351: construyó 2026-02 a 2026-08 y reconstruyó 2026-09 |
+| 7 | vacío | vacío | Run 38771287050 (`l3-backfill-74t6c`), sin `--force`: salida 0, los 50 θ con frontera en 2026-09, las 110 unidades saltadas («ningún θ la necesita»), sin escrituras, sin `theta_behind_frontier` y con la misma `generation`. Log final: «backfill: los 50 θ están al día en el rango» |
 
 La frontera de cada θ es contigua desde `series_start`: un rango sin `from`
 arranca en el mes siguiente al último construido. Con 2023-03 y 2026-09 ya
@@ -509,7 +513,8 @@ cuando termine. Relanzar un rango interrumpido es seguro: la frontera retoma don
 quedó.
 
 El rango 5 abortó en 2026-02 con `l2_state_inconsistent`: L1 había dejado 2 000
-`agg_trade_id` duplicados en ese mes y la compuerta de TRD-L3 §9.2 los detectó.
+`agg_trade_id` repetidos en ese mes (2 000 ids repetidos, 3 000 filas sobrantes, según
+midió ITSC-351) y la compuerta de TRD-L3 §9.2 los detectó.
 ITSC-351 lo corrigió en L1 y reprocesó en cascada L1 → L2 → viz desde 2026-02
 (ver el [runbook de operación de L1](../docs/runbooks/operacion-l1.md)). Con esa
 cascada hecha, el rango 6 (run 38674127712) corrió sin `from` ni `to`: la serie
