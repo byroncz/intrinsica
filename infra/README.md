@@ -603,8 +603,11 @@ scripts de partida están en el
   de vida: las versiones no vigentes de `scripts/` se borran a los 90 días y
   todo lo de `results/` a los 7.
 - **Acceso de la service account.** Lectura (`roles/storage.objectViewer`) de
-  `landing/l1/`, `dc-events/l2/`, `dq-findings/{l1,l2}/`, `manifest/{l1,l2}/` y
-  `ops/scripts/`, por el módulo `layer`; y escritura solo en `ops/results/`
+  `landing/l1/`, `dc-events/l2/`, `dc-descriptors/l3/`, `dq-findings/{l1,l2,l3}/`,
+  `manifest/{l1,l2}/`, `viz/tiles/` y `ops/scripts/`, por el módulo `layer`
+  (`dc-descriptors/l3/` y `dq-findings/l3/` desde ITSC-336, para
+  `l3_check_month.py`; el apply de `ops` agrega 2 bindings y no destruye
+  ninguno); y escritura solo en `ops/results/`
   (`roles/storage.objectCreator`, un binding propio del stack porque el módulo
   da un solo rol por bucket). Sin roles de IAM ni `run.jobs.update`.
 - **Cómputo.** 4 vCPU, 8 GiB, timeout 3600 s, `max_retries = 0` (un script ad
