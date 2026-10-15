@@ -40,19 +40,18 @@ module "layer" {
   region     = local.data.region
   image      = "${local.data.artifact_registry}/l3_dc_descriptors:${trimspace(file("${path.module}/../../../../layers/l3_dc_descriptors/VERSION"))}"
 
-  # PROVISIONAL hasta el backfill histórico (ITSC-335). 4 vCPU y 4 GiB, el tamaño
-  # de L2, medidos el 2026-10-14 sobre 2023-03 (TRD-L3 §10.3): pared 873 s, RSS
-  # pico 598 MiB (14,6 % de 4 GiB), sin OOM. Una tarea y un hilo: la suma estimada
-  # de los 109 meses (≈ 29 000 s) cabe en 86 400 s con margen 1,5, así que no hace
-  # falta paralelizar. El tamaño definitivo se fija tras el histórico, con el
-  # máximo de wall_s y de rss_peak_mib de los 109 unit_timing.
+  # Definitivo (ITSC-335, histórico de 110 meses, 2026-10-15; TRD-L3 §10.2). 4 vCPU
+  # y 4 GiB, el tamaño de L2: RSS pico máximo 1 267 MiB (2018-01, 31 % de 4 GiB),
+  # sin OOM. Una tarea y un hilo: la suma medida de los 110 meses (41 256 s) con
+  # margen 1,5 son 61 884 s, bajo 86 400 s, así que no hace falta paralelizar. El
+  # job usa ≈ 15 % de los vCPU; usarlos (procesos por θ) o bajarlos es una
+  # mejora aparte, no medida.
   cpu    = "4"
   memory = "4Gi"
 
-  # PROVISIONAL, el de monthly: 7 200 s son 8,2 veces la pared medida de 2023-03
-  # (873 s, 2026-10-14), sobre el mínimo de 6 veces de TRD-L2 §10.2 (5 238 s). Se
-  # confirma con el mes más pesado del histórico.
-  timeout = 7200
+  # El de monthly: 10 800 s son 7,6 veces la pared del mes más pesado (2021-01,
+  # 1 419 s), sobre el mínimo de 6 veces de TRD-L2 §10.2 (8 514 s).
+  timeout = 10800
 
   # 1 y no 0, como L1 y L2: el reintento cubre fallos transitorios de
   # infraestructura y uno determinista (OOM, timeout, conciliación) lo resuelve
@@ -76,11 +75,11 @@ module "layer" {
   # Una service account por modo. Ambos modos leen y escriben lo mismo; la
   # separación deja revocar o auditar cada uno por su cuenta.
   modes = {
-    # PROVISIONAL: 86 400 s es el tope del módulo y cubre con margen 1,5 la suma
-    # estimada de los meses (≈ 29 000 s; 109 × 873 s = 95 157 s es solo una cota
-    # superior). Una sola tarea recorre el rango. Cloud Run no la corta, pero el
-    # run de Actions espera 6 h como máximo: el histórico va por rangos (ver
-    # infra/README.md, stack l3). Se fija con la suma medida tras el histórico.
+    # 86 400 s, el tope del módulo, son 2,1 veces la suma medida de los 110 meses
+    # (41 256 s; el mínimo de la regla de TRD-L2 §10.2 es 1,5 veces, 61 884 s). Una
+    # sola tarea recorre el rango. Cloud Run no la corta, pero el run de Actions
+    # espera 6 h como máximo (41 meses tomaron 4 h 57 min): el histórico va por
+    # rangos (ver infra/README.md, stack l3).
     backfill = { timeout = 86400, access = local.access }
     monthly  = { access = local.access }
   }
