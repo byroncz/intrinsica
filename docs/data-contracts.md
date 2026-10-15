@@ -46,6 +46,9 @@ Parquet puede tener huecos de `agg_trade_id` solo donde el proveedor los
 tenga, nunca por las marcas. Detalle en el runbook
 [Marcas de Binance](runbooks/operacion-l1.md#marcas-de-binance).
 
+Además, `agg_trade_id` es único dentro de la partición (TRD-L1 §9.2): L2 (por
+posición) y L3 (por valor de id) lo asumen.
+
 ### Disposición física
 
 - **Raíz**: una ruta local o `gs://<bucket landing>/l1`. El stack `l1` solo
@@ -416,6 +419,18 @@ En GCS usa Application Default Credentials; no hay credenciales en código.
 `daily_monthly_drift`. Los que se agregan después de un bug real se
 documentan aquí, con su porqué:
 
+- **`aggid_duplicate`** (ITSC-351; semántica nueva en
+  [TRD-L1 §9.2](TRD/l1.md#92-compuerta-de-calidad-de-datos-aggtradeid)): L1
+  entrega cada `agg_trade_id` una sola vez, porque L2 recorre el mes por
+  posición y L3 decide por valor de id. Sin repetidos: `severity = info`,
+  `status = pass`, `metric_value = 0`. Con filas de mismo id e idéntico
+  contenido en todas las columnas: se reducen a una, `severity = warning`,
+  `status = corrected`, `metric_value` = filas eliminadas y `details.ids` =
+  hasta 10 `agg_trade_id`. Si dos filas con el mismo id difieren en alguna
+  columna: `severity = error`, `status = fail`, `metric_value = 1`,
+  `details = {"agg_trade_id": <id>, "rows": [<fila>, <fila>]}` (`price` y
+  `quantity` como texto) y la unidad falla sin escribir Parquet ni manifiesto.
+  Antes de ITSC-351 el hallazgo era `warning` / `fail` y no eliminaba nada.
 - **`provider_invalid_marker`** (ITSC-294): filas que Binance marcó como
   inválidas (`price = 0`, `quantity = 0`, `first_trade_id = -1`,
   `last_trade_id = -1`) y L1 descartó antes de escribir. `metric_value` =
