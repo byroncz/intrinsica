@@ -520,8 +520,9 @@ ITSC-351 lo corrigió en L1 y reprocesó en cascada L1 → L2 → viz desde 2026
 cascada hecha, el rango 6 (run 38674127712) corrió sin `from` ni `to`: la serie
 era contigua hasta 2026-01, así que arrancó en 2026-02 y llegó hasta 2026-09, que
 reconstruyó con los mismos 50 `content_hash` de la primera corrida (run
-38493995515). Los `unit_timing` de la suma de 41 256 s salen de los runs 1 a 5
-(103 meses, 40 294 s) y del 6 (2026-02 a 2026-08); la reconstrucción de 2026-09 no
+38493995515). Los `unit_timing` de la suma de 41 256 s salen de 103 meses
+(40 294 s): 101 de los rangos 1 a 5, 2023-03 del run 38495040816 y 2026-09 del
+run 38493995515; y del rango 6 (2026-02 a 2026-08, 7 meses); la reconstrucción de 2026-09 no
 se suma dos veces.
 
 **Regla para un backfill futuro de la serie completa** (por ejemplo, al agregar una
@@ -603,8 +604,11 @@ scripts de partida están en el
   de vida: las versiones no vigentes de `scripts/` se borran a los 90 días y
   todo lo de `results/` a los 7.
 - **Acceso de la service account.** Lectura (`roles/storage.objectViewer`) de
-  `landing/l1/`, `dc-events/l2/`, `dq-findings/{l1,l2}/`, `manifest/{l1,l2}/` y
-  `ops/scripts/`, por el módulo `layer`; y escritura solo en `ops/results/`
+  `landing/l1/`, `dc-events/l2/`, `dc-descriptors/l3/`, `dq-findings/{l1,l2,l3}/`,
+  `manifest/{l1,l2}/`, `viz/tiles/` y `ops/scripts/`, por el módulo `layer`
+  (`dc-descriptors/l3/` y `dq-findings/l3/` desde ITSC-336, para
+  `l3_check_month.py`; el apply de `ops` agrega 2 bindings y no destruye
+  ninguno); y escritura solo en `ops/results/`
   (`roles/storage.objectCreator`, un binding propio del stack porque el módulo
   da un solo rol por bucket). Sin roles de IAM ni `run.jobs.update`.
 - **Cómputo.** 4 vCPU, 8 GiB, timeout 3600 s, `max_retries = 0` (un script ad
