@@ -97,7 +97,6 @@ BLOCK = 1 << 18
 # Bajo este largo, un bucle de Python cuesta menos que las llamadas de NumPy.
 SMALL = 64
 PROGRESS_EVERY_S = 60
-KEY = ("provider", "market", "asset")
 
 
 def log(message: str) -> None:
@@ -553,7 +552,6 @@ def run(parser: argparse.ArgumentParser, ns: argparse.Namespace) -> int:
     started = time.perf_counter()
     lanes = [Oracle(theta, ns.max_diffs) for theta in thetas]
     by_theta = {Decimal(lane.theta): lane for lane in lanes}
-    problems = 0
     active = []
     for lane in lanes:
         path = l3_file(l3_root, key, lane.theta, ns.month)
@@ -562,7 +560,6 @@ def run(parser: argparse.ArgumentParser, ns: argparse.Namespace) -> int:
             active.append(lane)
         else:
             lane.diffs += 1
-            problems += 1
             log(f"DIFERENCIA θ={lane.theta} {reason}")
 
     error = None
