@@ -2,7 +2,7 @@
 # Prueba check-layer-versions.sh en un repo temporal (ITSC-355).
 # Uso: .github/scripts/test-check-layer-versions.sh
 # Cubre lo que entra y lo que no entra en las imágenes según el .dockerignore:
-#   - shared/*/tests y shared/*/README.md no exigen subir ningún VERSION;
+#   - shared/README.md, shared/*/tests y shared/*/README.md no exigen subir ningún VERSION;
 #   - shared/*/src, shared/*/pyproject.toml, uv.lock y el pyproject.toml raíz exigen
 #     subir las cinco capas.
 set -euo pipefail
@@ -25,6 +25,7 @@ mkdir -p shared/dc_frames/src/dc_frames shared/dc_frames/tests
 echo x > shared/dc_frames/src/dc_frames/reader.py
 echo x > shared/dc_frames/tests/test_dc_frames_memory.py
 echo x > shared/dc_frames/README.md
+echo x > shared/README.md
 echo x > shared/dc_frames/pyproject.toml
 echo x > uv.lock
 echo x > pyproject.toml
@@ -54,6 +55,7 @@ caso() {
 
 caso shared-tests   shared/dc_frames/tests/test_dc_frames_memory.py 0 ninguna
 caso shared-readme  shared/dc_frames/README.md                      0 ninguna
+caso shared-top-readme shared/README.md                                  0 ninguna
 caso layer-tests    layers/l1_ingest/tests/test_x.py                0 ninguna
 caso shared-src     shared/dc_frames/src/dc_frames/reader.py        1 todas
 caso shared-pyproj  shared/dc_frames/pyproject.toml                 1 todas
