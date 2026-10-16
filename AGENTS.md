@@ -103,9 +103,13 @@ PRs y entradas de Documentación. Sin excepción.
   parche para fixes, menor para features). El tag de la imagen y el stack de
   la capa se derivan de ella; sin tag nuevo, Cloud Run sigue con el digest
   viejo. CI lo exige en cada PR (`.github/scripts/check-layer-versions.sh`);
-  `README.md`, `tests/` y el propio `VERSION` no cuentan como código;
-  `shared/`, `uv.lock` y el `pyproject.toml` raíz sí, porque entran en cada
-  imagen. La versión nueva debe ser estrictamente mayor que la de la base.
+  `README.md`, `tests/` y el propio `VERSION` no cuentan como código, ni en
+  `layers/<capa>/` ni en `shared/<paquete>/`: `tests/` porque `.dockerignore`
+  lo deja fuera de la imagen; `README.md` porque la etapa final copia solo
+  `/app/.venv` y ningún `pyproject.toml` de `shared/` declara `readme` (si uno
+  lo declara, deja de valer). El resto de `shared/`, `uv.lock` y el
+  `pyproject.toml` raíz sí cuentan, porque entran en cada imagen. La versión
+  nueva debe ser estrictamente mayor que la de la base.
 - Eficiencia de memoria ante todo: todo dato alojado en RAM se libera en cuanto
   fue aprovechado; nunca conviven dos representaciones del mismo dato; el pico
   de memoria de una unidad es O(lote), no O(unidad). Aplica a todas las capas.

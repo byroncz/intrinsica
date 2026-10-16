@@ -46,6 +46,10 @@ jobs:
         with:
           fetch-depth: 0 # la guardia de VERSION compara contra la base del PR
 
+      - name: Probar la guardia de VERSION
+        if: github.event_name == 'pull_request'
+        run: .github/scripts/test-check-layer-versions.sh
+
       # Todo cambio de código de una capa debe subir su VERSION: el tag de la
       # imagen y el stack de la capa se derivan de ella (ITSC-216).
       - name: Exigir VERSION nueva si cambió código de una capa
