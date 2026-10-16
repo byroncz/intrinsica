@@ -4,8 +4,11 @@
 # Código de una capa = todo bajo layers/<capa>/ salvo README.md, tests/ y VERSION,
 # más shared/ (salvo shared/*/README.md y shared/*/tests/), uv.lock y
 # pyproject.toml, que el Dockerfile copia a cada imagen.
-# La lista de exclusiones sigue al Dockerfile.dockerignore de las imágenes
-# (**/tests): lo que el .dockerignore deja fuera no cambia ningún digest.
+# tests/ sale por el Dockerfile.dockerignore de las imágenes (**/tests). Los
+# README.md de shared/ sí entran a la etapa build, pero la etapa final copia solo
+# /app/.venv y ningún shared/*/pyproject.toml declara `readme`: no llegan al
+# digest. Si un pyproject de shared declara `readme`, el README pasa a los
+# metadatos del wheel y hay que quitar su exclusión de este script.
 # La VERSION nueva debe ser estrictamente mayor que la de la base.
 set -euo pipefail
 
