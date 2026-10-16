@@ -188,8 +188,10 @@ def test_row_groups_peak_is_a_row_group_and_does_not_grow_with_events(tmp_path):
     assert few["ticks"] == many["ticks"] > LONG
     assert many["events"] > few["events"] > 2 * GROUPS
     # Un row group con sus buffers de decodificación (un solo read_row_group pica en
-    # ~2,1 row groups de 48 B por tick); el modo por chunks llega a más de 5.
-    assert few["peak"] < 3 * ROW_GROUP_BYTES
+    # ~2,1 row groups de 48 B por tick, siempre igual con un hilo); el modo por chunks
+    # llega a más de 5. Retener la entrega anterior sube el pico a ~2,9: con 2,5 la
+    # prueba lo atrapa y aún deja 18 % de margen sobre la línea base.
+    assert few["peak"] < 2.5 * ROW_GROUP_BYTES
     assert many["peak"] < 1.25 * few["peak"]
     # Sin el row group anterior ni relecturas, por debajo del modo por chunks.
     assert many["peak"] < chunks["peak"]
