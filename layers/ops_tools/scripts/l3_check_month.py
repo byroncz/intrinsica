@@ -51,7 +51,7 @@ import os
 import re
 import sys
 import time
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 import numpy as np
@@ -447,7 +447,10 @@ def read_catalog(source: str) -> list[str]:
 def parse_thetas(text: str) -> list[str]:
     thetas = []
     for part in text.split(","):
-        theta = Decimal(part)
+        try:
+            theta = Decimal(part)
+        except InvalidOperation:
+            raise ValueError(f"--thetas: {part!r} no es un número") from None
         scaled = theta.quantize(Decimal("1e-8"))
         if scaled != theta:
             raise ValueError(f"θ {part} no cabe en 8 decimales, que es la partición")
@@ -539,7 +542,7 @@ def run(parser: argparse.ArgumentParser, ns: argparse.Namespace) -> int:
             thetas = parse_thetas(ns.thetas)
         else:
             thetas = read_catalog(ns.catalog or catalog_default)
-    except ValueError as exc:
+    except (ValueError, OSError) as exc:
         parser.error(str(exc))
     if len(set(thetas)) != len(thetas):
         parser.error("--thetas trae un θ repetido")

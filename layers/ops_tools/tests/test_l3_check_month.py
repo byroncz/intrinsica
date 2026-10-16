@@ -270,6 +270,9 @@ def test_el_uso_incorrecto_sale_con_2(check, lake, monkeypatch):
         ("2017-08", ["--thetas", "0.123456789"]),
         ("2017-08", ["--thetas", f"{theta},{theta}"]),
         ("2017-08", ["--thetas", "all", "--l3-root", str(l3 / "vacio")]),
+        ("2017-08", ["--thetas", "abc"]),
+        ("2017-08", ["--thetas", f"{theta},"]),
+        ("2017-08", ["--catalog", str(l3 / "no-existe.yaml")]),
     ):
         roots = ["--l1-root", str(l1), "--l2-root", str(l2), "--l3-root", str(l3)]
         with pytest.raises(SystemExit) as exit_:
