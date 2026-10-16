@@ -520,8 +520,9 @@ ITSC-351 lo corrigió en L1 y reprocesó en cascada L1 → L2 → viz desde 2026
 cascada hecha, el rango 6 (run 38674127712) corrió sin `from` ni `to`: la serie
 era contigua hasta 2026-01, así que arrancó en 2026-02 y llegó hasta 2026-09, que
 reconstruyó con los mismos 50 `content_hash` de la primera corrida (run
-38493995515). Los `unit_timing` de la suma de 41 256 s salen de los runs 1 a 5
-(103 meses, 40 294 s) y del 6 (2026-02 a 2026-08); la reconstrucción de 2026-09 no
+38493995515). Los `unit_timing` de la suma de 41 256 s salen de 103 meses
+(40 294 s): 101 de los rangos 1 a 5, 2023-03 del run 38495040816 y 2026-09 del
+run 38493995515; y del rango 6 (2026-02 a 2026-08, 7 meses); la reconstrucción de 2026-09 no
 se suma dos veces.
 
 **Regla para un backfill futuro de la serie completa** (por ejemplo, al agregar una

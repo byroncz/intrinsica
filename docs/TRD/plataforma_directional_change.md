@@ -47,7 +47,7 @@ Este TRD maestro fija las **invariantes** (contratos entre capas, formatos, part
 |---|---|---|
 | TRD-L1 | Ingesta, ordenamiento y materialización a Parquet de aggTrades crudos | A redactar al iniciar Capa 1 |
 | TRD-L2 | Detección de eventos DC (extremos, confirmaciones, overshoots) por θ | A redactar al iniciar Capa 2 |
-| [TRD-L3](l3.md) | Familias de descriptores por evento y θ (un archivo por familia sobre un esqueleto común, empezando por el resumen por fase), sin carry-over, con presupuesto de ticks por evento, agregación por row group y lector de tramas compartido | Línea base (v1.3.6, ITSC-335) |
+| [TRD-L3](l3.md) | Familias de descriptores por evento y θ (un archivo por familia sobre un esqueleto común, empezando por el resumen por fase), sin carry-over, con presupuesto de ticks por evento, agregación por row group y lector de tramas compartido | Línea base (v1.3.7, ITSC-336) |
 | TRD-L4 | Indicadores inter e intra-evento por θ | A redactar al iniciar Capa 4 |
 | TRD-ML | Backtesting walk-forward, ML y evaluación de estrategias | A redactar tras completar L1–L4 |
 | [TRD-viz](viz.md) | Capa transversal de visualización: la página de un día con sus ticks y los eventos exactos de los θ, derivados por píxel en el navegador con uPlot y servida desde un bucket sin servidor; modos `tiles` y `render` | Línea base (v2.1, ITSC-317 e ITSC-319) |

@@ -324,16 +324,37 @@ diferencias (o si el lector falla), **2** por uso. Una diferencia **nunca se
 tolera**: es un defecto del núcleo o del lector; abre una card de bug con la
 línea, y no relances el backfill esperando que desaparezca.
 
-**Cuánto tarda.** El job `ops-script` tiene 3 600 s y `max_retries = 0`: un
-timeout cuesta una corrida. El script lee L1 una vez para todos los θ. La
-referencia de ITSC-343 (2 474 s en 2023-03 con 50 θ) mide solo el lector, sin
-agregar ni comparar; la agregación suma ≈ 10 a 70 ns por tick (más cuanto más
-cortas las tramas) y el cómputo por evento, así que **2023-03 con los 50 θ puede
-no caber en una hora**. Si agota los 3 600 s, parte la corrida por `--thetas`:
-los θ del catálogo en orden, por ejemplo los 10 menores (concentran el 93 % de
-los eventos de 2023-03) en una corrida y los otros 40 en otra. Los segundos por θ
-de la tabla son su cómputo, no la lectura compartida. 2026-09 es corto
-(774 210 eventos, 145 s de backfill) y cabe sin partir.
+**Cuánto tarda (medido, ITSC-336, 2026-10-16).** El job `ops-script` tiene
+3 600 s y `max_retries = 0`: un timeout cuesta una corrida. El script lee L1 una
+vez para todos los θ. Los segundos por θ de la tabla son su cómputo; la lectura
+compartida no se reparte.
+
+| Mes | θ | Filas | Pared | Run |
+| --- | --- | --- | --- | --- |
+| 2026-09 | los 50 | 774 210 | 302,1 s | [38857887813](https://github.com/byroncz/intrinsica/actions/runs/38857887813) |
+| 2023-03, parte A | los 5 menores (`0.00010000` a `0.00016608`) | 14 454 943 | 1 688,4 s | [38858924852](https://github.com/byroncz/intrinsica/actions/runs/38858924852) |
+| 2023-03, parte B | los otros 45 (`0.00018854` a `0.05000000`) | 5 116 218 | 2 051,4 s | [38858999447](https://github.com/byroncz/intrinsica/actions/runs/38858999447) |
+
+Cero diferencias en los tres. Las dos partes de 2023-03 suman 19 571 161 filas
+(todos los eventos del mes, [TRD-L3 §10.3](../TRD/l3.md#103-sonda-del-lector-de-tramas--umbrales-de-aceptación-se-escriben-antes-de-medir))
+y 3 739,8 s de pared, **más** que los 3 600 s del job. De ahí la regla:
+
+- **2026-09 (y cualquier mes de ≈ 1 M de eventos o menos) va en una sola
+  corrida.**
+- **2023-03 y los meses de su tamaño se verifican en dos corridas por
+  `--thetas`, con los 5 θ menores aparte.** No es opcional: una corrida única
+  habría agotado el timeout. Los 5 θ menores son el 74 % de las filas y el 45 %
+  de la pared; los otros 45 pagan, además de sus eventos, por cada tick que leen.
+
+Para partir, toma del catálogo (`manifest/l2/thetas.yaml`) los θ en orden
+ascendente: los cinco primeros, de `0.00010000` a `0.00016608`, van en `--thetas`
+de la parte A, separados por coma, y los otros 45 en la B. La tabla por θ de cada corrida queda en `results/<ejecución>/`.
+
+**Dónde está el costo.** Los θ pequeños pagan por evento: ≈ 0,12 a 0,14 ms por
+evento (308 s para 4,5 M de filas en 2023-03). Los θ grandes tienen decenas de
+filas y pagan por tick: 6 a 10 s cada uno en 2026-09 y 60 a 75 s en 2023-03.
+Para un mes nuevo, extrapola de 2026-09 con la relación de ticks (7,3 × a
+2023-03) y de eventos (25 ×), y parte la corrida si la suma pasa de ≈ 3 000 s.
 
 ### La trampa del 403 por prefijo
 
