@@ -310,7 +310,7 @@ cambiaría `uv.lock` y subiría los `VERSION` de todas.
 | `args` | Efecto |
 | --- | --- |
 | `--month 2026-09` | Los θ del catálogo `manifest/l2/thetas.yaml` |
-| `--month 2023-03 --thetas 0.00010000,0.00012000` | Solo esos θ (para partir una corrida) |
+| `--month 2023-03 --thetas 0.00010000,0.00011352` | Solo esos θ (para partir una corrida) |
 | `--month 2026-09 --thetas all` | Los θ que tienen `summaries.parquet` del mes |
 | `--l1-root`, `--l2-root`, `--l3-root`, `--catalog` | Otras raíces, también locales |
 | `--max-diffs 100` | Cuántas diferencias imprime por θ (las cuentas las cuentan todas) |
@@ -337,13 +337,17 @@ compartida no se reparte.
 
 Cero diferencias en los tres. Las dos partes de 2023-03 suman 19 571 161 filas
 (todos los eventos del mes, [TRD-L3 §10.3](../TRD/l3.md#103-sonda-del-lector-de-tramas--umbrales-de-aceptación-se-escriben-antes-de-medir))
-y 3 739,8 s de pared, **más** que los 3 600 s del job. De ahí la regla:
+y 3 739,8 s de pared, pero cada parte paga la lectura completa de L1 y L2. Con el
+cómputo por θ de sus tablas (1 082,5 s y 1 740,7 s) y una sola lectura (310,7 s a
+605,9 s, según la corrida), una corrida única habría tardado **≈ 3 130 a 3 430 s**.
+Es una estimación: no se intentó. Queda demasiado cerca de los 3 600 s del job para
+arriesgarla con `max_retries = 0`. De ahí la regla:
 
 - **2026-09 (y cualquier mes de ≈ 1 M de eventos o menos) va en una sola
   corrida.**
 - **2023-03 y los meses de su tamaño se verifican en dos corridas por
-  `--thetas`, con los 5 θ menores aparte.** No es opcional: una corrida única
-  habría agotado el timeout. Los 5 θ menores son el 74 % de las filas y el 45 %
+  `--thetas`, con los 5 θ menores aparte.** Es prudencia, no un límite medido:
+  una corrida única habría quedado a ≈ 170 s del timeout. Los 5 θ menores son el 74 % de las filas y el 45 %
   de la pared; los otros 45 pagan, además de sus eventos, por cada tick que leen.
 
 Para partir, toma del catálogo (`manifest/l2/thetas.yaml`) los θ en orden
