@@ -434,7 +434,7 @@ def read_catalog(source: str) -> list[str]:
     fs, resolved = resolve_fs(source)
     with fs.open_input_stream(resolved) as stream:
         text = stream.read().decode()
-    if not re.search(r"^scale:\s*100000000\s*$", text, re.MULTILINE):
+    if not re.search(r"^scale:\s*100000000\s*(?:#.*)?$", text, re.MULTILINE):
         raise ValueError(f"{source}: `scale` debe ser 100000000")
     integers = [
         int(m[1]) for m in re.finditer(r"^\s*-\s*(\d+)\s*(?:#.*)?$", text, re.MULTILINE)

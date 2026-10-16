@@ -30,6 +30,7 @@ MONTH_TEXT = f"{MONTH[0]:04d}-{MONTH[1]:02d}"
 SERIES = "provider=binance/market=spot/asset=BTCUSDT"
 DEC = pa.decimal128(18, 8)
 THETA = 2_000_000
+SEED = ROOT / "layers/l2_dc_events/src/l2_dc_events/config/thetas.yaml"
 
 
 def load():
@@ -138,13 +139,25 @@ def test_all_toma_los_theta_que_tiene_l3_y_el_catalogo_por_defecto(
     l1, l2, l3, thetas = lake
     assert check.main(argv(l1, l2, l3, "--thetas", "all")) == 0
     assert f"thetas={len(thetas)} " in last_line(capsys)
+    # La semilla real de L2 con la lista de θ cambiada por los del lago: la línea `scale`
+    # (con su comentario) y el formato de cada θ son los de producción.
     catalog = tmp_path / "thetas.yaml"
+    head = [x for x in SEED.read_text().splitlines() if not re.match(r"\s*-\s*\d+", x)]
     integers = [int(Decimal(t).scaleb(8)) for t in thetas]
     catalog.write_text(
-        "scale: 100000000\nthetas:\n" + "".join(f"  - {i}  # θ\n" for i in integers)
+        "\n".join(head + [f"  - {i}  # {t}" for i, t in zip(integers, thetas)]) + "\n"
     )
     assert check.main(argv(l1, l2, l3, "--catalog", str(catalog))) == 0
     assert f"thetas={len(thetas)} " in last_line(capsys)
+
+
+def test_la_semilla_real_del_catalogo_se_lee_con_su_comentario_de_escala(check):
+    assert re.search(r"^scale:\s*100000000\s*#", SEED.read_text(), re.MULTILINE)
+    thetas = check.read_catalog(str(SEED))
+    assert len(thetas) == 50
+    assert thetas == sorted(thetas)
+    assert thetas[0] == "0.00010000"
+    assert thetas[-1] == "0.05000000"
 
 
 @pytest.mark.parametrize(
