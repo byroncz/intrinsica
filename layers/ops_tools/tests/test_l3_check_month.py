@@ -182,16 +182,14 @@ def test_una_celda_alterada_se_detecta_con_su_fila_y_columna(
     assert code == 1, out
     line = next(x for x in out.splitlines() if x.startswith("DIFERENCIA"))
     assert f"θ={theta} confirm_agg_trade_id={ident} columna={column} " in line
-    assert (
-        f"oráculo={original}" in line.replace(".00000000 ", " ") or "oráculo=" in line
-    )
-    assert re.search(r"L3=", line)
+    shown = f"{original:.8f}" if isinstance(original, Decimal) else str(original)
+    assert f"oráculo={shown} L3=" in line
     assert out.strip().endswith("veredicto=diferencias")
-    # El resto de los θ no se contagia: la única columna con diferencias es la alterada.
+    # El resto de las columnas no se contagia: la única con diferencias es la alterada.
     columns = {
         re.search(r"columna=(\w+)", x)[1] for x in out.splitlines() if "columna=" in x
     }
-    assert column in columns
+    assert columns == {column}
 
 
 def test_un_nulo_donde_el_overshoot_no_es_vacio_se_detecta(check, lake, capsys):
