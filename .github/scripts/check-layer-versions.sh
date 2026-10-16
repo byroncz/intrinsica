@@ -2,7 +2,13 @@
 # Falla si un cambio de código de una capa no sube su VERSION.
 # Uso: check-layer-versions.sh <ref-base> '<json con las capas>'
 # Código de una capa = todo bajo layers/<capa>/ salvo README.md, tests/ y VERSION,
-# más shared/, uv.lock y pyproject.toml, que el Dockerfile copia a cada imagen.
+# más shared/ (salvo shared/README.md, shared/*/README.md y shared/*/tests/), uv.lock y
+# pyproject.toml, que el Dockerfile copia a cada imagen.
+# tests/ sale por el Dockerfile.dockerignore de las imágenes (**/tests). Los
+# README.md de shared/ sí entran a la etapa build, pero la etapa final copia solo
+# /app/.venv y ningún shared/*/pyproject.toml declara `readme`: no llegan al
+# digest. Si un pyproject de shared declara `readme`, el README pasa a los
+# metadatos del wheel y hay que quitar su exclusión de este script.
 # La VERSION nueva debe ser estrictamente mayor que la de la base.
 set -euo pipefail
 
@@ -13,7 +19,8 @@ fail=0
 for layer in $(jq -r '.[]' <<< "$layers"); do
   dir="layers/${layer}"
   code="$(git diff --name-only "${base}...HEAD" -- "$dir" shared uv.lock pyproject.toml \
-    ":(exclude)${dir}/README.md" ":(exclude)${dir}/tests" ":(exclude)${dir}/VERSION")"
+    ":(exclude)${dir}/README.md" ":(exclude)${dir}/tests" ":(exclude)${dir}/VERSION" \
+    ":(exclude)shared/README.md" ":(exclude,glob)shared/*/README.md" ":(exclude,glob)shared/*/tests/**")"
   [ -z "$code" ] && continue
   new="$(tr -d '[:space:]' < "${dir}/VERSION")"
   # Si VERSION no existía en la base (capa nueva), cualquier versión es válida.
