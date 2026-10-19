@@ -61,12 +61,14 @@ def _tiny(column: pa.Array) -> pa.BooleanArray | None:
     Con escala entre 0 y 6 el exponente de `repr` nunca baja de −6: no hay celdas.
     Con escala mayor, el umbral se construye en el tipo de la columna: compararlo
     contra un decimal de otra escala lleva ambos lados a una precisión que puede
-    pasar de 38. Con escala negativa `repr` siempre lleva exponente: van todas.
+    pasar de 38. Si la precisión no pasa de `escala − 6`, 10⁻⁶ no cabe en el tipo,
+    pero todo valor es menor que 10⁻⁶: van todas. Con escala negativa `repr`
+    siempre lleva exponente: también van todas.
     """
     scale = column.type.scale
     if 0 <= scale <= 6:
         return None
-    if scale < 0:
+    if scale < 0 or column.type.precision <= scale - 6:
         return pc.is_valid(column)
     return pc.less(pc.abs(column), pa.scalar(_TINY, column.type))
 

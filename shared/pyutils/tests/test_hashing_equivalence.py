@@ -70,6 +70,8 @@ TYPES = [
     pa.decimal128(38, 0),
     pa.decimal128(9, 6),
     pa.decimal128(9, -2),
+    pa.decimal128(2, 8),
+    pa.decimal128(8, 8),
     pa.decimal256(50, 2),
     pa.decimal256(60, 10),
     pa.int64(),
@@ -86,7 +88,8 @@ def _unscaled(rng: random.Random, precision: int) -> int:
     if kind < 0.3:
         return rng.randint(-99, 99)  # exponente ajustado menor que −6 con escala 8
     if kind < 0.4:
-        return rng.choice([top, -top, 100, -100, 99, 1, -1, 10, 1000000])
+        edges = [top, -top, 100, -100, 99, 1, -1, 10, 1000000]
+        return rng.choice([edge for edge in edges if abs(edge) <= top])
     digits = rng.randint(1, precision)
     return rng.randint(-(10**digits - 1), 10**digits - 1)
 
