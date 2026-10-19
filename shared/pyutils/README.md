@@ -69,7 +69,10 @@ fijo calculado con el hasher anterior detecta cualquier cambio futuro.
 
 **Rendimiento.** Cuatro columnas nulables como las de `summaries.parquet` (tres
 `decimal128(18, 8)` y un `int64`), 32 768 filas, 30 % de nulos, mínimo de varias
-repeticiones: `update` pasa de ≈ 74 ms a ≈ 9 ms (≈ 8×, 12 % del anterior). La meta
-de la card era menos del 10 %; no se alcanzó porque el `cast` de decimal a texto de
-Arrow es ≈ 54 % de lo que queda (1,3 ms por columna) y no tiene alternativa más
-barata. La prueba exige al menos 5× para atrapar una regresión al bucle en Python.
+repeticiones: `update` pasa de ≈ 74 ms a ≈ 9 ms (≈ 8×, 12,5 % del anterior). En
+2021-01 son 1 335 `update` por mes: el hash baja de ≈ 99 s a ≈ 12 s. La meta
+inicial de la card era 10×; el humano aceptó 8× como criterio de rendimiento: los
+≈ 3 s que separan 8× de 10× no justifican una dependencia nueva ni tocar
+`uv.lock`. El `cast` de decimal a texto de Arrow es ≈ 54 % de lo que queda (1,3 ms
+por columna) y no tiene alternativa más barata. La prueba exige al menos 5× para
+atrapar una regresión al bucle en Python.
