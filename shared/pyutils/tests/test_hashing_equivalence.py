@@ -12,9 +12,29 @@ from decimal import Decimal
 from itertools import pairwise
 
 import pyarrow as pa
+import pyarrow.compute as pc
 import pytest
 from pyutils import ContentHasher, content_hash
-from pyutils.hashing import _is_raw, _raw_bytes
+
+
+def _raw_bytes(column: pa.Array) -> memoryview:
+    if pa.types.is_boolean(column.type):
+        column = pc.cast(column, pa.uint8())
+    if column.null_count:
+        raise ValueError("una columna no nulable trae nulos: no se puede hashear")
+    width = column.type.bit_width // 8
+    start = column.offset * width
+    return memoryview(column.buffers()[1])[start : start + len(column) * width]
+
+
+def _is_raw(field: pa.Field) -> bool:
+    kind = field.type
+    fixed = (
+        pa.types.is_integer(kind)
+        or pa.types.is_decimal(kind)
+        or pa.types.is_boolean(kind)
+    )
+    return fixed and not field.nullable
 
 
 class ReferenceHasher:
@@ -170,6 +190,8 @@ def test_a_known_digest_stays_pinned():
             pa.field("price", DECIMAL, nullable=True),
             pa.field("n", pa.int64(), nullable=True),
             pa.field("ok", pa.bool_(), nullable=True),
+            pa.field("qty", DECIMAL, nullable=False),
+            pa.field("id", pa.int64(), nullable=False),
         ]
     )
     batch = pa.RecordBatch.from_arrays(
@@ -179,6 +201,11 @@ def test_a_known_digest_stays_pinned():
             ),
             pa.array([1, None, -3, 0], pa.int64()),
             pa.array([True, False, None, True], pa.bool_()),
+            pa.array(
+                [Decimal("1.5"), Decimal(0), Decimal("-0.00000001"), Decimal(7)],
+                DECIMAL,
+            ),
+            pa.array([4, 3, 2, 1], pa.int64()),
         ],
         schema=schema,
     )
@@ -187,7 +214,7 @@ def test_a_known_digest_stays_pinned():
     assert digest == PINNED_DIGEST
 
 
-PINNED_DIGEST = "5a0c13f7ea5698081e7734076fd6606fb945b671e5911db67d0ca747bd9f97b3"
+PINNED_DIGEST = "2be5aae4624eef73ad39135ee68d474846858d1742c2184e065647c13b77c46b"
 
 
 PERF_COLUMNS = ["os_price_max", "os_price_min", "os_duration", "os_vwap"]
