@@ -503,3 +503,17 @@ def test_monthly_starts_the_series_without_a_frontier(lake, tmp_path, catalog):
 def test_monthly_takes_one_month_and_does_not_force(lake, tmp_path, catalog, option):
     assert monthly(lake, tmp_path, catalog, "--from", "2017-08", *option) == 2
     assert l3_files(lake) == []
+
+
+def test_l3_profile_makes_the_unit_emit_unit_profile(lake, tmp_path, catalog):
+    assert run(lake, tmp_path, catalog, *BACKFILL, L3_PROFILE="1") == 0
+    profiles = emitted(tmp_path, "unit_profile")
+    assert {r["month"] for r in profiles} == {
+        r["month"] for r in emitted(tmp_path, "unit_timing")
+    }
+    assert len(profiles) == len(lake.months)
+
+
+def test_without_l3_profile_the_cli_emits_no_unit_profile(lake, tmp_path, catalog):
+    assert run(lake, tmp_path, catalog, *BACKFILL, L3_PROFILE="0") == 0
+    assert emitted(tmp_path, "unit_profile") == []

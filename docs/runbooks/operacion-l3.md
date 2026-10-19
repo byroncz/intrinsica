@@ -1,4 +1,4 @@
-# Runbook: operación de L3 (backfill histórico, lectura de fallos, cascada, cadena mensual, volumen y costo, verificación cruzada)
+# Runbook: operación de L3 (backfill histórico, lectura de fallos, cascada, cadena mensual, volumen y costo, perfil de una unidad, verificación cruzada)
 
 Lo ejecuta el humano desde *Actions → Run job* y Cloud Shell; ningún agente
 dispara `terraform.yml` ni `run-job.yml`. Dice cómo se opera L3 una vez construido
@@ -127,7 +127,7 @@ causa en el log de la ejecución:
   10 800 s (7,6 veces el mes más pesado).
 - **Un hallazgo `error`**: lee su `check_type` en la tabla siguiente.
 
-Los 13 `check_type` de [TRD-L3 §9.3](../TRD/l3.md#93-tipos-de-chequeo-check_type),
+Los 14 `check_type` de [TRD-L3 §9.3](../TRD/l3.md#93-tipos-de-chequeo-check_type),
 y qué hacer con cada uno. En todos los casos de `error`, **el mes no se publica y
 la frontera no avanza**: relanzar los mismos inputs retoma donde quedó. Nunca
 repares un archivo de `l3/` a mano.
@@ -146,31 +146,84 @@ repares un archivo de `l3/` a mano.
 | `theta_behind_frontier` | `warning` | `monthly` no procesó un θ; `details.reason` es `l3_frontier` (la serie de L3 tiene un hueco o no existe) o `l2_missing` (L2 no tiene el mes) | `l3_frontier`: lanza `l3-backfill` sin `from` ni `to`, que retoma desde la frontera de cada θ. `l2_missing`: completa L2 primero. No falla la unidad si otros θ avanzan |
 | `theta_config_drift` | `info` | L3 tiene particiones de un θ que ya no está en el catálogo | Informa. Quitar un θ del catálogo no borra nada; si fue un error, restáuralo |
 | `summaries_summary` | `info` | Uno por θ y mes: filas, `content_hash` del archivo y de las entradas de L2 que usó | Es el linaje contra L2: sirve para comparar corridas y para detectar un mes obsoleto |
-| `unit_timing` | `info` | Uno por unidad (mes): pared, tiempo por fase, CPU efectiva y bytes leídos | Es la fuente de las cifras de "Volumen y costo" |
+| `unit_timing` | `info` | Uno por unidad (mes): pared, tiempo por fase, CPU efectiva y consumida (`cpu_s`, `cpu_utilization`) y bytes leídos | Es la fuente de las cifras de "Volumen y costo" |
+| `unit_profile` | `info` | Solo con `L3_PROFILE=1`, uno por unidad: las 40 funciones más caras por tiempo propio y acumulado | Es para proporciones, no para absolutos. Ver "Perfilar una unidad" |
 
-Para leer los hallazgos de un mes desde Cloud Shell (con tus credenciales, que sí
-pueden listar el prefijo; ver "La trampa del 403" si lo haces desde `ops-script`):
+Para leer los hallazgos de una corrida desde Cloud Shell, **baja primero solo las
+carpetas de los días de la corrida y léelas en local**. Nunca abras un
+`pyarrow.dataset` sobre `gs://<proyecto>-dq-findings/l3/` entero: descubre todos los
+archivos del lago y lee el pie de cada uno por la red, y no termina (comprobado el
+2026-10-17). Tampoco uses `pyarrow.fs` contra `gs://`: pide el token al servidor de
+metadatos y falla si `gcloud` no tiene cuenta activa. (Desde `ops-script` aplica además
+"La trampa del 403".)
+
+Las particiones son **`detected_date=AAAA-MM-DD`** (el día en que corrió el job), no
+el mes de los datos: el mes está en las columnas `year` y `month` de cada archivo. Por
+eso se baja por la fecha de la corrida y se filtra por mes dentro del archivo.
 
 ```bash
-DQ_ROOT=gs://<proyecto>-dq-findings/l3 MONTH=2026-09 CHECK=summaries_summary python3 - <<'PY'
+# 1. Solo los días de la corrida (acepta comodines: detected_date=2026-10-1*).
+rm -rf ~/dq-l3 && mkdir -p ~/dq-l3
+gcloud storage cp -r "gs://<proyecto>-dq-findings/l3/detected_date=2026-10-17" ~/dq-l3/
+
+# 2. Lee en local. MONTH es el mes de los datos; CHECK, el check_type.
+DQ_LOCAL=~/dq-l3 MONTH=2026-09 CHECK=summaries_summary python3 - <<'PY'
 import json
 import os
 
 import pyarrow.dataset as ds
-import pyarrow.fs as pafs
 
-fs, base = pafs.FileSystem.from_uri(os.environ["DQ_ROOT"])
 year, month = (int(x) for x in os.environ["MONTH"].split("-"))
 flt = (
     (ds.field("check_type") == os.environ["CHECK"])
     & (ds.field("year") == year)
     & (ds.field("month") == month)
 )
-table = ds.dataset(base, filesystem=fs, partitioning="hive").to_table(
+table = ds.dataset(os.environ["DQ_LOCAL"], partitioning="hive").to_table(
     filter=flt, columns=["run_id", "detected_at", "details"]
 )
 for row in table.to_pylist():
     print(row["run_id"], row["detected_at"], json.dumps(json.loads(row["details"]))[:300])
+PY
+```
+
+Variante para una corrida con perfil: imprime las claves de `unit_timing` del mes y las
+15 primeras filas de `unit_profile`, por tiempo propio y por tiempo acumulado.
+
+```bash
+DQ_LOCAL=~/dq-l3 MONTH=2021-01 python3 - <<'PY'
+import json
+import os
+
+import pyarrow.dataset as ds
+
+year, month = (int(x) for x in os.environ["MONTH"].split("-"))
+dataset = ds.dataset(os.environ["DQ_LOCAL"], partitioning="hive")
+
+
+def details(check):
+    flt = (
+        (ds.field("check_type") == check)
+        & (ds.field("year") == year)
+        & (ds.field("month") == month)
+    )
+    table = dataset.to_table(filter=flt, columns=["detected_at", "details"])
+    rows = sorted(table.to_pylist(), key=lambda r: r["detected_at"])
+    return [json.loads(r["details"]) for r in rows]
+
+
+for timing in details("unit_timing"):
+    print("unit_timing:", ", ".join(timing))
+    print({k: timing[k] for k in ("wall_s", "cpu_s", "cpu_utilization", "cores")})
+for profile in details("unit_profile"):
+    print(f"unit_profile: wall_s={profile['wall_s']}")
+    for key in ("top_tottime", "top_cumtime"):
+        print(key)
+        for r in profile[key][:15]:
+            print(
+                f"  {r['tottime_s']:9.3f} {r['cumtime_s']:9.3f} {r['ncalls']:>10} "
+                f"{r['function']} ({r['file']}:{r['line']})"
+            )
 PY
 ```
 
@@ -270,12 +323,49 @@ gcloud storage du -s -h gs://<proyecto>-dc-descriptors/l3
 
 Los `unit_timing` (pared y fases por mes) y los `summaries_summary` (filas y
 `content_hash` por θ y mes) están en `gs://<proyecto>-dq-findings/l3/`; el
-snippet de arriba con `CHECK=unit_timing` o `CHECK=summaries_summary` los lee, y
+snippet de "Leer un fallo" (baja primero la carpeta `detected_date=` del día) con `CHECK=unit_timing` o `CHECK=summaries_summary` los lee, y
 `details` de `unit_timing` trae la pared y el tiempo de cada fase. La pared
 facturable de una tarea es la de la ejecución
 (`gcloud run jobs executions describe <ejecución> --format='value(status.startTime,status.completionTime)'`),
 que incluye el arranque. Billing tarda hasta 24 h en reflejar el consumo y no
 separa por job.
+
+## Perfilar una unidad
+
+Para saber en qué funciones se gasta la pared de un mes (por ejemplo, cuánto de la
+escritura es `_check_keys`, la compresión ZSTD o Python) se corre la unidad con
+`L3_PROFILE=1`: corre bajo `cProfile` y deja, además de sus hallazgos de siempre, un
+`unit_profile` con las 40 funciones más caras por tiempo propio (`top_tottime`) y por
+tiempo acumulado (`top_cumtime`). Está en
+[TRD-L3 §9.3](../TRD/l3.md#93-tipos-de-chequeo-check_type).
+
+**Es para proporciones, no para absolutos.** `cProfile` instrumenta cada llamada y
+añade entre 30 % y 100 % de pared, más a las funciones pequeñas y muy llamadas. No
+compares el `wall_s` de una corrida perfilada con el de una sin perfil; el `unit_timing`
+de la corrida perfilada también sale inflado.
+
+`run-job.yml` no admite variables de entorno, así que el perfil se lanza **desde Cloud
+Shell**. `--update-env-vars` en `execute` vale solo para esa ejecución: el job no
+cambia. Los `--args` son los mismos que arma `run-job.yml` para `l3-backfill` con
+`from = to = 2021-01` y `force` (los imprime
+`.github/scripts/run-job-args.sh l3-backfill 2021-01 2021-01 true ""`):
+
+```bash
+gcloud run jobs execute l3-backfill \
+  --project <proyecto> --region <región> \
+  --update-env-vars L3_PROFILE=1 \
+  --args="--mode,backfill,--from=2021-01,--to=2021-01,--force" \
+  --wait
+```
+
+Un mes pesado como 2021-01 tarda unos 1 419 s sin perfil y hasta el doble con él
+(≈ 5 700 vCPU-s sin perfil, ≈ 0,10 USD de lista). `force` reescribe el mes con el
+mismo contenido: los `content_hash` de los 50 θ deben coincidir con los de la corrida
+anterior. No lances otra ejecución de `l3-backfill` a la vez.
+
+Para leer el resultado, baja la carpeta `detected_date=` del día y corre la variante con
+perfil del snippet de "Leer un fallo": imprime las claves de `unit_timing` y las 15
+primeras filas de `unit_profile`.
 
 ## Scripts de operación
 

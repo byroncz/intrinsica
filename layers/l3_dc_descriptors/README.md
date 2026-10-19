@@ -57,8 +57,11 @@ pared total y por fase (`read_s` lectura y decodificación, `aggregate_s`, `writ
 `rss_peak_mib` (`VmHWM`, reiniciado al empezar la unidad), `row_groups_month` y
 `row_groups_previous` (decodificaciones de L1 del mes y de meses anteriores, contadas con un
 gancho sobre `dc_frames.lake.open_parquet` como hace la sonda de `ops_tools`),
-`row_groups_repeated` (debe ser 0), eventos y ticks por θ y en total, y el límite efectivo de
-CPU.
+`row_groups_repeated` (debe ser 0), eventos y ticks por θ y en total, el límite efectivo de
+CPU y la CPU que consumió la unidad (`cpu_user_s`, `cpu_system_s`, `cpu_s` y
+`cpu_utilization`, de `getrusage`). Con `L3_PROFILE=1` la unidad corre bajo `cProfile` y suma el
+hallazgo `unit_profile` (las 40 funciones más caras por tiempo propio y acumulado); sin la
+variable no cambia nada. Cómo lanzarlo: [runbook](../../docs/runbooks/operacion-l3.md#perfilar-una-unidad).
 
 ## Estructura paralelizable, sin paralelizar todavía
 

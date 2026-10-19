@@ -53,3 +53,5 @@ class RunContext:
     summaries_root: str | Path
     dq_root: str | Path
     family: str = FAMILY
+    # `L3_PROFILE=1`: la unidad corre bajo cProfile y emite `unit_profile`.
+    profile: bool = False

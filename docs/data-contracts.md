@@ -645,9 +645,18 @@ mismo que traen las excepciones del resumidor, de las que sale la mayoría de lo
   (`ticks` son los de los eventos cerrados, también los de meses anteriores) y
   `theta_stats`, una entrada por θ con `theta`, `events`, `ticks` y `ticks_before_month`; y
   el límite efectivo de CPU (`cores`, `cores_visible`, `cores_source`, `cpu_throttled_s`,
-  `null` si el cgroup no lo expone). No cuenta las lecturas de la conciliación (solo
+  `null` si el cgroup no lo expone) y la CPU que consumió la unidad: `cpu_user_s`,
+  `cpu_system_s`, `cpu_s` (su suma, de todos los hilos) y `cpu_utilization` =
+  `cpu_s / (wall_s × cores)`, medidos con `getrusage` entre el inicio y el final de la
+  unidad. No cuenta las lecturas de la conciliación (solo
   `agg_trade_id` de los row groups de las fronteras). Va aparte de `summaries_summary`
   porque sus tiempos cambian en cada corrida y el de `summaries_summary` no puede.
+- **`unit_profile`** (`info`, `pass`): uno por unidad (mes), solo si la corrida lleva
+  `L3_PROFILE=1`. `metric_value` y `details.wall_s` son la pared de la unidad perfilada
+  con `cProfile` (inflada entre 30 % y 100 %: sirve para proporciones, no para absolutos).
+  `details.top_tottime` y `details.top_cumtime` son las 40 funciones más altas por tiempo
+  propio y por tiempo acumulado, cada una con `function`, `file`, `line`, `ncalls`,
+  `tottime_s` y `cumtime_s`. No se emite si la unidad falla.
 
 ### Estado actual de un hallazgo
 

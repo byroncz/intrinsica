@@ -1,11 +1,13 @@
 """`unit_timing`: lo que ITSC-335 necesita para el umbral 3 de TRD-L3 §10.3."""
 
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 
 import pyarrow.parquet as pq
 import pytest
 from dc_frames import lake as frames_lake
-from l3_dc_descriptors import timing
+from dq import Severity, Status
+from l3_dc_descriptors import pipeline, timing
 from l3_dc_descriptors.context import RunContext, Unit
 from l3_dc_descriptors.pipeline import process_unit
 from l3_lake import KEY, M1, M2, M3, build_lake, fixture_ticks, month_cuts
@@ -173,3 +175,69 @@ def test_a_failed_unit_returns_its_finding_and_no_timing(lake, tmp_path):
     assert finding.layer == "l3" and finding.mode == "backfill"
     assert (finding.year, finding.month) == (2017, 9)
     assert KEY == ("binance", "spot", "BTCUSDT")
+
+
+# CPU y perfil (ITSC-356)
+
+
+def test_it_reports_the_cpu_of_each_unit_within_what_the_cores_allow(lake, tmp_path):
+    ctx = context(lake, tmp_path)
+    # Varias unidades en el mismo proceso: getrusage es acumulado, cada una usa su diferencia.
+    for month in lake.months:
+        result = process_unit(unit_of(month), ctx, lake.thetas)
+        details = result.timing.details()
+        assert details["cpu_user_s"] >= 0 and details["cpu_system_s"] >= 0
+        assert details["cpu_s"] == pytest.approx(
+            details["cpu_user_s"] + details["cpu_system_s"], abs=0.002
+        )
+        assert 0 < details["cpu_s"] <= details["wall_s"] * details["cores"] * 1.05
+        assert details["cpu_utilization"] == pytest.approx(
+            details["cpu_s"] / (details["wall_s"] * details["cores"]), abs=0.002
+        )
+
+
+def test_it_does_not_profile_without_the_flag(lake, tmp_path, monkeypatch):
+    def boom(*args, **kwargs):
+        raise AssertionError("se instaló el perfilador sin L3_PROFILE")
+
+    monkeypatch.setattr(pipeline.cProfile, "Profile", boom)
+    result = process_unit(unit_of(M2), context(lake, tmp_path), lake.thetas)
+    assert result.ok
+    assert "unit_profile" not in {f.check_type for f in result.findings}
+
+
+def test_it_emits_unit_profile_with_the_top_functions(lake, tmp_path):
+    ctx = replace(context(lake, tmp_path), profile=True)
+    result = process_unit(unit_of(M2), ctx, lake.thetas)
+    assert result.ok
+    (profile,) = (f for f in result.findings if f.check_type == "unit_profile")
+    (timing,) = (f for f in result.findings if f.check_type == "unit_timing")
+    assert (profile.severity, profile.status) == (Severity.INFO, Status.PASS)
+    assert (profile.year, profile.month) == M2
+    details = profile.details
+    assert details["wall_s"] == pytest.approx(result.timing.wall_s, abs=0.001)
+    entry = {"function", "file", "line", "ncalls", "tottime_s", "cumtime_s"}
+    for key, column in (("top_tottime", "tottime_s"), ("top_cumtime", "cumtime_s")):
+        rows = details[key]
+        assert len(rows) == 40 and all(set(r) == entry for r in rows)
+        values = [r[column] for r in rows]
+        assert values == sorted(values, reverse=True)
+        assert all(r["ncalls"] >= 1 for r in rows)
+    # El perfil ve la unidad entera: la función más alta por tiempo acumulado la contiene.
+    assert (
+        details["top_cumtime"][0]["cumtime_s"] >= details["top_tottime"][0]["tottime_s"]
+    )
+    assert any(r["function"] == "summarize_month" for r in details["top_cumtime"])
+    # unit_timing conserva los mismos campos con y sin perfil.
+    plain = process_unit(unit_of(M2), context(lake, tmp_path), lake.thetas)
+    (plain_timing,) = (f for f in plain.findings if f.check_type == "unit_timing")
+    assert timing.details.keys() == plain_timing.details.keys()
+
+
+def test_a_failed_unit_has_no_profile(lake, tmp_path):
+    path = lake.l2 / "provider=binance/market=spot/asset=BTCUSDT"
+    (path / "theta=0.02000000/year=2017/month=09/events.parquet").unlink()
+    ctx = replace(context(lake, tmp_path), profile=True)
+    result = process_unit(unit_of(M2), ctx, lake.thetas)
+    assert not result.ok
+    assert {f.check_type for f in result.findings} == {"l2_input_missing"}

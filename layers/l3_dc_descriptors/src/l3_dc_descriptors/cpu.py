@@ -9,6 +9,7 @@ las capas no se importan entre sí (RNF-L3-04) y L3 todavía no decide cuántos 
 """
 
 import os
+import resource
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -125,6 +126,16 @@ def throttled_s(
     v1 = _v1_dirs(root, proc_cgroup)
     value = _stat_value(_read(v1[0] / "cpu.stat"), "throttled_time") if v1 else None
     return None if value is None else value / 1e9
+
+
+def process_cpu_s() -> tuple[float, float]:
+    """Segundos de CPU de usuario y de sistema que lleva el proceso, todos sus hilos.
+
+    `getrusage` es acumulado del proceso, no de la unidad (`backfill` corre varias en el
+    mismo proceso): la unidad usa la diferencia entre su inicio y su final.
+    """
+    usage = resource.getrusage(resource.RUSAGE_SELF)
+    return usage.ru_utime, usage.ru_stime
 
 
 def _stat_value(stat: str | None, name: str) -> int | None:
