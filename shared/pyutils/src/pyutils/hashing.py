@@ -40,7 +40,7 @@ _NULL_CELL = pa.scalar("None\0", _LARGE)
 # el cero con escala lleva exponente ("0E-8"). El texto de Arrow coincide hoy, pero
 # esa coincidencia no es un contrato de Arrow: las celdas con |valor| < 10⁻⁶ se
 # rehacen con `repr` de Python. Son pocas, y las pruebas lo verifican.
-_TINY = pa.scalar(Decimal("0.000001"))
+_TINY = Decimal("0.000001")
 
 
 def _wrap(text: pa.LargeStringArray, prefix: str, suffix: str) -> pa.LargeStringArray:
@@ -53,6 +53,22 @@ def _wrap(text: pa.LargeStringArray, prefix: str, suffix: str) -> pa.LargeString
     if prefix:
         text = pc.binary_replace_slice(text, 0, 0, prefix)
     return pc.binary_replace_slice(text, _END, _END, suffix)
+
+
+def _tiny(column: pa.Array) -> pa.BooleanArray | None:
+    """Celdas de un decimal cuyo texto Arrow podría diferir de `repr`; `None` si ninguna.
+
+    Con escala entre 0 y 6 el exponente de `repr` nunca baja de −6: no hay celdas.
+    Con escala mayor, el umbral se construye en el tipo de la columna: compararlo
+    contra un decimal de otra escala lleva ambos lados a una precisión que puede
+    pasar de 38. Con escala negativa `repr` siempre lleva exponente: van todas.
+    """
+    scale = column.type.scale
+    if 0 <= scale <= 6:
+        return None
+    if scale < 0:
+        return pc.is_valid(column)
+    return pc.less(pc.abs(column), pa.scalar(_TINY, column.type))
 
 
 def _cells(column: pa.Array) -> pa.LargeStringArray:
@@ -68,8 +84,8 @@ def _cells(column: pa.Array) -> pa.LargeStringArray:
         )
     elif pa.types.is_decimal(kind):
         cells = _wrap(pc.cast(column, _LARGE), "Decimal('", "')\0")
-        tiny = pc.less(pc.abs(column), _TINY)
-        if pc.any(tiny).as_py():  # `any` ignora los nulos
+        tiny = _tiny(column)
+        if tiny is not None and pc.any(tiny).as_py():  # `any` ignora los nulos
             tiny = pc.fill_null(tiny, False)
             fixed = [repr(value) + "\0" for value in column.filter(tiny).to_pylist()]
             cells = pc.replace_with_mask(cells, tiny, pa.array(fixed, _LARGE))

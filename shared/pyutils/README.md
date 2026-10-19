@@ -53,11 +53,16 @@ incremental da el mismo resultado partido en celdas o en un solo buffer. El úni
 riesgo es que el texto de Arrow no coincida con `repr(Decimal)`: pasa en el cero
 con escala (`Decimal('0E-8')`) y con exponente ajustado menor que −6
 (`Decimal('1.0E-7')`). Hoy Arrow lo escribe igual, pero no es un contrato suyo, así
-que las celdas con |valor| < 10⁻⁶ se rehacen con `repr` de Python (son pocas).
+que las celdas con |valor| < 10⁻⁶ se rehacen con `repr` de Python (son pocas). Con
+escala entre 0 y 6 no hay tales celdas y se omite la máscara; con escala mayor el
+umbral se construye en el tipo de la columna, para que la comparación no suba la
+precisión sobre 38 (`decimal128(38, 0)` fallaba); con escala negativa se rehacen
+todas.
 
 **Cómo se probó.** `tests/test_hashing_equivalence.py` conserva el hasher anterior
 (`ReferenceHasher`) y compara los digests sobre lotes aleatorios con semilla
-(`decimal128(18, 8)`, `(9, 8)`, `(38, 10)`, `(9, 0)`, `int64` y `bool`, nulables y no
+(`decimal128(18, 8)`, `(9, 8)`, `(38, 10)`, `(9, 0)`, `(38, 0)`, `(9, 6)`, `(9, -2)`,
+`decimal256(50, 2)` y `(60, 10)`, `int64` y `bool`, nulables y no
 nulables, con 0 %, 30 % y 100 % de nulos, ceros, negativos, valores con exponente
 ajustado menor que −6, máximos de la precisión, lotes vacíos y partidos). Un digest
 fijo calculado con el hasher anterior detecta cualquier cambio futuro.

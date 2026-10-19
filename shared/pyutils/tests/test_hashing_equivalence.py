@@ -47,6 +47,11 @@ TYPES = [
     THETA,
     pa.decimal128(38, 10),
     pa.decimal128(9, 0),
+    pa.decimal128(38, 0),
+    pa.decimal128(9, 6),
+    pa.decimal128(9, -2),
+    pa.decimal256(50, 2),
+    pa.decimal256(60, 10),
     pa.int64(),
     pa.bool_(),
 ]
@@ -74,7 +79,7 @@ def _value(rng: random.Random, kind: pa.DataType):
             return rng.choice([0, -(2**63), 2**63 - 1, -1])
         return rng.randint(-(10 ** rng.randint(1, 18)), 10 ** rng.randint(1, 18))
     unscaled = _unscaled(rng, kind.precision)
-    return Decimal(f"{unscaled}E-{kind.scale}")
+    return Decimal(f"{unscaled}E{-kind.scale}")
 
 
 def _column(rng: random.Random, kind: pa.DataType, size: int, null_share: float):
