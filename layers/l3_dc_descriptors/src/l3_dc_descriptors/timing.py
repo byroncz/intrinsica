@@ -6,10 +6,12 @@ el límite efectivo de CPU. Todo se acumula en objetos que crea la unidad (`Phas
 `RowGroupCount`) y que mueren con ella: ningún módulo guarda cuentas, así que dos
 unidades en el mismo proceso, en hilos o tareas distintas, no se pisan.
 
-Las fases son pared del hilo que las corre y, en serie, suman a lo más `wall_s`; lo que
-falta es `other_s`. Si un día los θ de un row group se agregan en varios hilos,
-`write_s` (la suma de lo que cada θ gastó escribiendo) puede pasar de la pared:
-`aggregate_s` se calcula restándola y queda en 0 como mínimo.
+Las fases de un solo hilo (`gate_s`, `reconcile_s`, `lineage_s`) son pared. `read_s` es lo
+que el hilo principal esperó al lector (con lectura anticipada, solo lo que faltó de la
+espera). `aggregate_s` y `write_s` son **suma sobre los hilos**: cada θ cuenta lo que
+gastó agregando y escribiendo, así que con `threads > 1` pueden pasar de `wall_s` (hasta
+`threads × wall_s`) y `other_s`, que es lo que falta hasta la pared, queda en 0 como
+mínimo. Con `threads = 1` y `prefetch = 0` son pared y suman a lo más `wall_s`.
 
 **El gancho de row groups.** Contar las decodificaciones de L1 exige mirar los
 `read_row_group` del lector, que abre sus archivos con `dc_frames.lake.open_parquet`
@@ -37,20 +39,24 @@ MIB = 1 << 20
 
 
 class Phases:
-    """Segundos de cada fase de la unidad. Los llena la unidad (hilo principal); solo
-    `write_s` lo suma cada θ (`_Lane`) sobre su propio contador.
+    """Segundos de cada fase de la unidad y los hilos que usó. Los llena la unidad (hilo
+    principal) con lo que cada θ (`_Lane`) contó en su propio contador, sin compartirlo.
     """
 
     __slots__ = (
         "aggregate_s",
         "gate_s",
         "lineage_s",
+        "prefetch",
         "read_s",
         "reconcile_s",
+        "threads",
         "write_s",
     )
 
     def __init__(self) -> None:
+        self.threads = 1
+        self.prefetch = 0
         self.gate_s = 0.0
         self.read_s = 0.0
         self.aggregate_s = 0.0
@@ -239,12 +245,15 @@ class Timing:
     def details(self) -> dict:
         """El payload del hallazgo `unit_timing` (segundos con ms de resolución).
 
-        `read_s` es lectura y decodificación (lo que el hilo principal esperó al lector
-        por cada row group); `aggregate_s`, la agregación de los θ; `write_s`, armar y
-        escribir los row groups de salida y publicar; `reconcile_s`, §9.1; `lineage_s`,
-        el hash de las entradas de L2; `gate_s`, la compuerta de entrada. `cpu_user_s` y
-        `cpu_system_s` son la CPU del proceso (todos sus hilos) durante la unidad y
-        `cpu_utilization`, `cpu_s / (wall_s × cores)`.
+        `read_s` es lectura y decodificación, lo que el hilo principal esperó al lector por
+        cada row group (con `prefetch > 0`, solo lo que el lector no alcanzó a traer
+        mientras se procesaba el anterior); `aggregate_s`, la agregación de los θ, y
+        `write_s`, armar y escribir los row groups de salida y publicar, ambos sumados
+        sobre los hilos (pueden pasar de `wall_s`); `reconcile_s`, §9.1; `lineage_s`, el
+        hash de las entradas de L2; `gate_s`, la compuerta de entrada. `threads` y
+        `prefetch` son los hilos del pool de θ y los row groups de ventaja del lector que
+        usó la unidad. `cpu_user_s` y `cpu_system_s` son la CPU del proceso (todos sus
+        hilos) durante la unidad y `cpu_utilization`, `cpu_s / (wall_s × cores)`.
         """
         p = self.phases
         seconds = {
@@ -261,6 +270,8 @@ class Timing:
         utilization = self.cpu_utilization
         return {
             **{name: round(value, 3) for name, value in seconds.items()},
+            "threads": p.threads,
+            "prefetch": p.prefetch,
             "rss_peak_mib": round(self.rss_peak_bytes / MIB, 1),
             "rss_peak_scope": self.rss_scope,
             "row_groups_month": counts.month,

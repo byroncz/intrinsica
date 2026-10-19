@@ -517,3 +517,37 @@ def test_l3_profile_makes_the_unit_emit_unit_profile(lake, tmp_path, catalog):
 def test_without_l3_profile_the_cli_emits_no_unit_profile(lake, tmp_path, catalog):
     assert run(lake, tmp_path, catalog, *BACKFILL, L3_PROFILE="0") == 0
     assert emitted(tmp_path, "unit_profile") == []
+
+
+# L3_THREADS y L3_PREFETCH (ITSC-357)
+
+
+def test_l3_threads_and_prefetch_reach_the_unit(lake, tmp_path, catalog):
+    assert run(lake, tmp_path, catalog, *BACKFILL, L3_THREADS="2", L3_PREFETCH="0") == 0
+    for row in emitted(tmp_path, "unit_timing"):
+        assert (row["details"]["threads"], row["details"]["prefetch"]) == (2, 0)
+
+
+def test_without_l3_threads_the_pool_follows_the_vcpus(lake, tmp_path, catalog):
+    assert run(lake, tmp_path, catalog, *BACKFILL, L3_THREADS="", L3_PREFETCH="") == 0
+    for row in emitted(tmp_path, "unit_timing"):
+        details = row["details"]
+        assert 1 <= details["threads"] <= len(lake.thetas)
+        assert details["threads"] <= max(1, int(details["cores"]))
+        assert details["prefetch"] == 1
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("L3_THREADS", "0"),
+        ("L3_THREADS", "cuatro"),
+        ("L3_PREFETCH", "-1"),
+        ("L3_PREFETCH", "1.5"),
+    ],
+)
+def test_a_bad_l3_threads_or_prefetch_is_a_usage_error(
+    lake, tmp_path, catalog, name, value
+):
+    assert run(lake, tmp_path, catalog, *BACKFILL, **{name: value}) == 2
+    assert l3_files(lake) == []

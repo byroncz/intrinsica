@@ -33,7 +33,10 @@ que ningún θ necesita se salta sin leer L1.
 | `--asset` | Activo; por defecto `BTCUSDT` |
 
 Entorno: `L3_LANDING_ROOT` (L1), `L3_EVENTS_ROOT` (L2), `L3_SUMMARIES_ROOT` (L3) y
-`L3_DQ_ROOT` (lago de hallazgos), además de `L3_SERIES_START` y `L3_THETAS_URI`.
+`L3_DQ_ROOT` (lago de hallazgos), además de `L3_SERIES_START` y `L3_THETAS_URI`. Opcionales:
+`L3_THREADS` (hilos del pool de θ; por defecto los vCPU efectivos, nunca más que θ; entero ≥ 1),
+`L3_PREFETCH` (row groups que el lector trae de ventaja; por defecto 1, 0 lo apaga; entero ≥ 0)
+y `L3_PROFILE=1`. Un valor que no sea un entero válido es código 2.
 `CLOUD_RUN_TASK_INDEX` distinto de 0 es código 2. `IMAGE_VERSION` la fija la imagen.
 
 **Códigos de salida** ([§8.4](../../docs/TRD/l3.md#84-códigos-de-salida)): 0 éxito; 1 fallo
@@ -63,11 +66,15 @@ CPU y la CPU que consumió la unidad (`cpu_user_s`, `cpu_system_s`, `cpu_s` y
 hallazgo `unit_profile` (las 40 funciones más caras por tiempo propio y acumulado); sin la
 variable no cambia nada. Cómo lanzarlo: [runbook](../../docs/runbooks/operacion-l3.md#perfilar-una-unidad).
 
-## Estructura paralelizable, sin paralelizar todavía
+## Hilos dentro de la unidad
 
-La CLI corre todo en serie. ITSC-335 midió el histórico y decidió dejarlo así (TRD-L3 §10.2): la
-suma de los 110 meses cabe en el timeout. Lo que esta capa garantiza es que nada impide paralelizar
-si una card futura lo pide:
+La CLI procesa los meses en serie, pero cada mes usa hilos (ADR-L3-15, [TRD-L3 §8.1](../../docs/TRD/l3.md#81-núcleo-del-resumidor-común-a-los-dos-modos)):
+un hilo lector trae y decodifica el siguiente row group mientras se procesa el actual
+(`L3_PREFETCH`) y un pool de `L3_THREADS` hilos reparte los θ de cada row group, cada uno
+escribiendo su archivo. El hilo principal espera los θ del row group antes de tomar el siguiente,
+así que cada θ corre en un solo hilo a la vez y en orden. Con `L3_THREADS=1` y `L3_PREFETCH=0` el
+flujo es el secuencial de antes y el resultado es idéntico en cualquier combinación
+(`tests/test_l3_parallel.py`). Qué sostiene esto:
 
 - **Sin estado global.** Ningún módulo guarda un contenedor mutable ni usa `global`
   (`tests/test_l3_parallel.py` lo comprueba). El trabajo por θ sobre un row group,
@@ -80,21 +87,27 @@ si una card futura lo pide:
 - **Hallazgos y tiempos por unidad.** `Phases`, `RowGroupCount` y `Timing` los crea la unidad.
   El único punto de proceso es el gancho de `open_parquet`: se instala una vez, delega en el
   original y cuenta en un `ContextVar`, así que dos unidades en hilos distintos no se mezclan.
-- **Prueba.** Agregar los θ de cada row group con un `ThreadPoolExecutor` en vez del bucle
-  secuencial da exactamente la misma tabla y el mismo `content_hash` sobre el fixture. No mide
-  velocidad: demuestra que no hay estado compartido que el GIL estuviera tapando.
+- **Prueba.** `summarize_month` con 1, 2 y 4 hilos y 0, 1 y 2 de prefetch da exactamente la misma
+  tabla y el mismo `content_hash` que la referencia secuencial sobre el fixture. No mide velocidad.
+- **Qué mide `unit_timing` con hilos.** `threads` y `prefetch` dicen lo usado. `read_s` es lo que el
+  hilo principal esperó al lector; `aggregate_s` y `write_s` son **suma sobre los hilos** y pueden
+  pasar de `wall_s`. El perfil (`L3_PROFILE=1`) ve las llamadas de todos los hilos (Python ≥ 3.12,
+  `sys.monitoring`): sus tiempos son de hilo, no de pared.
 
-**Límite conocido para los hilos.** Los tramos pesados ya están en NumPy y Arrow, que sueltan
-el GIL: los prefijos y las diferencias de `Segments`, `reduceat`, la codificación ZSTD y el
-hash del escritor. Lo que queda en Python puro y lo retiene: la **recomposición de
-`Σ price·quantity`** en entero de Python por segmento (`_vwaps` y `Segments.words.tolist()`),
-el **VWAP** (`divide_half_even`) y, solo si una comprobación del lote falla, el camino por
-evento de `build_row`. Con 50 θ y millones de eventos por mes ese tramo crece con los eventos,
-no con los ticks, y los hilos no lo aceleran. ITSC-335 lo midió: el job usa ≈ 15 % de los 4 vCPU
-y la pared sigue a los eventos (24,9 s por millón), así que las palancas son procesos por θ o
-bajar los vCPU, no hilos. Dos cosas más que no son
-por unidad en un proceso con meses en paralelo: `rss_peak_mib` y `cpu_throttled_s` son del
-proceso.
+**Límite conocido para los hilos.** Los tramos pesados están en NumPy y Arrow, que sueltan
+el GIL: los prefijos y las diferencias de `Segments`, `reduceat`, la decodificación de Parquet, la
+codificación ZSTD, la subida y el hash del escritor. Lo que queda en Python puro y lo retiene: la
+**recomposición de `Σ price·quantity`** en entero de Python por segmento (`_vwaps` y
+`Segments.words.tolist()`), el **VWAP** (`divide_half_even`), el control de flujo y, solo si una
+comprobación del lote falla, el camino por evento de `build_row`. Ese tramo crece con los eventos
+(≈ 5,7 µs de los 24,9 µs por evento) y los hilos no lo aceleran: por Amdahl, con ≈ 23 % serial el
+techo es 4,3× y a 4 vCPU se espera 1,5× a 2,5×. Lo que los hilos sí esconden es la espera: T1
+(ITSC-356, 2021-01) midió que la unidad esperaba el 62 % de su pared (`cpu_utilization` 0,092), en
+lecturas de PyArrow y escritura que sueltan el GIL. Lo medido con hilos (corrida T3) está en
+[TRD-L3 §10.2](../../docs/TRD/l3.md#102-dimensionamiento--hipótesis-de-partida-y-primera-medición). Si
+el tramo Python resulta lo que frena, lo ataca el núcleo en Rust (ITSC-358, condicional) y no los
+procesos: la data no se replica. Dos cosas más que no son por unidad en un proceso con meses en
+paralelo: `rss_peak_mib` y `cpu_throttled_s` son del proceso.
 
 ## Uso en local del núcleo
 
