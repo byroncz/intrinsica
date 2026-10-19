@@ -202,6 +202,18 @@ class Timing:
     thetas: tuple[ThetaStats, ...]
     cpu: CpuLimit
     cpu_throttled_s: float | None
+    cpu_user_s: float
+    cpu_system_s: float
+
+    @property
+    def cpu_s(self) -> float:
+        return self.cpu_user_s + self.cpu_system_s
+
+    @property
+    def cpu_utilization(self) -> float | None:
+        """`cpu_s / (wall_s × cores)`: la fracción de sus vCPU que usó la unidad."""
+        capacity = self.wall_s * self.cpu.cores
+        return self.cpu_s / capacity if capacity > 0 else None
 
     @property
     def events(self) -> int:
@@ -230,7 +242,9 @@ class Timing:
         `read_s` es lectura y decodificación (lo que el hilo principal esperó al lector
         por cada row group); `aggregate_s`, la agregación de los θ; `write_s`, armar y
         escribir los row groups de salida y publicar; `reconcile_s`, §9.1; `lineage_s`,
-        el hash de las entradas de L2; `gate_s`, la compuerta de entrada.
+        el hash de las entradas de L2; `gate_s`, la compuerta de entrada. `cpu_user_s` y
+        `cpu_system_s` son la CPU del proceso (todos sus hilos) durante la unidad y
+        `cpu_utilization`, `cpu_s / (wall_s × cores)`.
         """
         p = self.phases
         seconds = {
@@ -244,6 +258,7 @@ class Timing:
             "other_s": self.other_s,
         }
         counts = self.row_groups
+        utilization = self.cpu_utilization
         return {
             **{name: round(value, 3) for name, value in seconds.items()},
             "rss_peak_mib": round(self.rss_peak_bytes / MIB, 1),
@@ -263,4 +278,8 @@ class Timing:
             "cpu_throttled_s": (
                 None if self.cpu_throttled_s is None else round(self.cpu_throttled_s, 3)
             ),
+            "cpu_user_s": round(self.cpu_user_s, 3),
+            "cpu_system_s": round(self.cpu_system_s, 3),
+            "cpu_s": round(self.cpu_s, 3),
+            "cpu_utilization": None if utilization is None else round(utilization, 3),
         }

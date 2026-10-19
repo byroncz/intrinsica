@@ -188,6 +188,25 @@ def unit_timing(ctx: RunContext, unit: Unit, timing: Timing) -> Finding:
     )
 
 
+def unit_profile(
+    ctx: RunContext, unit: Unit, *, wall_s: float, top: dict[str, list[dict]]
+) -> Finding:
+    """Las funciones más caras de la unidad, solo con `L3_PROFILE=1` (uno por unidad).
+
+    `wall_s` es la pared de la unidad perfilada, inflada por el perfilador: sirve para
+    proporciones, no para absolutos.
+    """
+    return finding(
+        ctx,
+        unit,
+        "unit_profile",
+        severity=Severity.INFO,
+        status=Status.PASS,
+        metric_value=round(wall_s, 3),
+        details={"wall_s": round(wall_s, 3), **top},
+    )
+
+
 def emit(ctx: RunContext, findings: list[Finding]) -> None:
     if findings:
         emit_findings(findings, ctx.dq_root)

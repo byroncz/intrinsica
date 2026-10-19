@@ -9,9 +9,10 @@ Un fallo no se lanza: vuelve en el `Result` con su hallazgo, si lo tiene, para q
 llama lo emita y decida qué hacer con el rango.
 """
 
+import cProfile
 import time
 from contextlib import closing
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal
 
 import pyarrow.parquet as pq
@@ -22,11 +23,12 @@ from pyutils import ContentHasher, resolve_fs
 
 from l3_dc_descriptors import findings
 from l3_dc_descriptors.context import RunContext, Unit
-from l3_dc_descriptors.cpu import cpu_limit, throttled_s
+from l3_dc_descriptors.cpu import cpu_limit, process_cpu_s, throttled_s
 from l3_dc_descriptors.errors import SummarizeError
 from l3_dc_descriptors.frontier import theta_text
 from l3_dc_descriptors.l2 import CARRY_OVER
 from l3_dc_descriptors.landing import missing_input
+from l3_dc_descriptors.profiling import top_functions
 from l3_dc_descriptors.summarize import ThetaResult, summarize_month
 from l3_dc_descriptors.timing import (
     Phases,
@@ -79,8 +81,26 @@ def _theta(value: Decimal) -> int:
 
 
 def process_unit(unit: Unit, ctx: RunContext, thetas: list[int]) -> Result:
-    """Escribe el mes de `unit` para `thetas` (θ × 10⁸) y devuelve sus hallazgos."""
+    """Escribe el mes de `unit` para `thetas` (θ × 10⁸) y devuelve sus hallazgos.
+
+    Con `ctx.profile` la unidad corre bajo `cProfile` y suma el hallazgo `unit_profile`;
+    sin él no se crea ningún perfilador.
+    """
+    if not ctx.profile:
+        return _process_unit(unit, ctx, thetas)
+    profiler = cProfile.Profile()
+    result = profiler.runcall(_process_unit, unit, ctx, thetas)
+    if result.timing is None:
+        return result
+    profile = findings.unit_profile(
+        ctx, unit, wall_s=result.timing.wall_s, top=top_functions(profiler)
+    )
+    return replace(result, findings=(*result.findings, profile))
+
+
+def _process_unit(unit: Unit, ctx: RunContext, thetas: list[int]) -> Result:
     started = time.perf_counter()
+    cpu_started = process_cpu_s()
     missing = missing_input(str(ctx.landing_root), unit.key, unit.at)
     if missing is not None:
         check_type, details = missing
@@ -122,6 +142,9 @@ def process_unit(unit: Unit, ctx: RunContext, thetas: list[int]) -> Result:
         summaries.append((theta, result, _lineage(ctx, unit, theta, phases)))
         stats.append(_stats(theta, result))
     wall_s = time.perf_counter() - started
+    cpu_user_s, cpu_system_s = (
+        end - start for end, start in zip(process_cpu_s(), cpu_started, strict=True)
+    )
     after = throttled_s()
     timing = Timing(
         wall_s=wall_s,
@@ -134,6 +157,8 @@ def process_unit(unit: Unit, ctx: RunContext, thetas: list[int]) -> Result:
         cpu_throttled_s=(
             None if throttled is None or after is None else max(0.0, after - throttled)
         ),
+        cpu_user_s=cpu_user_s,
+        cpu_system_s=cpu_system_s,
     )
     return Result(
         (

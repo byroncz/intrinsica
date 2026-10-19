@@ -111,6 +111,7 @@ def _context(mode: str, series_start: Month, env: Mapping[str, str]) -> RunConte
         events_root=env["L3_EVENTS_ROOT"],
         summaries_root=env["L3_SUMMARIES_ROOT"],
         dq_root=env["L3_DQ_ROOT"],
+        profile=env.get("L3_PROFILE") == "1",
     )
 
 
