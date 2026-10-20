@@ -1,4 +1,4 @@
-# Runbook: operación de L3 (backfill histórico, lectura de fallos, cascada, cadena mensual, volumen y costo, perfil de una unidad, verificación cruzada)
+# Runbook: operación de L3 (backfill histórico, lectura de fallos, cascada, cadena mensual, volumen y costo, perfil de una unidad, hilos de la unidad, verificación cruzada)
 
 Lo ejecuta el humano desde *Actions → Run job* y Cloud Shell; ningún agente
 dispara `terraform.yml` ni `run-job.yml`. Dice cómo se opera L3 una vez construido
@@ -41,7 +41,8 @@ rango con la sección siguiente.
    Deben existir `l3-backfill` y `l3-monthly`; el primero con `timeoutSeconds:
    86400`, `maxRetries: 1`, `cpu: '4'` y `memory: 4Gi` en `limits`. Las raíces
    (`L3_LANDING_ROOT`, `L3_EVENTS_ROOT`, `L3_SUMMARIES_ROOT`, `L3_DQ_ROOT`),
-   `L3_SERIES_START` y `L3_THETAS_URI` van en `env`.
+   `L3_SERIES_START` y `L3_THETAS_URI` van en `env`; `L3_THREADS` y `L3_PREFETCH` son opcionales
+   (ver "Hilos de la unidad").
 2. **Imagen `l3_dc_descriptors`** de `layers/l3_dc_descriptors/VERSION`. El stack
    `l3` deriva el tag de ese archivo: sin `apply` posterior al merge, el job
    sigue con la imagen vieja.
@@ -366,6 +367,47 @@ anterior. No lances otra ejecución de `l3-backfill` a la vez.
 Para leer el resultado, baja la carpeta `detected_date=` del día y corre la variante con
 perfil del snippet de "Leer un fallo": imprime las claves de `unit_timing` y las 15
 primeras filas de `unit_profile`.
+
+## Hilos de la unidad: `L3_THREADS` y `L3_PREFETCH`
+
+Cada mes usa hilos dentro de su tarea ([ADR-L3-15](../TRD/l3.md#615-adr-l3-15--lector-anticipado-y-pool-de-θ-por-row-group-hilos-no-procesos)):
+un hilo lector que trae el siguiente row group de L1 mientras se procesa el actual y un pool
+que agrega y escribe los θ de cada row group. Son opcionales y se dejan sin fijar:
+
+| Variable | Qué fija | Por defecto |
+|---|---|---|
+| `L3_THREADS` | Hilos del pool de θ. Entero ≥ 1; nunca se usan más que θ | Los vCPU efectivos del job (`cores` de `unit_timing`; 4 en `l3-backfill`) |
+| `L3_PREFETCH` | Row groups que el lector trae de ventaja, además del que está en proceso. Entero ≥ 0; 0 apaga el hilo lector | 1 (uno en proceso y uno listo) |
+
+`L3_THREADS=1` con `L3_PREFETCH=0` es el flujo secuencial de antes, útil como línea base o
+si se sospecha de los hilos: el resultado (tablas y `content_hash`) es el mismo en cualquier
+combinación. Un valor que no sea un entero válido termina la corrida con código 2, sin
+escribir nada. Cada `prefetch` extra cuesta ≈ 48 MB de RSS (un row group de L1 decodificado).
+
+`unit_timing` dice lo que se usó (`threads`, `prefetch`). Con hilos, `aggregate_s` y `write_s`
+son **suma sobre los hilos**: pueden pasar de `wall_s`, y eso es lo esperado. Para comparar
+dos corridas usa `wall_s`, `cpu_s` y `cpu_utilization`.
+
+`run-job.yml` no admite variables de entorno: para fijarlas en una corrida suelta se
+lanza **desde Cloud Shell**, como el perfil (`--update-env-vars` vale solo para esa
+ejecución; el job no cambia). Por ejemplo, la línea base secuencial de 2021-01:
+
+```bash
+gcloud run jobs execute l3-backfill \
+  --project <proyecto> --region <región> \
+  --update-env-vars L3_THREADS=1,L3_PREFETCH=0 \
+  --args="--mode,backfill,--from=2021-01,--to=2021-01,--force" \
+  --wait
+```
+
+La corrida T3 de ITSC-357 (los valores por defecto, 4 hilos y prefetch 1) se lanza con
+*Actions → Run job*, `l3-backfill`, `from = to = 2021-01` y `force`; el resultado se
+registra como comentario en ITSC-357 y el cuadro de
+[TRD-L3 §10.2](../TRD/l3.md#102-dimensionamiento--hipótesis-de-partida-y-primera-medición)
+lo completa ITSC-352 (T5). Si no cumple la condición para conservar los valores por
+defecto (50 `content_hash` idénticos, `rss_peak_mib` ≤ 2 048 y pared ≥ 15 % menor que T1),
+el stack `l3` fija `L3_THREADS=1` y `L3_PREFETCH=0` por Terraform, sin revertir código.
+Un perfil con hilos (`L3_PROFILE=1`) ve todos los hilos y sus tiempos son de hilo, no de pared.
 
 ## Scripts de operación
 

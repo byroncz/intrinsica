@@ -1,5 +1,7 @@
 """`unit_timing`: lo que ITSC-335 necesita para el umbral 3 de TRD-L3 §10.3."""
 
+import cProfile
+import pstats
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 
@@ -111,7 +113,9 @@ def test_the_hook_does_not_touch_the_reader_outside_a_unit(lake):
 
 
 def test_the_phases_explain_the_wall(lake, tmp_path):
-    result = process_unit(unit_of(M2), context(lake, tmp_path), lake.thetas)
+    # En serie (un hilo, sin lector anticipado) las fases son pared y suman a lo más `wall_s`.
+    ctx = replace(context(lake, tmp_path), threads=1, prefetch=0)
+    result = process_unit(unit_of(M2), ctx, lake.thetas)
     details = result.timing.details()
     phases = ("gate_s", "read_s", "aggregate_s", "write_s", "reconcile_s", "lineage_s")
     assert all(details[name] >= 0 for name in (*phases, "other_s"))
@@ -241,3 +245,77 @@ def test_a_failed_unit_has_no_profile(lake, tmp_path):
     result = process_unit(unit_of(M2), ctx, lake.thetas)
     assert not result.ok
     assert {f.check_type for f in result.findings} == {"l2_input_missing"}
+
+
+# Hilos (ITSC-357)
+
+
+@pytest.mark.parametrize(("threads", "prefetch"), [(1, 0), (2, 1), (4, 2), (50, 1)])
+def test_the_counts_do_not_depend_on_threads_or_prefetch(
+    lake, tmp_path, threads, prefetch
+):
+    # El gancho de row groups vive en una ContextVar: con el lector en otro hilo, un
+    # contexto sin propagar dejaría `row_groups_month` en cero.
+    base = process_unit(
+        unit_of(M3),
+        replace(context(lake, tmp_path), threads=1, prefetch=0),
+        lake.thetas,
+    ).timing
+    ctx = replace(context(lake, tmp_path), threads=threads, prefetch=prefetch)
+    timing = process_unit(unit_of(M3), ctx, lake.thetas).timing
+    assert timing.row_groups.month > 0 and timing.row_groups.previous > 0
+    counts, expected = timing.row_groups, base.row_groups
+    assert (
+        counts.month,
+        counts.previous,
+        counts.repeated,
+        counts.bytes_in,
+        counts.month_total,
+    ) == (
+        expected.month,
+        expected.previous,
+        expected.repeated,
+        expected.bytes_in,
+        expected.month_total,
+    )
+
+
+def test_it_reports_the_threads_and_prefetch_it_used(lake, tmp_path):
+    ctx = replace(context(lake, tmp_path), threads=2, prefetch=0)
+    details = process_unit(unit_of(M2), ctx, lake.thetas).timing.details()
+    assert (details["threads"], details["prefetch"]) == (2, 0)
+    # Nunca más hilos que θ.
+    ctx = replace(context(lake, tmp_path), threads=50)
+    details = process_unit(unit_of(M2), ctx, lake.thetas).timing.details()
+    assert details["threads"] == len(lake.thetas)
+    assert details["prefetch"] == 1
+    default = process_unit(unit_of(M2), context(lake, tmp_path), lake.thetas)
+    assert 1 <= default.timing.details()["threads"] <= len(lake.thetas)
+
+
+def test_aggregate_and_write_are_sums_over_the_threads(lake, tmp_path):
+    ctx = replace(context(lake, tmp_path), threads=4, prefetch=1)
+    details = process_unit(unit_of(M2), ctx, lake.thetas).timing.details()
+    assert details["aggregate_s"] > 0 and details["write_s"] > 0
+    assert details["other_s"] >= 0
+    # Cada hilo aporta a lo más su pared: la suma no pasa de `threads × wall_s`.
+    parallel = details["aggregate_s"] + details["write_s"]
+    assert parallel <= details["threads"] * details["wall_s"] + 0.01
+    # Condición de merge de ITSC-357: el RSS del fixture con hilos queda dentro del límite.
+    assert 0 < details["rss_peak_mib"] <= 2048
+
+
+def test_the_profile_sees_the_calls_of_the_pool_threads():
+    # profiling.py lo afirma: desde Python 3.12 `cProfile` (sys.monitoring) cuenta las
+    # llamadas de todos los hilos, no solo las del que lo activa.
+    def busy(n):
+        return sum(range(n))
+
+    def run():
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            list(pool.map(busy, [1000] * 12))
+
+    profiler = cProfile.Profile()
+    profiler.runcall(run)
+    calls = {f[2]: v[1] for f, v in pstats.Stats(profiler).stats.items()}
+    assert calls["busy"] == 12

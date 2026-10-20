@@ -631,11 +631,14 @@ mismo que traen las excepciones del resumidor, de las que sale la mayoría de lo
   corrida y el linaje contra L2: si L2 se reprocesa y cambia, estos hashes ya no coinciden
   con los suyos y el mes está obsoleto (`--force --from <mes> --thetas <θ>`).
 - **`unit_timing`** (`info`, `pass`): uno por unidad (mes), no por θ. `metric_value` es la
-  pared (`wall_s`). `details` lleva la pared por fase, todas del hilo principal y, con
-  `other_s`, sumando `wall_s`: `gate_s` (compuerta de entrada), `read_s` (lectura y
-  decodificación: lo que se esperó al lector por cada row group), `aggregate_s`,
-  `write_s` (armar y escribir los row groups de salida y publicar), `reconcile_s`
-  (conciliación) y `lineage_s` (hash de las entradas de L2). Además: `rss_peak_mib`
+  pared (`wall_s`). `details` lleva el tiempo por fase: `gate_s` (compuerta de entrada),
+  `read_s` (lectura y decodificación: lo que el hilo principal esperó al lector por cada
+  row group), `aggregate_s`, `write_s` (armar y escribir los row groups de salida y
+  publicar), `reconcile_s` (conciliación) y `lineage_s` (hash de las entradas de L2). Con
+  `threads = 1` y `prefetch = 0` todas son pared y, con `other_s`, suman `wall_s`; con
+  hilos, `aggregate_s` y `write_s` son **suma sobre los hilos** y pueden pasar de
+  `wall_s`. `threads` y `prefetch` son los hilos del pool de θ y los row groups de
+  ventaja del lector que usó la unidad (`L3_THREADS` y `L3_PREFETCH`). Además: `rss_peak_mib`
   (`VmHWM`) con `rss_peak_scope` (`unit` si el pico se reinició al empezar la unidad,
   `process` si el sistema no lo permite y es el de todo el proceso); las decodificaciones
   de row group de L1, `row_groups_month` (del archivo del mes), `row_groups_previous` (de

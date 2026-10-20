@@ -98,6 +98,20 @@ def _image_version(env: Mapping[str, str]) -> str:
     return f"{version}+local"
 
 
+def _count(env: Mapping[str, str], name: str, *, minimum: int) -> int | None:
+    """Un entero de entorno (`L3_THREADS`, `L3_PREFETCH`), o `None` si no está o está vacío."""
+    raw = env.get(name)
+    if raw is None or not raw.strip():
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        raise UsageError(f"{name}={raw!r} no es un entero") from None
+    if value < minimum:
+        raise UsageError(f"{name}={value} debe ser al menos {minimum}")
+    return value
+
+
 def _context(mode: str, series_start: Month, env: Mapping[str, str]) -> RunContext:
     missing = [name for name in ROOT_VARS if not env.get(name)]
     if missing:
@@ -112,6 +126,8 @@ def _context(mode: str, series_start: Month, env: Mapping[str, str]) -> RunConte
         summaries_root=env["L3_SUMMARIES_ROOT"],
         dq_root=env["L3_DQ_ROOT"],
         profile=env.get("L3_PROFILE") == "1",
+        threads=_count(env, "L3_THREADS", minimum=1),
+        prefetch=_count(env, "L3_PREFETCH", minimum=0),
     )
 
 

@@ -127,6 +127,8 @@ def _process_unit(unit: Unit, ctx: RunContext, thetas: list[int]) -> Result:
                 market=unit.market,
                 asset=unit.asset,
                 phases=phases,
+                threads=ctx.threads,
+                prefetch=ctx.prefetch,
             )
     except SummarizeError as error:
         found = findings.from_error(ctx, unit, error)
