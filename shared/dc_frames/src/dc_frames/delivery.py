@@ -109,6 +109,7 @@ def deliver(
     end: Month,
     key: tuple[str, str, str],
     columns: Sequence[str] | None,
+    readers: int = 1,
 ) -> Iterator[RowGroupFrames]:
     l1 = L1(l1_root, key)
     wanted = DELIVERY_COLUMNS if columns is None else columns
@@ -124,7 +125,7 @@ def deliver(
     def needed(_low: int, high: int) -> bool:
         return any(not c.done and c.reference <= high for c in live)
 
-    rows = l1.row_groups(start, end, reference, needed)
+    rows = l1.row_groups(start, end, reference, needed, readers)
     try:
         # Se suelta todo lo del row group antes de pedir el siguiente: aquí no queda
         # ninguna referencia a sus buffers mientras el consumidor trabaja con el siguiente.

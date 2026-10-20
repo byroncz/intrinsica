@@ -4,7 +4,11 @@ Solo se leen archivos Parquet por nombre de columna: aquí no se importa nada de
 ni de L2 (las capas no se importan entre sí, RNF-14 del maestro).
 """
 
+import contextvars
+import os
+from collections import deque
 from collections.abc import Callable, Iterator, Sequence
+from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
@@ -37,7 +41,29 @@ BOUNDARY_COLUMNS = (
 )
 CONFIRM_TIME = "confirm_time"
 
+# Tamaño del pool de E/S de Arrow: cuántas peticiones de rangos de bytes viajan a la vez.
+# Se fija al importar el paquete, así que un `pa.set_io_thread_count` posterior lo reemplaza.
+IO_THREADS_ENV = "DC_FRAMES_IO_THREADS"
+DEFAULT_IO_THREADS = 8
+
 Month = tuple[int, int]
+
+
+def io_threads() -> int:
+    """El tamaño del pool de E/S: `DC_FRAMES_IO_THREADS` o, sin ella, 8."""
+    text = os.environ.get(IO_THREADS_ENV)
+    if text is None:
+        return DEFAULT_IO_THREADS
+    try:
+        threads = int(text)
+    except ValueError:
+        threads = 0
+    if threads < 1:
+        raise ValueError(f"{IO_THREADS_ENV}={text!r}: debe ser un entero mayor que 0")
+    return threads
+
+
+pa.set_io_thread_count(io_threads())
 
 
 def month_ordinal(month: Month) -> int:
@@ -88,12 +114,29 @@ def l2_path(
     return partition_path(root, key, theta, month, EVENTS)
 
 
-def open_parquet(path: str, what: str) -> pq.ParquetFile:
-    """Abre `path` sin leer datos; `FramesInputError` si no existe. Quien llama lo cierra."""
+def open_parquet(
+    path: str,
+    what: str,
+    metadata: pq.FileMetaData | None = None,
+    pre_buffer: bool = False,
+) -> pq.ParquetFile:
+    """Abre `path` sin leer datos; `FramesInputError` si no existe. Quien llama lo cierra.
+
+    Con `pre_buffer`, cada `read_row_group` calcula con el pie del archivo los rangos de
+    bytes de sus columnas, junta los vecinos y los pide a la vez al pool de E/S de Arrow,
+    en vez de una petición por columna y por página en serie. Pero Arrow retiene ese
+    caché comprimido hasta la siguiente lectura o hasta cerrar el archivo, así que solo
+    se pide en una apertura de vida corta: lee un row group y se cierra
+    (`_decode_reopened`). Un archivo que queda abierto se abre sin él. Con `metadata` (el
+    pie de una apertura anterior del mismo archivo) no relee el pie ni comprueba que el
+    archivo exista.
+    """
     fs, resolved = resolve_fs(path)
-    if fs.get_file_info(resolved).type != pafs.FileType.File:
+    if metadata is None and fs.get_file_info(resolved).type != pafs.FileType.File:
         raise FramesInputError(f"falta {what}: {path}")
-    return pq.ParquetFile(resolved, filesystem=fs)
+    return pq.ParquetFile(
+        resolved, filesystem=fs, pre_buffer=pre_buffer, metadata=metadata
+    )
 
 
 def check_columns(
@@ -158,6 +201,90 @@ def _bounds(parquet: pq.ParquetFile, path: str) -> list[tuple[int, int] | None]:
     return out
 
 
+@dataclass(slots=True)
+class _Step:
+    """Un row group por leer: dónde está y sus ids mínimo y máximo."""
+
+    month: Month
+    path: str
+    parquet: pq.ParquetFile
+    index: int
+    bounds: tuple[int, int]
+
+
+def _decode(parquet: pq.ParquetFile, index: int, month: Month) -> RowGroup:
+    table = parquet.read_row_group(index, columns=list(L1_COLUMNS))
+    columns = [_single(table.column(name)) for name in L1_COLUMNS]
+    del table
+    return RowGroup(columns[0].to_numpy(zero_copy_only=True), tuple(columns[1:]), month)
+
+
+def _decode_reopened(
+    path: str, metadata: pq.FileMetaData, index: int, month: Month
+) -> RowGroup:
+    """`_decode` con un archivo propio, con `pre_buffer` y el pie ya leído.
+
+    Se cierra al terminar, y con él el caché comprimido de Arrow. Cada hilo del lector
+    abre el suyo, porque un `ParquetFile` no admite lecturas concurrentes.
+    """
+    with closing(open_parquet(path, "L1", metadata, pre_buffer=True)) as parquet:
+        return _decode(parquet, index, month)
+
+
+def _read_in_turn(
+    steps: Iterator[_Step], needed: Callable[[int, int], bool]
+) -> Iterator[RowGroup]:
+    """Un row group a la vez, en el hilo de quien consume."""
+    for step in steps:
+        if needed(*step.bounds):
+            yield _decode_reopened(
+                step.path, step.parquet.metadata, step.index, step.month
+            )
+
+
+def _read_together(
+    steps: Iterator[_Step], needed: Callable[[int, int], bool], readers: int
+) -> Iterator[RowGroup]:
+    """Hasta `readers` row groups en lectura a la vez, entregados en el orden de `steps`."""
+    pending: deque[tuple[_Step, Future[RowGroup]]] = deque()
+    with ThreadPoolExecutor(readers, thread_name_prefix="dc-frames-read") as pool:
+
+        def fill() -> None:
+            # `needed` aquí es una cota: el estado solo avanza, así que un row group que
+            # ahora no se pide tampoco se pedirá al entregarlo.
+            while len(pending) < readers:
+                step = next((s for s in steps if needed(*s.bounds)), None)
+                if step is None:
+                    return
+                # Cada tarea corre en una copia del contexto de quien consume, para que
+                # lo que dependa de él (un `ContextVar` de medición) valga en los hilos.
+                future = pool.submit(
+                    contextvars.copy_context().run,
+                    _decode_reopened,
+                    step.path,
+                    step.parquet.metadata,
+                    step.index,
+                    step.month,
+                )
+                pending.append((step, future))
+
+        try:
+            fill()
+            while pending:
+                step, future = pending.popleft()
+                rg = future.result()
+                del future  # el futuro retiene el resultado
+                # Los R siguientes viajan mientras el llamador trabaja con este.
+                fill()
+                if needed(*step.bounds):
+                    yield rg
+                del rg
+        finally:
+            for _, future in pending:
+                future.cancel()
+            pending.clear()
+
+
 class L1:
     """L1 de un activo: entrega sus row groups en orden de id, de uno en uno."""
 
@@ -188,19 +315,11 @@ class L1:
                 return month
             month = month_of(month_ordinal(month) - 1)
 
-    def row_groups(
-        self,
-        first: Month,
-        last: Month,
-        reference: int,
-        needed: Callable[[int, int], bool],
-    ) -> Iterator[RowGroup]:
-        """Los row groups de L1 desde el que contiene `reference` hasta `last`.
+    def _steps(self, first: Month, last: Month, reference: int) -> Iterator[_Step]:
+        """Los row groups no vacíos del recorrido, en orden, con su archivo abierto.
 
-        Un row group solo se decodifica si `needed(mínimo, máximo)` lo pide; los demás
-        se saltan con las estadísticas del pie del archivo. Un row group se suelta
-        cuando el llamador pide el siguiente. Si falta un mes intermedio, o los ids
-        no crecen entre row groups, falla.
+        Valida que los ids crezcan entre row groups. El archivo de un paso solo sirve
+        hasta que se pide el siguiente.
         """
         previous = -1
         for month in months(self._first_month(first, reference), last):
@@ -215,17 +334,40 @@ class L1:
                             f"que no supera el id {previous} anterior"
                         )
                     previous = bounds[1]
-                    if not needed(*bounds):
-                        continue
-                    table = parquet.read_row_group(i, columns=list(L1_COLUMNS))
-                    columns = [_single(table.column(name)) for name in L1_COLUMNS]
-                    del table
-                    yield RowGroup(
-                        columns[0].to_numpy(zero_copy_only=True),
-                        tuple(columns[1:]),
-                        month,
-                    )
-                    del columns
+                    yield _Step(month, path, parquet, i, bounds)
+
+    def row_groups(
+        self,
+        first: Month,
+        last: Month,
+        reference: int,
+        needed: Callable[[int, int], bool],
+        readers: int = 1,
+    ) -> Iterator[RowGroup]:
+        """Los row groups de L1 desde el que contiene `reference` hasta `last`.
+
+        Un row group solo se decodifica si `needed(mínimo, máximo)` lo pide; los demás
+        se saltan con las estadísticas del pie del archivo. Un row group se suelta
+        cuando el llamador pide el siguiente. Si falta un mes intermedio, o los ids
+        no crecen entre row groups, falla.
+
+        Con `readers = R > 1`, R row groups se leen y decodifican a la vez, en hilos, y
+        salen en el mismo orden: mientras el llamador trabaja con uno, los R siguientes ya
+        están en camino, así que hay a lo sumo R + 1 decodificados en RAM. `needed` se
+        vuelve a consultar al entregar, con el estado de ese momento, así que sale
+        exactamente lo mismo que con `readers = 1`; solo se decodifica de más lo que un
+        evento cerrado entre tanto dejó de pedir (a lo sumo R row groups, al final).
+        """
+        if readers < 1:
+            raise ValueError(f"readers {readers} debe ser al menos 1")
+        steps = self._steps(first, last, reference)
+        try:
+            if readers == 1:
+                yield from _read_in_turn(steps, needed)
+            else:
+                yield from _read_together(steps, needed, readers)
+        finally:
+            steps.close()
 
 
 @dataclass(slots=True)
@@ -285,9 +427,8 @@ def event_groups(
     wanted = None if columns is None else list(dict.fromkeys([*expected, *columns]))
     for month in months(first, last):
         path = l2_path(root, key, theta, month)
-        parquet = open_parquet(
-            path, f"L2 del θ {theta} en {month[0]:04d}-{month[1]:02d}"
-        )
+        what = f"L2 del θ {theta} en {month[0]:04d}-{month[1]:02d}"
+        parquet = open_parquet(path, what)
         with closing(parquet):
             check_columns(parquet.schema_arrow, expected, path)
             for name in wanted or ():
@@ -296,7 +437,12 @@ def event_groups(
             for i in range(parquet.metadata.num_row_groups):
                 if parquet.metadata.row_group(i).num_rows == 0:
                     continue
-                table = parquet.read_row_group(i, columns=wanted).combine_chunks()
+                # Cada row group con un archivo de vida corta: el de arriba sigue abierto
+                # y no retiene el caché comprimido de `pre_buffer`.
+                with closing(
+                    open_parquet(path, what, parquet.metadata, pre_buffer=True)
+                ) as reader:
+                    table = reader.read_row_group(i, columns=wanted).combine_chunks()
                 yield event_group(
                     table.to_batches()[0], f"{path}, row group {i}", month
                 )

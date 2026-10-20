@@ -444,6 +444,7 @@ def read_row_groups(
     market: str = DEFAULT_KEY[1],
     asset: str = DEFAULT_KEY[2],
     columns: Sequence[str] | None = None,
+    readers: int = 1,
 ) -> Iterator[RowGroupFrames]:
     """Los row groups de L1 del pase, uno por elemento, con los eventos de todos los θ.
 
@@ -464,6 +465,14 @@ def read_row_groups(
     siguiente (`del`): el `for` conserva el anterior hasta recibir el nuevo y, sin el
     `del`, conviven dos row groups.
 
+    `readers` (por defecto 1, el comportamiento de arriba) es cuántos row groups se leen
+    y decodifican a la vez, en hilos. Se entregan en el mismo orden y con las mismas
+    posiciones que con 1: lo único que cambia es la memoria, que pasa a ser a lo sumo
+    `readers` row groups en camino más el que el consumidor tiene en la mano
+    (`readers + 1` decodificados, más los buffers de decodificación de los que se leen).
+    La lectura de cada uno usa `pre_buffer` y el pool de E/S de Arrow
+    (`DC_FRAMES_IO_THREADS`); ver el README del paquete.
+
     `columns` proyecta las columnas de `events.parquet` que se entregan, más las cuatro
     que el lector siempre lee (las tres fronteras y `confirm_time`). Sin él trae las
     siete de TRD-L3 §7.1, no las 11 de `read_frames`.
@@ -473,8 +482,10 @@ def read_row_groups(
     `FrameBoundaryError` al entregar el row group.
     """
     values = _check_request(thetas, start, end)
+    if readers < 1:
+        raise ValueError(f"readers {readers} debe ser al menos 1")
     key = (provider, market, asset)
-    return deliver(values, l1_root, l2_root, start, end, key, columns)
+    return deliver(values, l1_root, l2_root, start, end, key, columns, readers)
 
 
 def _month_of_time(microseconds: int) -> Month:
