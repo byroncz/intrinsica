@@ -1,7 +1,7 @@
 [project]
 name = "dc_pyo3"
 version = "0.1.0"
-description = "Bindings PyO3 sobre dc_core: fan-out de N theta y carry-over."
+description = "Bindings PyO3 sobre dc_core (fan-out de N theta, carry-over) y dc_descriptors (motor de agregación de L3)."
 requires-python = ">=3.14"
 
 [build-system]
@@ -23,4 +23,6 @@ cache-keys = [
     { file = "src/**/*.rs" },
     { file = "../dc_core/Cargo.toml" },
     { file = "../dc_core/src/**/*.rs" },
+    { file = "../dc_descriptors/Cargo.toml" },
+    { file = "../dc_descriptors/src/**/*.rs" },
 ]

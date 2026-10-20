@@ -42,9 +42,11 @@ errores del lector, y porque `pyutils` no sabe nada de L3.
 - `EventFrames(theta, event, confirmation, overshoot, ticks_before_month,
   over_budget)`: `event` es la fila de L2 sin transformar; `confirmation` son
   los ticks de `(R, C]` y `overshoot` los de `(C, E]`, vacío si `E = C`.
-- `RowGroupFrames(month, before_start, frame, thetas)` y `ThetaEvents(theta,
+- `RowGroupFrames(month, before_start, ids, frame, thetas)` y `ThetaEvents(theta,
   events, positions, starts_before, ends_after, ticks_before_month)`: lo que
-  entrega `read_row_groups`.
+  entrega `read_row_groups`. `ids` son los `agg_trade_id` de los ticks del row
+  group (vista de NumPy sin copia, crecientes), que el motor nativo usa para
+  ubicar las fronteras él mismo.
 - `Frame(transact_time, price, quantity, is_buyer_maker)`: cuatro arrays de
   Arrow con los tipos de L1. No trae `agg_trade_id` ni `is_best_match`.
 - `FamilyWriter(path, schema, state_version, skeleton_path)`,

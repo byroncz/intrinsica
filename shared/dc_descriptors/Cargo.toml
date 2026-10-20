@@ -1,0 +1,6 @@
+[package]
+name = "dc_descriptors"
+version = "0.1.0"
+edition = "2021"
+description = "Motor de agregación de L3: descriptores de summaries por evento DC, en hilos nativos y aritmética u128."
+publish = false

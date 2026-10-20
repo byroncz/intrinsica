@@ -5,9 +5,9 @@
 # correr y comprueba que no escribe nada (la frontera); y corre --force --from
 # comprobando el mismo content_hash. Uso: smoke.sh <imagen>
 #
-# El lago se genera en el host con `uv run` (necesita dc_pyo3, que es Rust y no viaja en
-# la imagen); todo lo demás corre en el contenedor, con el Python y el pyarrow de la
-# imagen. El catálogo de θ es de este lago y no se versiona: L3 no lleva ninguno propio.
+# El lago se genera en el host con `uv run` (el generador es de tests/, que no viaja en la
+# imagen, y usa dc_pyo3 para detectar los eventos); todo lo demás corre en el contenedor,
+# con el Python y el pyarrow de la imagen. El catálogo de θ es de este lago y no se versiona: L3 no lleva ninguno propio.
 set -euo pipefail
 
 image="${1:?uso: smoke.sh <imagen>}"

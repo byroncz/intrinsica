@@ -1,7 +1,7 @@
-"""Bindings PyO3 sobre dc_core: fan-out de N θ y carry-over."""
+"""Bindings PyO3 sobre dc_core (fan-out de N θ y carry-over) y dc_descriptors (motor de L3)."""
 
 from collections.abc import Sequence
-from typing import Self
+from typing import Protocol, Self
 
 SCALE: int
 PRICE_LIMIT: int
@@ -85,3 +85,77 @@ class FanOut:
     def discarded(self) -> list[int]: ...
     def carry_overs(self) -> list[CarryOver]: ...
     def __len__(self) -> int: ...
+
+class DescriptorError(ValueError):
+    """Un fallo del motor de L3. `kind` dice cuál: `input`, `ticks`, `internal`,
+    `skeleton`, `incomplete`, `boundary`, `confirm_time`, `direction`, `invariant`,
+    `quantity_too_large`, `no_quantity` o `notional_overflow`. Según el caso trae `theta`
+    (posición), `event`, `confirm_agg_trade_id`, `phase`, `field`, `got`, `wanted`, `rows`,
+    `missing` o `expected`. `boundary` (una frontera de un evento que no es un tick de L1)
+    trae además `reason` (`not_a_tick` o `unseen`), `bounds` (`R`, `C`, `E`), `low` y
+    `high` (primer y último id del row group); `field` es la columna de L2 de la frontera.
+    `confirm_time` trae `bounds`, `got` (el `transact_time` del tick `C`) y `wanted`.
+    """
+
+    kind: str
+
+class SealedColumn:
+    """Bytes de una columna de salida en el layout de Arrow, de solo lectura, con
+    protocolo de buffer (`pyarrow.py_buffer`, `memoryview`). Poseen la memoria del motor."""
+
+    def __len__(self) -> int: ...
+
+class EventBatch(Protocol):
+    """Un lote de filas consecutivas de `events.parquet` de L2 de un θ (cualquier objeto
+    con estos atributos): `rows` y, por columna, `(bytes del buffer, offset)` en el layout
+    de Arrow.
+    `reference`, `confirm`, `confirm_time` y `extreme` son `int64`; `direction`, `int8`;
+    los precios, `decimal128`."""
+
+    rows: int
+    reference: tuple[memoryview, int]
+    confirm: tuple[memoryview, int]
+    confirm_time: tuple[memoryview, int]
+    extreme: tuple[memoryview, int]
+    direction: tuple[memoryview, int]
+    confirm_price: tuple[memoryview, int]
+    extreme_price: tuple[memoryview, int]
+
+# (rows, closed_ticks, before_month, first_reference, last_extreme)
+type Stats = tuple[int, int, int, int | None, int | None]
+type Sealed = tuple[int, int, int, list[SealedColumn], SealedColumn | None, int]
+
+class Engine:
+    def __new__(
+        cls,
+        thetas: Sequence[int],
+        schema: Sequence[tuple[str, int, bool]],
+        row_groups: Sequence[Sequence[int]],
+        threads: int | None = None,
+    ) -> Self: ...
+    def push_boundaries(self, theta: int, batch: EventBatch) -> None: ...
+    def needed(self, theta: int) -> int: ...
+    def push(
+        self,
+        row_group_id: int,
+        rows: int,
+        ids: tuple[memoryview, int],
+        time: tuple[memoryview, int],
+        price: tuple[memoryview, int],
+        quantity: tuple[memoryview, int],
+        sold: tuple[memoryview, int],
+        before_month: bool,
+    ) -> None: ...
+    def locate(
+        self,
+        theta: int,
+        rows: int,
+        ids: tuple[memoryview, int],
+        time: tuple[memoryview, int],
+        prev_high: int | None = None,
+    ) -> list[tuple[int, tuple[int, int, int], bool, bool]]: ...
+    def pop_sealed(self) -> Sealed | None: ...
+    def inflight(self) -> int: ...
+    def busy(self) -> float: ...
+    def finish(self) -> list[Stats]: ...
+    def close(self) -> None: ...

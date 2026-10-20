@@ -5,6 +5,7 @@ description = "Capa L3 de intrinsica: descriptores por evento DC y θ, a partir 
 requires-python = ">=3.14"
 dependencies = [
     "dc_frames",
+    "dc_pyo3",
     "dq",
     "numpy>=2.0",
     "pyarrow>=25.0.1",
@@ -18,5 +19,6 @@ build-backend = "uv_build"
 
 [tool.uv.sources]
 dc_frames = { workspace = true }
+dc_pyo3 = { workspace = true }
 dq = { workspace = true }
 pyutils = { workspace = true }

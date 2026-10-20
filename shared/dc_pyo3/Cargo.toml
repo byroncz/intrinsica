@@ -2,7 +2,7 @@
 name = "dc_pyo3"
 version = "0.1.0"
 edition = "2021"
-description = "Bindings PyO3 sobre dc_core: fan-out de N theta y carry-over para Python."
+description = "Bindings PyO3 sobre dc_core (fan-out de N theta, carry-over) y dc_descriptors (motor de agregación de L3) para Python."
 publish = false
 
 [lib]
@@ -16,6 +16,7 @@ doctest = false
 
 [dependencies]
 dc_core = { path = "../dc_core" }
+dc_descriptors = { path = "../dc_descriptors" }
 pyo3 = "0.27"
 
 [features]

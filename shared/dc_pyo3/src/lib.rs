@@ -1,15 +1,18 @@
-//! Bindings PyO3 sobre `dc_core`: el fan-out de N θ y el carry-over para
-//! Python. Aquí no hay lógica de detección: solo conversión de tipos y de
-//! errores; el detector es `dc_core` sin tocarlo.
+//! Bindings PyO3 sobre `dc_core` (el fan-out de N θ y el carry-over) y sobre
+//! `dc_descriptors` (el motor de agregación de L3) para Python. Aquí no hay lógica de
+//! detección ni de agregación: solo conversión de tipos, de buffers y de errores; los
+//! núcleos son `dc_core` y `dc_descriptors` sin tocarlos.
 //!
 //! El módulo Python se llama `dc_pyo3`. `extension-module` no está activo por
 //! defecto (ver `Cargo.toml`): lo activa maturin al construir el wheel.
 
 use pyo3::prelude::*;
 
+mod buffers;
 mod carry;
 mod columns;
 mod convert;
+mod descriptors;
 mod event;
 mod fanout;
 
@@ -22,6 +25,12 @@ fn dc_pyo3(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<carry::CarryOver>()?;
     m.add_class::<event::Event>()?;
     m.add_class::<columns::EventColumns>()?;
+    m.add_class::<descriptors::Engine>()?;
+    m.add_class::<descriptors::SealedColumn>()?;
+    m.add(
+        "DescriptorError",
+        m.py().get_type::<descriptors::DescriptorError>(),
+    )?;
     m.add("SCALE", dc_core::SCALE)?;
     m.add("PRICE_LIMIT", dc_core::PRICE_LIMIT)?;
     m.add("STATE_VERSION", dc_core::STATE_VERSION)?;

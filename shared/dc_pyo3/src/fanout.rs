@@ -1,11 +1,12 @@
 //! El fan-out de N θ de `dc_core` como clase Python.
 
+use crate::buffers::view;
 use crate::carry::CarryOver;
 use crate::columns::EventColumns;
 use crate::convert::value_error;
 use crate::event::Event;
 use dc_core::{Event as CoreEvent, FanOut as CoreFanOut, PRICE_LIMIT};
-use pyo3::buffer::{Element, PyBuffer};
+use pyo3::buffer::PyBuffer;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
@@ -231,31 +232,4 @@ fn decode_price(raw: &[u8]) -> Result<i64, &'static str> {
     } else {
         Err("fuera de rango")
     }
-}
-
-/// Un buffer contiguo de Python como slice, sin copia.
-///
-/// El slice vive lo que el `PyBuffer`, no el token de Python: así se puede
-/// usar con el GIL suelto.
-fn view<T: Element>(buffer: &PyBuffer<T>) -> PyResult<&[T]> {
-    if buffer.item_count() == 0 {
-        // Un buffer vacío puede tener puntero nulo: no hay nada que mirar.
-        return Ok(&[]);
-    }
-    let ptr = buffer.buf_ptr().cast::<T>();
-    if buffer.dimensions() != 1
-        || !buffer.is_c_contiguous()
-        || !ptr.is_aligned()
-        || buffer.item_size() != std::mem::size_of::<T>()
-    {
-        return Err(PyValueError::new_err(
-            "el buffer debe ser contiguo, alineado y de un solo eje",
-        ));
-    }
-    // SAFETY: el `PyBuffer` mantiene exportado el buffer (y a su dueño vivo)
-    // hasta que se suelta, y el préstamo no sobrevive a `buffer`. Los buffers
-    // de Arrow son inmutables, así que nadie los escribe desde Python mientras
-    // el GIL está suelto. El puntero es no nulo, está alineado y cubre
-    // `item_count` elementos contiguos de un eje (comprobado arriba).
-    Ok(unsafe { std::slice::from_raw_parts(ptr, buffer.item_count()) })
 }

@@ -13,10 +13,15 @@ name = "dc_core"
 version = "0.1.0"
 
 [[package]]
+name = "dc_descriptors"
+version = "0.1.0"
+
+[[package]]
 name = "dc_pyo3"
 version = "0.1.0"
 dependencies = [
  "dc_core",
+ "dc_descriptors",
  "pyo3",
 ]
 

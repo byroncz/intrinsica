@@ -138,9 +138,10 @@ class RowGroupFrames:
 
     `month` es el mes del archivo de L1 del que sale y `before_start` dice que es
     anterior al `start` del pase: lo recorre solo para completar eventos que cruzan.
-    `frame` son los cuatro arrays del row group, vistas sin copia del buffer de Arrow
-    con los tipos de L1; sus posiciones son las de `ThetaEvents.positions`. `thetas`
-    trae solo los θ con algún evento que toca el row group, en el orden pedido.
+    `ids` son los `agg_trade_id` de los ticks (vista de NumPy sin copia, crecientes): el
+    motor nativo los busca para ubicar las fronteras él mismo. `frame` son los cuatro
+    arrays del row group, vistas sin copia del buffer de Arrow con los tipos de L1; sus
+    posiciones son las de `ThetaEvents.positions`. `thetas` trae solo los θ con algún evento que toca el row group, en el orden pedido.
 
     El lector no retiene el row group: el consumidor debe soltar el elemento (y todo lo
     que sea vista de él) antes de pedir el siguiente, o conviven dos.
@@ -148,5 +149,6 @@ class RowGroupFrames:
 
     month: tuple[int, int]
     before_start: bool
+    ids: np.ndarray
     frame: Frame
     thetas: tuple[ThetaEvents, ...]
