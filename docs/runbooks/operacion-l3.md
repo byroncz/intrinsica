@@ -448,7 +448,7 @@ Python) y taparía lo que se quiere medir:
 
 De la última línea (`sonda lector: …`) se copian `pared_s`, `s_por_row_group`, `rss_pico_mib`,
 `arrow_pico_mib` y `readers=`/`pre_buffer=`; la línea `pico del pool de Arrow=…` dice si quedó bajo el
-umbral del lector, `(K + 1,5)` row groups (informativo); de `row groups de L1: …`, los decodificados. Los bytes salen por
+umbral del lector, `(K + 1,5)` row groups (informativo; no es una cota: con `readers` > 1 el peor caso es `1 + readers × 2,1`); de `row groups de L1: …`, los decodificados. Los bytes salen por
 metadatos (`bytes por metadatos`), porque `--sin-contar-io` no los mide. Con `readers` > 1 las
 fases por hilo no se reportan (los hilos se solapan): decide la pared. Metas
 ([TRD-L3 §10.3](../TRD/l3.md#103-sonda-del-lector-de-tramas--umbrales-de-aceptación-se-escriben-antes-de-medir)):

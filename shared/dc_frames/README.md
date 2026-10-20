@@ -197,10 +197,17 @@ columna (5 en L1) y cada página por separado y en serie, y un row group de 48 M
   el consumidor tiene en la mano, y nada más (K = 1). Con R > 1, mientras el consumidor
   trabaja con uno ya viajan los R siguientes: R en camino (los que terminaron esperan su
   turno decodificados) más el de la mano, o sea **K = R + 1 decodificados en RAM**. A eso se
-  suman los buffers de decodificación del que se lee, ≈ 1,1 row groups
-  (un `read_row_group` pica en ≈ 2,1 de 48 B por tick con un hilo). Medido en la prueba de
-  memoria: 2,1 con `readers=1`, 4,1 con 2 y 5,1 con 3. El umbral de la prueba es
-  `(K + 1.5) × row group`: 2,5, 4,5 y 5,5, con ≈ 0,4 de margen en los tres.
+  suman los buffers de decodificación de cada lectura en curso, ≈ 1,1 row groups (un
+  `read_row_group` pica en ≈ 2,1 de 48 B por tick con un hilo) y ≈ 0,3 de comprimido de
+  `pre_buffer`. Medido en la prueba de memoria: 2,1 con `readers=1`, 4,1 con 2 y 5,1 con 3.
+  El umbral de la prueba es `(K + 1.5) × row group`: 2,5, 4,5 y 5,5, con ≈ 0,4 de margen en
+  los tres.
+
+  **Eso es lo medido con el fixture, no una cota.** Hasta R `read_row_group` corren a la vez
+  (Arrow suelta el GIL), así que el peor caso es el de la mano más R lecturas solapadas:
+  `1 + R × 2,1` row groups (R = 2: ≈ 5,2; R = 3: ≈ 7,3), más el comprimido en vuelo. En el
+  fixture las decodificaciones duran milisegundos y casi no se solapan; con row groups de
+  48 MB sí pueden.
   Cada lector de más cuesta ≈ 48 MB de RSS.
 - `pre_buffer` y el pool de E/S valen también para `read_frames` y `frames_of`; `readers`
   no: ahí el lector sigue siendo secuencial.

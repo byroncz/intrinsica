@@ -621,7 +621,8 @@ def run(ns: argparse.Namespace) -> int:
     arrow_peak = pa.default_memory_pool().max_memory()
     if ns.modo == "row-groups":
         # TRD-L3 §10.3: (K + 1,5) row groups decodificados, con K = 1 si `readers` = 1 y
-        # `readers` + 1 si no. Es solo informativo: el pool de Arrow cuenta también los row
+        # `readers` + 1 si no. Es lo medido con el fixture, no una cota: con las `readers`
+        # decodificaciones solapadas el peor caso es 1 + `readers` × 2,1 row groups. Es solo informativo: el pool de Arrow cuenta también los row
         # groups de eventos de L2 de cada θ, que la prueba de memoria de dc_frames no tiene.
         held = 1 if ns.readers == 1 else ns.readers + 1
         reader_limit = (
