@@ -376,15 +376,15 @@ que agrega y escribe los θ de cada row group. Son opcionales y se dejan sin fij
 
 | Variable | Qué fija | Por defecto |
 |---|---|---|
-| `L3_THREADS` | Hilos del pool de θ. Entero ≥ 1; nunca se usan más que θ | Los vCPU efectivos del job (`cores` de `unit_timing`; 4 en `l3-backfill`) |
-| `L3_PREFETCH` | Row groups que el lector trae de ventaja, además del que está en proceso. Entero ≥ 0; 0 apaga el hilo lector | 1 (uno en proceso y uno listo) |
+| `L3_THREADS` | Hilos del pool de θ. Entero ≥ 1; nunca se usan más que θ | `ceil(3 × cores)` de `unit_timing`, nunca más que θ: 12 en `l3-backfill` (4 vCPU) y 24 a 8 vCPU. El stack `l3` no lo fija: el valor sigue a los vCPU |
+| `L3_PREFETCH` | Row groups que el lector trae de ventaja, además del que está en proceso. Entero ≥ 0; 0 apaga el hilo lector | 2 (uno en proceso y dos listos). El stack `l3` no lo fija |
 
 `L3_THREADS=1` con `L3_PREFETCH=0` es el flujo secuencial de antes, útil como línea base o
 si se sospecha de los hilos: el resultado (tablas y `content_hash`) es el mismo en cualquier
 combinación. Un valor que no sea un entero válido termina la corrida con código 2, sin
-escribir nada. Cada `prefetch` extra cuesta ≈ 48 MB de RSS (un row group de L1 decodificado).
+escribir nada. Cada `prefetch` extra cuesta ≈ 48 MB de RSS (un row group de L1 decodificado). Los mismos hilos hacen la compuerta de entrada y el linaje (`gate_s` y `lineage_s` son la pared de esa fase).
 
-`unit_timing` dice lo que se usó (`threads`, `prefetch`). Con hilos, `aggregate_s` y `write_s`
+`unit_timing` dice lo que se usó (`threads`, `prefetch`); para sobrescribir los valores por defecto hay que lanzar desde Cloud Shell, como en el ejemplo de abajo. Con hilos, `aggregate_s` y `write_s`
 son **suma sobre los hilos**: pueden pasar de `wall_s`, y eso es lo esperado. Para comparar
 dos corridas usa `wall_s`, `cpu_s` y `cpu_utilization`.
 
@@ -400,11 +400,13 @@ gcloud run jobs execute l3-backfill \
   --wait
 ```
 
-La corrida T3 de ITSC-357 (los valores por defecto, 4 hilos y prefetch 1) se lanza con
+La corrida T3d de ITSC-360 (los valores por defecto: 12 hilos y prefetch 2 a 4 vCPU) se lanza con
 *Actions → Run job*, `l3-backfill`, `from = to = 2021-01` y `force`; el resultado se
-registra como comentario en ITSC-357 y el cuadro de
-[TRD-L3 §10.2](../TRD/l3.md#102-dimensionamiento--hipótesis-de-partida-y-primera-medición)
-lo completa ITSC-352 (T5). Si no cumple la condición para conservar los valores por
+registra como comentario en ITSC-360 y en el cuadro de
+[TRD-L3 §10.2](../TRD/l3.md#102-dimensionamiento--hipótesis-de-partida-y-primera-medición).
+La prueba de la espera al lector se lanza desde Cloud Shell con el mismo comando de arriba y
+`--update-env-vars L3_PREFETCH=3` (sin `L3_THREADS`); se acepta si `rss_peak_mib` ≤ 2 048.
+Si la corrida no cumple la condición para conservar los valores por
 defecto (50 `content_hash` idénticos, `rss_peak_mib` ≤ 2 048 y pared ≥ 15 % menor que T1),
 el stack `l3` fija `L3_THREADS=1` y `L3_PREFETCH=0` por Terraform, sin revertir código.
 Un perfil con hilos (`L3_PROFILE=1`) ve todos los hilos y sus tiempos son de hilo, no de pared.

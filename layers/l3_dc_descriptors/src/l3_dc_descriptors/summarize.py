@@ -11,19 +11,21 @@ en un buffer por columna y lo entrega al escritor de familias.
 Dos tipos de hilo, sin tocar la aritmética (ADR-L3-15): un lector que trae y decodifica
 el siguiente row group mientras se procesa el actual (`_ReadAhead`, `prefetch` row groups
 de ventaja) y un pool que reparte los θ de cada row group, cada uno escribiendo su
-archivo. El hilo principal espera los θ del row group antes de abrir el siguiente: el
+archivo. El mismo pool hace la compuerta de entrada, antes del primer row group, y la
+unidad (`pipeline`) crea otro del mismo tamaño para el linaje, después. El hilo principal espera los θ del row group antes de abrir el siguiente: el
 estado de un θ es secuencial entre row groups (el evento abierto en la frontera), así que
 cada `_Lane` corre en un solo hilo a la vez y en orden de row group. Con `threads=1` y
 `prefetch=0` el flujo es el secuencial de siempre.
 """
 
 import contextvars
+import math
 import queue
 import threading
 import time
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import ThreadPoolExecutor, wait
-from contextlib import ExitStack, closing
+from contextlib import AbstractContextManager, ExitStack, closing, nullcontext
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
@@ -59,8 +61,12 @@ from l3_dc_descriptors.timing import Phases
 DEFAULT_KEY = ("binance", "spot", "BTCUSDT")
 C_TICKS, OS_TICKS = COLUMN["c_ticks"], COLUMN["os_ticks"]
 _THETA_SCALE = Decimal("1e-8")
-# Row groups que el lector trae de ventaja: uno en proceso y uno listo.
-DEFAULT_PREFETCH = 1
+# Row groups que el lector trae de ventaja: uno en proceso y dos listos. Con 1 el hilo
+# principal aún esperó 43 s al lector en 2021-01 (ITSC-360).
+DEFAULT_PREFETCH = 2
+# Hilos por vCPU efectivo: la espera de red y de disco de cada θ se solapa con el cómputo
+# de otros. De 12 a 24 hilos a 4 vCPU la pared bajó 1 % y la RSS subió 130 MiB (ITSC-360).
+THREADS_PER_CORE = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -167,6 +173,22 @@ class _Lane:
             self.write_s += time.perf_counter() - started
 
 
+def ordered[T, R](
+    pool: ThreadPoolExecutor | None, fn: Callable[[T], R], items: Iterable[T]
+) -> list[R]:
+    """`fn` de cada item, en el pool y devuelto en el orden de `items`.
+
+    Sin `pool`, en serie en este hilo y se detiene en el primer error. Con `pool`, espera
+    a todas las tareas y relanza el error del primer item que falló en el orden de
+    `items`: el mismo que lanzaría el bucle en serie.
+    """
+    if pool is None:
+        return [fn(item) for item in items]
+    futures = [pool.submit(fn, item) for item in items]
+    wait(futures)
+    return [future.result() for future in futures]
+
+
 def _consume(
     rg: RowGroupFrames,
     lanes: dict[Decimal, _Lane],
@@ -183,14 +205,7 @@ def _consume(
     started = time.perf_counter()
     agg = Prefixes(rg.frame)
     phases.aggregate_s += time.perf_counter() - started
-    if pool is None:
-        for events in rg.thetas:
-            lanes[events.theta].add(agg, events)
-        return
-    futures = [pool.submit(lanes[e.theta].add, agg, e) for e in rg.thetas]
-    wait(futures)
-    for future in futures:
-        future.result()
+    ordered(pool, lambda events: lanes[events.theta].add(agg, events), rg.thetas)
 
 
 class _Failed:
@@ -288,10 +303,35 @@ def _timed_next(row_groups: Iterator[RowGroupFrames], phases: Phases):
 
 
 def _workers(requested: int | None, thetas: int) -> int:
-    """Hilos del pool: lo pedido o, por defecto, los vCPU efectivos; nunca más que θ."""
+    """Hilos del pool: lo pedido o, por defecto, `THREADS_PER_CORE` por vCPU efectivo
+    (redondeado hacia arriba); nunca más que θ.
+    """
     if requested is None:
-        requested = max(1, int(cpu_limit().cores))
+        requested = max(1, math.ceil(THREADS_PER_CORE * cpu_limit().cores))
     return min(requested, thetas)
+
+
+def theta_pool(threads: int) -> AbstractContextManager[ThreadPoolExecutor | None]:
+    """El pool de θ de `threads` hilos para un `with`, o `None` (todo en serie) con uno."""
+    if threads <= 1:
+        return nullcontext()
+    return ThreadPoolExecutor(threads, thread_name_prefix="l3-theta")
+
+
+def _gate_theta(
+    l2_root: str,
+    key: tuple[str, str, str],
+    month: Month,
+    series_start: Month,
+    text: str,
+) -> tuple[CarryOver, int]:
+    """La compuerta de entrada de un θ (§9.2): su carry-over y la dirección del mes anterior."""
+    require(l2_path(l2_root, key, text, month), text, month, EVENTS)
+    carry = read_carry_over(l2_root, key, text, month)
+    if month == series_start:
+        return carry, 0
+    before = month_of(month_ordinal(month) - 1)
+    return carry, read_carry_over(l2_root, key, text, before).direction
 
 
 def _theta(value: Decimal | str) -> Decimal:
@@ -335,8 +375,8 @@ def summarize_month(
     estar en meses anteriores de L1, que el lector relee. `series_start` es el primer mes
     de la serie: el único cuyo mes anterior no tiene carry-over de L2.
 
-    `threads` es el tamaño del pool que agrega los θ de cada row group (por defecto los
-    vCPU efectivos, nunca más que θ) y `prefetch`, cuántos row groups trae de ventaja el
+    `threads` es el tamaño del pool que comprueba la entrada y agrega los θ de cada row
+    group (por defecto `THREADS_PER_CORE` × vCPU efectivos, nunca más que θ) y `prefetch`, cuántos row groups trae de ventaja el
     lector (por defecto `DEFAULT_PREFETCH`; 0 lo deja en el hilo principal). Con `threads=1`
     y `prefetch=0` el flujo es el secuencial; el resultado no depende de ellos.
 
@@ -372,17 +412,15 @@ def summarize_month(
     phases.threads, phases.prefetch = threads, prefetch
     texts = {theta: f"{theta:.8f}" for theta in values}
 
-    # Compuerta de entrada (§9.2), antes de abrir ningún escritor.
-    carries: dict[Decimal, tuple[CarryOver, int]] = {}
-    for theta, text in texts.items():
-        require(l2_path(l2_root, key, text, month), text, month, EVENTS)
-        carry = read_carry_over(l2_root, key, text, month)
-        if month == series_start:
-            previous = 0
-        else:
-            before = month_of(month_ordinal(month) - 1)
-            previous = read_carry_over(l2_root, key, text, before).direction
-        carries[theta] = (carry, previous)
+    # Compuerta de entrada (§9.2), antes de abrir ningún escritor: los θ se comprueban en
+    # el pool y, si alguno falla, se lanza el primero en el orden de `texts`.
+    with theta_pool(threads) as pool:
+        gated = ordered(
+            pool,
+            lambda text: _gate_theta(l2_root, key, month, series_start, text),
+            texts.values(),
+        )
+    carries = dict(zip(texts, gated, strict=True))
     phases.gate_s += time.perf_counter() - started
 
     with ExitStack() as stack:
@@ -419,13 +457,7 @@ def summarize_month(
                     if prefetch
                     else row_groups
                 )
-                pool = (
-                    workers.enter_context(
-                        ThreadPoolExecutor(threads, thread_name_prefix="l3-theta")
-                    )
-                    if threads > 1
-                    else None
-                )
+                pool = workers.enter_context(theta_pool(threads))
                 while (rg := _timed_next(source, phases)) is not None:
                     _consume(rg, lanes, pool, phases)
                     del rg  # el siguiente row group no convive con este

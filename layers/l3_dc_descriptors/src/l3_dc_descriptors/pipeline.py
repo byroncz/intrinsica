@@ -29,7 +29,12 @@ from l3_dc_descriptors.frontier import theta_text
 from l3_dc_descriptors.l2 import CARRY_OVER
 from l3_dc_descriptors.landing import missing_input
 from l3_dc_descriptors.profiling import top_functions
-from l3_dc_descriptors.summarize import ThetaResult, summarize_month
+from l3_dc_descriptors.summarize import (
+    ThetaResult,
+    ordered,
+    summarize_month,
+    theta_pool,
+)
 from l3_dc_descriptors.timing import (
     Phases,
     RowGroupCount,
@@ -138,10 +143,11 @@ def _process_unit(unit: Unit, ctx: RunContext, thetas: list[int]) -> Result:
     ) as error:  # L1 o L2 fuera de contrato: sin hallazgo propio (§9.3)
         return Result((), error=str(error))
 
+    thetas_written = [_theta(value) for value in written]
+    lineage = _lineage(ctx, unit, thetas_written, phases)
     summaries, stats = [], []
-    for value, result in written.items():
-        theta = _theta(value)
-        summaries.append((theta, result, _lineage(ctx, unit, theta, phases)))
+    for theta, result in zip(thetas_written, written.values(), strict=True):
+        summaries.append((theta, result, lineage[theta]))
         stats.append(_stats(theta, result))
     wall_s = time.perf_counter() - started
     cpu_user_s, cpu_system_s = (
@@ -196,14 +202,25 @@ def _stats(theta: int, result: ThetaResult) -> ThetaStats:
 
 
 def _lineage(
-    ctx: RunContext, unit: Unit, theta: int, phases: Phases
-) -> tuple[str, str]:
-    """Los `content_hash` de las entradas de L2 que usó el θ: `events` y `carry_over`."""
+    ctx: RunContext, unit: Unit, thetas: list[int], phases: Phases
+) -> dict[int, tuple[str, str]]:
+    """Los `content_hash` de las entradas de L2 que usó cada θ: `events` y `carry_over`.
+
+    Los `file_hash` de todos los archivos corren en un pool del tamaño del de θ. `lineage_s`
+    es la pared de la fase: lo que el hilo principal esperó, no la suma de los hashes.
+    """
     started = time.perf_counter()
-    text = theta_text(theta)
-    events = file_hash(l2_path(ctx.events_root, unit.key, text, unit.at))
-    carry = file_hash(
-        partition_path(ctx.events_root, unit.key, text, unit.at, CARRY_OVER)
-    )
+    paths = [
+        path
+        for theta in thetas
+        for path in (
+            l2_path(ctx.events_root, unit.key, theta_text(theta), unit.at),
+            partition_path(
+                ctx.events_root, unit.key, theta_text(theta), unit.at, CARRY_OVER
+            ),
+        )
+    ]
+    with theta_pool(phases.threads) as pool:
+        hashes = ordered(pool, file_hash, paths)
     phases.lineage_s += time.perf_counter() - started
-    return events, carry
+    return {theta: (hashes[2 * i], hashes[2 * i + 1]) for i, theta in enumerate(thetas)}

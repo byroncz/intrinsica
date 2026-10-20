@@ -631,10 +631,10 @@ mismo que traen las excepciones del resumidor, de las que sale la mayoría de lo
   corrida y el linaje contra L2: si L2 se reprocesa y cambia, estos hashes ya no coinciden
   con los suyos y el mes está obsoleto (`--force --from <mes> --thetas <θ>`).
 - **`unit_timing`** (`info`, `pass`): uno por unidad (mes), no por θ. `metric_value` es la
-  pared (`wall_s`). `details` lleva el tiempo por fase: `gate_s` (compuerta de entrada),
+  pared (`wall_s`). `details` lleva el tiempo por fase: `gate_s` (compuerta de entrada, pared de la fase en el pool de θ),
   `read_s` (lectura y decodificación: lo que el hilo principal esperó al lector por cada
   row group), `aggregate_s`, `write_s` (armar y escribir los row groups de salida y
-  publicar), `reconcile_s` (conciliación) y `lineage_s` (hash de las entradas de L2). Con
+  publicar), `reconcile_s` (conciliación) y `lineage_s` (hash de las entradas de L2, pared de la fase en el pool de θ). Con
   `threads = 1` y `prefetch = 0` todas son pared y, con `other_s`, suman `wall_s`; con
   hilos, `aggregate_s` y `write_s` son **suma sobre los hilos** y pueden pasar de
   `wall_s`. `threads` y `prefetch` son los hilos del pool de θ y los row groups de

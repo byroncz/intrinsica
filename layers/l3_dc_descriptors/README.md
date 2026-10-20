@@ -34,9 +34,11 @@ que ningún θ necesita se salta sin leer L1.
 
 Entorno: `L3_LANDING_ROOT` (L1), `L3_EVENTS_ROOT` (L2), `L3_SUMMARIES_ROOT` (L3) y
 `L3_DQ_ROOT` (lago de hallazgos), además de `L3_SERIES_START` y `L3_THETAS_URI`. Opcionales:
-`L3_THREADS` (hilos del pool de θ; por defecto los vCPU efectivos, nunca más que θ; entero ≥ 1),
-`L3_PREFETCH` (row groups que el lector trae de ventaja; por defecto 1, 0 lo apaga; entero ≥ 0)
-y `L3_PROFILE=1`. Un valor que no sea un entero válido es código 2.
+`L3_THREADS` (hilos del pool de θ; por defecto `ceil(3 × vCPU efectivos)`, nunca más que θ: 12 a
+4 vCPU y 24 a 8; entero ≥ 1), `L3_PREFETCH` (row groups que el lector trae de ventaja; por defecto 2,
+0 lo apaga; entero ≥ 0) y `L3_PROFILE=1`. El stack `l3` no fija ninguna de las dos, así que el valor
+sigue a los vCPU del job; para sobrescribirlas en una corrida, ver el
+[runbook](../../docs/runbooks/operacion-l3.md#hilos-de-la-unidad-l3_threads-y-l3_prefetch). Un valor que no sea un entero válido es código 2.
 `CLOUD_RUN_TASK_INDEX` distinto de 0 es código 2. `IMAGE_VERSION` la fija la imagen.
 
 **Códigos de salida** ([§8.4](../../docs/TRD/l3.md#84-códigos-de-salida)): 0 éxito; 1 fallo
@@ -71,7 +73,9 @@ variable no cambia nada. Cómo lanzarlo: [runbook](../../docs/runbooks/operacion
 La CLI procesa los meses en serie, pero cada mes usa hilos (ADR-L3-15, [TRD-L3 §8.1](../../docs/TRD/l3.md#81-núcleo-del-resumidor-común-a-los-dos-modos)):
 un hilo lector trae y decodifica el siguiente row group mientras se procesa el actual
 (`L3_PREFETCH`) y un pool de `L3_THREADS` hilos reparte los θ de cada row group, cada uno
-escribiendo su archivo. El hilo principal espera los θ del row group antes de tomar el siguiente,
+escribiendo su archivo. El mismo pool hace la compuerta de entrada de L2 antes de abrir ningún escritor y,
+después del último row group, un pool del mismo tamaño hashea los archivos de L2 del linaje; ambos
+conservan el orden de los θ y el primer error. El hilo principal espera los θ del row group antes de tomar el siguiente,
 así que cada θ corre en un solo hilo a la vez y en orden. Con `L3_THREADS=1` y `L3_PREFETCH=0` el
 flujo es el secuencial de antes y el resultado es idéntico en cualquier combinación
 (`tests/test_l3_parallel.py`). Qué sostiene esto:
