@@ -98,7 +98,8 @@ en el README del crate.
 
 ```python
 engine = dc_pyo3.Engine(thetas, schema, row_groups, threads=None)
-engine.set_boundaries(theta, batches)  # una vez por θ, antes del primer push
+engine.push_boundaries(theta, batch)  # por lotes, por delante de los row groups
+engine.needed(theta)  # primer evento del θ sin cerrar
 engine.push(row_group_id, rows, ids, time, price, quantity, sold, before_month)
 engine.locate(theta, rows, ids, time, prev_high)  # solo para probar: no empuja
 while (sealed := engine.pop_sealed()) is not None:
@@ -119,11 +120,14 @@ engine.close()
   Buffer de Arrow, Array.offset)`. El motor retiene el `memoryview` hasta terminar el row
   group (`inflight()` baja) y lo suelta sin tomar el GIL: PyO3 difiere el `decref`. Los
   buffers deben ser inmutables, como los de Arrow.
-- **`set_boundaries(theta, batches)`**: una vez por θ, antes del primer `push`, con los row
-  groups de `events.parquet` de L2 del mes en orden; cada uno es cualquier objeto con los
-  atributos de `EventBatch` (ver `.pyi`; la capa usa un `NamedTuple`) y sus columnas van como
-  `(memoryview de bytes del buffer, offset)`, **sin copia** (el motor las retiene hasta
-  cerrarse: son O(eventos del mes), ADR-L3-16). El motor ubica solo las fronteras: busca los
+- **`push_boundaries(theta, batch)`**: un lote de filas consecutivas de `events.parquet` de
+  L2 del θ, detrás de los anteriores, antes o después de empezar los `push`; es cualquier
+  objeto con los atributos de `EventBatch` (ver `.pyi`; la capa usa un `NamedTuple`) y sus
+  columnas van como `(memoryview de bytes del buffer, offset)`, **sin copia**. El lote de un
+  evento debe llegar antes que el row group que lo toca: si no, `push` lanza
+  `DescriptorError` de `kind` `input` (no espera). El motor suelta los `memoryview` del lote
+  en cuanto sus eventos y los anteriores cerraron; `needed(theta)` es el primer evento del θ
+  que no cerró, para leer L2 por delante y no más (ADR-L3-16). El motor ubica solo las fronteras: busca los
   ids de `R`, `C` y `E` en `ids` con las comprobaciones del lector (frontera dentro del rango
   que no es un tick, anterior no vista y `confirm_time` del tick `C`), y falla con
   `DescriptorError` de `kind` `boundary` o `confirm_time`. `before_month` de `push` dice que

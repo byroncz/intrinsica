@@ -1,9 +1,10 @@
-//! Lo que el motor recibe: por mes y θ, las columnas de L2 de sus eventos (una vez) y, por
-//! row group, las columnas de L1 (buffers de Arrow, sin copia).
+//! Lo que el motor recibe: por θ, las columnas de L2 de sus eventos en lotes, en orden, y,
+//! por row group, las columnas de L1 (buffers de Arrow, sin copia).
 //!
 //! El motor mismo calcula dónde cae cada frontera de un evento en un row group: nadie le
 //! entrega posiciones (ADR-L3-16).
 
+use std::collections::VecDeque;
 use std::fmt;
 
 /// Un buffer de Arrow con su desfase: `offset` es el índice del primer elemento (en
@@ -184,7 +185,8 @@ pub struct EventIn {
     pub extreme_price: i64,
 }
 
-/// Un row group de `events.parquet` de L2 de un θ, en el layout de Arrow: `reference`,
+/// Un lote de filas consecutivas de `events.parquet` de L2 de un θ (un row group o un tramo
+/// de uno), en el layout de Arrow: `reference`,
 /// `confirm`, `confirm_time` y `extreme` `int64`, `direction` `int8` y los dos precios
 /// `decimal128` (16 bytes, el entero sin escalar, que cabe en `i64` por contrato de L2).
 #[derive(Debug)]
@@ -235,6 +237,11 @@ impl<B: AsRef<[u8]>> EventBatch<B> {
         })
     }
 
+    /// Eventos del lote.
+    pub fn rows(&self) -> usize {
+        self.rows
+    }
+
     fn price(region: &Region<B>, i: usize, what: &str) -> Result<i64, InputError> {
         let at = (region.offset + i) * 16;
         let raw = &region.buffer.as_ref()[at..at + 16];
@@ -256,51 +263,91 @@ impl<B: AsRef<[u8]>> EventBatch<B> {
     }
 }
 
-/// Los eventos de un θ en el mes, en el orden de `events.parquet`: sus row groups de L2
-/// uno tras otro, sin copiar. El evento `i` es la fila `i` del esqueleto.
+/// Los eventos de un θ que el motor tiene en mano: los lotes de L2 que llegaron con
+/// `push_boundaries`, en el orden de `events.parquet`, menos los que ya soltó. El evento
+/// `i` es la fila `i` del esqueleto, sea cual sea el lote que lo trajo.
 ///
-/// Cumplen `R < C ≤ E` y `E_i ≤ R_{i+1}` (lo comprueba [`Boundaries::new`]), así que `R` y
-/// `E` crecen y las búsquedas binarias valen: qué eventos toca un row group se decide con
-/// los ids, sin estado entre row groups.
+/// Cumplen `R < C ≤ E` y `E_i ≤ R_{i+1}` (lo comprueba [`Boundaries::push`], también entre
+/// un lote y el anterior), así que `R` y `E` crecen y las búsquedas binarias valen: qué
+/// eventos toca un row group se decide con los ids, sin estado entre row groups.
+///
+/// Solo se sueltan lotes del frente ([`Boundaries::release`]) y solo cuando sus eventos y
+/// los de los lotes anteriores cerraron. Un row group sin procesar no toca ningún evento
+/// cerrado (el evento cierra cuando llegaron los parciales de todos los row groups que
+/// toca), así que buscar en `[base, len)` da lo mismo que buscar en todos.
 #[derive(Debug)]
 pub struct Boundaries<B> {
-    batches: Vec<EventBatch<B>>,
-    /// `starts[b]` es el índice global de la primera fila del lote `b`; el último es el total.
-    starts: Vec<usize>,
+    lots: VecDeque<EventBatch<B>>,
+    /// `starts[k]` es el índice global de la primera fila de `lots[k]`; el último es el
+    /// total recibido.
+    starts: VecDeque<usize>,
+    first_reference: Option<i64>,
+    last_reference: Option<i64>,
+    last_extreme: Option<i64>,
+}
+
+impl<B> Default for Boundaries<B> {
+    fn default() -> Self {
+        Self {
+            lots: VecDeque::new(),
+            starts: VecDeque::from([0]),
+            first_reference: None,
+            last_reference: None,
+            last_extreme: None,
+        }
+    }
 }
 
 impl<B: AsRef<[u8]>> Boundaries<B> {
-    /// Valida el orden de los eventos y que los precios quepan en `i64`.
-    pub fn new(batches: Vec<EventBatch<B>>) -> Result<Self, InputError> {
-        let batches: Vec<_> = batches.into_iter().filter(|b| b.rows > 0).collect();
-        let mut starts = vec![0];
-        let mut previous: Option<i64> = None;
-        for batch in &batches {
-            for i in 0..batch.rows {
-                let event = batch.event(i)?;
-                let index = starts[starts.len() - 1] + i;
-                if !(event.reference < event.confirm && event.confirm <= event.extreme) {
-                    return Err(InputError(format!(
-                        "el evento {index} no cumple R < C <= E ({}, {}, {})",
-                        event.reference, event.confirm, event.extreme
-                    )));
-                }
-                if previous.is_some_and(|extreme| event.reference < extreme) {
-                    return Err(InputError(format!(
-                        "el evento {index} empieza en la referencia {}, antes del extremo {} \
-                         del anterior",
-                        event.reference,
-                        previous.unwrap_or_default()
-                    )));
-                }
-                previous = Some(event.extreme);
-            }
-            starts.push(starts[starts.len() - 1] + batch.rows);
+    /// Agrega un lote detrás de los anteriores. Valida el orden de sus eventos, también
+    /// contra el último recibido, y que los precios quepan en `i64`; si falla, no agrega
+    /// nada. Un lote vacío no cambia nada.
+    pub fn push(&mut self, batch: EventBatch<B>) -> Result<(), InputError> {
+        if batch.rows == 0 {
+            return Ok(());
         }
-        Ok(Self { batches, starts })
+        let base = self.len();
+        let mut previous = self.last_extreme;
+        for i in 0..batch.rows {
+            let event = batch.event(i)?;
+            let index = base + i;
+            if !(event.reference < event.confirm && event.confirm <= event.extreme) {
+                return Err(InputError(format!(
+                    "el evento {index} no cumple R < C <= E ({}, {}, {})",
+                    event.reference, event.confirm, event.extreme
+                )));
+            }
+            if previous.is_some_and(|extreme| event.reference < extreme) {
+                return Err(InputError(format!(
+                    "el evento {index} empieza en la referencia {}, antes del extremo {} \
+                     del anterior",
+                    event.reference,
+                    previous.unwrap_or_default()
+                )));
+            }
+            previous = Some(event.extreme);
+        }
+        self.first_reference
+            .get_or_insert(read_i64(&batch.reference, 0));
+        self.last_reference = Some(read_i64(&batch.reference, batch.rows - 1));
+        self.last_extreme = previous;
+        self.starts.push_back(base + batch.rows);
+        self.lots.push_back(batch);
+        Ok(())
     }
 
-    /// Eventos del θ en el mes.
+    /// Saca los lotes del frente cuyos eventos son todos anteriores a `closed` y los
+    /// devuelve, para que el llamador suelte sus buffers fuera de su lock.
+    pub fn release(&mut self, closed: usize) -> Vec<EventBatch<B>> {
+        let mut released = Vec::new();
+        while self.starts.len() > 1 && self.starts[1] <= closed {
+            self.starts.pop_front();
+            released.extend(self.lots.pop_front());
+        }
+        released
+    }
+
+    /// Eventos recibidos del θ, en mano o ya soltados.
     pub fn len(&self) -> usize {
         self.starts[self.starts.len() - 1]
     }
@@ -309,15 +356,41 @@ impl<B: AsRef<[u8]>> Boundaries<B> {
         self.len() == 0
     }
 
-    fn batch_of(&self, index: usize) -> (&EventBatch<B>, usize) {
-        let b = self.starts.partition_point(|&s| s <= index) - 1;
-        (&self.batches[b], index - self.starts[b])
+    /// El primer evento en mano: los anteriores ya se soltaron.
+    pub fn base(&self) -> usize {
+        self.starts[0]
     }
 
-    /// La fila `index` (0 ≤ index < len).
+    /// Lotes en mano.
+    pub fn lots(&self) -> usize {
+        self.lots.len()
+    }
+
+    /// La `reference_agg_trade_id` del primer evento recibido.
+    pub fn first_reference(&self) -> Option<i64> {
+        self.first_reference
+    }
+
+    /// La `reference_agg_trade_id` del último evento recibido.
+    pub fn last_reference(&self) -> Option<i64> {
+        self.last_reference
+    }
+
+    /// El `extreme_agg_trade_id` del último evento recibido.
+    pub fn last_extreme(&self) -> Option<i64> {
+        self.last_extreme
+    }
+
+    fn batch_of(&self, index: usize) -> (&EventBatch<B>, usize) {
+        debug_assert!(self.base() <= index && index < self.len());
+        let b = self.starts.partition_point(|&s| s <= index) - 1;
+        (&self.lots[b], index - self.starts[b])
+    }
+
+    /// La fila `index` (base ≤ index < len).
     pub(crate) fn event(&self, index: usize) -> EventIn {
         let (batch, i) = self.batch_of(index);
-        batch.event(i).expect("validado en Boundaries::new")
+        batch.event(i).expect("validado en Boundaries::push")
     }
 
     /// La `reference_agg_trade_id` del evento `index`.
@@ -333,20 +406,22 @@ impl<B: AsRef<[u8]>> Boundaries<B> {
     }
 
     /// Cuántos eventos tienen `E ≤ x`, que son los primeros: los que ya cerraron en un
-    /// row group cuyo último id es `x`.
+    /// row group cuyo último id es `x`. Busca entre los que están en mano: nunca da menos
+    /// que `base`.
     pub(crate) fn extremes_up_to(&self, x: i64) -> usize {
         self.search(|i| self.extreme(i) <= x)
     }
 
     /// Cuántos eventos tienen `R ≤ x`: los que empiezan en un row group cuyo último id es
-    /// `x`, o antes.
+    /// `x`, o antes. Como `extremes_up_to`, nunca da menos que `base`.
     pub(crate) fn references_up_to(&self, x: i64) -> usize {
         self.search(|i| self.reference(i) <= x)
     }
 
-    /// El primer índice donde `holds` deja de cumplirse (cumple en un prefijo).
+    /// El primer índice de `[base, len)` donde `holds` deja de cumplirse (cumple en un
+    /// prefijo).
     fn search(&self, holds: impl Fn(usize) -> bool) -> usize {
-        let (mut lo, mut hi) = (0, self.len());
+        let (mut lo, mut hi) = (self.base(), self.len());
         while lo < hi {
             let mid = lo + (hi - lo) / 2;
             if holds(mid) {

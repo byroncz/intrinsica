@@ -115,18 +115,21 @@ paralelo: `rss_peak_mib` y `cpu_throttled_s` son del proceso.
 ## Motor nativo de agregación (ITSC-358)
 
 `native.py` adapta el motor de Rust (`shared/dc_descriptors`, expuesto por `dc_pyo3.Engine`) a
-lo que entrega el lector: `set_boundaries` entrega una vez por θ las columnas de L2 de sus
-eventos (Arrow, sin copia; el índice de un evento es su casilla), `push` empuja los buffers de
+lo que entrega el lector: `push_boundaries` entrega por lotes las columnas de L2 de los eventos
+de cada θ (Arrow, sin copia; el índice de un evento es su casilla) y `BoundaryFeed` los entrega
+por delante del row group que los toca, y no más (el motor suelta cada lote al cerrarse sus
+eventos), `push` empuja los buffers de
 Arrow de cada row group sin copia, con la columna `agg_trade_id`, y el motor calcula él mismo
 dónde cae cada frontera (ADR-L3-16), `to_batch` envuelve en Arrow los row groups de salida que el motor sella y
 `to_summarize_error` convierte sus errores en las excepciones tipadas de `errors`, con el
 mismo `check_type` y los mismos `details`. **Todavía no está en el flujo de `summarize_month`**:
 lo conecta el orquestador (hija 3 de E6). Mientras tanto, `rowgroup.py` es la referencia contra
-la que `tests/test_l3_native.py` comprueba que el motor, con 1 y 4 hilos y en cualquier orden
-de `push`, da las mismas tablas, el mismo `content_hash` y la misma conciliación, y
-`tests/test_l3_native_memory.py` que la RSS que el motor añade no crece con los ticks del mes
-(las fronteras de L2 de los eventos sí son O(eventos) y quedan en la línea base; ver el costo en
-ADR-L3-16). `test_l3_native.py` compara además las posiciones del motor con las de
+la que `tests/test_l3_native.py` comprueba que el motor, con 1 y 4 hilos, en cualquier orden
+de `push` y con las fronteras en lotes de pocos eventos intercalados con los `push`, da las
+mismas tablas, el mismo `content_hash` y la misma conciliación, y
+`tests/test_l3_native_memory.py` que la RSS que el motor añade no crece con los ticks del mes.
+`test_l3_native.py` comprueba también que el motor suelta un lote de fronteras al cerrarse sus
+eventos, y compara además las posiciones del motor con las de
 `read_row_groups`, row group a row group. El diseño y por qué
 es nativo están en [TRD-L3 ADR-L3-16](../../docs/TRD/l3.md).
 

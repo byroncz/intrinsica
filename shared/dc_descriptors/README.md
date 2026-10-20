@@ -11,13 +11,20 @@ tiene `pyproject.toml`, así que el `pyproject.toml` raíz lo excluye del worksp
 ## Modelo
 
 ```text
-set_boundaries(θ)  ──► fronteras de L2 del mes (una vez por θ, sin copia)
+push_boundaries(θ, lote) ──► fronteras de L2 en mano (por lotes, en orden, sin copia)
 push(row group k) ──► cola de ítems (θ₀,k) (θ₁,k) … (θ₄₉,k)  ──► hilos nativos
                                                                   │ fetch_add (índice atómico)
                       casilla del evento i de θ ◄─ fila cerrada ──┤
+                      marca de cerrados de θ (needed) ──► suelta los lotes ya cerrados
                       almacén de parciales de θ ◄─ eventos que cruzan row groups
                       row group de salida lleno ──► sellado ──► pop_sealed()
 ```
+
+- **Fronteras.** `push_boundaries` agrega un lote de filas de L2 de un θ detrás de los
+  anteriores, antes o después de empezar los `push`. El lote de un evento debe llegar antes
+  que el row group que lo toca: en cada θ, o llegaron todos los eventos del esqueleto o el
+  último entregado empieza después del último id del row group. Si no, `push` falla con
+  `Input` en vez de esperar.
 
 - **Ítem.** `(row group, θ)`: ubica las fronteras de los eventos de ese θ que tocan el row
   group y agrega sus fases. `push` encola los ítems; los hilos los toman de la cola, ordenada por row
@@ -56,10 +63,14 @@ push(row group k) ──► cola de ítems (θ₀,k) (θ₁,k) … (θ₄₉,k) 
   un bit de la salida.
 - **Memoria.** Los ticks no se copian: `Engine<B>` es genérico en el dueño `B` de los
   buffers (`AsRef<[u8]>`) y lo suelta cuando los ítems del row group terminan. Las filas
-  de L2 de los eventos tampoco se copian, pero el motor las retiene todo el mes: son
-  O(eventos), unos 65 bytes por evento (`R`, `C`, `confirm_time` y `E`, `direction` y dos
-  `decimal128`) y no O(row groups en vuelo). Los buffers de salida se reservan al
-  llegar la primera fila de su row group y se entregan al sellar.
+  de L2 de los eventos tampoco se copian, y el motor suelta cada lote (su `B`) en cuanto
+  sus eventos y los de los lotes anteriores cerraron: las filas que un ítem escribe en
+  sus casillas avanzan, en el mismo paso, la marca de cerrados del θ (`needed`). Solo se
+  sueltan lotes del frente, porque un row group sin procesar no toca ningún evento cerrado;
+  así las búsquedas sobre los eventos en mano dan lo mismo que sobre todos. Lo retenido va
+  de la marca al último lote entregado: O(lote), no O(eventos del mes) (unos 65 bytes por
+  evento: `R`, `C`, `confirm_time` y `E`, `direction` y dos `decimal128`). Los buffers de
+  salida se reservan al llegar la primera fila de su row group y se entregan al sellar.
 
 ## API
 
@@ -69,10 +80,12 @@ let engine = Engine::<B>::new(Config {
     threads,     // hilos nativos
     row_groups,  // por θ, las filas de cada row group de salida
 })?;
-// Una vez por θ, antes del primer push: sus row groups de events.parquet de L2, sin copiar.
-engine.set_boundaries(theta, vec![EventBatch::new(rows, reference, confirm, confirm_time,
-                                                   extreme, direction, confirm_price,
-                                                   extreme_price)?, …])?;
+// Por lotes, en orden y sin copiar: filas consecutivas de events.parquet de L2 del θ, por
+// delante del row group que las toca (antes o después de empezar los push).
+engine.push_boundaries(theta, EventBatch::new(rows, reference, confirm, confirm_time,
+                                              extreme, direction, confirm_price,
+                                              extreme_price)?)?;
+engine.needed(theta)?;  // primer evento del θ sin cerrar: leer L2 por delante, y no más
 engine.push(RowGroupInput {
     id,            // ordinal del row group entre los que entrega el lector: 0, 1, 2, …
     ticks,         // TickColumns: ids, time, price, quantity, is_buyer_maker (Region = buffer + offset)
@@ -91,16 +104,21 @@ Contrato de entrada:
   group no se procesa hasta que se empuja el anterior (necesita su último id), y un evento
   solo se completa cuando llegaron todos los row groups de su rango. `finish()` falla con
   `Input` si un ordinal nunca llegó.
-- `set_boundaries` va una vez por θ y antes del primer `push` (un θ sin eventos lleva una
-  lista vacía). Los eventos cumplen `R < C ≤ E` y `E_i ≤ R_{i+1}` y los precios caben en
-  `i64` (contrato de L2); se comprueba al entregarlos. El evento `i` es la fila `i` del
-  esqueleto.
+- `push_boundaries` entrega los eventos de un θ en orden, en lotes de cualquier tamaño (un
+  θ sin eventos no necesita ninguno). El lote de un evento llega antes que el row group que
+  lo toca; si no, `push` falla con `Input` (no espera). Los eventos cumplen `R < C ≤ E` y
+  `E_i ≤ R_{i+1}`, también entre un lote y el anterior, y los precios caben en `i64`
+  (contrato de L2); se comprueba al entregarlos, y un lote que pasa del esqueleto falla con
+  `Skeleton`. El evento `i` es la fila `i` del esqueleto, sea cual sea el lote que lo trajo.
+- `needed(θ)` es el primer evento del θ que no cerró; los lotes enteros anteriores ya se
+  soltaron.
 - Los ids de un row group crecen estrictamente y sus ticks están en el orden de la serie
   (contrato de L1).
 - `before_month` marca los row groups de un mes anterior al de los eventos: sus ticks de
   `(R, E]` suman a `before_month` de las cuentas (`ticks_before_month` de §7.4).
 - `engine.locate(θ, ticks, prev_high)` devuelve qué eventos toca un row group y sus
-  posiciones y banderas sin empujarlo: es lo que calcula un ítem, para probar y diagnosticar.
+  posiciones y banderas sin empujarlo, con las fronteras en mano: es lo que calcula un
+  ítem, para probar y diagnosticar.
 - Los fallos de ubicación son `Boundary` (`not_a_tick` o `unseen`, con la frontera, el
   evento y el rango de ids del row group) y `ConfirmTime`; si un row group trae los dos,
   gana el de frontera, como en el lector.
@@ -116,7 +134,10 @@ cargo run --release -p dc_descriptors --example bench_engine -- [ticks] [row_gro
 ```
 
 `tests/engine.rs` compara el motor con un oráculo ingenuo (suma tick a tick con otra
-fórmula de redondeo) con 1 y 4 hilos y en órdenes de `push` barajados, e incluye los fallos
+fórmula de redondeo) con 1 y 4 hilos, en órdenes de `push` barajados y con las fronteras en
+lotes de 1 a 3 eventos intercalados con los `push`; comprueba que un lote se suelta en
+cuanto sus eventos cerraron (su `B` muere) y que un row group sin sus fronteras falla, e
+incluye los fallos
 de frontera y de `confirm_time` (también en orden inverso), operandos
 en los bordes de `DECIMAL(18,8)`, fases vacías, eventos que cruzan tres row groups, un
 row group intermedio sin ticks del evento, row groups sin eventos de un θ, los invariantes

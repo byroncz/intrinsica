@@ -7,13 +7,14 @@ empujar en cualquier orden.
 """
 
 import random
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from contextlib import ExitStack, closing
 from decimal import Decimal
 
 import dc_pyo3
+import pyarrow as pa
 from dc_frames import FamilyWriter, family_path, l2_path
-from dc_frames.lake import L1, Month, event_groups
+from dc_frames.lake import L1, EventGroup, Month, event_groups
 from l3_dc_descriptors import native
 from l3_dc_descriptors.event import EVENT_COLUMNS
 from l3_dc_descriptors.reconcile import L1Month, reconcile
@@ -32,9 +33,13 @@ def summarize_native(
     threads: int = 4,
     order: str | Sequence[int] = "forward",
     seed: int = 0,
+    lot: int | None = None,
 ) -> dict[Decimal, ThetaResult]:
     """`summarize_month` por el motor nativo. `order` es el orden de `push`: `forward`,
-    `reversed`, `swapped` (dos vecinos), `shuffled` o una lista de índices.
+    `reversed`, `swapped` (dos vecinos), `shuffled` o una lista de índices. Sin `lot`, las
+    fronteras de cada θ (sus row groups de L2) se entregan todas antes del primer `push`;
+    con `lot`, en tramos de `lot` eventos, justo antes del row group que las necesita
+    (`BoundaryFeed`).
     """
     key = DEFAULT_KEY
     values = [Decimal(t) for t in thetas]
@@ -64,8 +69,10 @@ def summarize_native(
         )
         engine = native.new_engine(values, [w.row_groups for w in writers], threads)
         stack.callback(engine.close)
-        for position, batches in enumerate(events):
-            native.set_boundaries(engine, position, batches)
+        feeds = [
+            native.BoundaryFeed(engine, position, _lots(batches, lot))
+            for position, batches in enumerate(events)
+        ]
 
         def drain() -> None:
             while (sealed := engine.pop_sealed()) is not None:
@@ -73,8 +80,13 @@ def summarize_native(
                 writers[position].write_row_group(batch)
 
         try:
+            if lot is None:
+                for feed in feeds:
+                    feed.cover(int(groups[-1].ids[-1]))
             for k in _order(order, len(groups), seed):
                 rg = groups[k]
+                for feed in feeds:
+                    feed.cover(int(rg.ids[-1]))
                 native.push(engine, k, rg.ids, rg.columns, rg.month < month)
                 drain()
             stats = engine.finish()
@@ -102,6 +114,16 @@ def summarize_native(
                 writer.path, rows, writer.commit(), reconciliation
             )
         return results
+
+
+def _lots(groups: list[EventGroup], lot: int | None) -> Iterator[pa.RecordBatch]:
+    """Los row groups de L2 de un θ tal cual, o cortados en tramos de `lot` eventos."""
+    for group in groups:
+        if lot is None:
+            yield group.batch
+            continue
+        for start in range(0, group.batch.num_rows, lot):
+            yield group.batch.slice(start, lot)
 
 
 def _order(order: str | Sequence[int], n: int, seed: int) -> list[int]:

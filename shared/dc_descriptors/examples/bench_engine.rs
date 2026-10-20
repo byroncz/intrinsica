@@ -43,9 +43,9 @@ fn main() {
         // Las filas de L2 se arman antes de medir: aquí solo cuenta el motor.
         let engine = engine(threads, &sizes);
         for t in 0..thetas {
-            engine
-                .set_boundaries(t, batches(&series, &events[t], &sizes[t]))
-                .expect("set_boundaries");
+            for batch in batches(&series, &events[t], &sizes[t]) {
+                engine.push_boundaries(t, batch).expect("push_boundaries");
+            }
         }
         let started = Instant::now();
         for (k, &(lo, hi)) in bounds.iter().enumerate() {

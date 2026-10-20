@@ -7,7 +7,7 @@ use dc_descriptors::{
     col, Config, Engine, EngineError, EventBatch, Region, Row, RowGroupInput, SealedRowGroup,
     ThetaStats, TickColumns, WIDTH,
 };
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 /// Xorshift64*: sin dependencias y la misma serie en cada corrida para una semilla.
 pub struct Rng(u64);
@@ -360,11 +360,22 @@ pub fn split(rng: &mut Rng, n: usize, max: u64) -> Vec<(usize, usize)> {
 /// en el layout de Arrow. Cada lote lleva un desfase distinto de 0 a 2 elementos, como un
 /// `Array` cortado de Arrow.
 pub fn batches(s: &Series, evs: &[Ev], sizes: &[usize]) -> Vec<EventBatch<Shared>> {
+    watched_batches(s, evs, sizes).0
+}
+
+/// Como `batches`, y además una referencia débil al buffer de `reference_agg_trade_id` de
+/// cada lote: muere cuando el motor suelta el lote.
+pub fn watched_batches(
+    s: &Series,
+    evs: &[Ev],
+    sizes: &[usize],
+) -> (Vec<EventBatch<Shared>>, Vec<Weak<Vec<u8>>>) {
     let wide = |values: &mut Vec<u8>, v: i64| {
         values.extend_from_slice(&v.to_le_bytes());
         values.extend_from_slice(&(i128::from(v) >> 64).to_le_bytes()[..8]);
     };
     let mut out = Vec::new();
+    let mut watched = Vec::new();
     let mut from = 0;
     for (b, &size) in sizes.iter().enumerate() {
         let offset = b % 3;
@@ -392,10 +403,12 @@ pub fn batches(s: &Series, evs: &[Ev], sizes: &[usize]) -> Vec<EventBatch<Shared
         };
         let mut direction = vec![0u8; offset];
         direction.extend(rows.iter().map(|ev| ev.direction as i8 as u8));
+        let reference = ints(&|ev| ev.reference_id(s));
+        watched.push(Arc::downgrade(&reference.buffer.0));
         out.push(
             EventBatch::new(
                 size,
-                ints(&|ev| ev.reference_id(s)),
+                reference,
                 ints(&|ev| ev.confirm_id(s)),
                 ints(&|ev| ev.confirm_time(s)),
                 ints(&|ev| ev.extreme_id(s)),
@@ -409,7 +422,19 @@ pub fn batches(s: &Series, evs: &[Ev], sizes: &[usize]) -> Vec<EventBatch<Shared
             .expect("buffers completos"),
         );
     }
-    out
+    (out, watched)
+}
+
+/// La `reference_agg_trade_id` del último evento de cada lote de `sizes`.
+pub fn last_references(s: &Series, evs: &[Ev], sizes: &[usize]) -> Vec<i64> {
+    let mut end = 0;
+    sizes
+        .iter()
+        .map(|&size| {
+            end += size;
+            evs[end - 1].reference_id(s)
+        })
+        .collect()
 }
 
 /// Cuántos ticks de `(R, E]` del evento caen en los row groups `[lo, hi)` que `flagged`
@@ -463,7 +488,8 @@ pub fn decode(sealed: &SealedRowGroup) -> Vec<Row> {
         .collect()
 }
 
-/// Empuja `order` (índices de row group) al motor y recoge todo lo que sella.
+/// Entrega todas las fronteras de cada θ, empuja `order` (índices de row group) al motor y
+/// recoge todo lo que sella.
 pub fn run(
     engine: &Engine<Shared>,
     columns: &Columns,
@@ -474,8 +500,68 @@ pub fn run(
     sizes: &[Vec<usize>],
 ) -> Result<Outcome, EngineError> {
     for (theta, batches) in batches.into_iter().enumerate() {
-        engine.set_boundaries(theta, batches)?;
+        for batch in batches {
+            engine.push_boundaries(theta, batch)?;
+        }
     }
+    run_with(
+        engine,
+        columns,
+        bounds,
+        flagged,
+        order,
+        sizes,
+        &mut |_, _| Ok(()),
+    )
+}
+
+/// Como `run`, pero entrega las fronteras de a lotes justo antes del row group que las
+/// necesita, y no más: antes del row group `k`, los lotes de cada θ hasta que el último
+/// entregado empieza después del último id del row group. `lots[t]` son los lotes del θ
+/// `t` con la referencia de su último evento; `ids` son los ids de la serie.
+#[allow(clippy::too_many_arguments)]
+pub fn run_interleaved(
+    engine: &Engine<Shared>,
+    columns: &Columns,
+    ids: &[i64],
+    bounds: &[(usize, usize)],
+    lots: Vec<Vec<(EventBatch<Shared>, i64)>>,
+    flagged: &dyn Fn(usize) -> bool,
+    order: &[usize],
+    sizes: &[Vec<usize>],
+) -> Result<Outcome, EngineError> {
+    let mut pending: Vec<_> = lots.into_iter().map(|l| l.into_iter().peekable()).collect();
+    let mut last: Vec<Option<i64>> = vec![None; pending.len()];
+    let mut feed = |engine: &Engine<Shared>, k: usize| -> Result<(), EngineError> {
+        let high = ids[bounds[k].1 - 1];
+        for (theta, lots) in pending.iter_mut().enumerate() {
+            while last[theta].map_or(true, |r| r <= high) {
+                let Some((batch, reference)) = lots.next() else {
+                    break;
+                };
+                engine.push_boundaries(theta, batch)?;
+                last[theta] = Some(reference);
+            }
+        }
+        Ok(())
+    };
+    run_with(engine, columns, bounds, flagged, order, sizes, &mut feed)
+}
+
+/// Lo que se hace antes de empujar el row group `k`: entregar sus fronteras, por ejemplo.
+pub type Feed<'a> = dyn FnMut(&Engine<Shared>, usize) -> Result<(), EngineError> + 'a;
+
+/// Empuja `order` al motor, con `feed(engine, k)` antes de cada row group `k`, y recoge
+/// todo lo que sella.
+pub fn run_with(
+    engine: &Engine<Shared>,
+    columns: &Columns,
+    bounds: &[(usize, usize)],
+    flagged: &dyn Fn(usize) -> bool,
+    order: &[usize],
+    sizes: &[Vec<usize>],
+    feed: &mut Feed<'_>,
+) -> Result<Outcome, EngineError> {
     let mut rows: Vec<Vec<Row>> = sizes.iter().map(|_| Vec::new()).collect();
     let mut seen_order = Vec::new();
     let mut take = |engine: &Engine<Shared>| -> Result<(), EngineError> {
@@ -492,6 +578,7 @@ pub fn run(
     };
     for &k in order {
         let (lo, hi) = bounds[k];
+        feed(engine, k)?;
         engine.push(RowGroupInput {
             id: k as u64,
             ticks: columns.row_group(lo, hi),

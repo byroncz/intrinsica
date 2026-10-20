@@ -106,8 +106,9 @@ class SealedColumn:
     def __len__(self) -> int: ...
 
 class EventBatch(Protocol):
-    """Un row group de `events.parquet` de L2 de un θ (cualquier objeto con estos
-    atributos): `rows` y, por columna, `(bytes del buffer, offset)` en el layout de Arrow.
+    """Un lote de filas consecutivas de `events.parquet` de L2 de un θ (cualquier objeto
+    con estos atributos): `rows` y, por columna, `(bytes del buffer, offset)` en el layout
+    de Arrow.
     `reference`, `confirm`, `confirm_time` y `extreme` son `int64`; `direction`, `int8`;
     los precios, `decimal128`."""
 
@@ -132,7 +133,8 @@ class Engine:
         row_groups: Sequence[Sequence[int]],
         threads: int | None = None,
     ) -> Self: ...
-    def set_boundaries(self, theta: int, batches: Sequence[EventBatch]) -> None: ...
+    def push_boundaries(self, theta: int, batch: EventBatch) -> None: ...
+    def needed(self, theta: int) -> int: ...
     def push(
         self,
         row_group_id: int,

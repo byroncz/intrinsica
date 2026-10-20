@@ -2,8 +2,9 @@
 
 El motor (crate `dc_descriptors`) agrega por row group y θ en hilos nativos y calcula él
 mismo dónde cae cada frontera de L2 en cada row group; esta capa de Python solo lo
-orquesta: entrega una vez por θ las columnas de L2 de sus eventos (`set_boundaries`),
-traduce cada row group del lector a los buffers de Arrow que `Engine.push` espera, envuelve
+orquesta: entrega por lotes las columnas de L2 de los eventos de cada θ, por delante de los
+row groups que las tocan y no más (`push_boundaries`, `BoundaryFeed`), traduce cada row
+group del lector a los buffers de Arrow que `Engine.push` espera, envuelve
 en Arrow los row groups de salida que el motor sella y convierte sus errores en las
 excepciones tipadas de `errors` y del lector. No agrega nada: la aritmética y los
 invariantes de §7.2 viven en Rust (ADR-L3-16).
@@ -20,7 +21,7 @@ import dc_pyo3
 import numpy as np
 import pyarrow as pa
 from dc_frames import FramesInputError
-from dc_frames.lake import BOUNDARY_COLUMNS, EventGroup, Month
+from dc_frames.lake import BOUNDARY_COLUMNS, Month
 
 from l3_dc_descriptors.errors import (
     L2StateInconsistent,
@@ -42,7 +43,7 @@ type Region = tuple[memoryview, int]
 
 
 class EventBatch(NamedTuple):
-    """Un row group de `events.parquet` de L2 de un θ (`Engine.set_boundaries`)."""
+    """Un lote de filas de `events.parquet` de L2 de un θ (`Engine.push_boundaries`)."""
 
     rows: int
     reference: Region
@@ -61,7 +62,7 @@ def _bytes(array: pa.Array) -> Region:
 
 
 def event_batch(batch: pa.RecordBatch) -> EventBatch:
-    """Las siete columnas de L2 de un row group de eventos, sin copiar."""
+    """Las siete columnas de L2 de un lote de eventos, sin copiar."""
     return EventBatch(
         batch.num_rows,
         _bytes(batch.column("reference_agg_trade_id")),
@@ -74,15 +75,48 @@ def event_batch(batch: pa.RecordBatch) -> EventBatch:
     )
 
 
-def set_boundaries(
-    engine: dc_pyo3.Engine, position: int, groups: Iterable[EventGroup]
+def push_boundaries(
+    engine: dc_pyo3.Engine, position: int, batch: pa.RecordBatch
 ) -> None:
-    """Entrega al motor los eventos del θ en `position`: sus row groups de L2, en orden.
+    """Entrega al motor un lote de eventos del θ en `position`, detrás de los anteriores.
 
-    Hay que llamarla una vez por θ, antes del primer `push`. El motor retiene los buffers
-    de Arrow (no se copian) hasta cerrarse, así que el llamador no necesita conservarlos.
+    `batch` son filas consecutivas de `events.parquet` (un row group de `EventGroup.batch`
+    o un tramo). El motor retiene sus buffers de Arrow (no se copian) hasta que sus eventos
+    cierran, así que el llamador no necesita conservarlos.
     """
-    engine.set_boundaries(position, [event_batch(group.batch) for group in groups])
+    engine.push_boundaries(position, event_batch(batch))
+
+
+class BoundaryFeed:
+    """Las fronteras de un θ por delante de los row groups de L1, y no más (ADR-L3-16).
+
+    `batches` son los lotes de L2 del θ en orden. Antes de empujar un row group cuyo último
+    id es `high`, `cover(high)` entrega lotes hasta que el último entregado empieza después
+    de `high` (ningún evento que falte toca el row group) o se acaban: lo que `Engine.push`
+    exige. Los lotes se leen a medida que hacen falta y no se conservan aquí.
+    """
+
+    def __init__(
+        self,
+        engine: dc_pyo3.Engine,
+        position: int,
+        batches: Iterable[pa.RecordBatch],
+    ) -> None:
+        self._engine = engine
+        self._position = position
+        self._batches = iter(batches)
+        self._last: int | None = None  # referencia del último evento entregado
+
+    def cover(self, high: int) -> None:
+        """Entrega lo que falta para un row group cuyo último id es `high`."""
+        while self._last is None or self._last <= high:
+            batch = next(self._batches, None)
+            if batch is None:
+                return
+            if batch.num_rows == 0:
+                continue
+            push_boundaries(self._engine, self._position, batch)
+            self._last = batch.column("reference_agg_trade_id")[-1].as_py()
 
 
 def push(

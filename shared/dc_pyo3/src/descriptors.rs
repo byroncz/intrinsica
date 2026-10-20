@@ -2,9 +2,9 @@
 //!
 //! Aquí no hay lógica de agregación: solo conversión de buffers y de errores. Los ticks
 //! del row group entran sin copia (el motor retiene el dueño del buffer hasta terminar
-//! el row group), igual que las columnas de L2 de los eventos (`set_boundaries`, una vez
-//! por θ; el motor las retiene hasta cerrarse); los buffers de salida los posee el motor y
-//! salen a Python por el protocolo de buffer, sin copia.
+//! el row group), igual que las columnas de L2 de los eventos (`push_boundaries`, por
+//! lotes; el motor retiene cada lote hasta que sus eventos cierran); los buffers de salida
+//! los posee el motor y salen a Python por el protocolo de buffer, sin copia.
 
 use crate::buffers::view;
 use dc_descriptors::{
@@ -70,7 +70,7 @@ fn pin(column: &Bound<'_, PyAny>, offset: usize) -> PyResult<Region<Pinned>> {
     })
 }
 
-/// Un row group de `events.parquet` de L2 de un θ: sus siete columnas como
+/// Un lote de filas consecutivas de `events.parquet` de L2 de un θ: sus siete columnas como
 /// `(memoryview de bytes del Buffer de Arrow, offset del Array)`, del mismo largo `rows`.
 /// Es cualquier objeto con estos atributos (la capa usa un `NamedTuple`).
 #[derive(FromPyObject)]
@@ -203,19 +203,25 @@ impl Engine {
         Ok(Self { inner: Some(inner) })
     }
 
-    /// Fija una vez las filas de L2 de los eventos del θ en la posición `theta`: sus row
-    /// groups de `events.parquet`, en orden, sin copia (el motor retiene los buffers hasta
-    /// cerrarse). Hay que llamarla para cada θ antes del primer `push`; un θ sin eventos
-    /// lleva una lista vacía. El motor calcula solo dónde cae cada frontera en cada row
+    /// Agrega un lote de filas de L2 de los eventos del θ en la posición `theta`, detrás
+    /// de los anteriores y sin copia. Vale antes y después de empezar los `push`: el lote
+    /// de un evento debe llegar antes que el row group que lo toca (si no, `push` lanza
+    /// `DescriptorError` de `kind` `input`, no espera). El motor suelta los buffers del
+    /// lote en cuanto sus eventos y los anteriores cerraron (ver `needed`). Un θ sin eventos
+    /// no necesita ninguno. El motor calcula solo dónde cae cada frontera en cada row
     /// group, con las comprobaciones del lector.
-    fn set_boundaries(&self, theta: usize, batches: Vec<PyBatch<'_>>) -> PyResult<()> {
-        let batches = batches
-            .iter()
-            .map(PyBatch::to_core)
-            .collect::<PyResult<Vec<_>>>()?;
+    fn push_boundaries(&self, theta: usize, batch: PyBatch<'_>) -> PyResult<()> {
+        let batch = batch.to_core()?;
         self.engine()?
-            .set_boundaries(theta, batches)
+            .push_boundaries(theta, batch)
             .map_err(to_py_error)
+    }
+
+    /// El índice del primer evento del θ en la posición `theta` que no cerró: el motor ya
+    /// soltó los lotes enteros anteriores. El orquestador lee L2 por delante de este índice,
+    /// y no más.
+    fn needed(&self, theta: usize) -> PyResult<u64> {
+        self.engine()?.needed(theta).map_err(to_py_error)
     }
 
     /// Encola un row group de L1 y vuelve: el trabajo corre en los hilos del motor.
@@ -226,7 +232,8 @@ impl Engine {
     /// de Arrow, offset del Array)`: `ids` y `time` `int64`, `price` y `quantity`
     /// `decimal128` e `is_buyer_maker` booleano (offset en bits). El motor retiene los
     /// buffers hasta terminar el row group (ver `inflight`). `before_month` dice que el
-    /// row group es de un mes anterior al de los eventos.
+    /// row group es de un mes anterior al de los eventos. Lanza `DescriptorError` de `kind`
+    /// `input` si a algún θ le faltan fronteras que el row group toca (`push_boundaries`).
     #[pyo3(signature = (row_group_id, rows, ids, time, price, quantity, sold, before_month))]
     #[allow(clippy::too_many_arguments)]
     fn push(
@@ -261,8 +268,9 @@ impl Engine {
 
     /// Dónde caen en un row group las fronteras de los eventos del θ que lo tocan, sin
     /// empujarlo: `(índice del evento, (R, C, E), starts_before, ends_after)` por evento.
-    /// Es lo que calcula un ítem de `push` (para probar y diagnosticar). `prev_high` es el
-    /// último id del row group anterior, o `None` en el primero. Lanza `DescriptorError`
+    /// Es lo que calcula un ítem de `push` (para probar y diagnosticar), con las fronteras
+    /// que llegaron y no se soltaron. `prev_high` es el último id del row group anterior, o
+    /// `None` en el primero. Lanza `DescriptorError`
     /// con `kind` `boundary` o `confirm_time` si el row group no cuadra con L2.
     #[pyo3(signature = (theta, rows, ids, time, prev_high=None))]
     fn locate(

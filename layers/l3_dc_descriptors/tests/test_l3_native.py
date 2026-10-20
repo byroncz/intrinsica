@@ -122,6 +122,28 @@ def test_the_push_order_does_not_change_a_bit(edge_lake, tmp_path, order, thread
         assert_same(got, reference[month])
 
 
+@pytest.mark.parametrize("lot", [1, 3])
+@pytest.mark.parametrize("order", ["forward", "swapped"])
+def test_boundaries_in_small_lots_interleaved_with_the_pushes_change_nothing(
+    edge_lake, tmp_path, lot, order
+):
+    """Las fronteras en lotes de pocos eventos, entregadas justo antes del row group que
+    las necesita y no más (`BoundaryFeed`), dan la misma tabla, el mismo hash y la misma
+    conciliación que todas de una vez (ADR-L3-16).
+    """
+    lake, reference = edge_lake
+    for month in lake.months:
+        got = native(
+            lake,
+            tmp_path / f"{order}{lot}",
+            month,
+            threads=4,
+            order=order,
+            lot=lot,
+        )
+        assert_same(got, reference[month])
+
+
 def tamper(lake, theta: int, month, column: str, row: int, value) -> None:
     """Cambia una fila de `events.parquet` de L2 conservando sus row groups."""
     import pyarrow as pa
@@ -207,8 +229,9 @@ def frame_columns(rg):
 def pushed_engine(lake, threads=2):
     """Un motor con todos los row groups del primer mes y el primer θ ya empujados.
 
-    Devuelve `(engine, ref)`: `ref` es una referencia débil al `memoryview` del precio
-    del primer row group, para observar cuándo el motor lo suelta.
+    Devuelve `(engine, ref, lot)`: `ref` es una referencia débil al `memoryview` del precio
+    del primer row group y `lot` otra al de `reference_agg_trade_id` del primer lote de
+    fronteras, para observar cuándo el motor los suelta.
     """
     import weakref
     from decimal import Decimal
@@ -227,11 +250,16 @@ def pushed_engine(lake, threads=2):
         for i in range(parquet.metadata.num_row_groups)
     ]
     engine = native.new_engine(values, [sizes], threads)
-    native.set_boundaries(
-        engine,
-        0,
-        event_groups(str(lake.l2), DEFAULT_KEY, text, month, month, EVENT_COLUMNS),
-    )
+    lots = [
+        native.event_batch(group.batch)
+        for group in event_groups(
+            str(lake.l2), DEFAULT_KEY, text, month, month, EVENT_COLUMNS
+        )
+    ]
+    lot = weakref.ref(lots[0].reference[0])
+    for batch in lots:
+        engine.push_boundaries(0, batch)
+    del lots, batch
     watched = None
     groups = read_row_groups(
         values,
@@ -259,7 +287,7 @@ def pushed_engine(lake, threads=2):
             del watched_args
         else:
             native.push(engine, k, rg.ids, frame_columns(rg), rg.before_start)
-    return engine, weakref.ref(watched)
+    return engine, weakref.ref(watched), lot
 
 
 def test_sealed_columns_are_read_only_buffers_that_arrow_wraps_without_copying(
@@ -269,7 +297,7 @@ def test_sealed_columns_are_read_only_buffers_that_arrow_wraps_without_copying(
     import pyarrow as pa
 
     lake, _ = edge_lake
-    engine, _ = pushed_engine(lake)
+    engine, _, _ = pushed_engine(lake)
     engine.finish()
     position, index, rows, columns, validity, null_count = engine.pop_sealed()
     assert (position, index) == (0, 0)
@@ -293,7 +321,7 @@ def test_the_engine_releases_a_row_group_when_its_items_are_done(edge_lake):
     import time
 
     lake, _ = edge_lake
-    engine, watched = pushed_engine(lake)
+    engine, watched, _ = pushed_engine(lake)
     engine.finish()
     deadline = time.monotonic() + 5
     while watched() is not None and time.monotonic() < deadline:
@@ -301,6 +329,58 @@ def test_the_engine_releases_a_row_group_when_its_items_are_done(edge_lake):
         time.sleep(0.01)
     assert watched() is None, "el motor sigue anclando el row group"
     assert engine.inflight() == 0
+    engine.close()
+
+
+def test_the_engine_releases_a_lot_of_boundaries_when_its_events_closed(edge_lake):
+    """Con el motor vivo, un lote de fronteras cuyos eventos cerraron ya no está anclado
+    (su `memoryview` muere) y `needed` llega al total del θ: el motor no retiene las
+    fronteras del mes (ADR-L3-16).
+    """
+    import time
+
+    lake, _ = edge_lake
+    engine, _, lot = pushed_engine(lake)
+    ((rows, *_),) = engine.finish()
+    deadline = time.monotonic() + 5
+    while lot() is not None and time.monotonic() < deadline:
+        engine.inflight()  # cada llamada procesa los decref que dejaron los hilos
+        time.sleep(0.01)
+    assert lot() is None, "el motor sigue anclando el lote de fronteras"
+    assert engine.needed(0) == rows > 0
+    engine.close()
+
+
+def test_a_row_group_before_its_boundaries_is_a_contract_error(edge_lake):
+    """`push` no espera fronteras que no llegaron: falla con `kind` `input`."""
+    from decimal import Decimal
+
+    from dc_frames import read_row_groups
+    from l3_dc_descriptors import native
+    from l3_dc_descriptors.event import EVENT_COLUMNS
+    from l3_dc_descriptors.summarize import DEFAULT_KEY
+
+    lake, _ = edge_lake
+    month, text = lake.months[0], lake.theta_texts[0]
+    engine = native.new_engine([Decimal(text)], [[1]], 1)
+    rg = next(
+        iter(
+            read_row_groups(
+                [Decimal(text)],
+                str(lake.l1),
+                str(lake.l2),
+                month,
+                month,
+                *DEFAULT_KEY,
+                columns=EVENT_COLUMNS,
+            )
+        )
+    )
+    with pytest.raises(
+        dc_pyo3.DescriptorError, match="antes de las fronteras"
+    ) as error:
+        native.push(engine, 0, rg.ids, frame_columns(rg), rg.before_start)
+    assert error.value.kind == "input"
     engine.close()
 
 
@@ -348,13 +428,10 @@ def test_the_engine_locates_the_boundaries_like_the_reader_row_group_by_row_grou
         ]
         engine = native.new_engine(values, skeletons, 2)
         for position, text in enumerate(lake.theta_texts):
-            native.set_boundaries(
-                engine,
-                position,
-                event_groups(
-                    str(lake.l2), DEFAULT_KEY, text, month, month, EVENT_COLUMNS
-                ),
-            )
+            for group in event_groups(
+                str(lake.l2), DEFAULT_KEY, text, month, month, EVENT_COLUMNS
+            ):
+                native.push_boundaries(engine, position, group.batch)
         seen = [0] * len(values)
         before = [0] * len(values)
         for k, rg in enumerate(groups):

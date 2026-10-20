@@ -8,6 +8,15 @@ use dc_descriptors::{
     col, BoundaryKind, Config, Engine, EngineError, EventBatch, EventErrorKind, PhaseName, Region,
     Row, RowGroupInput, TickColumns, TickError,
 };
+use std::sync::Weak;
+
+/// Las fronteras de cada θ en lotes: cada lote con la referencia de su último evento, sus
+/// tamaños y una referencia débil a un buffer de cada lote.
+struct Lots {
+    lots: Vec<Vec<(EventBatch<Shared>, i64)>>,
+    sizes: Vec<Vec<usize>>,
+    watched: Vec<Vec<Weak<Vec<u8>>>>,
+}
 
 struct Case {
     series: Series,
@@ -74,6 +83,24 @@ impl Case {
             order,
             &self.sizes,
         )
+    }
+
+    /// Los eventos de cada θ en lotes de 1 a `max` eventos, no en los row groups de L2.
+    fn lots(&self, rng: &mut Rng, max: u64) -> Lots {
+        let mut out = Lots {
+            lots: Vec::new(),
+            sizes: Vec::new(),
+            watched: Vec::new(),
+        };
+        for evs in &self.events {
+            let sizes = skeleton(rng, evs.len(), max);
+            let (batches, watched) = watched_batches(&self.series, evs, &sizes);
+            let references = last_references(&self.series, evs, &sizes);
+            out.lots.push(batches.into_iter().zip(references).collect());
+            out.sizes.push(sizes);
+            out.watched.push(watched);
+        }
+        out
     }
 
     fn expected(&self, theta: usize) -> Vec<Row> {
@@ -159,6 +186,130 @@ fn the_push_order_does_not_change_the_result() {
             }
         }
     }
+}
+
+#[test]
+fn boundaries_in_small_lots_interleaved_with_the_pushes_give_the_same_table() {
+    // Lotes de 1 a 3 eventos entregados justo antes del row group que los necesita, y no
+    // más: mismas filas y cuentas que con todas las fronteras de una vez.
+    for seed in 400..412 {
+        let case = Case::new(seed, 260, 3, 12, seed % 2 == 0);
+        let forward: Vec<_> = (0..case.bounds.len()).collect();
+        let baseline = case.run(1, &forward).unwrap();
+        let mut rng = Rng::new(seed);
+        let mut swapped = forward.clone();
+        let at = rng.below(swapped.len() as u64 - 1) as usize;
+        swapped.swap(at, at + 1);
+        for order in [forward.clone(), swapped] {
+            for threads in [1, 4] {
+                let lots = case.lots(&mut rng, 3);
+                let engine = engine(threads, &case.sizes);
+                let outcome = run_interleaved(
+                    &engine,
+                    &case.columns,
+                    &case.series.ids,
+                    &case.bounds,
+                    lots.lots,
+                    &Case::flagged,
+                    &order,
+                    &case.sizes,
+                )
+                .unwrap();
+                assert_eq!(outcome.rows, baseline.rows, "seed {seed}, orden {order:?}");
+                assert_eq!(outcome.stats, baseline.stats);
+                case.check(&outcome);
+                for (t, evs) in case.events.iter().enumerate() {
+                    assert_eq!(engine.needed(t).unwrap(), evs.len() as u64);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn a_lot_of_boundaries_is_released_as_soon_as_its_events_closed() {
+    // Tras cada row group, con el motor quieto: un lote entregado sigue vivo si y solo si
+    // tiene un evento desde `needed` en adelante. Los anteriores ya no los ancla nadie.
+    let case = Case::new(11, 400, 2, 10, false);
+    let mut rng = Rng::new(11);
+    let Lots {
+        lots,
+        sizes,
+        watched,
+    } = case.lots(&mut rng, 2);
+    let ends: Vec<Vec<u64>> = sizes
+        .iter()
+        .map(|s| {
+            s.iter()
+                .scan(0u64, |end, &n| {
+                    *end += n as u64;
+                    Some(*end)
+                })
+                .collect()
+        })
+        .collect();
+    let engine = common::engine(4, &case.sizes);
+    let mut pending: Vec<_> = lots.into_iter().map(|l| l.into_iter().peekable()).collect();
+    let mut delivered = vec![0usize; pending.len()];
+    let mut last: Vec<Option<i64>> = vec![None; pending.len()];
+    let (mut released, mut held, mut early) = (0, 0, 0);
+    let make = |k: usize| {
+        let (lo, hi) = case.bounds[k];
+        RowGroupInput {
+            id: k as u64,
+            ticks: case.columns.row_group(lo, hi),
+            before_month: false,
+        }
+    };
+    for k in 0..case.bounds.len() {
+        let high = case.series.ids[case.bounds[k].1 - 1];
+        // Si a un θ le faltan fronteras para este row group, `push` falla y no espera,
+        // también después de los primeros `push`.
+        let short = pending
+            .iter_mut()
+            .enumerate()
+            .any(|(t, lots)| last[t].map_or(true, |r| r <= high) && lots.peek().is_some());
+        if short {
+            match engine.push(make(k)) {
+                Err(EngineError::Input(m)) => assert!(m.contains("antes de las fronteras")),
+                other => panic!("se esperaba un error de entrada y vino {other:?}"),
+            }
+            early += 1;
+        }
+        for (t, lots) in pending.iter_mut().enumerate() {
+            while last[t].map_or(true, |r| r <= high) {
+                let Some((batch, reference)) = lots.next() else {
+                    break;
+                };
+                engine.push_boundaries(t, batch).unwrap();
+                last[t] = Some(reference);
+                delivered[t] += 1;
+            }
+        }
+        engine.push(make(k)).unwrap();
+        while engine.inflight() > 0 {
+            std::thread::yield_now();
+        }
+        while engine.pop_sealed().unwrap().is_some() {}
+        for t in 0..pending.len() {
+            let needed = engine.needed(t).unwrap();
+            for j in 0..delivered[t] {
+                let alive = watched[t][j].upgrade().is_some();
+                assert_eq!(alive, ends[t][j] > needed, "θ {t}, lote {j}, row group {k}");
+                if alive {
+                    held += 1;
+                } else {
+                    released += 1;
+                }
+            }
+        }
+    }
+    engine.finish().unwrap();
+    assert!(watched.iter().flatten().all(|w| w.upgrade().is_none()));
+    assert!(
+        released > 0 && held > 0 && early > 0,
+        "{released} {held} {early}"
+    );
 }
 
 #[test]
@@ -511,21 +662,29 @@ fn the_contract_of_push_and_finish() {
         other => panic!("se esperaba un error de entrada y vino {other}"),
     };
 
-    // Las fronteras de todos los θ van antes del primer push.
+    // Las fronteras que un row group toca van antes que él, en cada θ: si faltan, `push`
+    // falla en vez de esperar.
     let engine = common::engine(1, &case.sizes);
     assert!(input(engine.push(make(0)).unwrap_err()).contains("antes de las fronteras del θ 0"));
     let mut batches = case.batches();
-    engine.set_boundaries(0, batches.remove(0)).unwrap();
+    for batch in batches.remove(0) {
+        engine.push_boundaries(0, batch).unwrap();
+    }
     assert!(input(engine.push(make(0)).unwrap_err()).contains("antes de las fronteras del θ 1"));
-    // Un θ que no existe, y uno que ya las tiene.
-    assert!(input(engine.set_boundaries(9, vec![]).unwrap_err()).contains("no existe"));
-    assert!(input(engine.set_boundaries(0, vec![]).unwrap_err()).contains("ya tiene"));
-    engine.set_boundaries(1, batches.remove(0)).unwrap();
+    // Un θ que no existe.
+    let one = || common::batches(&case.series, &case.events[1][..1], &[1]).remove(0);
+    assert!(input(engine.push_boundaries(9, one()).unwrap_err()).contains("no existe"));
+    for batch in batches.remove(0) {
+        engine.push_boundaries(1, batch).unwrap();
+    }
 
-    // Un row group no se empuja dos veces, y las fronteras no cambian tras el primer push.
+    // Un row group no se empuja dos veces, y un lote que pasa del esqueleto es un error.
     engine.push(make(0)).unwrap();
     assert!(input(engine.push(make(0)).unwrap_err()).contains("ya se empujó"));
-    assert!(input(engine.set_boundaries(0, vec![]).unwrap_err()).contains("después del primer"));
+    assert!(matches!(
+        engine.push_boundaries(1, one()),
+        Err(EngineError::Skeleton { theta: 1, .. })
+    ));
 
     // Sin los demás row groups, al terminar faltan filas.
     match engine.finish() {
@@ -539,7 +698,9 @@ fn the_contract_of_push_and_finish() {
     // de esperar para siempre.
     let engine = common::engine(1, &case.sizes);
     for (t, b) in case.batches().into_iter().enumerate() {
-        engine.set_boundaries(t, b).unwrap();
+        for batch in b {
+            engine.push_boundaries(t, batch).unwrap();
+        }
     }
     engine.push(make(0)).unwrap();
     engine.push(make(2)).unwrap();
@@ -593,7 +754,7 @@ fn the_events_of_l2_must_be_ordered_and_have_prices_that_fit() {
     let sizes = vec![vec![evs.len()]];
     let reason = |evs: &[Ev], series: &Series| {
         let engine = common::engine(1, &sizes);
-        match engine.set_boundaries(0, batches(series, evs, &[evs.len()])) {
+        match engine.push_boundaries(0, batches(series, evs, &[evs.len()]).remove(0)) {
             Err(EngineError::Input(message)) => message,
             other => panic!("se esperaba un error de entrada y vino {other:?}"),
         }
@@ -606,6 +767,19 @@ fn the_events_of_l2_must_be_ordered_and_have_prices_that_fit() {
     let mut broken = evs.clone();
     broken[1].r = broken[0].r;
     assert!(reason(&broken, &series).contains("antes del extremo"));
+    // También entre lotes: el segundo lote no puede empezar antes del extremo del primero,
+    // y un lote rechazado no cambia nada.
+    let engine = common::engine(1, &sizes);
+    let mut lots = batches(&series, &evs, &[1, 1, evs.len() - 2]);
+    let (second, third) = (lots.remove(1), lots.remove(1));
+    engine.push_boundaries(0, second).unwrap();
+    match engine.push_boundaries(0, lots.remove(0)) {
+        Err(EngineError::Input(message)) => {
+            assert!(message.contains("evento 1") && message.contains("antes del extremo"))
+        }
+        other => panic!("se esperaba un error de entrada y vino {other:?}"),
+    }
+    engine.push_boundaries(0, third).unwrap();
     // Un precio que no cabe en i64 (la palabra alta distinta de la extensión de signo).
     let engine = common::engine(1, &sizes);
     let mut ok = batches(&series, &evs, &[evs.len()]);
@@ -632,7 +806,7 @@ fn the_events_of_l2_must_be_ordered_and_have_prices_that_fit() {
         region(wide(5, 0)),
     )
     .unwrap();
-    match engine.set_boundaries(0, vec![batch]) {
+    match engine.push_boundaries(0, batch) {
         Err(EngineError::Input(message)) => {
             assert!(message.contains("no cabe en i64"), "{message}")
         }
@@ -861,7 +1035,7 @@ fn ticks_outside_the_contract_of_l1_are_input_errors() {
             sold: vec![false; 3],
         };
         engine
-            .set_boundaries(0, batches(&series, &[ev], &[1]))
+            .push_boundaries(0, batches(&series, &[ev], &[1]).remove(0))
             .unwrap();
         engine
             .push(RowGroupInput {
@@ -879,7 +1053,9 @@ fn inflight_drops_to_zero_and_busy_is_a_fraction() {
     let case = Case::new(9, 400, 3, 8, false);
     let engine = common::engine(1, &case.sizes);
     for (t, b) in case.batches().into_iter().enumerate() {
-        engine.set_boundaries(t, b).unwrap();
+        for batch in b {
+            engine.push_boundaries(t, batch).unwrap();
+        }
     }
     assert_eq!(engine.busy(), 0.0);
     for (k, &(lo, hi)) in case.bounds.iter().enumerate() {

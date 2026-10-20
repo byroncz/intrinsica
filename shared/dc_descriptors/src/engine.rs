@@ -1,11 +1,17 @@
 //! El motor: una cola de ítems `(row group, θ)` que consumen hilos nativos.
 //!
-//! **Fronteras.** Antes del primer `push`, `set_boundaries` entrega una vez por θ las
-//! columnas de L2 de sus eventos del mes (buffers de Arrow, sin copia). El motor decide
-//! solo qué eventos toca un row group y dónde cae cada frontera: dentro del ítem, con
-//! búsqueda binaria sobre los ids de los ticks y de los eventos, sin estado entre row
-//! groups. Solo necesita saber cuál es el último id del row group anterior, que `push`
-//! fija en orden de ordinal.
+//! **Fronteras.** `push_boundaries` entrega las columnas de L2 de los eventos de un θ por
+//! lotes, en orden y sin copia (buffers de Arrow), antes o después de empezar los `push`:
+//! el lote de un evento debe llegar antes que el row group que lo toca, y `push` falla si
+//! no llegó (no espera). El motor decide solo qué eventos toca un row group y dónde cae
+//! cada frontera: dentro del ítem, con búsqueda binaria sobre los ids de los ticks y de los
+//! eventos, sin estado entre row groups. Solo necesita saber cuál es el último id del row
+//! group anterior, que `push` fija en orden de ordinal.
+//!
+//! **Lotes cerrados.** Las filas que un ítem escribe en sus casillas avanzan, en el mismo
+//! paso, la marca de eventos cerrados del θ (`needed`: todos los anteriores cerraron). Los
+//! lotes que quedan enteros antes de la marca se sueltan (su `B` se libera): el motor
+//! retiene las fronteras por delante de la marca, no las del mes.
 //!
 //! **Ítems.** `push` convierte un row group en un trabajo con un ítem por θ que tiene
 //! eventos. Los hilos toman ítems de la cola con un índice atómico (`fetch_add`):
@@ -24,7 +30,8 @@
 //! sella y se entrega en orden de row group de salida (`pop_sealed`).
 //!
 //! Los únicos locks son el almacén de parciales de un θ (una vez por ítem, para dos
-//! eventos como mucho), el de una casilla (una vez por tramo de filas) y los de la cola.
+//! eventos como mucho), el de una casilla (una vez por tramo de filas), los de la cola y,
+//! una vez por ítem, los de las fronteras y la marca de cerrados de su θ.
 
 use crate::close::{close_event, EventError, EventErrorKind};
 use crate::input::{
@@ -37,7 +44,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fmt;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError};
+use std::sync::{
+    Arc, Condvar, Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard,
+};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -204,6 +213,29 @@ impl Groups {
     }
 }
 
+/// Qué eventos de un θ cerraron: todos los anteriores a `watermark` y los tramos de
+/// `ahead` (inicio → fin), que cerraron antes de tiempo. Igual que `Groups` con los row
+/// groups.
+#[derive(Default)]
+struct Closed {
+    watermark: u64,
+    ahead: BTreeMap<u64, u64>,
+}
+
+impl Closed {
+    /// Marca cerrados los eventos `[start, end)`.
+    fn close(&mut self, start: u64, end: u64) {
+        if start == self.watermark {
+            self.watermark = end;
+        } else {
+            self.ahead.insert(start, end);
+        }
+        while let Some(end) = self.ahead.remove(&self.watermark) {
+            self.watermark = end;
+        }
+    }
+}
+
 /// Un error con su clave de orden: `(row group donde el evento termina, θ, evento)`, la
 /// misma en que lo habría encontrado el recorrido secuencial. Se reporta el de menor
 /// clave, así que no depende de qué hilo llegó primero.
@@ -303,6 +335,14 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+fn read<T>(rw: &RwLock<T>) -> RwLockReadGuard<'_, T> {
+    rw.read().unwrap_or_else(PoisonError::into_inner)
+}
+
+fn write<T>(rw: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
+    rw.write().unwrap_or_else(PoisonError::into_inner)
+}
+
 /// Un evento que toca un row group, con las posiciones de sus fronteras en él.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Located {
@@ -330,6 +370,9 @@ pub struct Located {
 /// group vale si `<= prev_high`, porque entonces cayó dentro de un row group anterior
 /// (que la comprobó como tick) o en un hueco antes de él (que el ítem de ese row group ya
 /// rechazó). Un fallo de frontera pesa más que uno de `confirm_time`, como en el lector.
+///
+/// Busca solo entre los eventos en mano (`bounds.base()` en adelante): los soltados ya
+/// cerraron, y un row group sin procesar no toca ninguno cerrado.
 pub fn locate_events<B: AsRef<[u8]>>(
     theta: usize,
     bounds: &Boundaries<B>,
@@ -337,7 +380,7 @@ pub fn locate_events<B: AsRef<[u8]>>(
     prev_high: Option<i64>,
 ) -> Result<Vec<Located>, EngineError> {
     let (low, high) = (keys.id(0), keys.id(keys.rows() - 1));
-    let first = prev_high.map_or(0, |high| bounds.extremes_up_to(high));
+    let first = prev_high.map_or(bounds.base(), |high| bounds.extremes_up_to(high));
     let end = bounds.references_up_to(high);
     if first >= end {
         return Ok(Vec::new());
@@ -411,10 +454,12 @@ struct Shared<B> {
     /// Row groups empujados y aún sin terminar, por id.
     groups: Mutex<Groups>,
     settled: Condvar,
-    /// Las fronteras de L2 de cada θ, fijadas una vez antes del primer `push`.
-    bounds: Vec<OnceLock<Boundaries<B>>>,
-    /// Los θ con al menos un evento, que se fija en el primer `push`; un ítem es uno de ellos.
-    active: OnceLock<Vec<usize>>,
+    /// Las fronteras de L2 de cada θ que llegaron y aún no se soltaron.
+    bounds: Vec<RwLock<Boundaries<B>>>,
+    /// Los eventos cerrados de cada θ.
+    closed: Vec<Mutex<Closed>>,
+    /// Los θ con al menos una fila en el esqueleto; un ítem es uno de ellos.
+    active: Vec<usize>,
     order: Mutex<Order<B>>,
     partials: Vec<Mutex<HashMap<u64, Partial>>>,
     stats: Vec<Mutex<ThetaStats>>,
@@ -443,9 +488,11 @@ impl<B: AsRef<[u8]> + Send + Sync + 'static> Engine<B> {
                 config.row_groups.len()
             )));
         }
+        let out = OutTable::new(&config.row_groups);
+        let active = (0..thetas).filter(|&t| out.rows(t) > 0).collect();
         let shared = Arc::new(Shared {
             thetas,
-            out: OutTable::new(&config.row_groups),
+            out,
             delivery: Mutex::new(Delivery::new(thetas)),
             queue: Mutex::new(Queue {
                 jobs: VecDeque::new(),
@@ -454,8 +501,9 @@ impl<B: AsRef<[u8]> + Send + Sync + 'static> Engine<B> {
             work: Condvar::new(),
             groups: Mutex::new(Groups::default()),
             settled: Condvar::new(),
-            bounds: (0..thetas).map(|_| OnceLock::new()).collect(),
-            active: OnceLock::new(),
+            bounds: (0..thetas).map(|_| RwLock::default()).collect(),
+            closed: (0..thetas).map(|_| Mutex::default()).collect(),
+            active,
             order: Mutex::new(Order {
                 next: 0,
                 last_high: None,
@@ -480,30 +528,44 @@ impl<B: AsRef<[u8]> + Send + Sync + 'static> Engine<B> {
         Ok(Self { shared, workers })
     }
 
-    /// Fija una vez las filas de L2 de los eventos del θ `theta` en el mes: sus row groups de
-    /// `events.parquet`, en orden y sin copiar. Hay que llamarla para cada θ antes del
-    /// primer `push` (un θ sin eventos lleva una lista vacía).
+    /// Agrega un lote de filas de L2 de los eventos del θ `theta`, sin copiarlo: filas
+    /// consecutivas de `events.parquet` (un row group o un tramo), detrás de los lotes
+    /// anteriores del θ. Vale antes y después de empezar los `push`; el lote de un evento
+    /// debe llegar antes que el row group que lo toca (ver [`Engine::push`]). El motor
+    /// suelta el lote (su `B`) en cuanto todos sus eventos y los anteriores cerraron. Un θ
+    /// sin eventos no necesita ninguno.
     ///
-    /// Falla si el θ no existe, ya tiene fronteras, ya empezaron los `push`, un buffer no
-    /// alcanza, un precio no cabe en `i64` o los eventos no cumplen `R < C ≤ E` y
-    /// `E_i ≤ R_{i+1}`.
-    pub fn set_boundaries(
-        &self,
-        theta: usize,
-        batches: Vec<EventBatch<B>>,
-    ) -> Result<(), EngineError> {
+    /// Falla si el θ no existe, el lote pasa del esqueleto del θ (`Skeleton`), un buffer no
+    /// alcanza, un precio no cabe en `i64`, los eventos no cumplen `R < C ≤ E` y
+    /// `E_i ≤ R_{i+1}` (también contra el último del lote anterior) o el motor ya falló.
+    pub fn push_boundaries(&self, theta: usize, batch: EventBatch<B>) -> Result<(), EngineError> {
+        self.shared.poll_failure()?;
         let Some(slot) = self.shared.bounds.get(theta) else {
             return Err(EngineError::Input(format!("el θ {theta} no existe")));
         };
-        if self.shared.active.get().is_some() {
-            return Err(EngineError::Input(format!(
-                "las fronteras del θ {theta} llegan después del primer push"
-            )));
+        let rows = self.shared.out.rows(theta);
+        let mut bounds = write(slot);
+        if (bounds.len() + batch.rows()) as u64 > rows {
+            return Err(EngineError::Skeleton {
+                theta,
+                event: rows,
+                rows,
+            });
         }
-        let boundaries = Boundaries::new(batches)
-            .map_err(|e| EngineError::Input(format!("fronteras del θ {theta}: {e}")))?;
-        slot.set(boundaries)
-            .map_err(|_| EngineError::Input(format!("el θ {theta} ya tiene fronteras")))
+        bounds
+            .push(batch)
+            .map_err(|e| EngineError::Input(format!("fronteras del θ {theta}: {e}")))
+    }
+
+    /// El índice del primer evento del θ que no cerró: todos los anteriores ya tienen su
+    /// fila y sus lotes enteros ya se soltaron. El orquestador lee L2 por delante de este
+    /// índice, y no más. Falla si el θ no existe.
+    pub fn needed(&self, theta: usize) -> Result<u64, EngineError> {
+        self.shared
+            .closed
+            .get(theta)
+            .map(|closed| lock(closed).watermark)
+            .ok_or_else(|| EngineError::Input(format!("el θ {theta} no existe")))
     }
 
     /// Encola un row group. Vuelve en cuanto los ítems están en la cola: el trabajo corre
@@ -513,6 +575,11 @@ impl<B: AsRef<[u8]> + Send + Sync + 'static> Engine<B> {
     /// necesitan su último id para saber qué eventos cerraron antes. Con los ordinales en
     /// orden no espera nada.
     ///
+    /// Las fronteras que el row group toca tienen que haber llegado: en cada θ, o llegaron
+    /// todos los eventos del esqueleto o el último que llegó empieza después del último id
+    /// del row group (`R > último id`), así que ninguno de los que faltan lo toca. Si no,
+    /// falla en vez de esperar.
+    ///
     /// Falla si el contrato de entrada se rompe o si el motor ya falló.
     pub fn push(&self, input: RowGroupInput<B>) -> Result<(), EngineError> {
         self.shared.poll_failure()?;
@@ -521,31 +588,34 @@ impl<B: AsRef<[u8]> + Send + Sync + 'static> Engine<B> {
             ticks,
             before_month,
         } = input;
-        if let Some(theta) = self.shared.bounds.iter().position(|b| b.get().is_none()) {
-            return Err(EngineError::Input(format!(
-                "el row group {id} llega antes de las fronteras del θ {theta}"
-            )));
+        let rows = ticks.rows();
+        let high = ticks.keys().id(rows - 1);
+        for &theta in &self.shared.active {
+            let bounds = read(&self.shared.bounds[theta]);
+            let complete = bounds.len() as u64 >= self.shared.out.rows(theta);
+            if !complete && bounds.last_reference().map_or(true, |r| r <= high) {
+                return Err(EngineError::Input(format!(
+                    "el row group {id} llega antes de las fronteras del θ {theta} que lo \
+                     tocan: su último id es {high} y faltan los eventos desde el {}",
+                    bounds.len()
+                )));
+            }
         }
-        let active = self.shared.active.get_or_init(|| {
-            (0..self.shared.thetas)
-                .filter(|&t| self.shared.bounds[t].get().is_some_and(|b| !b.is_empty()))
-                .collect()
-        });
         if !lock(&self.shared.groups).push(id) {
             return Err(EngineError::Input(format!(
                 "el row group {id} ya se empujó"
             )));
         }
-        let rows = ticks.rows();
+        let items = self.shared.active.len();
         let job = Job {
             id,
-            high: ticks.keys().id(rows - 1),
+            high,
             ticks,
             before_month,
             prev_high: None,
-            items: active.len(),
+            items,
             next: AtomicUsize::new(0),
-            remaining: AtomicUsize::new(active.len()),
+            remaining: AtomicUsize::new(items),
         };
         let mut ready = Vec::new();
         {
@@ -567,20 +637,20 @@ impl<B: AsRef<[u8]> + Send + Sync + 'static> Engine<B> {
 
     /// Dónde caen en un row group las fronteras de los eventos que lo tocan, sin empujarlo:
     /// lo mismo que calcula un ítem (ver [`locate_events`]), para probar y diagnosticar.
-    /// `prev_high` es el último id del row group anterior. Falla si el θ no tiene fronteras.
+    /// `prev_high` es el último id del row group anterior. Ve solo las fronteras que
+    /// llegaron y no se soltaron. Falla si el θ no existe.
     pub fn locate(
         &self,
         theta: usize,
         keys: &KeyColumns<B>,
         prev_high: Option<i64>,
     ) -> Result<Vec<Located>, EngineError> {
-        let bounds = self
+        let slot = self
             .shared
             .bounds
             .get(theta)
-            .and_then(OnceLock::get)
-            .ok_or_else(|| EngineError::Input(format!("el θ {theta} no tiene fronteras")))?;
-        locate_events(theta, bounds, keys, prev_high)
+            .ok_or_else(|| EngineError::Input(format!("el θ {theta} no existe")))?;
+        locate_events(theta, &read(slot), keys, prev_high)
     }
 
     /// El siguiente row group de salida sellado, o `None`. Cada θ sale en orden de row
@@ -644,10 +714,9 @@ impl<B: AsRef<[u8]> + Send + Sync + 'static> Engine<B> {
         Ok((0..self.shared.thetas)
             .map(|theta| {
                 let mut stats = *lock(&self.shared.stats[theta]);
-                if let Some(bounds) = self.shared.bounds[theta].get().filter(|b| !b.is_empty()) {
-                    stats.first_reference = Some(bounds.reference(0));
-                    stats.last_extreme = Some(bounds.extreme(bounds.len() - 1));
-                }
+                let bounds = read(&self.shared.bounds[theta]);
+                stats.first_reference = bounds.first_reference();
+                stats.last_extreme = bounds.last_extreme();
                 stats
             })
             .collect())
@@ -734,7 +803,7 @@ impl<B: AsRef<[u8]> + Send + Sync + 'static> Shared<B> {
         {
             return;
         }
-        let theta = self.active.get().map_or(0, |active| active[item]);
+        let theta = self.active[item];
         let outcome = catch_unwind(AssertUnwindSafe(|| self.process(job, theta)));
         let failure = match outcome {
             Ok(Ok(())) => return,
@@ -805,15 +874,13 @@ impl<B: AsRef<[u8]> + Send + Sync + 'static> Shared<B> {
                 }),
             )
         };
-        let Some(bounds) = self.bounds[theta].get() else {
-            return Err(fail(
-                job.id,
-                0,
-                EngineError::Internal(format!("el θ {theta} no tiene fronteras")),
-            ));
-        };
-        let located = locate_events(theta, bounds, job.ticks.keys(), job.prev_high)
-            .map_err(|e| fail(job.id, located_event(&e), e))?;
+        let located = locate_events(
+            theta,
+            &read(&self.bounds[theta]),
+            job.ticks.keys(),
+            job.prev_high,
+        )
+        .map_err(|e| fail(job.id, located_event(&e), e))?;
         if located.is_empty() {
             return Ok(());
         }
@@ -914,7 +981,35 @@ impl<B: AsRef<[u8]> + Send + Sync + 'static> Shared<B> {
                 delivery.insert(row_group);
             }
         }
+        self.close_events(theta, &done);
         Ok(())
+    }
+
+    /// Las filas de `done` (ordenadas por evento) ya están en sus casillas: avanza la
+    /// marca de cerrados del θ y suelta los lotes de fronteras que quedaron enteros antes
+    /// de ella. Sus buffers se liberan fuera de los locks.
+    fn close_events(&self, theta: usize, done: &[(u64, Row)]) {
+        let watermark = {
+            let mut closed = lock(&self.closed[theta]);
+            let before = closed.watermark;
+            let mut i = 0;
+            while i < done.len() {
+                let start = done[i].0;
+                let mut end = start + 1;
+                i += 1;
+                while i < done.len() && done[i].0 == end {
+                    end += 1;
+                    i += 1;
+                }
+                closed.close(start, end);
+            }
+            if closed.watermark == before {
+                return;
+            }
+            closed.watermark
+        };
+        let released = write(&self.bounds[theta]).release(watermark as usize);
+        drop(released);
     }
 
     fn aggregate_event(

@@ -49,9 +49,10 @@ def decimals(count, value):
     words[:, 0] = value
     return memoryview(words).cast("B"), 0
 
-# Las fronteras de L2 de cada θ, como row groups de `events.parquet` de S filas, sin copiar
-# (el motor las retiene todo el mes: son O(eventos), el costo de `set_boundaries`). Se arman
-# antes de la línea base: lo que se mide abajo es lo que el motor añade por row group.
+# Las fronteras de L2 de cada θ, como lotes de S filas de `events.parquet`, sin copiar. Las
+# arrays las retiene el probe (el motor suelta cada lote al cerrarse sus eventos; eso lo
+# prueba `test_l3_native.py`) y se arman antes de la línea base: lo que se mide abajo es lo
+# que el motor añade por row group.
 # Las referencias, confirmaciones y extremos son ids, y el tiempo de cada tick es su id.
 direction = np.ones(n, np.int8)
 price = decimals(n, 10**8)
@@ -65,7 +66,8 @@ batches = [
     for start in range(0, n, S)
 ]
 for theta in range(2):
-    engine.set_boundaries(theta, batches)
+    for batch in batches:
+        engine.push_boundaries(theta, batch)
 
 def rss():
     with open("/proc/self/status") as f:

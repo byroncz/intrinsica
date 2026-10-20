@@ -1,9 +1,9 @@
 //! Motor de agregación de L3: los descriptores de `summaries.parquet` por evento DC, sin
 //! pasar por el intérprete de Python.
 //!
-//! Recibe, una vez por θ, las filas de L2 de sus eventos del mes y, por row group, los
-//! ticks de L1 (buffers de Arrow, sin copia). Ubica solo las fronteras de cada evento en
-//! cada row group, con los ids y las mismas comprobaciones que el lector. Reparte
+//! Recibe, por θ y en lotes, las filas de L2 de sus eventos (suelta cada lote al cerrarse
+//! sus eventos) y, por row group, los ticks de L1 (buffers de Arrow, sin copia). Ubica solo
+//! las fronteras de cada evento en cada row group, con los ids y las mismas comprobaciones que el lector. Reparte
 //! el trabajo en ítems `(row group, θ)` que hilos nativos toman de una cola, cierra cada
 //! evento en su casilla (la fila del evento en el esqueleto) y entrega row groups de
 //! salida sellados. Las sumas son `u128` comprobadas y los parciales de un evento que
