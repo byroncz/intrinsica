@@ -4,6 +4,7 @@ Solo se leen archivos Parquet por nombre de columna: aquí no se importa nada de
 ni de L2 (las capas no se importan entre sí, RNF-14 del maestro).
 """
 
+import contextvars
 import os
 from collections import deque
 from collections.abc import Callable, Iterator, Sequence
@@ -242,7 +243,10 @@ def _read_together(
                 step = next((s for s in steps if needed(*s.bounds)), None)
                 if step is None:
                     return
+                # Cada tarea corre en una copia del contexto de quien consume, para que
+                # lo que dependa de él (un `ContextVar` de medición) valga en los hilos.
                 future = pool.submit(
+                    contextvars.copy_context().run,
                     _decode_reopened,
                     step.path,
                     step.parquet.metadata,

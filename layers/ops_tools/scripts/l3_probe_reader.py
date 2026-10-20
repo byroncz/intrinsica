@@ -17,9 +17,15 @@ Args:
   --max-bytes-ratio 1.1              (con más de un θ, los bytes leídos de los archivos de L1 del
                                       rango no pasan de esto × su tamaño; los de meses anteriores,
                                       donde cae la referencia del primer evento, se reportan aparte)
-  --modo chunks|evento               (cómo consume el lector; por defecto `chunks`, el modo de
+  --modo chunks|evento|row-groups    (cómo consume el lector; por defecto `chunks`, el modo de
                                       las pasadas de L3: cada fase llega en trozos de un row
-                                      group y la sonda cuenta los ticks de cada trozo)
+                                      group y la sonda cuenta los ticks de cada trozo.
+                                      `row-groups` es `read_row_groups`, la entrega de TRD-L3
+                                      §7.4 que usa el resumidor de L3)
+  --readers N                        (solo `--modo row-groups`; por defecto 1: cuántos row groups
+                                      se leen y decodifican a la vez, ITSC-362)
+  --sin-pre-buffer                   (abre los archivos sin `pre_buffer`, como antes de ITSC-362:
+                                      la línea base para comparar)
   --max-event-ticks 20000000         (solo en `--modo evento`: presupuesto de ticks por evento,
                                       ADR-L3-13; uno mayor llega sin tramas y se cuenta como
                                       `over_budget`)
@@ -32,6 +38,12 @@ RSS (§10.3, umbral 2, con un solo θ): 1 GiB en modo chunks, que no retiene nin
 modo evento, 1 GiB más el presupuesto de ticks (`--max-event-ticks` × 40 B por tick), que es lo
 que puede pesar el evento más grande que el lector entrega entero.
 
+`--modo row-groups` no arma tramas por evento: cuenta por θ los eventos que cierran en cada row
+group y los ticks de sus fases (`R..C` y `C..E`) a partir de las posiciones que entrega el
+lector. No admite relecturas: cada row group se decodifica una vez. Con `--readers` > 1 el lector
+puede decodificar de más, a lo sumo `readers` row groups tras el del último evento, que no se
+entregan; la sonda los cuenta como decodificados.
+
 Row groups: TRD-L3 §10.3 pide tantas decodificaciones como row groups del mes. El lector salta
 por estadísticas los que ningún evento necesita (el tramo tras el último evento cerrado) y la
 sonda reporta cuántos se saltaron. En modo evento exige que ninguno se decodifique más de una
@@ -41,7 +53,8 @@ de los archivos del rango: las de meses anteriores ya quedan fuera de ellos.
 Los bytes incluyen los pies de Parquet, que el lector abre más de una vez por mes: en un
 archivo real pesan nada, en uno de fixtures dominan (por eso `--max-bytes-ratio`).
 
-Las fases se miden así. Lectura: tiempo dentro de las lecturas de archivo (la sonda envuelve
+Las fases se miden así (con `--readers` > 1 los hilos se solapan: la sonda solo reporta el tiempo
+acumulado dentro de `read_row_group` y la pared total, que es lo que decide). Lectura: tiempo dentro de las lecturas de archivo (la sonda envuelve
 cada archivo para contarlas; serializa las lecturas de un row group, así que la pared
 puede ser algo más alta que la del lector sin envolver: `--sin-contar-io` da esa pared).
 Decodificación: lo que tarda `read_row_group` sin su lectura. Selección: el resto
@@ -49,9 +62,9 @@ Decodificación: lo que tarda `read_row_group` sin su lectura. Selección: el re
 
 Última línea: `sonda lector: thetas=… meses=… eventos=… ticks_l1=… pared_s=… lectura_s=…
 decodificación_s=… selección_s=… rss_pico_mib=… arrow_pool=… arrow_max_mib=… bytes_l1=…
-ticks_s=… modo=chunks|evento over_budget=… veredicto=ok|excedido|fallo`.
+ticks_s=… readers=… pre_buffer=si|no s_por_row_group=… modo=chunks|evento|row-groups over_budget=… veredicto=ok|excedido|fallo`.
 `arrow_pool` es el backend del pool de Arrow (`mimalloc`, `jemalloc` o `system`) y
-`arrow_max_mib` el máximo de `pa.total_allocated_bytes()` visto con cada trozo en mano (modo
+`arrow_pico_mib` el máximo del pool de Arrow en todo el proceso (`max_memory()`) y `arrow_max_mib` el máximo de `pa.total_allocated_bytes()` visto con cada trozo en mano (modo
 chunks) o con el evento entregado (modo evento) y al cerrar cada evento. Separan
 lo que Arrow tiene asignado de lo que pesa el proceso (`rss_pico_mib`): si el RSS se dispara y
 `arrow_max_mib` no, el pico no es de datos del lector (pool que no devuelve páginas, entorno).
@@ -66,6 +79,7 @@ import os
 import re
 import resource
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from decimal import Decimal
@@ -74,7 +88,7 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.fs as pafs
 import pyarrow.parquet as pq
-from dc_frames import FramesError, FramesInputError, lake, read_frames
+from dc_frames import FramesError, FramesInputError, lake, read_frames, read_row_groups
 from pyutils import resolve_fs
 
 HISTORY_TICKS = 4_051_000_000  # TRD-L3 §10.3, criterio 6
@@ -82,6 +96,8 @@ GIB = 1 << 30
 MIB = 1 << 20
 # 3 columnas de 8 y 16 B más un bit: lo que pesa un tick en una trama.
 BYTES_PER_TICK = 8 + 16 + 16 + 1 / 8
+# Un row group de L1 decodificado: id, tiempo, precio y cantidad (8 + 8 + 16 + 16 B).
+ROW_GROUP_BYTES_PER_TICK = 48
 PROGRESS_EVERY_S = 30
 
 
@@ -90,6 +106,9 @@ class Stats:
     """Lo que miden los archivos envueltos; lo llenan `_CountedFile` y `_ProbeFile`."""
 
     count_io: bool = True
+    pre_buffer: bool = True
+    # Con `readers` > 1 varios hilos llaman a `read_row_group` a la vez.
+    lock: threading.Lock = field(default_factory=threading.Lock)
     io_s: float = 0.0
     io_in_rg_s: float = 0.0
     rg_s: float = 0.0
@@ -99,6 +118,8 @@ class Stats:
     expected: dict[str, int] = field(default_factory=lambda: {"l1": 0, "l2": 0})
     decodes: dict[str, int] = field(default_factory=lambda: {"l1": 0, "l2": 0})
     l1_ticks: int = 0
+    # Ticks del row group de L1 más grande decodificado.
+    l1_group_ticks_max: int = 0
     # ruta de L1 -> (bytes del archivo, row groups, decodificaciones)
     l1_files: dict[str, list[int]] = field(default_factory=dict)
     l1_seen: set[tuple[str, int]] = field(default_factory=set)
@@ -227,46 +248,57 @@ class _ProbeFile(pq.ParquetFile):
         io_before = STATS.io_s
         start = time.perf_counter()
         table = super().read_row_group(i, columns=columns, **kwargs)
-        STATS.rg_s += time.perf_counter() - start
-        STATS.io_in_rg_s += STATS.io_s - io_before
-        STATS.decodes[self._kind] += 1
+        elapsed = time.perf_counter() - start
         group = self.metadata.row_group(i)
         names = self.schema_arrow.names
         size = sum(
             group.column(names.index(name)).total_compressed_size
             for name in columns or names
         )
-        STATS.expected[self._kind] += size
-        if self._kind == "l1":
-            STATS.l1_ticks += table.num_rows
-            STATS.l1_files[self._probe_path][2] += 1
-            if (self._probe_path, i) in STATS.l1_seen:
-                STATS.l1_repeated += 1
-                STATS.l1_repeated_bytes[self._probe_path] = (
-                    STATS.l1_repeated_bytes.get(self._probe_path, 0) + size
-                )
-            STATS.l1_seen.add((self._probe_path, i))
+        with STATS.lock:
+            STATS.rg_s += elapsed
+            STATS.io_in_rg_s += STATS.io_s - io_before
+            STATS.decodes[self._kind] += 1
+            STATS.expected[self._kind] += size
+            if self._kind == "l1":
+                STATS.l1_ticks += table.num_rows
+                STATS.l1_group_ticks_max = max(STATS.l1_group_ticks_max, table.num_rows)
+                STATS.l1_files[self._probe_path][2] += 1
+                if (self._probe_path, i) in STATS.l1_seen:
+                    STATS.l1_repeated += 1
+                    STATS.l1_repeated_bytes[self._probe_path] = (
+                        STATS.l1_repeated_bytes.get(self._probe_path, 0) + size
+                    )
+                STATS.l1_seen.add((self._probe_path, i))
         progress()
         return table
 
 
-def probe_open_parquet(path: str, what: str) -> pq.ParquetFile:
-    """Sustituto de `dc_frames.lake.open_parquet` que mide; hace lo mismo que el original."""
+def probe_open_parquet(
+    path: str, what: str, metadata: pq.FileMetaData | None = None
+) -> pq.ParquetFile:
+    """Sustituto de `dc_frames.lake.open_parquet` que mide; hace lo mismo que el original.
+
+    Con `metadata` es la apertura de un hilo del lector (ver `lake.open_parquet`): no
+    comprueba que el archivo exista, pero sí necesita su tamaño para envolverlo.
+    """
     fs, resolved = resolve_fs(path)
-    info = fs.get_file_info(resolved)
-    if info.type != pafs.FileType.File:
+    info = fs.get_file_info(resolved) if metadata is None or STATS.count_io else None
+    if metadata is None and info.type != pafs.FileType.File:
         raise FramesInputError(f"falta {what}: {path}")
     kind = "l1" if path.endswith(lake.CONSOLIDATED) else "l2"
+    options = {"pre_buffer": STATS.pre_buffer, "metadata": metadata}
     if STATS.count_io:
         source = pa.PythonFile(
             _CountedFile(fs.open_input_file(resolved), kind, path, info.size),
             mode="r",
         )
-        parquet = _ProbeFile(source, kind, path)
+        parquet = _ProbeFile(source, kind, path, **options)
     else:
-        parquet = _ProbeFile(resolved, kind, path, filesystem=fs)
-    if kind == "l1" and path not in STATS.l1_files:
-        STATS.l1_files[path] = [info.size, parquet.num_row_groups, 0]
+        parquet = _ProbeFile(resolved, kind, path, filesystem=fs, **options)
+    with STATS.lock:
+        if kind == "l1" and metadata is None and path not in STATS.l1_files:
+            STATS.l1_files[path] = [info.size, parquet.num_row_groups, 0]
     return parquet
 
 
@@ -355,6 +387,23 @@ def tally(
         stats.biggest_bytes = size
     if ticks >= ns.big_event_ticks:
         bigs.append((reference, extreme, ticks))
+
+
+def tally_row_group(delivery, per_theta: dict[Decimal, ThetaStats]) -> None:
+    """Suma a cada θ los eventos que cierran en el row group y los ticks de sus fases.
+
+    Las fases salen de las posiciones: confirmación `[R, C)` y overshoot `[C, E)` dentro del
+    row group. Una función aparte para que, al volver, la sonda no retenga el elemento.
+    """
+    for te in delivery.thetas:
+        stats = per_theta.get(te.theta)
+        if stats is None:
+            stats = per_theta[te.theta] = ThetaStats()
+        closing = int(np.count_nonzero(~te.ends_after))
+        stats.events += closing
+        STATS.events += closing
+        stats.confirmation += int((te.positions[:, 1] - te.positions[:, 0]).sum())
+        stats.overshoot += int((te.positions[:, 2] - te.positions[:, 1]).sum())
 
 
 def default_roots() -> tuple[str, str]:
@@ -450,6 +499,7 @@ def run(ns: argparse.Namespace) -> int:
     )
 
     STATS.count_io = not ns.sin_contar_io
+    STATS.pre_buffer = not ns.sin_pre_buffer
     original_open_parquet = lake.open_parquet
     lake.open_parquet = probe_open_parquet
     per_theta: dict[Decimal, ThetaStats] = {}
@@ -457,16 +507,25 @@ def run(ns: argparse.Namespace) -> int:
     error = None
     STATS.started = STATS.last_progress = time.perf_counter()
     try:
-        options = {"chunks": True}
-        if ns.modo == "evento":
-            options = {"max_event_ticks": ns.max_event_ticks}
-        for event in read_frames(
-            thetas, l1_root, l2_root, first, last, *key, **options
-        ):
-            tally(event, per_theta, bigs, ns)
-            sample_arrow()
-            # Suelta el evento antes de que el lector entregue el siguiente.
-            del event
+        if ns.modo == "row-groups":
+            for delivery in read_row_groups(
+                thetas, l1_root, l2_root, first, last, *key, readers=ns.readers
+            ):
+                tally_row_group(delivery, per_theta)
+                sample_arrow()
+                # Suelta el row group antes de que el lector entregue el siguiente.
+                del delivery
+        else:
+            options = {"chunks": True}
+            if ns.modo == "evento":
+                options = {"max_event_ticks": ns.max_event_ticks}
+            for event in read_frames(
+                thetas, l1_root, l2_root, first, last, *key, **options
+            ):
+                tally(event, per_theta, bigs, ns)
+                sample_arrow()
+                # Suelta el evento antes de que el lector entregue el siguiente.
+                del event
     except FramesError as exc:
         error = f"{type(exc).__name__}: {exc}"
     finally:
@@ -476,7 +535,12 @@ def run(ns: argparse.Namespace) -> int:
     decode = STATS.rg_s - STATS.io_in_rg_s
     reading = STATS.io_s if STATS.count_io else None
     selection = wall - STATS.rg_s - (STATS.io_s - STATS.io_in_rg_s)
-    if STATS.count_io:
+    if ns.readers > 1:
+        # Los hilos se solapan: `rg_s` suma el tiempo de cada llamada y puede superar la
+        # pared, así que no se resta de ella.
+        selection = 0.0
+        phases = f"tiempo acumulado en read_row_group de los {ns.readers} hilos={STATS.rg_s:.1f} s"
+    elif STATS.count_io:
         phases = f"lectura={STATS.io_s:.1f} s, decodificación={decode:.1f} s, selección={selection:.1f} s"
     else:
         phases = f"lectura+decodificación={STATS.rg_s:.1f} s, selección={wall - STATS.rg_s:.1f} s"
@@ -505,6 +569,7 @@ def run(ns: argparse.Namespace) -> int:
     delivered = sum(s.confirmation + s.overshoot for s in per_theta.values())
     events = sum(s.events for s in per_theta.values())
     rate = STATS.l1_ticks / wall if wall else 0.0
+    per_row_group = wall / (month_decodes or STATS.decodes["l1"] or 1)
     biggest = max((s.biggest_bytes for s in per_theta.values()), default=0)
     big_open = open_sweep(bigs)
     small_open = len(thetas) * (ns.big_event_ticks - 1)
@@ -550,6 +615,20 @@ def run(ns: argparse.Namespace) -> int:
             f"eventos sobre el presupuesto de {ns.max_event_ticks} ticks (over_budget)={over_budget}; "
             f"el mayor tiene a lo sumo {over_budget_max} ticks (por ids de L2)"
         )
+    arrow_peak = pa.default_memory_pool().max_memory()
+    if ns.modo == "row-groups":
+        # TRD-L3 §10.3: (K + 1,5) row groups decodificados, con K = 1 si `readers` = 1 y
+        # `readers` + 1 si no. Es solo informativo: el pool de Arrow cuenta también los row
+        # groups de eventos de L2 de cada θ, que la prueba de memoria de dc_frames no tiene.
+        held = 1 if ns.readers == 1 else ns.readers + 1
+        reader_limit = (
+            (held + 1.5) * STATS.l1_group_ticks_max * ROW_GROUP_BYTES_PER_TICK
+        )
+        log(
+            f"pico del pool de Arrow={arrow_peak / MIB:.0f} MiB; umbral del lector "
+            f"({held} + 1,5) × row group de {STATS.l1_group_ticks_max * ROW_GROUP_BYTES_PER_TICK / MIB:.0f} MiB "
+            f"= {reader_limit / MIB:.0f} MiB: {'bajo' if arrow_peak <= reader_limit else 'SOBRE'} el umbral"
+        )
     if rate:
         log(
             f"extrapolación al histórico ({HISTORY_TICKS // 1_000_000} M de ticks) a esa tasa: "
@@ -566,7 +645,7 @@ def run(ns: argparse.Namespace) -> int:
                     rss <= limit,
                 )
             )
-        else:
+        if multi or ns.modo == "row-groups":
             # El modo por chunks relee los row groups que sobran de un evento de más de dos
             # (TRD-L3 §10.3, umbral 3): esas relecturas se miden aparte y no cuentan en los bytes.
             allowed = STATS.reread_allowed if ns.modo == "chunks" else 0
@@ -604,11 +683,13 @@ def run(ns: argparse.Namespace) -> int:
     verdict = "fallo" if error is not None else ("excedido" if failed else "ok")
     log(
         f"sonda lector: thetas={len(thetas)} meses={months[0]}..{months[-1]} eventos={events} "
-        f"ticks_l1={STATS.l1_ticks} pared_s={wall:.1f} lectura_s={'n/d' if reading is None else f'{reading:.1f}'} "
-        f"decodificación_s={'n/d' if reading is None else f'{decode:.1f}'} selección_s={selection:.1f} "
+        f"ticks_l1={STATS.l1_ticks} pared_s={wall:.1f} lectura_s={'n/d' if reading is None or ns.readers > 1 else f'{reading:.1f}'} "
+        f"decodificación_s={'n/d' if reading is None or ns.readers > 1 else f'{decode:.1f}'} "
+        f"selección_s={'n/d' if ns.readers > 1 else f'{selection:.1f}'} "
         f"rss_pico_mib={rss / MIB:.0f} arrow_pool={pa.default_memory_pool().backend_name} "
-        f"arrow_max_mib={STATS.arrow_max / MIB:.1f} bytes_l1={STATS.bytes['l1'] if STATS.count_io else 'n/d'} "
-        f"ticks_s={rate:.0f} modo={ns.modo} over_budget={over_budget} veredicto={verdict}"
+        f"arrow_max_mib={STATS.arrow_max / MIB:.1f} arrow_pico_mib={arrow_peak / MIB:.1f} bytes_l1={STATS.bytes['l1'] if STATS.count_io else 'n/d'} "
+        f"ticks_s={rate:.0f} readers={ns.readers} pre_buffer={'si' if STATS.pre_buffer else 'no'} "
+        f"s_por_row_group={per_row_group:.2f} modo={ns.modo} over_budget={over_budget} veredicto={verdict}"
     )
     return 1 if failed else 0
 
@@ -642,11 +723,20 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--asset", default="BTCUSDT")
     parser.add_argument("--max-wall-s", type=float)
     parser.add_argument("--max-bytes-ratio", type=float, default=1.1)
-    parser.add_argument("--modo", choices=("chunks", "evento"), default="chunks")
+    parser.add_argument(
+        "--modo", choices=("chunks", "evento", "row-groups"), default="chunks"
+    )
+    parser.add_argument("--readers", type=int, default=1)
+    parser.add_argument("--sin-pre-buffer", action="store_true")
     parser.add_argument("--max-event-ticks", type=int, default=20_000_000)
     parser.add_argument("--big-event-ticks", type=int, default=100_000)
     parser.add_argument("--sin-contar-io", action="store_true")
-    return run(parser.parse_args(argv))
+    ns = parser.parse_args(argv)
+    if ns.readers < 1:
+        parser.error("--readers debe ser al menos 1")
+    if ns.readers > 1 and ns.modo != "row-groups":
+        parser.error("--readers solo aplica con --modo row-groups")
+    return run(ns)
 
 
 if __name__ == "__main__":

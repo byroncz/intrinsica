@@ -6,6 +6,7 @@ entrega `read_frames`.
 """
 
 import bisect
+import contextvars
 import threading
 from decimal import Decimal
 
@@ -542,3 +543,20 @@ def test_closing_the_reader_early_ends_its_threads(tmp_path):
     next(rows)
     rows.close()
     assert threading.active_count() == before
+
+
+def test_the_reader_threads_run_in_the_context_of_the_consumer(tmp_path, monkeypatch):
+    marker: contextvars.ContextVar[str] = contextvars.ContextVar("marker", default="")
+    seen: list[str] = []
+    real = lake_module.open_parquet
+
+    def open_parquet(path, what, metadata=None):
+        if metadata is not None:  # la apertura de un hilo del lector
+            seen.append(marker.get())
+        return real(path, what, metadata)
+
+    monkeypatch.setattr(lake_module, "open_parquet", open_parquet)
+    l1_root, l2_root, *_ = build_lake(tmp_path, l1_row_group=ROW_GROUP)
+    marker.set("unidad-7")
+    assert list(read_row_groups(THETAS, l1_root, l2_root, MONTH, MONTH, readers=2))
+    assert seen and set(seen) == {"unidad-7"}

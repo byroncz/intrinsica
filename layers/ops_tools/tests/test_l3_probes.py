@@ -474,6 +474,62 @@ def test_sin_contar_io_no_reporta_bytes_medidos(lake):
     assert "lectura_s=n/d" in final and "bytes_l1=n/d" in final
 
 
+@pytest.mark.parametrize("readers", [1, 3])
+def test_el_modo_row_groups_cuenta_lo_mismo_que_el_lector_con_cualquier_readers(
+    lake, capsys, readers
+):
+    l1, l2, events = lake
+    thetas = [theta_text(t) for t in sorted(events)]
+    probe = load("l3_probe_reader")
+    code = probe.main(
+        [
+            "--theta",
+            "all",
+            *args(
+                l1,
+                l2,
+                "--modo",
+                "row-groups",
+                "--readers",
+                str(readers),
+                "--max-bytes-ratio",
+                "3",
+            ),
+        ]
+    )
+    out = capsys.readouterr().out
+    assert code == 0, out
+    n, conf, over = oracle(l1, l2, thetas)
+    final = out.strip().splitlines()[-1]
+    assert f"eventos={n}" in final and "veredicto=ok" in final
+    assert f"readers={readers} pre_buffer=si" in final and "modo=row-groups" in final
+    assert "s_por_row_group=" in final
+    # Los ticks de las fases son los del lector por evento; cada row group, una vez.
+    table = out.split("ticks_overshoot")[1].splitlines()[1 : 1 + len(thetas)]
+    assert sum(int(line.split()[2]) for line in table) == conf
+    assert sum(int(line.split()[3]) for line in table) == over
+    assert "ok row groups de L1 decodificados más de una vez: 0" in out
+    assert "repetidos=0" in out
+
+
+def test_sin_pre_buffer_lo_reporta(lake, capsys):
+    l1, l2, events = lake
+    probe = load("l3_probe_reader")
+    args_ = ["--theta", theta_text(min(events)), *args(l1, l2, "--sin-pre-buffer")]
+    probe.main([*args_, "--modo", "row-groups"])
+    assert "pre_buffer=no" in capsys.readouterr().out.strip().splitlines()[-1]
+
+
+def test_readers_solo_aplica_al_modo_row_groups(lake):
+    l1, l2, events = lake
+    probe = load("l3_probe_reader")
+    base = ["--theta", theta_text(min(events)), *args(l1, l2)]
+    with pytest.raises(SystemExit):
+        probe.main([*base, "--readers", "2"])
+    with pytest.raises(SystemExit):
+        probe.main([*base, "--modo", "row-groups", "--readers", "0"])
+
+
 def test_pared_excedida_sale_con_1(lake, capsys):
     l1, l2, events = lake
     probe = load("l3_probe_reader")

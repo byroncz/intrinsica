@@ -414,6 +414,47 @@ cumple (50 `content_hash` idénticos, `rss_peak_mib` ≤ 2 048 y pared ≥ 15 % 
 el stack `l3` fija `L3_THREADS=1` y `L3_PREFETCH=0` por Terraform, sin revertir código.
 Un perfil con hilos (`L3_PROFILE=1`) ve todos los hilos y sus tiempos son de hilo, no de pared.
 
+## Lector de tramas: `DC_FRAMES_IO_THREADS` y `readers`
+
+`dc_frames` lee Parquet con `pre_buffer=True`: Arrow junta los rangos de bytes de las
+columnas de un row group y los pide a la vez, en vez de una petición por columna y por
+página. Cuántas peticiones viajan en paralelo lo fija el pool de E/S de Arrow:
+
+| Variable | Qué fija | Por defecto |
+|---|---|---|
+| `DC_FRAMES_IO_THREADS` | Hilos del pool de E/S de Arrow. Entero ≥ 1; un valor inválido hace fallar el import de `dc_frames` con `ValueError`, antes de leer nada | 8 |
+
+Se lee al importar `dc_frames`, en cualquiera de las capas que lo usan (L1, L2, L3, viz).
+Como `L3_THREADS`, solo se sobrescribe lanzando desde Cloud Shell con `--update-env-vars`.
+Más hilos de E/S no aceleran un row group suelto (es un solo rango de ≈ 15 MB): ayudan
+cuando varios row groups se leen a la vez (`readers` > 1). `read_row_groups(readers=R)` aún
+no lo usa L3: el orquestador lo adopta en la hija 3 de E6 (hoy L3 sigue con
+`readers = 1` más su lector anticipado, `L3_PREFETCH`). Cada lector de más cuesta ≈ 48 MB de
+RSS ([README de dc_frames](../../shared/dc_frames/README.md#lectura-pre_buffer-pool-de-es-y-readers)).
+
+### Sonda del lector con `readers` (ITSC-362)
+
+Los agentes no lanzan jobs: las dos corridas las lanza el humano con `ops-script`, después de
+subir el script (`gcloud storage cp layers/ops_tools/scripts/l3_probe_reader.py
+gs://<proyecto>-ops/scripts/l3_probe_reader.py`). Se pide `--sin-contar-io` porque envolver el
+archivo para contar bytes serializa las lecturas (cada lectura toma el candado del archivo de
+Python) y taparía lo que se quiere medir:
+
+| Corrida | `args` |
+|---|---|
+| `readers = 1` | `--theta all --from 2021-01 --modo row-groups --readers 1 --sin-contar-io` |
+| `readers = 2` | `--theta all --from 2021-01 --modo row-groups --readers 2 --sin-contar-io` |
+| Línea base, opcional | `--theta all --from 2021-01 --modo row-groups --readers 1 --sin-contar-io --sin-pre-buffer` |
+
+De la última línea (`sonda lector: …`) se copian `pared_s`, `s_por_row_group`, `rss_pico_mib`,
+`arrow_pico_mib` y `readers=`/`pre_buffer=`; la línea `pico del pool de Arrow=…` dice si quedó bajo el
+umbral del lector, `(K + 1,5)` row groups (informativo); de `row groups de L1: …`, los decodificados. Los bytes salen por
+metadatos (`bytes por metadatos`), porque `--sin-contar-io` no los mide. Con `readers` > 1 las
+fases por hilo no se reportan (los hilos se solapan): decide la pared. Metas
+([TRD-L3 §10.3](../TRD/l3.md#103-sonda-del-lector-de-tramas--umbrales-de-aceptación-se-escriben-antes-de-medir)):
+`s_por_row_group` ≤ 1,0 con `readers = 1` y `pared_s` ≤ 60 con `readers = 2`. Con `readers = 2`
+se decodifican a lo sumo 2 row groups más que con 1, al final.
+
 ## Scripts de operación
 
 Dos scripts de `layers/ops_tools/scripts/`, para el job `ops-script`
@@ -424,7 +465,7 @@ locales (`uv run`).
 
 | Script | Para qué | `args` típicos |
 | --- | --- | --- |
-| `l3_probe_reader.py` | Mide el lector de tramas (pared por fase, RSS, bytes, row groups) contra los umbrales de TRD-L3 §10.3 | `--theta all --from 2023-03` |
+| `l3_probe_reader.py` | Mide el lector de tramas (pared por fase, RSS, bytes, row groups) contra los umbrales de TRD-L3 §10.3 | `--theta all --from 2023-03`; con lectores, `--theta all --from 2021-01 --modo row-groups --readers 2 --sin-contar-io` |
 | `l3_check_month.py` | Verificación cruzada: agrega por su cuenta las tramas de cada evento del mes y compara fila a fila con `summaries.parquet` | `--month 2026-09` |
 
 ```bash
