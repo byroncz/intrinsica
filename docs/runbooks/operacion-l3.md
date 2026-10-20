@@ -401,8 +401,12 @@ gcloud run jobs execute l3-backfill \
 ```
 
 La corrida T3 de ITSC-357 (los valores por defecto, 4 hilos y prefetch 1) se lanza con
-*Actions → Run job*, `l3-backfill`, `from = to = 2021-01` y `force`; el resultado va a
-[TRD-L3 §10.2](../TRD/l3.md#102-dimensionamiento--hipótesis-de-partida-y-primera-medición).
+*Actions → Run job*, `l3-backfill`, `from = to = 2021-01` y `force`; el resultado se
+registra como comentario en ITSC-357 y el cuadro de
+[TRD-L3 §10.2](../TRD/l3.md#102-dimensionamiento--hipótesis-de-partida-y-primera-medición)
+lo completa ITSC-352 (T5). Si no cumple la condición para conservar los valores por
+defecto (50 `content_hash` idénticos, `rss_peak_mib` ≤ 2 048 y pared ≥ 15 % menor que T1),
+el stack `l3` fija `L3_THREADS=1` y `L3_PREFETCH=0` por Terraform, sin revertir código.
 Un perfil con hilos (`L3_PROFILE=1`) ve todos los hilos y sus tiempos son de hilo, no de pared.
 
 ## Scripts de operación
