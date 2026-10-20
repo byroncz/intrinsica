@@ -6,6 +6,8 @@ entrega `read_frames`.
 """
 
 import bisect
+import contextvars
+import threading
 from decimal import Decimal
 
 import pyarrow as pa
@@ -13,6 +15,7 @@ import pyarrow.parquet as pq
 import pytest
 from dc_frames import (
     FrameBoundaryError,
+    FramesInputError,
     RowGroupFrames,
     read_frames,
     read_row_groups,
@@ -228,8 +231,10 @@ def count_decodes(monkeypatch) -> list[tuple[str, int]]:
     reads: list[tuple[str, int]] = []
     real = lake_module.open_parquet
 
-    def open_parquet(path: str, what: str) -> pq.ParquetFile:
-        parquet = real(path, what)
+    def open_parquet(
+        path: str, what: str, metadata=None, pre_buffer=False
+    ) -> pq.ParquetFile:
+        parquet = real(path, what, metadata, pre_buffer)
         if path.endswith("consolidated.parquet"):
             original = parquet.read_row_group
 
@@ -446,3 +451,114 @@ def test_arguments_are_validated_before_iterating(tmp_path):
         read_row_groups("0.001", tmp_path, tmp_path, (2017, 0), MONTH)
     with pytest.raises(ValueError, match="8 decimales"):
         read_row_groups("0.0000000001", tmp_path, tmp_path, MONTH, MONTH)
+
+
+# `readers` > 1: R row groups se leen a la vez y salen en orden, con lo mismo que el lector
+# secuencial. La comparación es row group a row group.
+
+
+def assert_same_delivery(got: RowGroupFrames, want: RowGroupFrames) -> None:
+    assert (got.month, got.before_start) == (want.month, want.before_start)
+    for name in COLUMNS:
+        assert getattr(got.frame, name).equals(getattr(want.frame, name)), name
+    assert [te.theta for te in got.thetas] == [te.theta for te in want.thetas]
+    for a, b in zip(got.thetas, want.thetas, strict=True):
+        assert a.events.equals(b.events)
+        assert a.positions.tolist() == b.positions.tolist()
+        assert a.starts_before.tolist() == b.starts_before.tolist()
+        assert a.ends_after.tolist() == b.ends_after.tolist()
+        assert a.ticks_before_month.tolist() == b.ticks_before_month.tolist()
+
+
+@pytest.mark.parametrize("readers", [2, 3, 8])
+def test_readers_deliver_the_same_row_groups_as_the_sequential_reader(
+    tmp_path, readers
+):
+    l1_root, l2_root, *_ = build_two_month_lake(tmp_path)
+    for month in (MONTH, SECOND_MONTH):
+        want = list(read_row_groups(THETAS, l1_root, l2_root, month, month))
+        got = list(
+            read_row_groups(THETAS, l1_root, l2_root, month, month, readers=readers)
+        )
+        assert len(got) == len(want) > 2
+        for g, w in zip(got, want, strict=True):
+            assert_same_delivery(g, w)
+
+
+def test_readers_skip_the_same_row_groups_when_a_gap_leaves_some_unneeded(tmp_path):
+    # Nada toca los row groups 3 a 5: se saltan con las estadísticas, con o sin hilos.
+    events = {100000: [event(10, 50, 60), event(660, 670, 690)]}
+    l1_root, l2_root, _ = hand_lake(tmp_path, events)
+    thetas = Decimal("0.001")
+    want = list(read_row_groups(thetas, l1_root, l2_root, MONTH, MONTH))
+    got = list(read_row_groups(thetas, l1_root, l2_root, MONTH, MONTH, readers=3))
+    assert len(want) < GROUPS - 1
+    assert len(got) == len(want)
+    for g, w in zip(got, want, strict=True):
+        assert_same_delivery(g, w)
+
+
+def test_readers_decode_each_row_group_at_most_once(tmp_path, monkeypatch):
+    l1_root, l2_root, *_ = build_two_month_lake(tmp_path)
+    sequential = count_decodes(monkeypatch)
+    delivered = list(
+        read_row_groups(THETAS, l1_root, l2_root, SECOND_MONTH, SECOND_MONTH)
+    )
+    sequential_reads = list(sequential)
+    sequential.clear()
+    together = list(
+        read_row_groups(THETAS, l1_root, l2_root, SECOND_MONTH, SECOND_MONTH, readers=3)
+    )
+    assert len(together) == len(delivered)
+    assert len(sequential) == len(set(sequential))
+    # Se decodifican los mismos y, a lo sumo, los `readers` que el cierre del último evento dejó sin pedir.
+    assert set(sequential_reads) <= set(sequential)
+    assert len(sequential) - len(sequential_reads) <= 3
+
+
+def test_readers_must_be_at_least_one(tmp_path):
+    l1_root, l2_root, *_ = build_lake(tmp_path, l1_row_group=ROW_GROUP)
+    with pytest.raises(ValueError, match="readers 0"):
+        read_row_groups(THETAS, l1_root, l2_root, MONTH, MONTH, readers=0)
+
+
+@pytest.mark.parametrize("readers", [1, 3])
+def test_ids_that_do_not_grow_fail_the_same_way_with_readers(tmp_path, readers):
+    ticks = [{"id": i, "price": Decimal(1), "time": i} for i in range(SIZE)]
+    ticks += [
+        {"id": i, "price": Decimal(1), "time": i} for i in range(SIZE - 1, 3 * SIZE)
+    ]
+    events = {100000: [event(10, 150, 250)]}
+    l1_root, l2_root, _ = hand_lake(tmp_path, events, ticks)
+    with pytest.raises(FramesInputError, match="no supera el id"):
+        list(
+            read_row_groups(
+                Decimal("0.001"), l1_root, l2_root, MONTH, MONTH, readers=readers
+            )
+        )
+
+
+def test_closing_the_reader_early_ends_its_threads(tmp_path):
+    l1_root, l2_root, *_ = build_lake(tmp_path, l1_row_group=ROW_GROUP)
+    before = threading.active_count()
+    rows = read_row_groups(THETAS, l1_root, l2_root, MONTH, MONTH, readers=3)
+    next(rows)
+    rows.close()
+    assert threading.active_count() == before
+
+
+def test_the_reader_threads_run_in_the_context_of_the_consumer(tmp_path, monkeypatch):
+    marker: contextvars.ContextVar[str] = contextvars.ContextVar("marker", default="")
+    seen: list[str] = []
+    real = lake_module.open_parquet
+
+    def open_parquet(path, what, metadata=None, pre_buffer=False):
+        if metadata is not None:  # la apertura de un hilo del lector
+            seen.append(marker.get())
+        return real(path, what, metadata, pre_buffer)
+
+    monkeypatch.setattr(lake_module, "open_parquet", open_parquet)
+    l1_root, l2_root, *_ = build_lake(tmp_path, l1_row_group=ROW_GROUP)
+    marker.set("unidad-7")
+    assert list(read_row_groups(THETAS, l1_root, l2_root, MONTH, MONTH, readers=2))
+    assert seen and set(seen) == {"unidad-7"}

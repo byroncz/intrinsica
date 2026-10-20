@@ -8,6 +8,7 @@ import io
 import re
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import pyarrow as pa
@@ -98,6 +99,17 @@ def test_un_theta_cuenta_lo_mismo_que_el_lector(lake):
     # Por defecto consume el lector en modo por chunks, con el umbral de 1 GiB.
     assert "modo=chunks over_budget=0" in out
     assert "≤ 1 GiB (modo chunks) (1024 MiB)" in out
+
+
+def test_el_umbral_de_rss_nombra_el_modo_row_groups(lake):
+    l1, l2, events = lake
+    code, out = run_probe(
+        "--theta",
+        theta_text(min(events)),
+        *args(l1, l2, "--modo", "row-groups", "--sin-contar-io"),
+    )
+    assert_only_rss_may_fail(code, out)
+    assert "≤ 1 GiB (modo row-groups) (1024 MiB)" in out
 
 
 def test_todos_los_theta_decodifican_cada_row_group_una_vez(lake, capsys):
@@ -313,6 +325,25 @@ def test_el_envoltorio_no_reenvia_seeks_al_final_ni_lecturas_desde_el_final():
     assert wrapped.read(2) == data[10:12]
 
 
+def test_el_envoltorio_actualiza_las_estadisticas_bajo_el_candado():
+    probe = load("l3_probe_reader")
+    data = bytes(range(100))
+    wrapped = probe._CountedFile(RangedFile(data), "l1", "ruta", len(data))
+    done = threading.Event()
+
+    def read() -> None:
+        wrapped.read(10)
+        done.set()
+
+    with probe.STATS.lock:
+        worker = threading.Thread(target=read)
+        worker.start()
+        assert not done.wait(0.2)  # la lectura espera el candado de las estadísticas
+    worker.join(5)
+    assert done.is_set()
+    assert probe.STATS.bytes["l1"] == 10
+
+
 def test_un_parquet_real_se_abre_a_traves_del_envoltorio():
     probe = load("l3_probe_reader")
     sink = io.BytesIO()
@@ -472,6 +503,63 @@ def test_sin_contar_io_no_reporta_bytes_medidos(lake):
     assert_only_rss_may_fail(code, out)
     final = out.strip().splitlines()[-1]
     assert "lectura_s=n/d" in final and "bytes_l1=n/d" in final
+
+
+@pytest.mark.parametrize("readers", [1, 3])
+def test_el_modo_row_groups_cuenta_lo_mismo_que_el_lector_con_cualquier_readers(
+    lake, capsys, readers
+):
+    l1, l2, events = lake
+    thetas = [theta_text(t) for t in sorted(events)]
+    probe = load("l3_probe_reader")
+    code = probe.main(
+        [
+            "--theta",
+            "all",
+            *args(
+                l1,
+                l2,
+                "--modo",
+                "row-groups",
+                "--readers",
+                str(readers),
+                "--max-bytes-ratio",
+                "3",
+            ),
+        ]
+    )
+    out = capsys.readouterr().out
+    assert code == 0, out
+    n, conf, over = oracle(l1, l2, thetas)
+    final = out.strip().splitlines()[-1]
+    assert f"eventos={n}" in final and "veredicto=ok" in final
+    assert f"readers={readers} pre_buffer=si" in final and "modo=row-groups" in final
+    assert "s_por_row_group=" in final
+    assert "s_read_row_group_l1=" in final
+    # Los ticks de las fases son los del lector por evento; cada row group, una vez.
+    table = out.split("ticks_overshoot")[1].splitlines()[1 : 1 + len(thetas)]
+    assert sum(int(line.split()[2]) for line in table) == conf
+    assert sum(int(line.split()[3]) for line in table) == over
+    assert "ok row groups de L1 decodificados más de una vez: 0" in out
+    assert "repetidos=0" in out
+
+
+def test_sin_pre_buffer_lo_reporta(lake, capsys):
+    l1, l2, events = lake
+    probe = load("l3_probe_reader")
+    args_ = ["--theta", theta_text(min(events)), *args(l1, l2, "--sin-pre-buffer")]
+    probe.main([*args_, "--modo", "row-groups"])
+    assert "pre_buffer=no" in capsys.readouterr().out.strip().splitlines()[-1]
+
+
+def test_readers_solo_aplica_al_modo_row_groups(lake):
+    l1, l2, events = lake
+    probe = load("l3_probe_reader")
+    base = ["--theta", theta_text(min(events)), *args(l1, l2)]
+    with pytest.raises(SystemExit):
+        probe.main([*base, "--readers", "2"])
+    with pytest.raises(SystemExit):
+        probe.main([*base, "--modo", "row-groups", "--readers", "0"])
 
 
 def test_pared_excedida_sale_con_1(lake, capsys):

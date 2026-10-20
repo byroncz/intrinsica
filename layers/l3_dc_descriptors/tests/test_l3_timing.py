@@ -52,8 +52,8 @@ class Spy:
         self.reads: list[tuple[str, int]] = []
         real = timing._OPEN
 
-        def spy(path, what):
-            parquet = real(path, what)
+        def spy(path, what, metadata=None, pre_buffer=False):
+            parquet = real(path, what, metadata, pre_buffer)
             read = parquet.read_row_group
 
             def read_row_group(i, columns=None, **kwargs):

@@ -26,10 +26,12 @@ errores del lector, y porque `pyutils` no sabe nada de L3.
   orden. `columns` proyecta las columnas de `events.parquet` que se decodifican
   (siempre se leen además las tres fronteras y `confirm_time`); sin él, las 11.
 - `read_row_groups(thetas, l1_root, l2_root, start, end, provider="binance",
-  market="spot", asset="BTCUSDT", columns=None)`: la entrega por row group
-  (ADR-L3-14). Iterador de `RowGroupFrames`, uno por row group de L1 del pase,
-  con los eventos de todos los θ que lo tocan como arreglos de posiciones. Ver
-  [Entrega por row group](#entrega-por-row-group).
+  market="spot", asset="BTCUSDT", columns=None, readers=1)`: la entrega por row
+  group (ADR-L3-14). Iterador de `RowGroupFrames`, uno por row group de L1 del pase,
+  con los eventos de todos los θ que lo tocan como arreglos de posiciones. `readers`
+  es cuántos row groups se leen a la vez. Ver
+  [Entrega por row group](#entrega-por-row-group) y
+  [Lectura: `pre_buffer`, pool de E/S y `readers`](#lectura-pre_buffer-pool-de-es-y-readers).
 - `frames_of(event, l1_root, ..., month=None)`: las tramas de un evento cuya
   fila de L2 ya se tiene (un `RecordBatch` o `Table` de una fila, o un mapa con
   sus 11 columnas). Decodifica solo los row groups que el evento toca. Con un
@@ -151,15 +153,64 @@ for delivery in read_row_groups(thetas, l1_root, l2_root, start, end):
   `FrameBoundaryError`: toda frontera dentro del row group existe como tick
   (`ids[pos - 1] == id`) y en `C`, además, `transact_time = confirm_time`; un hueco de
   ids no corre la pertenencia. Si L1 termina antes de cerrar un evento, también falla.
-- **Memoria.** Un row group de L1 en vuelo y ninguno retenido, más un row group de
+- **Memoria.** Con `readers=1`: un row group de L1 en vuelo y ninguno retenido, más un row group de
   eventos de L2 por θ. El `for` conserva el elemento anterior hasta recibir el nuevo:
   suéltalo con `del` antes de pedir el siguiente o conviven dos row groups. Medido: el
   pico es el de decodificar un row group (unos 2,4 de 48 B por tick) y no sube con 10
   veces más eventos ni con un evento de 10 row groups; el modo por chunks llega a más
-  de 5.
+  de 5. Con `readers` > 1 la cuenta cambia, ver la sección siguiente.
 - Cada row group del pase se decodifica **exactamente una vez**, sea cual sea el
   número de θ y la longitud de los eventos. Un row group que ningún evento abierto
   necesita se salta con las estadísticas del pie.
+
+## Lectura: `pre_buffer`, pool de E/S y `readers`
+
+Los archivos viven en GCS y cada petición cuesta una espera, no ancho de banda. Un
+`pq.ParquetFile` abre por defecto con `pre_buffer=False`: `read_row_group` pide cada
+columna (5 en L1) y cada página por separado y en serie, y un row group de 48 MB tardaba
+≈ 2,3 s (≈ 21 MB/s) cuando GCS entrega más de 100 MB/s por conexión.
+
+- **`pre_buffer=True`**, solo en aperturas de vida corta (`lake.open_parquet(...,
+  pre_buffer=True)`). Arrow calcula con el pie del archivo los rangos de bytes del row
+  group, junta los vecinos y los pide a la vez con su pool de E/S: una espera por row group.
+  Pero retiene ese caché **comprimido** (≈ 15 MB) hasta la siguiente lectura o hasta cerrar
+  el archivo, y mientras tanto convive con el decodificado. Por eso el lector abre un
+  `ParquetFile` por row group, con el pie ya leído, lo lee y lo cierra (L1 con cualquier
+  `readers`, y los row groups de `events.parquet`); los archivos que quedan abiertos todo el
+  mes (los de `_steps`, el esqueleto de la familia y los que abren L2 y L3) se abren sin
+  `pre_buffer`.
+- **Pool de E/S de Arrow**, `DC_FRAMES_IO_THREADS` (entero ≥ 1, por defecto 8). Se fija
+  **al importar `dc_frames`** con `pa.set_io_thread_count`; un `set_io_thread_count`
+  posterior lo reemplaza (las pruebas de memoria lo usan así). Un valor inválido lanza
+  `ValueError` al importar. Es global del proceso: si otra parte pide otro tamaño, gana el
+  último en llamar.
+- **`readers=R`** (solo en `read_row_groups`; por defecto 1). Con R > 1, R row groups se
+  leen y decodifican a la vez, cada uno en su hilo, y salen **en el mismo orden y con las
+  mismas posiciones** que con 1 (una prueba compara row group a row group). Cada hilo abre
+  su propio `ParquetFile`, con el pie ya leído, porque un `ParquetFile` no admite lecturas
+  concurrentes, y corre en una copia del contexto de quien consume (los `ContextVar`, como el
+  contador de row groups de L3, valen en los hilos). `needed` (qué row groups piden los eventos abiertos) se vuelve a consultar
+  al entregar, así que se saltan los mismos row groups; lo único distinto es que al final
+  se pueden decodificar de más, a lo sumo R, los que el cierre del último evento dejó sin
+  pedir.
+- **Por qué el pico es R + K.** Con `readers=1` el lector es secuencial: el row group que
+  el consumidor tiene en la mano, y nada más (K = 1). Con R > 1, mientras el consumidor
+  trabaja con uno ya viajan los R siguientes: R en camino (los que terminaron esperan su
+  turno decodificados) más el de la mano, o sea **K = R + 1 decodificados en RAM**. A eso se
+  suman los buffers de decodificación de cada lectura en curso, ≈ 1,1 row groups (un
+  `read_row_group` pica en ≈ 2,1 de 48 B por tick con un hilo) y ≈ 0,3 de comprimido de
+  `pre_buffer`. Medido en la prueba de memoria: 2,1 con `readers=1`, 4,1 con 2 y 5,1 con 3.
+  El umbral de la prueba es `(K + 1.5) × row group`: 2,5, 4,5 y 5,5, con ≈ 0,4 de margen en
+  los tres.
+
+  **Eso es lo medido con el fixture, no una cota.** Hasta R `read_row_group` corren a la vez
+  (Arrow suelta el GIL), así que el peor caso es el de la mano más R lecturas solapadas:
+  `1 + R × 2,1` row groups (R = 2: ≈ 5,2; R = 3: ≈ 7,3), más el comprimido en vuelo. En el
+  fixture las decodificaciones duran milisegundos y casi no se solapan; con row groups de
+  48 MB sí pueden.
+  Cada lector de más cuesta ≈ 48 MB de RSS.
+- `pre_buffer` y el pool de E/S valen también para `read_frames` y `frames_of`; `readers`
+  no: ahí el lector sigue siendo secuencial.
 
 ## Presupuesto de ticks (`max_event_ticks`)
 

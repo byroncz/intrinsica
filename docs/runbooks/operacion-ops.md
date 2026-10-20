@@ -258,6 +258,21 @@ entradas.
   | Los 50 θ en modo evento, con presupuesto | `--theta all --from 2023-03 --modo evento` |
   | Un θ en modo evento con otro presupuesto | `--theta 0.00100000 --from 2023-03 --modo evento --max-event-ticks 50000000` |
 
+  Banderas de ITSC-362 (el lector con `pre_buffer` y `readers`):
+
+  - `--modo row-groups`: llama a `read_row_groups`, la entrega que usa L3, y cuenta por θ los
+    eventos que cierran en cada row group y los ticks de `[R, C)` y `[C, E)` con las
+    posiciones. Cada row group se decodifica una vez: no admite relecturas.
+  - `--readers N` (solo con `--modo row-groups`, por defecto 1): cuántos row groups se leen y
+    decodifican a la vez. Con N > 1 los hilos se solapan y la sonda solo reporta la pared y el
+    tiempo acumulado en `read_row_group`; `lectura_s`, `decodificación_s` y `selección_s`
+    salen `n/d`.
+  - `--sin-pre-buffer`: abre los archivos como antes de ITSC-362, la línea base.
+  - La última línea trae `readers=`, `pre_buffer=si|no`, `s_por_row_group=` (pared dividida
+    por los row groups decodificados del mes) y `s_read_row_group_l1=` (tiempo medio de un
+    `read_row_group` de L1, la métrica de la línea base). Las corridas de la card están en el
+    [runbook de L3](operacion-l3.md#sonda-del-lector-con-readers-itsc-362).
+
   Banderas nuevas (ITSC-343):
 
   - `--modo chunks|evento`: por defecto `chunks`, que llama a `read_frames(chunks=True)` y

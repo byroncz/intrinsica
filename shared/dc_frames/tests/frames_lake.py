@@ -101,7 +101,9 @@ def write_l1(
         {
             "agg_trade_id": ids,
             "price": pa.array([t["price"] for t in ticks], DEC),
-            "quantity": pa.array([Decimal(t["id"]) for t in ticks], DEC),
+            "quantity": pa.array(
+                [t.get("quantity", Decimal(t["id"])) for t in ticks], DEC
+            ),
             "first_trade_id": ids,
             "last_trade_id": ids,
             "transact_time": pa.array([t["time"] for t in ticks], pa.int64()),

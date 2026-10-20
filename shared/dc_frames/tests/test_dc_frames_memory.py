@@ -7,13 +7,16 @@ así que ese contador oscila en varios MB.
 
 import gc
 import json
+import random
 import subprocess
 import sys
 from decimal import Decimal
 
 import pyarrow as pa
+import pytest
 from dc_frames import read_frames
-from frames_lake import MONTH, write_l1, write_l2
+from dc_frames.lake import L1
+from frames_lake import KEY, MONTH, write_l1, write_l2
 
 ROW_GROUP = 100_000
 # Bytes de un row group decodificado: id, tiempo, precio y cantidad (8 + 8 + 16 + 16 B).
@@ -150,9 +153,11 @@ from dc_frames import read_row_groups
 
 pa.set_cpu_count(1)
 pa.set_io_thread_count(1)
-l1, l2 = sys.argv[1], sys.argv[2]
+l1, l2, readers = sys.argv[1], sys.argv[2], int(sys.argv[3])
 ticks = events = 0
-for delivery in read_row_groups(["0.001", "0.002"], l1, l2, (2017, 8), (2017, 8)):
+for delivery in read_row_groups(
+    ["0.001", "0.002"], l1, l2, (2017, 8), (2017, 8), readers=readers
+):
     ticks += len(delivery.frame)
     events += sum(len(t) for t in delivery.thetas)
     del delivery
@@ -162,9 +167,16 @@ print(json.dumps({
 """
 
 
-def row_groups_peak(root, l2: str) -> dict:
+def row_groups_peak(root, l2: str, readers: int = 1) -> dict:
     out = subprocess.run(
-        [sys.executable, "-c", ROW_GROUPS_PROBE, str(root / "l1"), str(root / l2)],
+        [
+            sys.executable,
+            "-c",
+            ROW_GROUPS_PROBE,
+            str(root / "l1"),
+            str(root / l2),
+            str(readers),
+        ],
         capture_output=True,
         text=True,
         check=True,
@@ -172,7 +184,19 @@ def row_groups_peak(root, l2: str) -> dict:
     return json.loads(out.stdout)
 
 
-def test_row_groups_peak_is_a_row_group_and_does_not_grow_with_events(tmp_path):
+def decoded_row_groups(readers: int) -> int:
+    """Cuántos row groups decodificados conviven con `readers` lectores.
+
+    Con 1 el lector es secuencial: el que el consumidor tiene en la mano, y nada más.
+    Con R > 1 hay R en camino (los que ya terminaron esperan su turno) más el de la mano.
+    """
+    return 1 if readers == 1 else readers + 1
+
+
+@pytest.mark.parametrize("readers", [1, 2, 3])
+def test_row_groups_peak_is_a_row_group_and_does_not_grow_with_events(
+    tmp_path, readers
+):
     ticks = [
         {"id": i, "price": Decimal(1), "time": i} for i in range(GROUPS * ROW_GROUP)
     ]
@@ -181,17 +205,56 @@ def test_row_groups_peak_is_a_row_group_and_does_not_grow_with_events(tmp_path):
         write_l2(tmp_path / name, 100000, theta_events(0, small), 100)
         write_l2(tmp_path / name, 200000, theta_events(7, small), 100)
 
-    few, many = row_groups_peak(tmp_path, "few"), row_groups_peak(tmp_path, "many")
-    chunks = peak(tmp_path, "many", "chunks")
+    few = row_groups_peak(tmp_path, "few", readers)
+    many = row_groups_peak(tmp_path, "many", readers)
     # El pase se detiene en el row group donde cierra el último evento (el 10); cada tick
     # se entrega una vez y los eventos largos salen en cada row group que cruzan.
     assert few["ticks"] == many["ticks"] > LONG
     assert many["events"] > few["events"] > 2 * GROUPS
-    # Un row group con sus buffers de decodificación (un solo read_row_group pica en
-    # ~2,1 row groups de 48 B por tick, siempre igual con un hilo); el modo por chunks
-    # llega a más de 5. Retener la entrega anterior sube el pico a ~2,9: con 2,5 la
-    # prueba lo atrapa y aún deja 18 % de margen sobre la línea base.
-    assert few["peak"] < 2.5 * ROW_GROUP_BYTES
-    assert many["peak"] < 1.25 * few["peak"]
-    # Sin el row group anterior ni relecturas, por debajo del modo por chunks.
-    assert many["peak"] < chunks["peak"]
+    # Los row groups decodificados que conviven más ~1,5 de buffers de decodificación de
+    # lo que se lee (un solo read_row_group pica en ~2,1 row groups de 48 B por tick con
+    # un hilo, o sea 1 + ~1,1). Con readers = 1 son 2,5; retener la entrega anterior sube
+    # el pico a ~2,9: con 2,5 la prueba lo atrapa y aún deja 18 % de margen. Con R > 1 la
+    # cuenta es R + 1 decodificados y medimos R + 2,1 (R = 2: 4,1; R = 3: 5,1), así que el
+    # umbral es R + 2,5 y el margen sigue siendo de ~0,4.
+    limit = (decoded_row_groups(readers) + 1.5) * ROW_GROUP_BYTES
+    assert few["peak"] < limit
+    assert many["peak"] < limit
+    if readers == 1:
+        chunks = peak(tmp_path, "many", "chunks")
+        # Diez veces más eventos no suben el pico.
+        assert many["peak"] < 1.25 * few["peak"]
+        # Sin el row group anterior ni relecturas, por debajo del modo por chunks.
+        assert many["peak"] < chunks["peak"]
+
+
+def test_the_reader_does_not_keep_the_compressed_row_group_of_pre_buffer(tmp_path):
+    """Con datos incompresibles, el comprimido de `pre_buffer` pesaría tanto como el row
+    group: el lector lo suelta al cerrar su archivo de vida corta, así que en RAM queda el
+    decodificado y nada más (Arrow retiene el caché mientras el archivo siga abierto).
+    """
+    rng = random.Random(7)
+    ticks = [
+        {
+            "id": i,
+            "price": Decimal(rng.getrandbits(59)).scaleb(-8),
+            "quantity": Decimal(rng.getrandbits(59)).scaleb(-8),
+            "time": rng.getrandbits(60),
+        }
+        for i in range(2 * ROW_GROUP)
+    ]
+    write_l1(tmp_path / "l1", ticks, ROW_GROUP)
+    for readers in (1, 2):
+        gc.collect()
+        baseline = pa.total_allocated_bytes()
+        rows = L1(tmp_path / "l1", KEY).row_groups(
+            MONTH, MONTH, 0, lambda low, high: True, readers=readers
+        )
+        first = next(rows)
+        gc.collect()
+        retained = pa.total_allocated_bytes() - baseline
+        rows.close()
+        del first
+        # Con R > 1 los R siguientes ya viajan: ahí se cuentan R + 1 decodificados.
+        decoded = 1 if readers == 1 else readers + 1
+        assert retained < (decoded + 0.25) * ROW_GROUP_BYTES, readers
