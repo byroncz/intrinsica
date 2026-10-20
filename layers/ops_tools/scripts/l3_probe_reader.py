@@ -62,7 +62,11 @@ Decodificación: lo que tarda `read_row_group` sin su lectura. Selección: el re
 
 Última línea: `sonda lector: thetas=… meses=… eventos=… ticks_l1=… pared_s=… lectura_s=…
 decodificación_s=… selección_s=… rss_pico_mib=… arrow_pool=… arrow_max_mib=… bytes_l1=…
-ticks_s=… readers=… pre_buffer=si|no s_por_row_group=… modo=chunks|evento|row-groups over_budget=… veredicto=ok|excedido|fallo`.
+ticks_s=… readers=… pre_buffer=si|no s_por_row_group=… s_read_row_group_l1=… modo=chunks|evento|row-groups over_budget=… veredicto=ok|excedido|fallo`.
+`s_por_row_group` es la pared total (incluye L2, la selección y los row groups de meses anteriores)
+dividida por los row groups de L1 del mes; `s_read_row_group_l1` es el tiempo medio de una llamada
+a `read_row_group` de L1, que es lo que mide la línea base de ≈ 2,3 s (con `--readers` > 1 es la
+latencia de una llamada, con los hilos compitiendo).
 `arrow_pool` es el backend del pool de Arrow (`mimalloc`, `jemalloc` o `system`) y
 `arrow_pico_mib` el máximo del pool de Arrow en todo el proceso (`max_memory()`) y `arrow_max_mib` el máximo de `pa.total_allocated_bytes()` visto con cada trozo en mano (modo
 chunks) o con el evento entregado (modo evento) y al cerrar cada evento. Separan
@@ -112,6 +116,8 @@ class Stats:
     io_s: float = 0.0
     io_in_rg_s: float = 0.0
     rg_s: float = 0.0
+    # La parte de `rg_s` que es de `consolidated.parquet`: la que la línea base de 2,3 s mide.
+    rg_l1_s: float = 0.0
     bytes: dict[str, int] = field(default_factory=lambda: {"l1": 0, "l2": 0})
     # ruta de L1 -> bytes leídos de ese archivo
     l1_read: dict[str, int] = field(default_factory=dict)
@@ -260,6 +266,8 @@ class _ProbeFile(pq.ParquetFile):
         )
         with STATS.lock:
             STATS.rg_s += elapsed
+            if self._kind == "l1":
+                STATS.rg_l1_s += elapsed
             STATS.io_in_rg_s += STATS.io_s - io_before
             STATS.decodes[self._kind] += 1
             STATS.expected[self._kind] += size
@@ -576,6 +584,8 @@ def run(ns: argparse.Namespace) -> int:
     events = sum(s.events for s in per_theta.values())
     rate = STATS.l1_ticks / wall if wall else 0.0
     per_row_group = wall / (month_decodes or STATS.decodes["l1"] or 1)
+    # Lo que mide la línea base de 2,3 s: el `read_row_group` de L1, sin L2 ni selección.
+    per_l1_call = STATS.rg_l1_s / (STATS.decodes["l1"] or 1)
     biggest = max((s.biggest_bytes for s in per_theta.values()), default=0)
     big_open = open_sweep(bigs)
     small_open = len(thetas) * (ns.big_event_ticks - 1)
@@ -696,7 +706,7 @@ def run(ns: argparse.Namespace) -> int:
         f"rss_pico_mib={rss / MIB:.0f} arrow_pool={pa.default_memory_pool().backend_name} "
         f"arrow_max_mib={STATS.arrow_max / MIB:.1f} arrow_pico_mib={arrow_peak / MIB:.1f} bytes_l1={STATS.bytes['l1'] if STATS.count_io else 'n/d'} "
         f"ticks_s={rate:.0f} readers={ns.readers} pre_buffer={'si' if STATS.pre_buffer else 'no'} "
-        f"s_por_row_group={per_row_group:.2f} modo={ns.modo} over_budget={over_budget} veredicto={verdict}"
+        f"s_por_row_group={per_row_group:.2f} s_read_row_group_l1={per_l1_call:.2f} modo={ns.modo} over_budget={over_budget} veredicto={verdict}"
     )
     return 1 if failed else 0
 

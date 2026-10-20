@@ -268,8 +268,9 @@ entradas.
     tiempo acumulado en `read_row_group`; `lectura_s`, `decodificación_s` y `selección_s`
     salen `n/d`.
   - `--sin-pre-buffer`: abre los archivos como antes de ITSC-362, la línea base.
-  - La última línea trae `readers=`, `pre_buffer=si|no` y `s_por_row_group=` (pared dividida
-    por los row groups decodificados del mes). Las corridas de la card están en el
+  - La última línea trae `readers=`, `pre_buffer=si|no`, `s_por_row_group=` (pared dividida
+    por los row groups decodificados del mes) y `s_read_row_group_l1=` (tiempo medio de un
+    `read_row_group` de L1, la métrica de la línea base). Las corridas de la card están en el
     [runbook de L3](operacion-l3.md#sonda-del-lector-con-readers-itsc-362).
 
   Banderas nuevas (ITSC-343):

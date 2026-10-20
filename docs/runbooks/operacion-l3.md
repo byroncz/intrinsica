@@ -447,12 +447,12 @@ Python) y taparía lo que se quiere medir:
 | Línea base, opcional | `--theta all --from 2021-01 --modo row-groups --readers 1 --sin-contar-io --sin-pre-buffer` |
 
 De la última línea (`sonda lector: …`) se copian `pared_s`, `s_por_row_group`, `rss_pico_mib`,
-`arrow_pico_mib` y `readers=`/`pre_buffer=`; la línea `pico del pool de Arrow=…` dice si quedó bajo el
+`arrow_pico_mib`, `s_read_row_group_l1` y `readers=`/`pre_buffer=`; la línea `pico del pool de Arrow=…` dice si quedó bajo el
 umbral del lector, `(K + 1,5)` row groups (informativo; no es una cota: con `readers` > 1 el peor caso es `1 + readers × 2,1`); de `row groups de L1: …`, los decodificados. Los bytes salen por
 metadatos (`bytes por metadatos`), porque `--sin-contar-io` no los mide. Con `readers` > 1 las
 fases por hilo no se reportan (los hilos se solapan): decide la pared. Metas
 ([TRD-L3 §10.3](../TRD/l3.md#103-sonda-del-lector-de-tramas--umbrales-de-aceptación-se-escriben-antes-de-medir)):
-`s_por_row_group` ≤ 1,0 con `readers = 1` y `pared_s` ≤ 60 con `readers = 2`. Con `readers = 2`
+`s_read_row_group_l1` ≤ 1,0 con `readers = 1` (es el tiempo medio de un `read_row_group` de L1, la misma métrica que la línea base de ≈ 2,3 s; `s_por_row_group` es la pared total, con L2 y la selección, y no se compara con ella) y `pared_s` ≤ 60 con `readers = 2`. Con `readers = 2`
 se decodifican a lo sumo 2 row groups más que con 1, al final.
 
 ## Scripts de operación

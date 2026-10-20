@@ -524,6 +524,7 @@ def test_el_modo_row_groups_cuenta_lo_mismo_que_el_lector_con_cualquier_readers(
     assert f"eventos={n}" in final and "veredicto=ok" in final
     assert f"readers={readers} pre_buffer=si" in final and "modo=row-groups" in final
     assert "s_por_row_group=" in final
+    assert "s_read_row_group_l1=" in final
     # Los ticks de las fases son los del lector por evento; cada row group, una vez.
     table = out.split("ticks_overshoot")[1].splitlines()[1 : 1 + len(thetas)]
     assert sum(int(line.split()[2]) for line in table) == conf
