@@ -275,7 +275,10 @@ class _ProbeFile(pq.ParquetFile):
 
 
 def probe_open_parquet(
-    path: str, what: str, metadata: pq.FileMetaData | None = None
+    path: str,
+    what: str,
+    metadata: pq.FileMetaData | None = None,
+    pre_buffer: bool = False,
 ) -> pq.ParquetFile:
     """Sustituto de `dc_frames.lake.open_parquet` que mide; hace lo mismo que el original.
 
@@ -287,7 +290,7 @@ def probe_open_parquet(
     if metadata is None and info.type != pafs.FileType.File:
         raise FramesInputError(f"falta {what}: {path}")
     kind = "l1" if path.endswith(lake.CONSOLIDATED) else "l2"
-    options = {"pre_buffer": STATS.pre_buffer, "metadata": metadata}
+    options = {"pre_buffer": pre_buffer and STATS.pre_buffer, "metadata": metadata}
     if STATS.count_io:
         source = pa.PythonFile(
             _CountedFile(fs.open_input_file(resolved), kind, path, info.size),

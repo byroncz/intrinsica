@@ -7,6 +7,7 @@ así que ese contador oscila en varios MB.
 
 import gc
 import json
+import random
 import subprocess
 import sys
 from decimal import Decimal
@@ -14,7 +15,8 @@ from decimal import Decimal
 import pyarrow as pa
 import pytest
 from dc_frames import read_frames
-from frames_lake import MONTH, write_l1, write_l2
+from dc_frames.lake import L1
+from frames_lake import KEY, MONTH, write_l1, write_l2
 
 ROW_GROUP = 100_000
 # Bytes de un row group decodificado: id, tiempo, precio y cantidad (8 + 8 + 16 + 16 B).
@@ -226,3 +228,35 @@ def test_row_groups_peak_is_a_row_group_and_does_not_grow_with_events(
         assert many["peak"] < 1.25 * few["peak"]
         # Sin el row group anterior ni relecturas, por debajo del modo por chunks.
         assert many["peak"] < chunks["peak"]
+
+
+def test_the_reader_does_not_keep_the_compressed_row_group_of_pre_buffer(tmp_path):
+    """Con datos incompresibles, el comprimido de `pre_buffer` pesaría tanto como el row
+    group: el lector lo suelta al cerrar su archivo de vida corta, así que en RAM queda el
+    decodificado y nada más (Arrow retiene el caché mientras el archivo siga abierto).
+    """
+    rng = random.Random(7)
+    ticks = [
+        {
+            "id": i,
+            "price": Decimal(rng.getrandbits(59)).scaleb(-8),
+            "quantity": Decimal(rng.getrandbits(59)).scaleb(-8),
+            "time": rng.getrandbits(60),
+        }
+        for i in range(2 * ROW_GROUP)
+    ]
+    write_l1(tmp_path / "l1", ticks, ROW_GROUP)
+    for readers in (1, 2):
+        gc.collect()
+        baseline = pa.total_allocated_bytes()
+        rows = L1(tmp_path / "l1", KEY).row_groups(
+            MONTH, MONTH, 0, lambda low, high: True, readers=readers
+        )
+        first = next(rows)
+        gc.collect()
+        retained = pa.total_allocated_bytes() - baseline
+        rows.close()
+        del first
+        # Con R > 1 los R siguientes ya viajan: ahí se cuentan R + 1 decodificados.
+        decoded = 1 if readers == 1 else readers + 1
+        assert retained < (decoded + 0.25) * ROW_GROUP_BYTES, readers

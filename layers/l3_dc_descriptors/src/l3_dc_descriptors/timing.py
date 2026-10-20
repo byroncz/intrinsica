@@ -135,12 +135,15 @@ def _compressed(parquet: pq.ParquetFile, index: int, columns) -> int:
 
 
 def _open_counting(
-    path: str, what: str, metadata: pq.FileMetaData | None = None
+    path: str,
+    what: str,
+    metadata: pq.FileMetaData | None = None,
+    pre_buffer: bool = False,
 ) -> pq.ParquetFile:
     """Sustituto de `dc_frames.lake.open_parquet`: igual al original, y cuenta los
     row groups de `consolidated.parquet` si la unidad en curso trae un contador.
     """
-    parquet = _OPEN(path, what, metadata)
+    parquet = _OPEN(path, what, metadata, pre_buffer)
     count = _COUNT.get()
     if count is None or not path.endswith(lake.CONSOLIDATED):
         return parquet

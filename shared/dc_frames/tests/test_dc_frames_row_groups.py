@@ -231,8 +231,10 @@ def count_decodes(monkeypatch) -> list[tuple[str, int]]:
     reads: list[tuple[str, int]] = []
     real = lake_module.open_parquet
 
-    def open_parquet(path: str, what: str, metadata=None) -> pq.ParquetFile:
-        parquet = real(path, what, metadata)
+    def open_parquet(
+        path: str, what: str, metadata=None, pre_buffer=False
+    ) -> pq.ParquetFile:
+        parquet = real(path, what, metadata, pre_buffer)
         if path.endswith("consolidated.parquet"):
             original = parquet.read_row_group
 
@@ -550,10 +552,10 @@ def test_the_reader_threads_run_in_the_context_of_the_consumer(tmp_path, monkeyp
     seen: list[str] = []
     real = lake_module.open_parquet
 
-    def open_parquet(path, what, metadata=None):
+    def open_parquet(path, what, metadata=None, pre_buffer=False):
         if metadata is not None:  # la apertura de un hilo del lector
             seen.append(marker.get())
-        return real(path, what, metadata)
+        return real(path, what, metadata, pre_buffer)
 
     monkeypatch.setattr(lake_module, "open_parquet", open_parquet)
     l1_root, l2_root, *_ = build_lake(tmp_path, l1_row_group=ROW_GROUP)

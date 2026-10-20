@@ -44,7 +44,9 @@ def test_a_bad_value_fails_loudly(monkeypatch, text):
         lake.io_threads()
 
 
-def test_open_parquet_passes_pre_buffer_and_the_footer_to_arrow(tmp_path, monkeypatch):
+def test_open_parquet_passes_pre_buffer_on_request_and_the_footer_to_arrow(
+    tmp_path, monkeypatch
+):
     path = tmp_path / "x.parquet"
     pq.write_table(pa.table({"a": [1, 2, 3]}), path, row_group_size=2)
     seen: dict = {}
@@ -56,7 +58,9 @@ def test_open_parquet_passes_pre_buffer_and_the_footer_to_arrow(tmp_path, monkey
 
     monkeypatch.setattr(lake.pq, "ParquetFile", spy)
     first = lake.open_parquet(str(path), "x")
-    assert seen["pre_buffer"] is True and seen["metadata"] is None
+    assert seen["pre_buffer"] is False and seen["metadata"] is None
+    lake.open_parquet(str(path), "x", pre_buffer=True).close()
+    assert seen["pre_buffer"] is True
     again = lake.open_parquet(str(path), "x", first.metadata)
     assert seen["metadata"] is first.metadata
     assert again.read_row_group(1).column("a").to_pylist() == [3]

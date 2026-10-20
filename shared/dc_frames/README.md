@@ -170,10 +170,15 @@ Los archivos viven en GCS y cada petición cuesta una espera, no ancho de banda.
 columna (5 en L1) y cada página por separado y en serie, y un row group de 48 MB tardaba
 ≈ 2,3 s (≈ 21 MB/s) cuando GCS entrega más de 100 MB/s por conexión.
 
-- **`pre_buffer=True`** (siempre, en `lake.open_parquet`). Arrow calcula con el pie del
-  archivo los rangos de bytes del row group, junta los vecinos y los pide a la vez con su
-  pool de E/S: una espera por row group. Mientras se lee, el row group **comprimido**
-  (≈ 15 MB) vive en RAM antes de decodificarse.
+- **`pre_buffer=True`**, solo en aperturas de vida corta (`lake.open_parquet(...,
+  pre_buffer=True)`). Arrow calcula con el pie del archivo los rangos de bytes del row
+  group, junta los vecinos y los pide a la vez con su pool de E/S: una espera por row group.
+  Pero retiene ese caché **comprimido** (≈ 15 MB) hasta la siguiente lectura o hasta cerrar
+  el archivo, y mientras tanto convive con el decodificado. Por eso el lector abre un
+  `ParquetFile` por row group, con el pie ya leído, lo lee y lo cierra (L1 con cualquier
+  `readers`, y los row groups de `events.parquet`); los archivos que quedan abiertos todo el
+  mes (los de `_steps`, el esqueleto de la familia y los que abren L2 y L3) se abren sin
+  `pre_buffer`.
 - **Pool de E/S de Arrow**, `DC_FRAMES_IO_THREADS` (entero ≥ 1, por defecto 8). Se fija
   **al importar `dc_frames`** con `pa.set_io_thread_count`; un `set_io_thread_count`
   posterior lo reemplaza (las pruebas de memoria lo usan así). Un valor inválido lanza

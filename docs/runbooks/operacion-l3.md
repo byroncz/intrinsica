@@ -416,9 +416,9 @@ Un perfil con hilos (`L3_PROFILE=1`) ve todos los hilos y sus tiempos son de hil
 
 ## Lector de tramas: `DC_FRAMES_IO_THREADS` y `readers`
 
-`dc_frames` lee Parquet con `pre_buffer=True`: Arrow junta los rangos de bytes de las
-columnas de un row group y los pide a la vez, en vez de una petición por columna y por
-página. Cuántas peticiones viajan en paralelo lo fija el pool de E/S de Arrow:
+`dc_frames` lee cada row group con `pre_buffer=True`, en un archivo que abre y cierra por
+row group: Arrow junta los rangos de bytes de las columnas y los pide a la vez, en vez de una
+petición por columna y por página. Cuántas peticiones viajan en paralelo lo fija el pool de E/S de Arrow:
 
 | Variable | Qué fija | Por defecto |
 |---|---|---|
