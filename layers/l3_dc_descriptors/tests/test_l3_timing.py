@@ -288,7 +288,7 @@ def test_it_reports_the_threads_and_prefetch_it_used(lake, tmp_path):
     ctx = replace(context(lake, tmp_path), threads=50)
     details = process_unit(unit_of(M2), ctx, lake.thetas).timing.details()
     assert details["threads"] == len(lake.thetas)
-    assert details["prefetch"] == 1
+    assert details["prefetch"] == 2
     default = process_unit(unit_of(M2), context(lake, tmp_path), lake.thetas)
     assert 1 <= default.timing.details()["threads"] <= len(lake.thetas)
 

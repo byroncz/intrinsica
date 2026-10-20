@@ -1,5 +1,6 @@
 """La CLI de la imagen: modos, opciones, códigos de salida y hallazgos (TRD-L3 §8.2 a §8.4)."""
 
+import math
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
@@ -528,13 +529,13 @@ def test_l3_threads_and_prefetch_reach_the_unit(lake, tmp_path, catalog):
         assert (row["details"]["threads"], row["details"]["prefetch"]) == (2, 0)
 
 
-def test_without_l3_threads_the_pool_follows_the_vcpus(lake, tmp_path, catalog):
+def test_without_l3_threads_the_pool_is_three_per_vcpu(lake, tmp_path, catalog):
     assert run(lake, tmp_path, catalog, *BACKFILL, L3_THREADS="", L3_PREFETCH="") == 0
     for row in emitted(tmp_path, "unit_timing"):
         details = row["details"]
         assert 1 <= details["threads"] <= len(lake.thetas)
-        assert details["threads"] <= max(1, int(details["cores"]))
-        assert details["prefetch"] == 1
+        assert details["threads"] <= max(1, math.ceil(3 * details["cores"]))
+        assert details["prefetch"] == 2
 
 
 @pytest.mark.parametrize(

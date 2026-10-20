@@ -6,9 +6,10 @@ el límite efectivo de CPU. Todo se acumula en objetos que crea la unidad (`Phas
 `RowGroupCount`) y que mueren con ella: ningún módulo guarda cuentas, así que dos
 unidades en el mismo proceso, en hilos o tareas distintas, no se pisan.
 
-Las fases de un solo hilo (`gate_s`, `reconcile_s`, `lineage_s`) son pared. `read_s` es lo
-que el hilo principal esperó al lector (con lectura anticipada, solo lo que faltó de la
-espera). `aggregate_s` y `write_s` son **suma sobre los hilos**: cada θ cuenta lo que
+`gate_s` y `lineage_s` son la pared de su fase: lo que el hilo principal esperó mientras el
+pool comprobaba la entrada de L2 o hasheaba sus archivos (ITSC-360); `reconcile_s` es pared
+de un solo hilo. `read_s` es lo que el hilo principal esperó al lector (con lectura
+anticipada, solo lo que faltó de la espera). `aggregate_s` y `write_s` son **suma sobre los hilos**: cada θ cuenta lo que
 gastó agregando y escribiendo, así que con `threads > 1` pueden pasar de `wall_s` (hasta
 `threads × wall_s`) y `other_s`, que es lo que falta hasta la pared, queda en 0 como
 mínimo. Con `threads = 1` y `prefetch = 0` son pared y suman a lo más `wall_s`.

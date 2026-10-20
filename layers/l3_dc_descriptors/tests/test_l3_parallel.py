@@ -14,13 +14,21 @@ import inspect
 import pkgutil
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import l3_dc_descriptors
 import pyarrow.parquet as pq
 import pytest
-from l3_dc_descriptors import SUMMARIES_SCHEMA, summarize, summarize_month
+from l3_dc_descriptors import (
+    SUMMARIES_SCHEMA,
+    L2InputMissing,
+    summarize,
+    summarize_month,
+)
+from l3_dc_descriptors.context import RunContext, Unit
 from l3_dc_descriptors.cpu import CpuLimit
-from l3_lake import M1, build_lake, fixture_ticks, month_cuts
+from l3_dc_descriptors.pipeline import process_unit
+from l3_lake import M1, M2, build_lake, fixture_ticks, month_cuts
 
 THREADS = (1, 2, 4)
 PREFETCH = (0, 1, 2)
@@ -106,15 +114,28 @@ def test_it_rejects_threads_or_prefetch_out_of_range(lake, options, message):
         )
 
 
-def test_it_never_uses_more_threads_than_thetas_or_vcpus():
+def test_it_never_uses_more_threads_than_thetas():
     assert summarize._workers(8, 5) == 5
     assert summarize._workers(3, 50) == 3
     assert 1 <= summarize._workers(None, 50) <= 50
 
 
-def test_a_fractional_vcpu_quota_still_gives_one_thread(monkeypatch):
-    monkeypatch.setattr(summarize, "cpu_limit", lambda: CpuLimit(0.5, 4, "cgroup-v2"))
-    assert summarize._workers(None, 50) == 1
+@pytest.mark.parametrize(
+    ("cores", "thetas", "expected"),
+    [
+        (3.72, 50, 12),
+        (4.0, 50, 12),
+        (8.0, 50, 24),
+        (8.0, 5, 5),
+        (0.2, 50, 1),
+        (0.5, 50, 2),
+    ],
+)
+def test_the_default_pool_is_three_threads_per_vcpu_rounded_up(
+    monkeypatch, cores, thetas, expected
+):
+    monkeypatch.setattr(summarize, "cpu_limit", lambda: CpuLimit(cores, 8, "cgroup-v2"))
+    assert summarize._workers(None, thetas) == expected
 
 
 def l3_threads() -> list[str]:
@@ -246,3 +267,97 @@ def test_no_module_declares_global_state():
             and not name.startswith("__")
         ]
         assert mutable == [], (module.__name__, mutable)
+
+
+# Compuerta y linaje en el pool (ITSC-360)
+
+
+def test_ordered_returns_in_item_order_and_raises_the_first_failure_in_item_order():
+    def work(n: int) -> int:
+        time.sleep(0.02 * (5 - n))  # los últimos terminan antes que los primeros
+        if n in (2, 4):
+            raise RuntimeError(f"falla {n}")
+        return n * 10
+
+    with ThreadPoolExecutor(5) as pool:
+        assert summarize.ordered(pool, lambda n: n * 10, range(5)) == [
+            0,
+            10,
+            20,
+            30,
+            40,
+        ]
+        with pytest.raises(RuntimeError, match="falla 2"):
+            summarize.ordered(pool, work, range(5))
+    with pytest.raises(RuntimeError, match="falla 2"):
+        summarize.ordered(None, work, range(5))
+
+
+def test_a_pool_of_one_thread_is_no_pool():
+    with summarize.theta_pool(1) as pool:
+        assert pool is None
+    with summarize.theta_pool(3) as pool:
+        assert isinstance(pool, ThreadPoolExecutor)
+
+
+def test_the_gate_raises_the_first_failing_theta_in_theta_order(tmp_path, ticks):
+    # Los dos primeros θ no tienen events.parquet: con hilos, el error es el del primero,
+    # como en serie, y no queda ningún archivo ni hilo. Lago propio: se borran archivos.
+    lake = build_lake(tmp_path, ticks, month_cuts(ticks, 1500, 3000), l1_row_group=150)
+    thetas = lake.theta_texts
+    for text in thetas[:2]:
+        lake_file(lake, text, M2, "events.parquet").unlink()
+    messages = set()
+    for threads in (1, 4):
+        with pytest.raises(L2InputMissing) as caught:
+            summarize_month(
+                lake.l1,
+                lake.l2,
+                lake.l3,
+                M2,
+                thetas,
+                series_start=M1,
+                threads=threads,
+            )
+        messages.add(str(caught.value))
+        assert caught.value.details["theta"] == thetas[0]
+        assert [p for p in lake.l3.rglob("*") if p.is_file()] == []
+        assert l3_threads() == []
+    assert len(messages) == 1
+
+
+def lake_file(lake, text: str, month, name: str):
+    base = "provider=binance/market=spot/asset=BTCUSDT"
+    return lake.l2 / f"{base}/theta={text}/year={month[0]}/month={month[1]:02d}/{name}"
+
+
+@pytest.mark.parametrize("threads", THREADS)
+def test_the_lineage_is_the_same_with_any_pool(lake, tmp_path, threads):
+    def lineage(**options):
+        ctx = RunContext(
+            mode="backfill",
+            run_id="run",
+            image_version="0.8.0+test",
+            series_start=M1,
+            landing_root=str(lake.l1),
+            events_root=str(lake.l2),
+            summaries_root=str(lake.l3),
+            dq_root=str(tmp_path / "dq"),
+            **options,
+        )
+        result = process_unit(Unit(*M2), ctx, lake.thetas)
+        assert result.ok
+        rows = [f for f in result.findings if f.check_type == "summaries_summary"]
+        return {
+            f.details["theta"]: (
+                f.details["l2_events_content_hash"],
+                f.details["l2_carry_over_content_hash"],
+                f.details["content_hash"],
+            )
+            for f in rows
+        }, result.timing
+
+    expected, _ = lineage(threads=1, prefetch=0)
+    got, timing = lineage(threads=threads, prefetch=1)
+    assert got == expected and len(got) == len(lake.thetas)
+    assert timing.phases.lineage_s > 0 and timing.phases.gate_s > 0

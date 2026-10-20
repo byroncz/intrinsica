@@ -55,7 +55,7 @@ class RunContext:
     family: str = FAMILY
     # `L3_PROFILE=1`: la unidad corre bajo cProfile y emite `unit_profile`.
     profile: bool = False
-    # `L3_THREADS` y `L3_PREFETCH`: hilos del pool de θ (`None`: los vCPU efectivos) y row
+    # `L3_THREADS` y `L3_PREFETCH`: hilos del pool de θ (`None`: `ceil(3 × vCPU)`) y row
     # groups de ventaja del lector (`None`: el valor por defecto de `summarize`).
     threads: int | None = None
     prefetch: int | None = None
