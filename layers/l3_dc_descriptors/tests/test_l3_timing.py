@@ -301,6 +301,8 @@ def test_aggregate_and_write_are_sums_over_the_threads(lake, tmp_path):
     # Cada hilo aporta a lo más su pared: la suma no pasa de `threads × wall_s`.
     parallel = details["aggregate_s"] + details["write_s"]
     assert parallel <= details["threads"] * details["wall_s"] + 0.01
+    # Condición de merge de ITSC-357: el RSS del fixture con hilos queda dentro del límite.
+    assert 0 < details["rss_peak_mib"] <= 2048
 
 
 def test_the_profile_sees_the_calls_of_the_pool_threads():
