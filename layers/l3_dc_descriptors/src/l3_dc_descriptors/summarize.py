@@ -61,8 +61,9 @@ from l3_dc_descriptors.timing import Phases
 DEFAULT_KEY = ("binance", "spot", "BTCUSDT")
 C_TICKS, OS_TICKS = COLUMN["c_ticks"], COLUMN["os_ticks"]
 _THETA_SCALE = Decimal("1e-8")
-# Row groups que el lector trae de ventaja: uno en proceso y dos listos. Con 1 el hilo
-# principal aún esperó 43 s al lector en 2021-01 (ITSC-360).
+# Row groups que el lector trae de ventaja: uno en proceso y dos listos. Es el valor de
+# T3b y T3c, no de una comparación con 1; con 2 el hilo principal aún esperó 43 s al
+# lector en 2021-01 (T3c, ITSC-360).
 DEFAULT_PREFETCH = 2
 # Hilos por vCPU efectivo: la espera de red y de disco de cada θ se solapa con el cómputo
 # de otros. De 12 a 24 hilos a 4 vCPU la pared bajó 1 % y la RSS subió 130 MiB (ITSC-360).
