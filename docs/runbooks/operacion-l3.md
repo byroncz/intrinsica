@@ -382,7 +382,7 @@ que agrega y escribe los θ de cada row group. Son opcionales y se dejan sin fij
 `L3_THREADS=1` con `L3_PREFETCH=0` es el flujo secuencial de antes, útil como línea base o
 si se sospecha de los hilos: el resultado (tablas y `content_hash`) es el mismo en cualquier
 combinación. Un valor que no sea un entero válido termina la corrida con código 2, sin
-escribir nada. Cada `prefetch` extra cuesta ≈ 48 MB de RSS (un row group de L1 decodificado). Los mismos hilos hacen la compuerta de entrada y el linaje (`gate_s` y `lineage_s` son la pared de esa fase).
+escribir nada. Cada `prefetch` extra cuesta ≈ 48 MB de RSS (un row group de L1 decodificado). Un pool del mismo tamaño hace la compuerta de entrada y otro el linaje (`gate_s` y `lineage_s` son la pared de cada fase).
 
 `unit_timing` dice lo que se usó (`threads`, `prefetch`); para sobrescribir los valores por defecto hay que lanzar desde Cloud Shell, como en el ejemplo de abajo. Con hilos, `aggregate_s` y `write_s`
 son **suma sobre los hilos**: pueden pasar de `wall_s`, y eso es lo esperado. Para comparar
