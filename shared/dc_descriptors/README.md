@@ -68,8 +68,10 @@ push(row group k) ──► cola de ítems (θ₀,k) (θ₁,k) … (θ₄₉,k) 
   sus casillas avanzan, en el mismo paso, la marca de cerrados del θ (`needed`). Solo se
   sueltan lotes del frente, porque un row group sin procesar no toca ningún evento cerrado;
   así las búsquedas sobre los eventos en mano dan lo mismo que sobre todos. Lo retenido va
-  de la marca al último lote entregado: O(lote), no O(eventos del mes) (unos 65 bytes por
-  evento: `R`, `C`, `confirm_time` y `E`, `direction` y dos `decimal128`). Los buffers de
+  de la marca al último lote entregado: O(lote + eventos abiertos de los row groups en
+  vuelo), no O(eventos del mes); un evento largo abierto en la marca ancla los lotes
+  entregados detrás de él (unos 65 bytes por evento: `R`, `C`, `confirm_time` y `E`,
+  `direction` y dos `decimal128`). Los buffers de
   salida se reservan al llegar la primera fila de su row group y se entregan al sellar.
 
 ## API
