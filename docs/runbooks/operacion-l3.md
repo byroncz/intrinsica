@@ -424,7 +424,7 @@ petición por columna y por página. Cuántas peticiones viajan en paralelo lo f
 |---|---|---|
 | `DC_FRAMES_IO_THREADS` | Hilos del pool de E/S de Arrow. Entero ≥ 1; un valor inválido hace fallar el import de `dc_frames` con `ValueError`, antes de leer nada | 8 |
 
-Se lee al importar `dc_frames`, en cualquiera de las capas que lo usan (L1, L2, L3, viz).
+Se lee al importar `dc_frames`, que solo importan `l3_dc_descriptors` y `ops_tools`. Los `VERSION` de L1, L2 y viz suben igual, porque `shared/` entra en cada imagen.
 Como `L3_THREADS`, solo se sobrescribe lanzando desde Cloud Shell con `--update-env-vars`.
 Más hilos de E/S no aceleran un row group suelto (es un solo rango de ≈ 15 MB): ayudan
 cuando varios row groups se leen a la vez (`readers` > 1). `read_row_groups(readers=R)` aún
