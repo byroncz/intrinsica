@@ -28,10 +28,10 @@ dc_pyo3 = { workspace = true }
 
 [tool.uv.workspace]
 members = ["shared/*", "layers/*"]
-# dc_core es un crate Rust, sin pyproject.toml: un directorio sin manifiesto
-# bajo shared/ rompe el workspace de uv (shared/README.md). dc_pyo3 sí lo
-# tiene: maturin lo construye.
-exclude = ["shared/dc_core"]
+# dc_core y dc_descriptors son crates Rust, sin pyproject.toml: un directorio
+# sin manifiesto bajo shared/ rompe el workspace de uv (shared/README.md).
+# dc_pyo3 sí lo tiene: maturin lo construye.
+exclude = ["shared/dc_core", "shared/dc_descriptors"]
 
 [tool.ruff]
 line-length = 88

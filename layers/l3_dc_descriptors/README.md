@@ -108,10 +108,23 @@ comprobación del lote falla, el camino por evento de `build_row`. Ese tramo cre
 techo es 4,3× y a 4 vCPU se espera 1,5× a 2,5×. Lo que los hilos sí esconden es la espera: T1
 (ITSC-356, 2021-01) midió que la unidad esperaba el 62 % de su pared (`cpu_utilization` 0,092), en
 lecturas de PyArrow y escritura que sueltan el GIL. Lo medido con hilos (corrida T3) está en
-[TRD-L3 §10.2](../../docs/TRD/l3.md#102-dimensionamiento--hipótesis-de-partida-y-primera-medición). Si
-el tramo Python resulta lo que frena, lo ataca el núcleo en Rust (ITSC-358, condicional) y no los
-procesos: la data no se replica. Dos cosas más que no son por unidad en un proceso con meses en
+[TRD-L3 §10.2](../../docs/TRD/l3.md#102-dimensionamiento--hipótesis-de-partida-y-primera-medición). Lo ataca el
+motor nativo (ITSC-358, ADR-L3-16; ver abajo) y no los procesos: la data no se replica. Dos cosas más que no son por unidad en un proceso con meses en
 paralelo: `rss_peak_mib` y `cpu_throttled_s` son del proceso.
+
+## Motor nativo de agregación (ITSC-358)
+
+`native.py` adapta el motor de Rust (`shared/dc_descriptors`, expuesto por `dc_pyo3.Engine`) a
+lo que entrega el lector: `Feeder` arma por row group las piezas de L2 de cada θ y lleva la
+cuenta de eventos (el índice de un evento es su casilla), `push` empuja los buffers de Arrow
+sin copia, `to_batch` envuelve en Arrow los row groups de salida que el motor sella y
+`to_summarize_error` convierte sus errores en las excepciones tipadas de `errors`, con el
+mismo `check_type` y los mismos `details`. **Todavía no está en el flujo de `summarize_month`**:
+lo conecta el orquestador (hija 3 de E6). Mientras tanto, `rowgroup.py` es la referencia contra
+la que `tests/test_l3_native.py` comprueba que el motor, con 1 y 4 hilos y en cualquier orden
+de `push`, da las mismas tablas, el mismo `content_hash` y la misma conciliación, y
+`tests/test_l3_native_memory.py` que la RSS no crece con los ticks del mes. El diseño y por qué
+es nativo están en [TRD-L3 ADR-L3-16](../../docs/TRD/l3.md).
 
 ## Uso en local del núcleo
 

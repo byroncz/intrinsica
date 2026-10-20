@@ -1,7 +1,7 @@
-"""Bindings PyO3 sobre dc_core: fan-out de N θ y carry-over."""
+"""Bindings PyO3 sobre dc_core (fan-out de N θ y carry-over) y dc_descriptors (motor de L3)."""
 
 from collections.abc import Sequence
-from typing import Self
+from typing import Protocol, Self
 
 SCALE: int
 PRICE_LIMIT: int
@@ -85,3 +85,66 @@ class FanOut:
     def discarded(self) -> list[int]: ...
     def carry_overs(self) -> list[CarryOver]: ...
     def __len__(self) -> int: ...
+
+class DescriptorError(ValueError):
+    """Un fallo del motor de L3. `kind` dice cuál: `input`, `ticks`, `internal`,
+    `skeleton`, `incomplete`, `direction`, `invariant`, `quantity_too_large`,
+    `no_quantity` o `notional_overflow`. Según el caso trae `theta` (posición),
+    `event`, `confirm_agg_trade_id`, `phase`, `field`, `got`, `wanted`, `rows`,
+    `missing` o `expected`.
+    """
+
+    kind: str
+
+class SealedColumn:
+    """Bytes de una columna de salida en el layout de Arrow, de solo lectura, con
+    protocolo de buffer (`pyarrow.py_buffer`, `memoryview`). Poseen la memoria del motor."""
+
+    def __len__(self) -> int: ...
+
+class Piece(Protocol):
+    """Las columnas de L2 de los eventos de un θ en un row group (cualquier objeto con
+    estos atributos). `positions` es `(n, 3)` `int64`; los flags, `n` bytes 0/1;
+    `direction`, `int8`; los precios, `(bytes del buffer decimal128, offset)`."""
+
+    theta: int
+    first_event: int
+    positions: object
+    starts_before: object
+    ends_after: object
+    ticks_before_month: object
+    reference: object
+    confirm: object
+    confirm_time: object
+    extreme: object
+    direction: object
+    confirm_price: tuple[memoryview, int]
+    extreme_price: tuple[memoryview, int]
+
+# (rows, closed_ticks, before_month, first_reference, last_extreme)
+type Stats = tuple[int, int, int, int | None, int | None]
+type Sealed = tuple[int, int, int, list[SealedColumn], SealedColumn | None, int]
+
+class Engine:
+    def __new__(
+        cls,
+        thetas: Sequence[int],
+        schema: Sequence[tuple[str, int, bool]],
+        row_groups: Sequence[Sequence[int]],
+        threads: int | None = None,
+    ) -> Self: ...
+    def push(
+        self,
+        row_group_id: int,
+        rows: int,
+        time: tuple[memoryview, int],
+        price: tuple[memoryview, int],
+        quantity: tuple[memoryview, int],
+        sold: tuple[memoryview, int],
+        pieces: Sequence[Piece],
+    ) -> None: ...
+    def pop_sealed(self) -> Sealed | None: ...
+    def inflight(self) -> int: ...
+    def busy(self) -> float: ...
+    def finish(self) -> list[Stats]: ...
+    def close(self) -> None: ...

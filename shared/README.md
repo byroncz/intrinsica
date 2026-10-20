@@ -15,13 +15,14 @@ Un paquete por subcarpeta, cada uno con su `pyproject.toml` (o `Cargo.toml`).
 | [`dc_frames`](dc_frames/) | Lector de tramas (por evento o por chunks) y escritor común de archivos de familia de L3 (ITSC-330, ITSC-342) |
 | [`pyutils`](pyutils/) | Escritor Parquet atómico, `content_hash` y `resolve_fs` compartidos por L1 y L2 (ITSC-245) |
 | [`dc_core`](dc_core/) | Crate Rust del núcleo de Directional Change: detector DC de un θ (ITSC-239) |
-| [`dc_pyo3`](dc_pyo3/) | Bindings PyO3 sobre `dc_core`: fan-out de N θ y carry-over para Python (ITSC-243) |
+| [`dc_descriptors`](dc_descriptors/) | Crate Rust del motor de agregación de L3: ítems por row group y θ en hilos nativos, aritmética `u128` (ITSC-358) |
+| [`dc_pyo3`](dc_pyo3/) | Bindings PyO3 sobre `dc_core` (fan-out de N θ y carry-over) y `dc_descriptors` (motor de L3) para Python (ITSC-243, ITSC-358) |
 
 ## Qué no contiene
 
 - Lógica propia de una capa: va en `layers/`.
 - Directorios sin `pyproject.toml`: rompen el workspace de uv. Cada
   directorio se crea junto con su manifiesto, no antes; un paquete solo
-  Rust (como `dc_core`) se excluye en `[tool.uv.workspace] exclude` del
+  Rust (como `dc_core` y `dc_descriptors`) se excluye en `[tool.uv.workspace] exclude` del
   `pyproject.toml` raíz. `dc_pyo3` sí tiene `pyproject.toml` (maturin), así
   que es miembro de los dos workspaces.

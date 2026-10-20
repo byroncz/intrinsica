@@ -1,9 +1,10 @@
 # dc_pyo3
 
 Bindings [PyO3](https://pyo3.rs) sobre [`dc_core`](../dc_core/README.md): el
-fan-out de N θ y el carry-over, para que Python use el núcleo Rust (ITSC-243).
-No tiene lógica de detección: convierte tipos y errores, nada más. El
-detector es `dc_core` sin tocarlo.
+fan-out de N θ y el carry-over, para que Python use el núcleo Rust (ITSC-243), y
+sobre [`dc_descriptors`](../dc_descriptors/README.md): el motor de agregación de
+L3 (ITSC-358). No tiene lógica de detección ni de agregación: convierte tipos,
+buffers y errores, nada más.
 
 Es miembro del workspace de Cargo (`Cargo.toml` raíz) y del de uv
 (`shared/*`). `uv sync` lo compila con maturin, en release, y
@@ -87,6 +88,50 @@ constante, lo agrega quien escribe. Se construyen directo en la memoria del
 eventos de `dc_core` de un θ se sueltan en cuanto están sus columnas. Las
 pruebas (`test_columns_carry_the_same_events_as_the_objects`) comprueban que
 `EventColumns` y `Event` llevan exactamente lo mismo.
+
+## `Engine`: el motor de agregación de L3 (ITSC-358)
+
+Bindings sobre [`dc_descriptors`](../dc_descriptors/README.md), el motor que calcula los
+descriptores de `summaries.parquet` en hilos nativos (ADR-L3-16). Aquí tampoco hay lógica:
+solo buffers y errores. El modelo (ítems, casillas, fusión) y el contrato de entrada están
+en el README del crate.
+
+```python
+engine = dc_pyo3.Engine(thetas, schema, row_groups, threads=None)
+engine.push(row_group_id, rows, time, price, quantity, sold, pieces)
+while (sealed := engine.pop_sealed()) is not None:
+    theta, index, rows, columns, validity, null_count = sealed
+engine.inflight()
+engine.busy()
+stats = (
+    engine.finish()
+)  # por θ: (rows, closed_ticks, before_month, first_reference, last_extreme)
+engine.close()
+```
+
+- `schema` son las 18 columnas de datos como `(nombre, bytes por valor, nulable)`; el motor
+  las compara con las suyas y falla con `ValueError` si el esquema de la capa cambió.
+  `row_groups[t]` son las filas de cada row group de salida del θ `t` (el esqueleto de L2),
+  y van en el constructor y no en cada `push` porque no cambian por row group.
+- **Ticks sin copia.** `time`, `price`, `quantity` y `sold` son `(memoryview de bytes del
+  Buffer de Arrow, Array.offset)`. El motor retiene el `memoryview` hasta terminar el row
+  group (`inflight()` baja) y lo suelta sin tomar el GIL: PyO3 difiere el `decref`. Los
+  buffers deben ser inmutables, como los de Arrow.
+- **`pieces`**: una por θ que tiene eventos en el row group; cualquier objeto con los
+  atributos de `Piece` (ver `.pyi`; la capa usa un `NamedTuple`). Los arreglos de L2 se
+  copian (son pocos); `positions` es `(n, 3)` `int64` contiguo y los decimales van como
+  `(bytes del buffer, offset)`.
+- **Salida sin copia.** `columns` son 18 `SealedColumn`: objetos de solo lectura con
+  protocolo de buffer que poseen la memoria del motor. `pyarrow.py_buffer(column)` los
+  envuelve sin copiar, y `validity` es el mapa de bits de las columnas `os_*`, o `None`.
+- **Errores.** `DescriptorError` (subclase de `ValueError`) con `kind` y, según el caso,
+  `theta` (posición), `event`, `confirm_agg_trade_id`, `phase`, `field`, `got`, `wanted`.
+  `l3_dc_descriptors.native.to_summarize_error` los convierte en las excepciones tipadas
+  de L3.
+- `finish()` espera con el GIL suelto.
+
+Se prueba con `layers/l3_dc_descriptors/tests/test_l3_native*.py`, no con pytest de este
+paquete: el contrato real es el que usa la capa.
 
 ## Por qué `extension-module` no es una feature por defecto
 

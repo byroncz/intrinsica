@@ -4,20 +4,39 @@ FROM python:3.14-slim AS build
 
 COPY --from=ghcr.io/astral-sh/uv:0.12.7 /uv /usr/local/bin/uv
 
-ENV UV_PYTHON_DOWNLOADS=0 \
+# dc_pyo3 es una extensión Rust (trae el motor de agregación, dc_descriptors): maturin la
+# compila durante uv sync, y necesita cargo y un enlazador (gcc). Nada de esto llega a la
+# etapa final. Misma etapa de build que L2.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends build-essential ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV RUSTUP_HOME=/opt/rustup \
+    CARGO_HOME=/opt/cargo \
+    PATH=/opt/cargo/bin:$PATH \
+    UV_PYTHON_DOWNLOADS=0 \
     UV_COMPILE_BYTECODE=1 \
     UV_NO_CACHE=1
 
 WORKDIR /app
 
-COPY pyproject.toml uv.lock ./
+# La versión de Rust la fija rust-toolchain.toml (una sola fuente con el
+# desarrollo local, el CI y L2). Va antes que el código para que esta capa solo se
+# reconstruya si cambia la toolchain.
+COPY rust-toolchain.toml ./
+RUN curl -fsSL -o /tmp/rustup-init "https://static.rust-lang.org/rustup/dist/$(uname -m)-unknown-linux-gnu/rustup-init" \
+    && chmod +x /tmp/rustup-init \
+    && /tmp/rustup-init -y --profile minimal --default-toolchain none --no-modify-path \
+    && rm /tmp/rustup-init \
+    && rustup toolchain install \
+    && cargo --version
+
+COPY Cargo.toml Cargo.lock pyproject.toml uv.lock ./
 COPY shared ./shared
 COPY layers ./layers
 
-# --no-editable copia l3_dc_descriptors, dc_frames, dq y pyutils dentro del entorno: la
-# etapa final no necesita el árbol fuente. Sin Rust: L3 no depende de dc_pyo3 (lee los
-# Parquet de L1 y L2 por nombre de columna, sin importar esas capas; dc_pyo3 solo lo usan
-# las pruebas, para generar el lago).
+# --no-editable copia l3_dc_descriptors, dc_frames, dq y pyutils, y la rueda de dc_pyo3
+# compilada, dentro del entorno: la etapa final no necesita el árbol fuente ni Rust.
 RUN uv sync --locked --package l3_dc_descriptors --no-dev --no-editable
 
 FROM python:3.14-slim
