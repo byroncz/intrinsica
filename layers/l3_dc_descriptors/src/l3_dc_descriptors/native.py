@@ -1,24 +1,26 @@
 """El adaptador del motor nativo de agregación (`dc_pyo3.Engine`, ITSC-358).
 
-El motor (crate `dc_descriptors`) agrega por row group y θ en hilos nativos; esta capa de
-Python solo lo orquesta: traduce un `RowGroupFrames` del lector a los buffers de Arrow y
-a las columnas de L2 que `Engine.push` espera, envuelve en Arrow los row groups de salida
-que el motor sella y convierte sus errores en las excepciones tipadas de `errors`. No
-agrega nada: la aritmética y los invariantes de §7.2 viven en Rust (ADR-L3-16).
+El motor (crate `dc_descriptors`) agrega por row group y θ en hilos nativos y calcula él
+mismo dónde cae cada frontera de L2 en cada row group; esta capa de Python solo lo
+orquesta: entrega una vez por θ las columnas de L2 de sus eventos (`set_boundaries`),
+traduce cada row group del lector a los buffers de Arrow que `Engine.push` espera, envuelve
+en Arrow los row groups de salida que el motor sella y convierte sus errores en las
+excepciones tipadas de `errors` y del lector. No agrega nada: la aritmética y los
+invariantes de §7.2 viven en Rust (ADR-L3-16).
 
 Todavía no está en el flujo de `summarize_month`: lo conecta el orquestador (ITSC-358 es
 solo el motor). `rowgroup.py` sigue siendo la referencia con la que se compara.
 """
 
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from decimal import Decimal
 from typing import Any, NamedTuple
 
 import dc_pyo3
 import numpy as np
 import pyarrow as pa
-from dc_frames import FramesInputError, RowGroupFrames, ThetaEvents
-from dc_frames.lake import Month
+from dc_frames import FramesInputError
+from dc_frames.lake import BOUNDARY_COLUMNS, EventGroup, Month
 
 from l3_dc_descriptors.errors import (
     L2StateInconsistent,
@@ -33,93 +35,84 @@ ENGINE_SCHEMA = tuple(
     for field in list(SUMMARIES_SCHEMA)[1:]
 )
 
+_NAMES = ("referencia", "confirmación", "extremo")
 
-class Piece(NamedTuple):
-    """Las columnas de L2 de los eventos de un θ en un row group (`Engine.push`)."""
-
-    theta: int  # posición del θ en la lista del motor
-    first_event: int  # índice de la primera fila en `events.parquet` de L2
-    positions: np.ndarray  # (n, 3) int64
-    starts_before: np.ndarray  # n bytes 0/1
-    ends_after: np.ndarray
-    ticks_before_month: np.ndarray
-    reference: np.ndarray
-    confirm: np.ndarray
-    confirm_time: np.ndarray
-    extreme: np.ndarray
-    direction: np.ndarray  # int8
-    confirm_price: tuple[memoryview, int]  # (bytes del buffer, offset) decimal128
-    extreme_price: tuple[memoryview, int]
+# Los (buffer, offset) de una columna: el `memoryview` de bytes y el `offset` del `Array`.
+type Region = tuple[memoryview, int]
 
 
-def _bytes(array: pa.Array) -> tuple[memoryview, int]:
+class EventBatch(NamedTuple):
+    """Un row group de `events.parquet` de L2 de un θ (`Engine.set_boundaries`)."""
+
+    rows: int
+    reference: Region
+    confirm: Region
+    confirm_time: Region
+    extreme: Region
+    direction: Region
+    confirm_price: Region
+    extreme_price: Region
+
+
+def _bytes(array: pa.Array) -> Region:
     """Los bytes del buffer de datos de un array de Arrow y su offset, sin copia."""
     buffer = array.buffers()[1]
     return memoryview(buffer if buffer is not None else b"").cast("B"), array.offset
 
 
-def _column(events: pa.RecordBatch, name: str) -> np.ndarray:
-    return events.column(name).to_numpy(zero_copy_only=True)
+def event_batch(batch: pa.RecordBatch) -> EventBatch:
+    """Las siete columnas de L2 de un row group de eventos, sin copiar."""
+    return EventBatch(
+        batch.num_rows,
+        _bytes(batch.column("reference_agg_trade_id")),
+        _bytes(batch.column("confirm_agg_trade_id")),
+        _bytes(batch.column("confirm_time")),
+        _bytes(batch.column("extreme_agg_trade_id")),
+        _bytes(batch.column("direction")),
+        _bytes(batch.column("confirm_price")),
+        _bytes(batch.column("extreme_price")),
+    )
 
 
-class Feeder:
-    """Arma lo que `Engine.push` recibe, llevando la cuenta de eventos de cada θ.
+def set_boundaries(
+    engine: dc_pyo3.Engine, position: int, groups: Iterable[EventGroup]
+) -> None:
+    """Entrega al motor los eventos del θ en `position`: sus row groups de L2, en orden.
 
-    El índice de un evento en `events.parquet` es su casilla en el motor. El lector
-    entrega los eventos de cada θ en orden y repite el evento abierto al pasar de un row
-    group al siguiente (`starts_before`), así que el primer evento de una entrega es el
-    siguiente a los ya vistos, o el último visto si continúa. Hay que llamar a `pieces`
-    en el orden del lector, un row group tras otro.
+    Hay que llamarla una vez por θ, antes del primer `push`. El motor retiene los buffers
+    de Arrow (no se copian) hasta cerrarse, así que el llamador no necesita conservarlos.
     """
-
-    def __init__(self, thetas: Sequence[Decimal]) -> None:
-        self.index = {theta: i for i, theta in enumerate(thetas)}
-        self._seen = [0] * len(self.index)
-
-    def piece(self, theta: ThetaEvents) -> Piece:
-        i = self.index[theta.theta]
-        events = theta.events
-        resumed = int(theta.starts_before[0])
-        first = self._seen[i] - resumed
-        self._seen[i] += len(theta) - resumed
-        return Piece(
-            i,
-            first,
-            np.ascontiguousarray(theta.positions, np.int64),
-            theta.starts_before.view(np.uint8),
-            theta.ends_after.view(np.uint8),
-            np.ascontiguousarray(theta.ticks_before_month, np.int64),
-            _column(events, "reference_agg_trade_id"),
-            _column(events, "confirm_agg_trade_id"),
-            _column(events, "confirm_time"),
-            _column(events, "extreme_agg_trade_id"),
-            _column(events, "direction"),
-            _bytes(events.column("confirm_price")),
-            _bytes(events.column("extreme_price")),
-        )
-
-    def pieces(self, rg: RowGroupFrames) -> list[Piece]:
-        return [self.piece(theta) for theta in rg.thetas]
+    engine.set_boundaries(position, [event_batch(group.batch) for group in groups])
 
 
 def push(
-    engine: dc_pyo3.Engine, row_group_id: int, rg: RowGroupFrames, pieces: list[Piece]
+    engine: dc_pyo3.Engine,
+    row_group_id: int,
+    ids: np.ndarray,
+    columns: Sequence[pa.Array],
+    before_month: bool,
 ) -> None:
-    """Empuja un row group al motor, que retiene sus buffers hasta terminarlo.
+    """Empuja un row group de L1 al motor, que retiene sus buffers hasta terminarlo.
 
-    `row_group_id` es el ordinal del row group entre los que entrega el lector (0, 1, 2,
-    ..., sin huecos). El row group no se copia: el llamador puede soltar `rg` en cuanto
-    vuelve, y `engine.inflight()` dice cuántos siguen anclados.
+    `ids` son los `agg_trade_id` de los ticks y `columns` las cuatro columnas de una trama
+    en el orden de `Frame` (`transact_time`, `price`, `quantity`, `is_buyer_maker`), como
+    las entrega el lector (`RowGroup.ids` y `RowGroup.columns`, o `RowGroupFrames.ids` y
+    `RowGroupFrames.frame`). `before_month` dice que el row group es de un mes anterior al
+    de los eventos. `row_group_id` es el ordinal del row group entre los que entrega el
+    lector (0, 1, 2, ..., sin huecos). El row group no se copia: el llamador puede soltar
+    sus arreglos en cuanto vuelve, y `engine.inflight()` dice cuántos siguen anclados. Las
+    posiciones de las fronteras no se calculan aquí: el motor las resuelve con `ids`.
     """
-    frame = rg.frame
+    time, price, quantity, sold = columns
     engine.push(
         row_group_id,
-        len(frame),
-        _bytes(frame.transact_time),
-        _bytes(frame.price),
-        _bytes(frame.quantity),
-        _bytes(frame.is_buyer_maker),
-        pieces,
+        len(time),
+        (memoryview(ids).cast("B"), 0),
+        _bytes(time),
+        _bytes(price),
+        _bytes(quantity),
+        _bytes(sold),
+        before_month,
     )
 
 
@@ -201,6 +194,32 @@ def to_summarize_error(
                 event,
                 f"la suma de price·quantity de la fase {error.phase} no cabe en 128 bits",
             )
+        case "boundary":
+            r, c, e = error.bounds
+            name = _NAMES[BOUNDARY_COLUMNS.index(error.field)]
+            return _boundary(
+                month,
+                f"θ {Decimal(theta)}: el id de {name} {error.got} del evento "
+                f"(referencia {r}, confirmación {c}, extremo {e}) "
+                f"no es un tick de L1: cae en un hueco del proveedor o L1 y L2 no "
+                f"cuadran (row group de L1 con ids {error.low}..{error.high})",
+                theta=theta,
+                field=error.field,
+                got=error.got,
+                wanted="un tick de L1",
+            )
+        case "confirm_time":
+            r, c, e = error.bounds
+            return _boundary(
+                month,
+                f"θ {Decimal(theta)}: el tick de confirmación {c} (evento con "
+                f"referencia {r}) tiene transact_time {error.got} y L2 "
+                f"dice confirm_time {error.wanted}: L1 y L2 no cuadran",
+                theta=theta,
+                field="confirm_time",
+                got=error.got,
+                wanted=error.wanted,
+            )
         case "ticks" | "input":
             return FramesInputError(str(error))
         case "skeleton":
@@ -218,3 +237,14 @@ def to_summarize_error(
                 f"faltan {error.missing} de las {error.expected} filas del esqueleto",
             )
     return error
+
+
+def _boundary(
+    month: Month, message: str, *, theta: str, field: str, got: Any, wanted: Any
+) -> L2StateInconsistent:
+    """Lo que el resumidor de Python deja del `FrameBoundaryError` del lector: un
+    `l2_state_inconsistent` (§9.2) con el mensaje completo en `details["message"]`.
+    """
+    result = L2StateInconsistent.mismatch(theta, month, field, str(got), str(wanted))
+    result.details["message"] = message
+    return result

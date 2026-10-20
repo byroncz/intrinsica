@@ -2,14 +2,14 @@
 //!
 //! Aquí no hay lógica de agregación: solo conversión de buffers y de errores. Los ticks
 //! del row group entran sin copia (el motor retiene el dueño del buffer hasta terminar
-//! el row group); las filas de L2 de los eventos, que son pocas, se copian a la
-//! estructura del motor; los buffers de salida los posee el motor y salen a Python por
-//! el protocolo de buffer, sin copia.
+//! el row group), igual que las columnas de L2 de los eventos (`set_boundaries`, una vez
+//! por θ; el motor las retiene hasta cerrarse); los buffers de salida los posee el motor y
+//! salen a Python por el protocolo de buffer, sin copia.
 
-use crate::buffers::{view, view_nd};
+use crate::buffers::view;
 use dc_descriptors::{
-    Config, Engine as CoreEngine, EngineError, EventErrorKind, EventIn, Region, RowGroupInput,
-    SealedRowGroup, ThetaPiece, TickColumns, COLUMNS,
+    BoundaryKind, Config, Engine as CoreEngine, EngineError, EventBatch, EventErrorKind,
+    KeyColumns, Region, RowGroupInput, SealedRowGroup, TickColumns, COLUMNS,
 };
 use pyo3::buffer::PyBuffer;
 use pyo3::create_exception;
@@ -70,94 +70,36 @@ fn pin(column: &Bound<'_, PyAny>, offset: usize) -> PyResult<Region<Pinned>> {
     })
 }
 
-/// El entero sin escalar de un `decimal128` de Arrow que cabe en `i64` (contrato de L2).
-fn decimal(bytes: &[u8], offset: usize, i: usize, what: &str) -> PyResult<i64> {
-    let at = (offset + i) * 16;
-    let raw = bytes.get(at..at + 16).ok_or_else(|| {
-        PyValueError::new_err(format!("el buffer de {what} es más corto que sus eventos"))
-    })?;
-    i64::try_from(i128::from_le_bytes(raw.try_into().expect("16 bytes")))
-        .map_err(|_| PyValueError::new_err(format!("{what} no cabe en i64")))
-}
-
-/// Las columnas de L2 de los eventos de un θ en un row group, como las entrega el lector
-/// (`ThetaEvents`): arreglos NumPy y buffers de Arrow, todos del mismo largo `n`. Es
-/// cualquier objeto con estos atributos (la capa usa un `NamedTuple`).
+/// Un row group de `events.parquet` de L2 de un θ: sus siete columnas como
+/// `(memoryview de bytes del Buffer de Arrow, offset del Array)`, del mismo largo `rows`.
+/// Es cualquier objeto con estos atributos (la capa usa un `NamedTuple`).
 #[derive(FromPyObject)]
-struct PyPiece {
-    theta: usize,
-    first_event: u64,
-    /// `(n, 3)` `int64`: posiciones de `R`, `C` y `E`.
-    positions: PyBuffer<i64>,
-    /// `n` bytes 0/1.
-    starts_before: PyBuffer<u8>,
-    ends_after: PyBuffer<u8>,
-    ticks_before_month: PyBuffer<i64>,
-    reference: PyBuffer<i64>,
-    confirm: PyBuffer<i64>,
-    confirm_time: PyBuffer<i64>,
-    extreme: PyBuffer<i64>,
-    direction: PyBuffer<i8>,
-    confirm_price: (PyBuffer<u8>, usize),
-    extreme_price: (PyBuffer<u8>, usize),
+struct PyBatch<'py> {
+    rows: usize,
+    reference: (Bound<'py, PyAny>, usize),
+    confirm: (Bound<'py, PyAny>, usize),
+    confirm_time: (Bound<'py, PyAny>, usize),
+    extreme: (Bound<'py, PyAny>, usize),
+    /// `int8`.
+    direction: (Bound<'py, PyAny>, usize),
+    /// `decimal128`.
+    confirm_price: (Bound<'py, PyAny>, usize),
+    extreme_price: (Bound<'py, PyAny>, usize),
 }
 
-impl PyPiece {
-    fn to_core(&self) -> PyResult<ThetaPiece> {
-        let positions = view_nd(&self.positions)?;
-        let starts_before = view(&self.starts_before)?;
-        let ends_after = view(&self.ends_after)?;
-        let before_month = view(&self.ticks_before_month)?;
-        let reference = view(&self.reference)?;
-        let confirm = view(&self.confirm)?;
-        let confirm_time = view(&self.confirm_time)?;
-        let extreme = view(&self.extreme)?;
-        let direction = view(&self.direction)?;
-        let confirm_price = (view(&self.confirm_price.0)?, self.confirm_price.1);
-        let extreme_price = (view(&self.extreme_price.0)?, self.extreme_price.1);
-        let n = direction.len();
-        let same = [
-            positions.len() == 3 * n,
-            starts_before.len() == n,
-            ends_after.len() == n,
-            before_month.len() == n,
-            reference.len() == n,
-            confirm.len() == n,
-            confirm_time.len() == n,
-            extreme.len() == n,
-        ];
-        if same.contains(&false) {
-            return Err(PyValueError::new_err(format!(
-                "las columnas del θ {} no miden lo mismo ({n} eventos)",
-                self.theta
-            )));
-        }
-        let mut events = Vec::with_capacity(n);
-        for i in 0..n {
-            let at = |p: usize| {
-                usize::try_from(positions[3 * i + p]).map_err(|_| {
-                    PyValueError::new_err(format!("posición negativa en el θ {}", self.theta))
-                })
-            };
-            events.push(EventIn {
-                positions: [at(0)?, at(1)?, at(2)?],
-                starts_before: starts_before[i] != 0,
-                ends_after: ends_after[i] != 0,
-                ticks_before_month: before_month[i],
-                reference: reference[i],
-                confirm: confirm[i],
-                confirm_time: confirm_time[i],
-                extreme: extreme[i],
-                direction: i64::from(direction[i]),
-                confirm_price: decimal(confirm_price.0, confirm_price.1, i, "confirm_price")?,
-                extreme_price: decimal(extreme_price.0, extreme_price.1, i, "extreme_price")?,
-            });
-        }
-        Ok(ThetaPiece {
-            theta: self.theta,
-            first_event: self.first_event,
-            events,
-        })
+impl PyBatch<'_> {
+    fn to_core(&self) -> PyResult<EventBatch<Pinned>> {
+        EventBatch::new(
+            self.rows,
+            pin(&self.reference.0, self.reference.1)?,
+            pin(&self.confirm.0, self.confirm.1)?,
+            pin(&self.confirm_time.0, self.confirm_time.1)?,
+            pin(&self.extreme.0, self.extreme.1)?,
+            pin(&self.direction.0, self.direction.1)?,
+            pin(&self.confirm_price.0, self.confirm_price.1)?,
+            pin(&self.extreme_price.0, self.extreme_price.1)?,
+        )
+        .map_err(|e| to_py_error(e.into()))
     }
 }
 
@@ -204,6 +146,15 @@ impl SealedColumn {
         self.data.len()
     }
 }
+
+const BOUNDARY_COLUMNS: [&str; 3] = [
+    "reference_agg_trade_id",
+    "confirm_agg_trade_id",
+    "extreme_agg_trade_id",
+];
+
+/// Un evento ubicado en un row group: `(índice, (R, C, E), starts_before, ends_after)`.
+type PyLocated = (u64, (usize, usize, usize), bool, bool);
 
 /// Las cuentas de un θ: `(rows, closed_ticks, before_month, first_reference, last_extreme)`.
 type PyStats = (u64, u64, u64, Option<i64>, Option<i64>);
@@ -252,46 +203,89 @@ impl Engine {
         Ok(Self { inner: Some(inner) })
     }
 
+    /// Fija una vez las filas de L2 de los eventos del θ en la posición `theta`: sus row
+    /// groups de `events.parquet`, en orden, sin copia (el motor retiene los buffers hasta
+    /// cerrarse). Hay que llamarla para cada θ antes del primer `push`; un θ sin eventos
+    /// lleva una lista vacía. El motor calcula solo dónde cae cada frontera en cada row
+    /// group, con las comprobaciones del lector.
+    fn set_boundaries(&self, theta: usize, batches: Vec<PyBatch<'_>>) -> PyResult<()> {
+        let batches = batches
+            .iter()
+            .map(PyBatch::to_core)
+            .collect::<PyResult<Vec<_>>>()?;
+        self.engine()?
+            .set_boundaries(theta, batches)
+            .map_err(to_py_error)
+    }
+
     /// Encola un row group de L1 y vuelve: el trabajo corre en los hilos del motor.
     ///
     /// `row_group_id` es el ordinal del row group entre los que entrega el lector
-    /// (0, 1, 2, ...; pueden llegar en cualquier orden). Cada columna de ticks es un
-    /// `(memoryview de bytes del Buffer de Arrow, offset del Array)`: `time` `int64`,
-    /// `price` y `quantity` `decimal128` e `is_buyer_maker` booleano (offset en bits). El
-    /// motor retiene los buffers hasta terminar el row group (ver `inflight`). `pieces`
-    /// son las columnas de L2 de cada θ que toca el row group (ver el README del crate).
-    #[pyo3(signature = (row_group_id, rows, time, price, quantity, sold, pieces))]
+    /// (0, 1, 2, ...; pueden llegar en cualquier orden, pero un row group espera a que
+    /// llegue el anterior). Cada columna de ticks es un `(memoryview de bytes del Buffer
+    /// de Arrow, offset del Array)`: `ids` y `time` `int64`, `price` y `quantity`
+    /// `decimal128` e `is_buyer_maker` booleano (offset en bits). El motor retiene los
+    /// buffers hasta terminar el row group (ver `inflight`). `before_month` dice que el
+    /// row group es de un mes anterior al de los eventos.
+    #[pyo3(signature = (row_group_id, rows, ids, time, price, quantity, sold, before_month))]
     #[allow(clippy::too_many_arguments)]
     fn push(
         &self,
         row_group_id: u64,
         rows: usize,
+        ids: (Bound<'_, PyAny>, usize),
         time: (Bound<'_, PyAny>, usize),
         price: (Bound<'_, PyAny>, usize),
         quantity: (Bound<'_, PyAny>, usize),
         sold: (Bound<'_, PyAny>, usize),
-        pieces: Vec<PyPiece>,
+        before_month: bool,
     ) -> PyResult<()> {
         let engine = self.engine()?;
         let ticks = TickColumns::new(
             rows,
+            pin(&ids.0, ids.1)?,
             pin(&time.0, time.1)?,
             pin(&price.0, price.1)?,
             pin(&quantity.0, quantity.1)?,
             pin(&sold.0, sold.1)?,
         )
         .map_err(|e| to_py_error(e.into()))?;
-        let pieces = pieces
-            .iter()
-            .map(PyPiece::to_core)
-            .collect::<PyResult<Vec<_>>>()?;
         engine
             .push(RowGroupInput {
                 id: row_group_id,
                 ticks,
-                pieces,
+                before_month,
             })
             .map_err(to_py_error)
+    }
+
+    /// Dónde caen en un row group las fronteras de los eventos del θ que lo tocan, sin
+    /// empujarlo: `(índice del evento, (R, C, E), starts_before, ends_after)` por evento.
+    /// Es lo que calcula un ítem de `push` (para probar y diagnosticar). `prev_high` es el
+    /// último id del row group anterior, o `None` en el primero. Lanza `DescriptorError`
+    /// con `kind` `boundary` o `confirm_time` si el row group no cuadra con L2.
+    #[pyo3(signature = (theta, rows, ids, time, prev_high=None))]
+    fn locate(
+        &self,
+        theta: usize,
+        rows: usize,
+        ids: (Bound<'_, PyAny>, usize),
+        time: (Bound<'_, PyAny>, usize),
+        prev_high: Option<i64>,
+    ) -> PyResult<Vec<PyLocated>> {
+        let keys = KeyColumns::new(rows, pin(&ids.0, ids.1)?, pin(&time.0, time.1)?)
+            .map_err(|e| to_py_error(e.into()))?;
+        let located = self
+            .engine()?
+            .locate(theta, &keys, prev_high)
+            .map_err(to_py_error)?;
+        Ok(located
+            .into_iter()
+            .map(|at| {
+                let [r, c, e] = at.positions;
+                (at.index, (r, c, e), at.starts_before, at.ends_after)
+            })
+            .collect())
     }
 
     /// El siguiente row group de salida sellado, o `None`: `(theta, index, rows,
@@ -377,7 +371,8 @@ impl Engine {
 
 /// El error del motor como `DescriptorError` con atributos: `kind` y, según el caso,
 /// `theta` (posición), `event`, `confirm_agg_trade_id`, `phase`, `field`, `got`,
-/// `wanted`, `missing`, `expected`.
+/// `wanted`, `missing`, `expected`, y en `boundary` también `reason`, `bounds`, `low` y
+/// `high`.
 fn to_py_error(error: EngineError) -> PyErr {
     let message = error.to_string();
     let err = DescriptorError::new_err(message);
@@ -406,6 +401,41 @@ fn to_py_error(error: EngineError) -> PyErr {
                 set("theta", theta.into_pyobject(py).unwrap().into_any());
                 set("missing", missing.into_pyobject(py).unwrap().into_any());
                 set("expected", expected.into_pyobject(py).unwrap().into_any());
+            }
+            EngineError::Boundary(error) => {
+                kind("boundary");
+                set("theta", error.theta.into_pyobject(py).unwrap().into_any());
+                set("event", error.event.into_pyobject(py).unwrap().into_any());
+                set(
+                    "field",
+                    BOUNDARY_COLUMNS[error.field]
+                        .into_pyobject(py)
+                        .unwrap()
+                        .into_any(),
+                );
+                let reason = match error.kind {
+                    BoundaryKind::NotATick => "not_a_tick",
+                    BoundaryKind::Unseen => "unseen",
+                };
+                set("reason", reason.into_pyobject(py).unwrap().into_any());
+                set("bounds", error.bounds.into_pyobject(py).unwrap().into_any());
+                set(
+                    "got",
+                    error.bounds[error.field]
+                        .into_pyobject(py)
+                        .unwrap()
+                        .into_any(),
+                );
+                set("low", error.low.into_pyobject(py).unwrap().into_any());
+                set("high", error.high.into_pyobject(py).unwrap().into_any());
+            }
+            EngineError::ConfirmTime(error) => {
+                kind("confirm_time");
+                set("theta", error.theta.into_pyobject(py).unwrap().into_any());
+                set("event", error.event.into_pyobject(py).unwrap().into_any());
+                set("bounds", error.bounds.into_pyobject(py).unwrap().into_any());
+                set("got", error.got.into_pyobject(py).unwrap().into_any());
+                set("wanted", error.wanted.into_pyobject(py).unwrap().into_any());
             }
             EngineError::Event(event) => {
                 set("theta", event.theta.into_pyobject(py).unwrap().into_any());

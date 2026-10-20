@@ -8,10 +8,13 @@ groups de L1 son de 50 ticks para que los eventos crucen row groups y las fronte
 en sus bordes.
 """
 
+from decimal import Decimal
+
 import by_event
 import dc_pyo3
 import pyarrow.parquet as pq
 import pytest
+from dc_frames import l2_path
 from l3_dc_descriptors import (
     SUMMARIES_SCHEMA,
     L2StateInconsistent,
@@ -196,6 +199,11 @@ def test_the_engine_checks_its_output_schema_and_can_be_closed():
         engine.inflight()
 
 
+def frame_columns(rg):
+    frame = rg.frame
+    return frame.transact_time, frame.price, frame.quantity, frame.is_buyer_maker
+
+
 def pushed_engine(lake, threads=2):
     """Un motor con todos los row groups del primer mes y el primer θ ya empujados.
 
@@ -206,6 +214,7 @@ def pushed_engine(lake, threads=2):
     from decimal import Decimal
 
     from dc_frames import l2_path, read_row_groups
+    from dc_frames.lake import event_groups
     from l3_dc_descriptors import native
     from l3_dc_descriptors.event import EVENT_COLUMNS
     from l3_dc_descriptors.summarize import DEFAULT_KEY
@@ -218,7 +227,11 @@ def pushed_engine(lake, threads=2):
         for i in range(parquet.metadata.num_row_groups)
     ]
     engine = native.new_engine(values, [sizes], threads)
-    feeder = native.Feeder(values)
+    native.set_boundaries(
+        engine,
+        0,
+        event_groups(str(lake.l2), DEFAULT_KEY, text, month, month, EVENT_COLUMNS),
+    )
     watched = None
     groups = read_row_groups(
         values,
@@ -230,22 +243,22 @@ def pushed_engine(lake, threads=2):
         columns=EVENT_COLUMNS,
     )
     for k, rg in enumerate(groups):
-        pieces = feeder.pieces(rg)
         if k == 0:
             watched = native._bytes(rg.frame.price)[0]
             watched_args = (
                 k,
                 len(rg.frame),
+                (memoryview(rg.ids).cast("B"), 0),
                 native._bytes(rg.frame.transact_time),
                 (watched, 0),
                 native._bytes(rg.frame.quantity),
                 native._bytes(rg.frame.is_buyer_maker),
-                pieces,
+                rg.before_start,
             )
             engine.push(*watched_args)
             del watched_args
         else:
-            native.push(engine, k, rg, pieces)
+            native.push(engine, k, rg.ids, frame_columns(rg), rg.before_start)
     return engine, weakref.ref(watched)
 
 
@@ -289,3 +302,146 @@ def test_the_engine_releases_a_row_group_when_its_items_are_done(edge_lake):
     assert watched() is None, "el motor sigue anclando el row group"
     assert engine.inflight() == 0
     engine.close()
+
+
+def test_the_engine_locates_the_boundaries_like_the_reader_row_group_by_row_group(
+    edge_lake,
+):
+    """Las posiciones que el motor calcula con los ids son las que `read_row_groups`
+    entrega: mismas filas, mismos cortes `(R, C, E)`, mismas banderas, y la misma cuenta
+    de ticks anteriores al mes.
+    """
+    import numpy as np
+    from dc_frames import read_row_groups
+    from dc_frames.lake import event_groups
+    from l3_dc_descriptors import native
+    from l3_dc_descriptors.event import EVENT_COLUMNS
+    from l3_dc_descriptors.summarize import DEFAULT_KEY
+
+    lake, _ = edge_lake
+    values = [Decimal(text) for text in lake.theta_texts]
+    compared = crossing = 0
+    for month in lake.months:
+        groups = list(
+            read_row_groups(
+                values,
+                str(lake.l1),
+                str(lake.l2),
+                month,
+                month,
+                *DEFAULT_KEY,
+                columns=EVENT_COLUMNS,
+            )
+        )
+        skeletons = [
+            [
+                pq.ParquetFile(l2_path(str(lake.l2), DEFAULT_KEY, text, month))
+                .metadata.row_group(i)
+                .num_rows
+                for i in range(
+                    pq.ParquetFile(
+                        l2_path(str(lake.l2), DEFAULT_KEY, text, month)
+                    ).metadata.num_row_groups
+                )
+            ]
+            for text in lake.theta_texts
+        ]
+        engine = native.new_engine(values, skeletons, 2)
+        for position, text in enumerate(lake.theta_texts):
+            native.set_boundaries(
+                engine,
+                position,
+                event_groups(
+                    str(lake.l2), DEFAULT_KEY, text, month, month, EVENT_COLUMNS
+                ),
+            )
+        seen = [0] * len(values)
+        before = [0] * len(values)
+        for k, rg in enumerate(groups):
+            previous = int(groups[k - 1].ids[-1]) if k else None
+            by_theta = {t.theta: t for t in rg.thetas}
+            for position, theta in enumerate(values):
+                found = engine.locate(
+                    position,
+                    len(rg.frame),
+                    (memoryview(rg.ids).cast("B"), 0),
+                    native._bytes(rg.frame.transact_time),
+                    previous,
+                )
+                expected = by_theta.get(theta)
+                if expected is None:
+                    assert found == [], (month, k, theta)
+                    continue
+                resumed = int(expected.starts_before[0])
+                first = seen[position] - resumed
+                seen[position] += len(expected) - resumed
+                before[position] += int(expected.ticks_before_month.sum())
+                assert [at[0] for at in found] == list(
+                    range(first, first + len(expected))
+                ), (month, k, theta)
+                assert np.array_equal(
+                    np.array([at[1] for at in found], np.int64), expected.positions
+                ), (month, k, theta)
+                assert [at[2] for at in found] == expected.starts_before.tolist()
+                assert [at[3] for at in found] == expected.ends_after.tolist()
+                compared += len(found)
+                crossing += int(
+                    expected.starts_before.sum() + expected.ends_after.sum()
+                )
+            native.push(engine, k, rg.ids, frame_columns(rg), rg.before_start)
+        stats = engine.finish()
+        assert [s[2] for s in stats] == before
+        engine.close()
+    assert compared > 200 and crossing > 20, (compared, crossing)
+
+
+@pytest.mark.parametrize("kind", ["not_a_tick", "confirm_time"])
+def test_a_boundary_that_does_not_match_l1_raises_the_error_of_the_reader(
+    tmp_path, kind
+):
+    """El motor falla con las mismas comprobaciones del lector y la misma excepción que el
+    resumidor de Python: `l2_state_inconsistent`, con los mismos `details` y mensaje.
+    """
+    ticks = fixture_ticks(seed=3, drop=0.1)
+    lake = build_lake(
+        tmp_path / "lake", ticks, month_cuts(ticks, 2400), l1_row_group=ROW_GROUP
+    )
+    month = lake.months[-1]
+    theta = 250_000
+    present = {tick.id for tick in lake.all_ticks()}
+    rows = lake.events[(theta, month)]
+    if kind == "confirm_time":
+        row = 3
+        column, value = "confirm_time", rows[row]["confirm_time"] + 1
+    else:
+        # Un evento con un id sin tick entre su referencia y su confirmación.
+        row, value = next(
+            (i, gap)
+            for i, event in enumerate(rows)
+            for gap in range(
+                event["reference_agg_trade_id"] + 1, event["confirm_agg_trade_id"]
+            )
+            if gap not in present
+        )
+        column = "confirm_agg_trade_id"
+    tamper(lake, theta, month, column, row, value)
+    texts = [f"{theta / 10**8:.8f}"]
+    with pytest.raises(L2StateInconsistent) as wanted:
+        summarize_month(
+            lake.l1,
+            lake.l2,
+            tmp_path / "py",
+            month,
+            texts,
+            series_start=M1,
+            threads=1,
+            prefetch=0,
+        )
+    with pytest.raises(L2StateInconsistent) as got:
+        summarize_native(
+            lake.l1, lake.l2, tmp_path / "rs", month, texts, series_start=M1, threads=4
+        )
+    assert isinstance(got.value.__cause__, dc_pyo3.DescriptorError)
+    assert got.value.check_type == wanted.value.check_type
+    assert got.value.details == wanted.value.details
+    assert "message" in got.value.details

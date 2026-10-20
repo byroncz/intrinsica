@@ -88,10 +88,13 @@ class FanOut:
 
 class DescriptorError(ValueError):
     """Un fallo del motor de L3. `kind` dice cuál: `input`, `ticks`, `internal`,
-    `skeleton`, `incomplete`, `direction`, `invariant`, `quantity_too_large`,
-    `no_quantity` o `notional_overflow`. Según el caso trae `theta` (posición),
-    `event`, `confirm_agg_trade_id`, `phase`, `field`, `got`, `wanted`, `rows`,
-    `missing` o `expected`.
+    `skeleton`, `incomplete`, `boundary`, `confirm_time`, `direction`, `invariant`,
+    `quantity_too_large`, `no_quantity` o `notional_overflow`. Según el caso trae `theta`
+    (posición), `event`, `confirm_agg_trade_id`, `phase`, `field`, `got`, `wanted`, `rows`,
+    `missing` o `expected`. `boundary` (una frontera de un evento que no es un tick de L1)
+    trae además `reason` (`not_a_tick` o `unseen`), `bounds` (`R`, `C`, `E`), `low` y
+    `high` (primer y último id del row group); `field` es la columna de L2 de la frontera.
+    `confirm_time` trae `bounds`, `got` (el `transact_time` del tick `C`) y `wanted`.
     """
 
     kind: str
@@ -102,22 +105,18 @@ class SealedColumn:
 
     def __len__(self) -> int: ...
 
-class Piece(Protocol):
-    """Las columnas de L2 de los eventos de un θ en un row group (cualquier objeto con
-    estos atributos). `positions` es `(n, 3)` `int64`; los flags, `n` bytes 0/1;
-    `direction`, `int8`; los precios, `(bytes del buffer decimal128, offset)`."""
+class EventBatch(Protocol):
+    """Un row group de `events.parquet` de L2 de un θ (cualquier objeto con estos
+    atributos): `rows` y, por columna, `(bytes del buffer, offset)` en el layout de Arrow.
+    `reference`, `confirm`, `confirm_time` y `extreme` son `int64`; `direction`, `int8`;
+    los precios, `decimal128`."""
 
-    theta: int
-    first_event: int
-    positions: object
-    starts_before: object
-    ends_after: object
-    ticks_before_month: object
-    reference: object
-    confirm: object
-    confirm_time: object
-    extreme: object
-    direction: object
+    rows: int
+    reference: tuple[memoryview, int]
+    confirm: tuple[memoryview, int]
+    confirm_time: tuple[memoryview, int]
+    extreme: tuple[memoryview, int]
+    direction: tuple[memoryview, int]
     confirm_price: tuple[memoryview, int]
     extreme_price: tuple[memoryview, int]
 
@@ -133,16 +132,26 @@ class Engine:
         row_groups: Sequence[Sequence[int]],
         threads: int | None = None,
     ) -> Self: ...
+    def set_boundaries(self, theta: int, batches: Sequence[EventBatch]) -> None: ...
     def push(
         self,
         row_group_id: int,
         rows: int,
+        ids: tuple[memoryview, int],
         time: tuple[memoryview, int],
         price: tuple[memoryview, int],
         quantity: tuple[memoryview, int],
         sold: tuple[memoryview, int],
-        pieces: Sequence[Piece],
+        before_month: bool,
     ) -> None: ...
+    def locate(
+        self,
+        theta: int,
+        rows: int,
+        ids: tuple[memoryview, int],
+        time: tuple[memoryview, int],
+        prev_high: int | None = None,
+    ) -> list[tuple[int, tuple[int, int, int], bool, bool]]: ...
     def pop_sealed(self) -> Sealed | None: ...
     def inflight(self) -> int: ...
     def busy(self) -> float: ...

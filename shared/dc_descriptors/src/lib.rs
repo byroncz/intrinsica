@@ -1,8 +1,9 @@
 //! Motor de agregación de L3: los descriptores de `summaries.parquet` por evento DC, sin
 //! pasar por el intérprete de Python.
 //!
-//! Recibe row groups de L1 ya decodificados (buffers de Arrow, sin copia) y, por θ, las
-//! filas de L2 de los eventos que los tocan con las posiciones de sus fronteras. Reparte
+//! Recibe, una vez por θ, las filas de L2 de sus eventos del mes y, por row group, los
+//! ticks de L1 (buffers de Arrow, sin copia). Ubica solo las fronteras de cada evento en
+//! cada row group, con los ids y las mismas comprobaciones que el lector. Reparte
 //! el trabajo en ítems `(row group, θ)` que hilos nativos toman de una cola, cierra cada
 //! evento en su casilla (la fila del evento en el esqueleto) y entrega row groups de
 //! salida sellados. Las sumas son `u128` comprobadas y los parciales de un evento que
@@ -22,8 +23,13 @@ pub mod phase;
 
 pub use arith::divide_half_even;
 pub use close::{close_event, EventError, EventErrorKind, PhaseName};
-pub use engine::{Config, Engine, EngineError, ThetaStats};
-pub use input::{EventIn, InputError, Region, RowGroupInput, ThetaPiece, TickColumns};
+pub use engine::{
+    locate_events, BoundaryError, BoundaryKind, Config, ConfirmTimeError, Engine, EngineError,
+    Located, ThetaStats,
+};
+pub use input::{
+    Boundaries, EventBatch, EventIn, InputError, KeyColumns, Region, RowGroupInput, TickColumns,
+};
 pub use layout::{col, ColumnSpec, Row, COLUMNS, LIMIT, WIDTH};
 pub use output::SealedRowGroup;
 pub use phase::{EventAcc, InstantAcc, PhaseAcc, TickError};

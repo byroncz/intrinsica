@@ -49,23 +49,23 @@ def decimals(count, value):
     words[:, 0] = value
     return memoryview(words).cast("B"), 0
 
-def pieces_of(lo, hi):
-    first = int(np.searchsorted(e, lo, "right"))
-    last = int(np.searchsorted(r, hi, "right"))
-    k = last - first
-    if k == 0:
-        return []
-    positions = np.clip(
-        np.stack([r[first:last], c[first:last], e[first:last]], 1) - lo, 0, hi - lo
+# Las fronteras de L2 de cada θ, como row groups de `events.parquet` de S filas, sin copiar
+# (el motor las retiene todo el mes: son O(eventos), el costo de `set_boundaries`). Se arman
+# antes de la línea base: lo que se mide abajo es lo que el motor añade por row group.
+# Las referencias, confirmaciones y extremos son ids, y el tiempo de cada tick es su id.
+direction = np.ones(n, np.int8)
+price = decimals(n, 10**8)
+def column(array, start):
+    return memoryview(array[start:]).cast("B"), 0
+batches = [
+    native.EventBatch(
+        min(S, n - start), column(r, start), column(c, start), column(c, start),
+        column(e, start), column(direction, start), (price[0], start), (price[0], start),
     )
-    piece = native.Piece(
-        0, first, positions,
-        (r[first:last] <= lo).view(np.uint8), (e[first:last] > hi).view(np.uint8),
-        np.zeros(k, np.int64), r[first:last].copy(), c[first:last].copy(),
-        c[first:last].copy(), e[first:last].copy(), np.ones(k, np.int8),
-        decimals(k, 10**8), decimals(k, 10**8),
-    )
-    return [piece, piece._replace(theta=1)]
+    for start in range(0, n, S)
+]
+for theta in range(2):
+    engine.set_boundaries(theta, batches)
 
 def rss():
     with open("/proc/self/status") as f:
@@ -90,8 +90,8 @@ for k in range(RGS):
     ids = np.arange(lo + 1, hi + 1, dtype=np.int64)
     sold = np.packbits(ids % 2 == 0, bitorder="little")
     engine.push(
-        k, T, (memoryview(ids).cast("B"), 0), decimals(T, 10**8), decimals(T, 10**8),
-        (memoryview(sold).cast("B"), 0), pieces_of(lo, hi),
+        k, T, (memoryview(ids).cast("B"), 0), (memoryview(ids).cast("B"), 0),
+        decimals(T, 10**8), decimals(T, 10**8), (memoryview(sold).cast("B"), 0), False,
     )
     del ids, sold
     peak_inflight = max(peak_inflight, engine.inflight())

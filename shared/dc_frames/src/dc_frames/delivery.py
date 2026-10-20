@@ -139,6 +139,7 @@ def deliver(
             element = RowGroupFrames(
                 rg.month,
                 rg.month < start,
+                rg.ids,
                 Frame(*rg.columns),
                 tuple(t for t in touching if t is not None),
             )

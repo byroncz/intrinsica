@@ -98,7 +98,9 @@ en el README del crate.
 
 ```python
 engine = dc_pyo3.Engine(thetas, schema, row_groups, threads=None)
-engine.push(row_group_id, rows, time, price, quantity, sold, pieces)
+engine.set_boundaries(theta, batches)  # una vez por θ, antes del primer push
+engine.push(row_group_id, rows, ids, time, price, quantity, sold, before_month)
+engine.locate(theta, rows, ids, time, prev_high)  # solo para probar: no empuja
 while (sealed := engine.pop_sealed()) is not None:
     theta, index, rows, columns, validity, null_count = sealed
 engine.inflight()
@@ -113,19 +115,27 @@ engine.close()
   las compara con las suyas y falla con `ValueError` si el esquema de la capa cambió.
   `row_groups[t]` son las filas de cada row group de salida del θ `t` (el esqueleto de L2),
   y van en el constructor y no en cada `push` porque no cambian por row group.
-- **Ticks sin copia.** `time`, `price`, `quantity` y `sold` son `(memoryview de bytes del
+- **Ticks sin copia.** `ids`, `time`, `price`, `quantity` y `sold` son `(memoryview de bytes del
   Buffer de Arrow, Array.offset)`. El motor retiene el `memoryview` hasta terminar el row
   group (`inflight()` baja) y lo suelta sin tomar el GIL: PyO3 difiere el `decref`. Los
   buffers deben ser inmutables, como los de Arrow.
-- **`pieces`**: una por θ que tiene eventos en el row group; cualquier objeto con los
-  atributos de `Piece` (ver `.pyi`; la capa usa un `NamedTuple`). Los arreglos de L2 se
-  copian (son pocos); `positions` es `(n, 3)` `int64` contiguo y los decimales van como
-  `(bytes del buffer, offset)`.
+- **`set_boundaries(theta, batches)`**: una vez por θ, antes del primer `push`, con los row
+  groups de `events.parquet` de L2 del mes en orden; cada uno es cualquier objeto con los
+  atributos de `EventBatch` (ver `.pyi`; la capa usa un `NamedTuple`) y sus columnas van como
+  `(memoryview de bytes del buffer, offset)`, **sin copia** (el motor las retiene hasta
+  cerrarse: son O(eventos del mes), ADR-L3-16). El motor ubica solo las fronteras: busca los
+  ids de `R`, `C` y `E` en `ids` con las comprobaciones del lector (frontera dentro del rango
+  que no es un tick, anterior no vista y `confirm_time` del tick `C`), y falla con
+  `DescriptorError` de `kind` `boundary` o `confirm_time`. `before_month` de `push` dice que
+  el row group es de un mes anterior al de los eventos. Un row group espera a que se empuje
+  el anterior; `locate` devuelve `(índice, (R, C, E), starts_before, ends_after)` por evento
+  de un row group sin empujarlo, para comparar con el lector.
 - **Salida sin copia.** `columns` son 18 `SealedColumn`: objetos de solo lectura con
   protocolo de buffer que poseen la memoria del motor. `pyarrow.py_buffer(column)` los
   envuelve sin copiar, y `validity` es el mapa de bits de las columnas `os_*`, o `None`.
 - **Errores.** `DescriptorError` (subclase de `ValueError`) con `kind` y, según el caso,
-  `theta` (posición), `event`, `confirm_agg_trade_id`, `phase`, `field`, `got`, `wanted`.
+  `theta` (posición), `event`, `confirm_agg_trade_id`, `phase`, `field`, `got`, `wanted` y, en
+  `boundary`, `reason`, `bounds`, `low` y `high`.
   `l3_dc_descriptors.native.to_summarize_error` los convierte en las excepciones tipadas
   de L3.
 - `finish()` espera con el GIL suelto.

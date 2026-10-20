@@ -5,8 +5,8 @@ mod common;
 
 use common::*;
 use dc_descriptors::{
-    col, Config, Engine, EngineError, EventErrorKind, EventIn, PhaseName, Region, Row,
-    RowGroupInput, ThetaPiece, TickColumns, TickError,
+    col, BoundaryKind, Config, Engine, EngineError, EventBatch, EventErrorKind, PhaseName, Region,
+    Row, RowGroupInput, TickColumns, TickError,
 };
 
 struct Case {
@@ -45,15 +45,22 @@ impl Case {
         }
     }
 
-    fn pieces(&self, k: usize) -> Vec<ThetaPiece> {
-        let (lo, hi) = self.bounds[k];
+    /// Los row groups de L2 de cada θ, en el layout de Arrow.
+    fn batches(&self) -> Vec<Vec<EventBatch<Shared>>> {
         (0..self.events.len())
-            .filter_map(|t| {
-                piece(&self.series, t, &self.events[t], lo, hi, &|i| {
-                    before_month(t, i)
-                })
-            })
+            .map(|t| batches(&self.series, &self.events[t], &self.sizes[t]))
             .collect()
+    }
+
+    /// Los row groups de L1 de un mes anterior al de los eventos: uno de cada tres.
+    fn flagged(k: usize) -> bool {
+        k % 3 == 1
+    }
+
+    /// El evento toca el row group `k`: empieza en él o antes y no cerró en uno anterior.
+    fn touches(&self, theta: usize, k: usize) -> bool {
+        let (lo, hi) = self.bounds[k];
+        self.events[theta].iter().any(|e| e.r <= hi && e.e > lo)
     }
 
     fn run(&self, threads: usize, order: &[usize]) -> Result<Outcome, EngineError> {
@@ -62,7 +69,8 @@ impl Case {
             &engine,
             &self.columns,
             &self.bounds,
-            &|k| self.pieces(k),
+            self.batches(),
+            &Self::flagged,
             order,
             &self.sizes,
         )
@@ -85,7 +93,7 @@ impl Case {
                 .map(|r| r[col::C_TICKS] + r[col::OS_TICKS])
                 .sum();
             assert_eq!(stats.closed_ticks as i64, ticks);
-            let before: i64 = (0..evs.len()).map(|i| before_month(t, i)).sum();
+            let before = before_month(evs, &self.bounds, &Self::flagged);
             assert_eq!(stats.before_month as i64, before);
             assert_eq!(
                 stats.first_reference,
@@ -179,7 +187,7 @@ fn events_crossing_three_row_groups_and_empty_middle_pieces() {
                 .count();
         }
         without_events += (0..case.bounds.len())
-            .filter(|&k| case.pieces(k).len() < 2)
+            .filter(|&k| (0..case.events.len()).any(|t| !case.touches(t, k)))
             .count();
     }
     assert!(crossed > 20, "{crossed} eventos cruzan tres row groups");
@@ -227,12 +235,8 @@ fn single(
         &engine,
         &columns,
         &bounds,
-        &|k| {
-            let (lo, hi) = bounds[k];
-            piece(series, 0, &events, lo, hi, &|_| 0)
-                .into_iter()
-                .collect()
-        },
+        vec![batches(series, &events, &sizes[0])],
+        &|_| false,
         &order,
         &sizes,
     )
@@ -499,7 +503,7 @@ fn the_contract_of_push_and_finish() {
         RowGroupInput {
             id: k as u64,
             ticks: case.columns.row_group(lo, hi),
-            pieces: case.pieces(k),
+            before_month: false,
         }
     };
     let input = |error: EngineError| match error {
@@ -507,22 +511,21 @@ fn the_contract_of_push_and_finish() {
         other => panic!("se esperaba un error de entrada y vino {other}"),
     };
 
-    // Un row group no se empuja dos veces.
+    // Las fronteras de todos los θ van antes del primer push.
     let engine = common::engine(1, &case.sizes);
+    assert!(input(engine.push(make(0)).unwrap_err()).contains("antes de las fronteras del θ 0"));
+    let mut batches = case.batches();
+    engine.set_boundaries(0, batches.remove(0)).unwrap();
+    assert!(input(engine.push(make(0)).unwrap_err()).contains("antes de las fronteras del θ 1"));
+    // Un θ que no existe, y uno que ya las tiene.
+    assert!(input(engine.set_boundaries(9, vec![]).unwrap_err()).contains("no existe"));
+    assert!(input(engine.set_boundaries(0, vec![]).unwrap_err()).contains("ya tiene"));
+    engine.set_boundaries(1, batches.remove(0)).unwrap();
+
+    // Un row group no se empuja dos veces, y las fronteras no cambian tras el primer push.
     engine.push(make(0)).unwrap();
     assert!(input(engine.push(make(0)).unwrap_err()).contains("ya se empujó"));
-    // Un θ fuera de rango o repetido, y posiciones fuera de orden.
-    let mut bad = make(1);
-    bad.pieces[0].theta = 9;
-    assert!(input(engine.push(bad).unwrap_err()).contains("fuera de rango"));
-    let mut bad = make(1);
-    if let Some(first) = bad.pieces.first().cloned() {
-        bad.pieces.push(first);
-    }
-    assert!(input(engine.push(bad).unwrap_err()).contains("repetido"));
-    let mut bad = make(1);
-    bad.pieces[0].events[0].positions = [3, 2, 1];
-    assert!(input(engine.push(bad).unwrap_err()).contains("fuera de orden"));
+    assert!(input(engine.set_boundaries(0, vec![]).unwrap_err()).contains("después del primer"));
 
     // Sin los demás row groups, al terminar faltan filas.
     match engine.finish() {
@@ -532,6 +535,16 @@ fn the_contract_of_push_and_finish() {
         other => panic!("se esperaba Incomplete y vino {other:?}"),
     }
 
+    // Un ordinal que nunca llega deja esperando a los siguientes: `finish` lo dice en vez
+    // de esperar para siempre.
+    let engine = common::engine(1, &case.sizes);
+    for (t, b) in case.batches().into_iter().enumerate() {
+        engine.set_boundaries(t, b).unwrap();
+    }
+    engine.push(make(0)).unwrap();
+    engine.push(make(2)).unwrap();
+    assert!(input(engine.finish().unwrap_err()).contains("falta el row group 1"));
+
     // Un esqueleto más corto que los eventos.
     let mut short = case.sizes.clone();
     short[0].pop();
@@ -540,7 +553,8 @@ fn the_contract_of_push_and_finish() {
         &engine,
         &case.columns,
         &case.bounds,
-        &|k| case.pieces(k),
+        case.batches(),
+        &Case::flagged,
         &order,
         &short,
     );
@@ -571,6 +585,225 @@ fn the_contract_of_push_and_finish() {
 }
 
 #[test]
+fn the_events_of_l2_must_be_ordered_and_have_prices_that_fit() {
+    let mut rng = Rng::new(5);
+    let mut series = Series::random(&mut rng, 80, false);
+    let evs = events(&mut rng, &mut series, 30, 40);
+    assert!(evs.len() >= 3);
+    let sizes = vec![vec![evs.len()]];
+    let reason = |evs: &[Ev], series: &Series| {
+        let engine = common::engine(1, &sizes);
+        match engine.set_boundaries(0, batches(series, evs, &[evs.len()])) {
+            Err(EngineError::Input(message)) => message,
+            other => panic!("se esperaba un error de entrada y vino {other:?}"),
+        }
+    };
+    // R < C ≤ E.
+    let mut broken = evs.clone();
+    broken[1].c = broken[1].r;
+    assert!(reason(&broken, &series).contains("R < C"));
+    // E_i ≤ R_{i+1}: dos eventos que se pisan.
+    let mut broken = evs.clone();
+    broken[1].r = broken[0].r;
+    assert!(reason(&broken, &series).contains("antes del extremo"));
+    // Un precio que no cabe en i64 (la palabra alta distinta de la extensión de signo).
+    let engine = common::engine(1, &sizes);
+    let mut ok = batches(&series, &evs, &[evs.len()]);
+    let one = ok.remove(0);
+    drop(one);
+    let wide = |v: i64, high: i64| {
+        let mut bytes = v.to_le_bytes().to_vec();
+        bytes.extend_from_slice(&high.to_le_bytes());
+        bytes
+    };
+    let region = |bytes: Vec<u8>| Region {
+        buffer: Shared(std::sync::Arc::new(bytes)),
+        offset: 0,
+    };
+    let ints = |v: i64| region(v.to_le_bytes().to_vec());
+    let batch = EventBatch::new(
+        1,
+        ints(1),
+        ints(2),
+        ints(2),
+        ints(3),
+        region(vec![1]),
+        region(wide(5, 1)),
+        region(wide(5, 0)),
+    )
+    .unwrap();
+    match engine.set_boundaries(0, vec![batch]) {
+        Err(EngineError::Input(message)) => {
+            assert!(message.contains("no cabe en i64"), "{message}")
+        }
+        other => panic!("se esperaba un error de entrada y vino {other:?}"),
+    }
+}
+
+/// Un evento escrito a mano sobre `series`, con las fronteras que dice `declared` (la
+/// misma serie con algún id o tiempo cambiado) y los row groups cortados en `cuts`.
+fn declared(
+    series: &Series,
+    declared: &Series,
+    ev: &Ev,
+    cuts: &[usize],
+    threads: usize,
+    reversed: bool,
+) -> Result<Outcome, EngineError> {
+    let mut bounds = Vec::new();
+    let mut lo = 0;
+    for &cut in cuts.iter().chain([&series.len()]) {
+        bounds.push((lo, cut));
+        lo = cut;
+    }
+    let sizes = vec![vec![1]];
+    let engine = engine(threads, &sizes);
+    let columns = Columns::new(series);
+    let mut order: Vec<_> = (0..bounds.len()).collect();
+    if reversed {
+        order.reverse();
+    }
+    run(
+        &engine,
+        &columns,
+        &bounds,
+        vec![batches(declared, std::slice::from_ref(ev), &sizes[0])],
+        &|_| false,
+        &order,
+        &sizes,
+    )
+}
+
+fn boundary(result: Result<Outcome, EngineError>) -> dc_descriptors::BoundaryError {
+    match result {
+        Err(EngineError::Boundary(error)) => error,
+        Err(other) => panic!("se esperaba un error de frontera y vino {other}"),
+        Ok(_) => panic!("se esperaba un error de frontera"),
+    }
+}
+
+/// Seis ticks con hueco en los ids 3 y 6: 1, 2, 4, 5, 7, 8.
+fn gapped() -> Series {
+    Series {
+        ids: vec![1, 2, 4, 5, 7, 8],
+        time: vec![10, 11, 12, 13, 14, 15],
+        price: vec![50, 51, 52, 53, 54, 55],
+        qty: vec![1; 6],
+        sold: vec![false; 6],
+    }
+}
+
+fn gapped_event() -> Ev {
+    // R = tick 0 (id 1), C = tick 3 (id 5), E = tick 3 (id 5): sube hasta el 5.
+    Ev {
+        r: 1,
+        c: 4,
+        e: 4,
+        direction: 1,
+        confirm_price: 53,
+        extreme_price: 53,
+    }
+}
+
+#[test]
+fn a_boundary_that_is_not_a_tick_or_falls_in_a_gap_fails_like_the_reader() {
+    let series = gapped();
+    let ev = gapped_event();
+    let sane = declared(&series, &series, &ev, &[2], 1, false).unwrap();
+    assert_eq!(sane.rows[0].len(), 1);
+    for (threads, reversed) in [(1, false), (4, false), (1, true), (4, true)] {
+        // C = 3 está dentro del rango del row group y ningún tick lo tiene.
+        let mut other = series.clone();
+        other.ids[3] = 3;
+        let error = boundary(declared(&series, &other, &ev, &[], threads, reversed));
+        assert_eq!(
+            (error.kind, error.field, error.event, error.bounds),
+            (BoundaryKind::NotATick, 1, 0, [1, 3, 3])
+        );
+        assert_eq!((error.low, error.high), (1, 8));
+
+        // C = 3 cae entre el row group [1, 2] y el [4, 5, 7, 8]: en un hueco.
+        let error = boundary(declared(&series, &other, &ev, &[2], threads, reversed));
+        assert_eq!(
+            (error.kind, error.field, error.bounds),
+            (BoundaryKind::Unseen, 1, [1, 3, 3])
+        );
+        assert_eq!((error.low, error.high), (4, 8));
+
+        // R = 0 cae antes del primer row group.
+        let mut other = series.clone();
+        other.ids[0] = 0;
+        let error = boundary(declared(&series, &other, &ev, &[2], threads, reversed));
+        assert_eq!((error.kind, error.field), (BoundaryKind::Unseen, 0));
+
+        // Con el tick de la frontera en un row group anterior no hay hueco: sin error.
+        declared(&series, &series, &ev, &[2], threads, reversed).unwrap();
+        declared(&series, &series, &ev, &[1, 2, 3], threads, reversed).unwrap();
+    }
+}
+
+#[test]
+fn the_tick_c_must_have_the_confirm_time_of_l2() {
+    let series = gapped();
+    let ev = gapped_event();
+    let mut other = series.clone();
+    other.time[3] += 1;
+    for (threads, reversed) in [(1, false), (4, true)] {
+        match declared(&series, &other, &ev, &[2], threads, reversed) {
+            Err(EngineError::ConfirmTime(error)) => {
+                assert_eq!((error.got, error.wanted), (13, 14));
+                assert_eq!((error.theta, error.event, error.bounds), (0, 0, [1, 5, 5]));
+            }
+            other => panic!("se esperaba ConfirmTime y vino {:?}", other.err()),
+        }
+    }
+}
+
+#[test]
+fn a_boundary_error_wins_over_a_confirm_time_error_in_the_same_row_group() {
+    // Dos eventos en el mismo row group: el primero con el `confirm_time` mal y el
+    // segundo con un id que no es tick. El lector (`locate`) comprueba todas las
+    // fronteras antes que los tiempos, así que reporta el segundo.
+    let mut series = gapped();
+    series.price = vec![50, 51, 50, 49, 55, 56];
+    series.ids = vec![1, 2, 4, 5, 7, 8];
+    let first = Ev {
+        r: 1,
+        c: 2,
+        e: 2,
+        direction: 1,
+        confirm_price: 51,
+        extreme_price: 51,
+    };
+    let second = Ev {
+        r: 2,
+        c: 6,
+        e: 6,
+        direction: 1,
+        confirm_price: 56,
+        extreme_price: 56,
+    };
+    let evs = vec![first, second];
+    let mut other = series.clone();
+    other.time[1] += 1;
+    other.ids[5] = 6;
+    let sizes = vec![vec![2]];
+    let engine = engine(1, &sizes);
+    let columns = Columns::new(&series);
+    let result = run(
+        &engine,
+        &columns,
+        &[(0, 6)],
+        vec![batches(&other, &evs, &sizes[0])],
+        &|_| false,
+        &[0],
+        &sizes,
+    );
+    let error = boundary(result);
+    assert_eq!((error.event, error.field, error.bounds[2]), (1, 1, 6));
+}
+
+#[test]
 fn ticks_outside_the_contract_of_l1_are_input_errors() {
     for (price_high, wanted) in [(u64::MAX, TickError::Negative), (1, TickError::TooLarge)] {
         let series = Tiny {
@@ -590,6 +823,10 @@ fn ticks_outside_the_contract_of_l1_are_input_errors() {
         let ticks = TickColumns::new(
             3,
             Region {
+                buffer: columns.share_ids(),
+                offset: 0,
+            },
+            Region {
                 buffer: columns.share_time(),
                 offset: 0,
             },
@@ -608,28 +845,29 @@ fn ticks_outside_the_contract_of_l1_are_input_errors() {
         )
         .unwrap();
         let engine = common::engine(1, &[vec![1]]);
-        let ev = EventIn {
-            positions: [0, 3, 3],
-            starts_before: false,
-            ends_after: false,
-            ticks_before_month: 0,
-            reference: 0,
-            confirm: 3,
-            confirm_time: 3,
-            extreme: 3,
+        let ev = Ev {
+            r: 1,
+            c: 3,
+            e: 3,
             direction: 1,
             confirm_price: 5,
             extreme_price: 5,
         };
+        let series = Series {
+            ids: vec![1, 2, 3],
+            time: vec![1, 2, 3],
+            price: vec![5, 5, 5],
+            qty: vec![1, 1, 1],
+            sold: vec![false; 3],
+        };
+        engine
+            .set_boundaries(0, batches(&series, &[ev], &[1]))
+            .unwrap();
         engine
             .push(RowGroupInput {
                 id: 0,
                 ticks,
-                pieces: vec![ThetaPiece {
-                    theta: 0,
-                    first_event: 0,
-                    events: vec![ev],
-                }],
+                before_month: false,
             })
             .unwrap();
         assert_eq!(engine.finish().unwrap_err(), EngineError::Ticks(wanted));
@@ -640,13 +878,16 @@ fn ticks_outside_the_contract_of_l1_are_input_errors() {
 fn inflight_drops_to_zero_and_busy_is_a_fraction() {
     let case = Case::new(9, 400, 3, 8, false);
     let engine = common::engine(1, &case.sizes);
+    for (t, b) in case.batches().into_iter().enumerate() {
+        engine.set_boundaries(t, b).unwrap();
+    }
     assert_eq!(engine.busy(), 0.0);
     for (k, &(lo, hi)) in case.bounds.iter().enumerate() {
         engine
             .push(RowGroupInput {
                 id: k as u64,
                 ticks: case.columns.row_group(lo, hi),
-                pieces: case.pieces(k),
+                before_month: false,
             })
             .unwrap();
     }

@@ -4,8 +4,8 @@
 #![allow(dead_code)]
 
 use dc_descriptors::{
-    col, Config, Engine, EngineError, EventIn, Region, Row, RowGroupInput, SealedRowGroup,
-    ThetaPiece, ThetaStats, TickColumns, WIDTH,
+    col, Config, Engine, EngineError, EventBatch, Region, Row, RowGroupInput, SealedRowGroup,
+    ThetaStats, TickColumns, WIDTH,
 };
 use std::sync::Arc;
 
@@ -278,6 +278,7 @@ impl AsRef<[u8]> for Shared {
 
 /// Las columnas de ticks de toda la serie en el layout de Arrow.
 pub struct Columns {
+    ids: Shared,
     time: Shared,
     price: Shared,
     quantity: Shared,
@@ -301,11 +302,16 @@ impl Columns {
             bits[i >> 3] |= u8::from(sold) << (i & 7);
         }
         Self {
+            ids: le(&s.ids, false),
             time: le(&s.time, false),
             price: le(&s.price, true),
             quantity: le(&s.qty, true),
             sold: Shared(Arc::new(bits)),
         }
+    }
+
+    pub fn share_ids(&self) -> Shared {
+        self.ids.clone()
     }
 
     pub fn share_time(&self) -> Shared {
@@ -328,6 +334,7 @@ impl Columns {
         };
         TickColumns::new(
             hi - lo,
+            region(&self.ids),
             region(&self.time),
             region(&self.price),
             region(&self.quantity),
@@ -349,50 +356,74 @@ pub fn split(rng: &mut Rng, n: usize, max: u64) -> Vec<(usize, usize)> {
     bounds
 }
 
-/// Los eventos de un θ que tocan el row group `[lo, hi)`, como los entrega el lector:
-/// del que contiene su `R` al que contiene su `E`.
-pub fn piece(
-    s: &Series,
-    theta: usize,
-    evs: &[Ev],
-    lo: usize,
-    hi: usize,
-    before_month: &dyn Fn(usize) -> i64,
-) -> Option<ThetaPiece> {
-    let touching: Vec<usize> = (0..evs.len())
-        .filter(|&i| evs[i].r <= hi && evs[i].e > lo)
-        .collect();
-    let first = *touching.first()?;
-    let clamp = |count: usize| count.saturating_sub(lo).min(hi - lo);
-    let events = touching
-        .iter()
-        .map(|&i| {
-            let ev = &evs[i];
-            let ends_after = ev.e > hi;
-            EventIn {
-                positions: [clamp(ev.r), clamp(ev.c), clamp(ev.e)],
-                starts_before: ev.r <= lo,
-                ends_after,
-                ticks_before_month: if ends_after { 0 } else { before_month(i) },
-                reference: ev.reference_id(s),
-                confirm: ev.confirm_id(s),
-                confirm_time: ev.confirm_time(s),
-                extreme: ev.extreme_id(s),
-                direction: ev.direction,
-                confirm_price: ev.confirm_price,
-                extreme_price: ev.extreme_price,
+/// Las filas de L2 de un θ como los row groups de `events.parquet` que serían (`sizes`),
+/// en el layout de Arrow. Cada lote lleva un desfase distinto de 0 a 2 elementos, como un
+/// `Array` cortado de Arrow.
+pub fn batches(s: &Series, evs: &[Ev], sizes: &[usize]) -> Vec<EventBatch<Shared>> {
+    let wide = |values: &mut Vec<u8>, v: i64| {
+        values.extend_from_slice(&v.to_le_bytes());
+        values.extend_from_slice(&(i128::from(v) >> 64).to_le_bytes()[..8]);
+    };
+    let mut out = Vec::new();
+    let mut from = 0;
+    for (b, &size) in sizes.iter().enumerate() {
+        let offset = b % 3;
+        let rows = &evs[from..from + size];
+        from += size;
+        let ints = |value: &dyn Fn(&Ev) -> i64| {
+            let mut bytes = vec![0u8; offset * 8];
+            for ev in rows {
+                bytes.extend_from_slice(&value(ev).to_le_bytes());
             }
-        })
-        .collect();
-    Some(ThetaPiece {
-        theta,
-        first_event: first as u64,
-        events,
-    })
+            Region {
+                buffer: Shared(Arc::new(bytes)),
+                offset,
+            }
+        };
+        let prices = |value: &dyn Fn(&Ev) -> i64| {
+            let mut bytes = vec![0u8; offset * 16];
+            for ev in rows {
+                wide(&mut bytes, value(ev));
+            }
+            Region {
+                buffer: Shared(Arc::new(bytes)),
+                offset,
+            }
+        };
+        let mut direction = vec![0u8; offset];
+        direction.extend(rows.iter().map(|ev| ev.direction as i8 as u8));
+        out.push(
+            EventBatch::new(
+                size,
+                ints(&|ev| ev.reference_id(s)),
+                ints(&|ev| ev.confirm_id(s)),
+                ints(&|ev| ev.confirm_time(s)),
+                ints(&|ev| ev.extreme_id(s)),
+                Region {
+                    buffer: Shared(Arc::new(direction)),
+                    offset,
+                },
+                prices(&|ev| ev.confirm_price),
+                prices(&|ev| ev.extreme_price),
+            )
+            .expect("buffers completos"),
+        );
+    }
+    out
 }
 
-pub fn before_month(theta: usize, event: usize) -> i64 {
-    ((theta * 31 + event * 7) % 5) as i64
+/// Cuántos ticks de `(R, E]` del evento caen en los row groups `[lo, hi)` que `flagged`
+/// marca como de un mes anterior: la cuenta que el motor llama `before_month`.
+pub fn before_month(evs: &[Ev], bounds: &[(usize, usize)], flagged: &dyn Fn(usize) -> bool) -> i64 {
+    let mut total = 0;
+    for ev in evs {
+        for (k, &(lo, hi)) in bounds.iter().enumerate() {
+            if flagged(k) {
+                total += ev.e.min(hi).saturating_sub(ev.r.max(lo)) as i64;
+            }
+        }
+    }
+    total
 }
 
 /// Reparte `rows` filas en row groups de salida de 1 a `max` filas.
@@ -437,10 +468,14 @@ pub fn run(
     engine: &Engine<Shared>,
     columns: &Columns,
     bounds: &[(usize, usize)],
-    pieces: &dyn Fn(usize) -> Vec<ThetaPiece>,
+    batches: Vec<Vec<EventBatch<Shared>>>,
+    flagged: &dyn Fn(usize) -> bool,
     order: &[usize],
     sizes: &[Vec<usize>],
 ) -> Result<Outcome, EngineError> {
+    for (theta, batches) in batches.into_iter().enumerate() {
+        engine.set_boundaries(theta, batches)?;
+    }
     let mut rows: Vec<Vec<Row>> = sizes.iter().map(|_| Vec::new()).collect();
     let mut seen_order = Vec::new();
     let mut take = |engine: &Engine<Shared>| -> Result<(), EngineError> {
@@ -460,7 +495,7 @@ pub fn run(
         engine.push(RowGroupInput {
             id: k as u64,
             ticks: columns.row_group(lo, hi),
-            pieces: pieces(k),
+            before_month: flagged(k),
         })?;
         take(engine)?;
     }

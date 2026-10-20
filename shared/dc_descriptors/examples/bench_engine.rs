@@ -40,24 +40,20 @@ fn main() {
     );
 
     for threads in threads {
-        // Las filas de L2 de cada row group se arman antes de medir: aquí solo cuenta el motor.
-        let mut pieces: Vec<_> = bounds
-            .iter()
-            .map(|&(lo, hi)| {
-                (0..thetas)
-                    .filter_map(|t| piece(&series, t, &events[t], lo, hi, &|_| 0))
-                    .collect::<Vec<_>>()
-            })
-            .collect();
+        // Las filas de L2 se arman antes de medir: aquí solo cuenta el motor.
         let engine = engine(threads, &sizes);
+        for t in 0..thetas {
+            engine
+                .set_boundaries(t, batches(&series, &events[t], &sizes[t]))
+                .expect("set_boundaries");
+        }
         let started = Instant::now();
         for (k, &(lo, hi)) in bounds.iter().enumerate() {
-            let pieces = std::mem::take(&mut pieces[k]);
             engine
                 .push(RowGroupInput {
                     id: k as u64,
                     ticks: columns.row_group(lo, hi),
-                    pieces,
+                    before_month: false,
                 })
                 .expect("push");
         }

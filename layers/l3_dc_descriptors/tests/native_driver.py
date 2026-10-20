@@ -1,8 +1,9 @@
 """Un resumidor mínimo sobre el motor nativo, solo para probarlo contra el de Python.
 
-Es lo que el orquestador (ITSC-358 es solo el motor) hará con más cuidado: lee los row
-groups del lector, los empuja al motor y escribe lo que sella. Aquí el lago es chico, así
-que se materializan todos los row groups y se puede empujar en cualquier orden.
+Es lo que el orquestador (ITSC-358 es solo el motor) hará con más cuidado: entrega al motor
+las fronteras de L2 de cada θ, lee los row groups del lector, los empuja y escribe lo que
+sella. Aquí el lago es chico, así que se materializan todos los row groups y se puede
+empujar en cualquier orden.
 """
 
 import random
@@ -11,8 +12,8 @@ from contextlib import ExitStack, closing
 from decimal import Decimal
 
 import dc_pyo3
-from dc_frames import FamilyWriter, family_path, l2_path, read_row_groups
-from dc_frames.lake import Month
+from dc_frames import FamilyWriter, family_path, l2_path
+from dc_frames.lake import L1, Month, event_groups
 from l3_dc_descriptors import native
 from l3_dc_descriptors.event import EVENT_COLUMNS
 from l3_dc_descriptors.reconcile import L1Month, reconcile
@@ -51,15 +52,20 @@ def summarize_native(
             for text in thetas
         ]
         l1 = stack.enter_context(closing(L1Month(l1_root, key, month)))
+        events = [
+            list(event_groups(l2_root, key, text, month, month, EVENT_COLUMNS))
+            for text in thetas
+        ]
+        # Todos los row groups desde el que contiene la primera referencia: el motor decide
+        # solo qué eventos toca cada uno, sin el filtro del lector.
+        reference = min(g[0].bounds[0, 0] for g in events if g)
         groups = list(
-            read_row_groups(
-                values, l1_root, l2_root, month, month, *key, columns=EVENT_COLUMNS
-            )
+            L1(l1_root, key).row_groups(month, month, int(reference), lambda *_: True)
         )
-        feeder = native.Feeder(values)
-        pieces = [feeder.pieces(rg) for rg in groups]
         engine = native.new_engine(values, [w.row_groups for w in writers], threads)
         stack.callback(engine.close)
+        for position, batches in enumerate(events):
+            native.set_boundaries(engine, position, batches)
 
         def drain() -> None:
             while (sealed := engine.pop_sealed()) is not None:
@@ -68,7 +74,8 @@ def summarize_native(
 
         try:
             for k in _order(order, len(groups), seed):
-                native.push(engine, k, groups[k], pieces[k])
+                rg = groups[k]
+                native.push(engine, k, rg.ids, rg.columns, rg.month < month)
                 drain()
             stats = engine.finish()
             drain()
