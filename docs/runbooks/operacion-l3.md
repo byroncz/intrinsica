@@ -406,8 +406,11 @@ registra como comentario en ITSC-360 y en el cuadro de
 [TRD-L3 §10.2](../TRD/l3.md#102-dimensionamiento--hipótesis-de-partida-y-primera-medición).
 La prueba de la espera al lector se lanza desde Cloud Shell con el mismo comando de arriba y
 `--update-env-vars L3_PREFETCH=3` (sin `L3_THREADS`); se acepta si `rss_peak_mib` ≤ 2 048.
-Si la corrida no cumple la condición para conservar los valores por
-defecto (50 `content_hash` idénticos, `rss_peak_mib` ≤ 2 048 y pared ≥ 15 % menor que T1),
+Las metas de T3d son `wall_s` ≤ 300 s y `gate_s + lineage_s + read_s + reconcile_s` ≤ 60 s
+([TRD-L3 §10.2](../TRD/l3.md#102-dimensionamiento--hipótesis-de-partida-y-primera-medición)):
+si se cumplen, T5 (ITSC-352) puede empezar; si no, no empieza. No son la condición de reversión.
+La condición para conservar los valores por defecto es la de ITSC-357: si la corrida no la
+cumple (50 `content_hash` idénticos, `rss_peak_mib` ≤ 2 048 y pared ≥ 15 % menor que T1),
 el stack `l3` fija `L3_THREADS=1` y `L3_PREFETCH=0` por Terraform, sin revertir código.
 Un perfil con hilos (`L3_PROFILE=1`) ve todos los hilos y sus tiempos son de hilo, no de pared.
 
