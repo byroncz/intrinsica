@@ -76,7 +76,6 @@ def test_crossing_event_is_copied_and_the_rest_are_slices(tmp_path):
 PROBE = """
 import json, sys
 import pyarrow as pa
-import pytest
 from dc_frames import read_frames
 
 l1, l2, chunks = sys.argv[1], sys.argv[2], sys.argv[3] == "chunks"
@@ -150,7 +149,6 @@ def test_chunks_peak_is_a_row_group_and_does_not_grow_with_events(tmp_path):
 ROW_GROUPS_PROBE = """
 import json, sys
 import pyarrow as pa
-import pytest
 from dc_frames import read_row_groups
 
 pa.set_cpu_count(1)
