@@ -191,10 +191,13 @@ class _CountedFile:
         )
         self._position += len(data)
         self._inner_position += len(data)
-        STATS.io_s += time.perf_counter() - start
-        STATS.bytes[self._kind] += len(data)
-        if self._kind == "l1":
-            STATS.l1_read[self._path] = STATS.l1_read.get(self._path, 0) + len(data)
+        elapsed = time.perf_counter() - start
+        # Con `--readers` > 1 varios hilos leen a la vez: un `+=` sin candado se pierde.
+        with STATS.lock:
+            STATS.io_s += elapsed
+            STATS.bytes[self._kind] += len(data)
+            if self._kind == "l1":
+                STATS.l1_read[self._path] = STATS.l1_read.get(self._path, 0) + len(data)
         return data
 
     def seek(self, position: int, whence: int = 0) -> int:

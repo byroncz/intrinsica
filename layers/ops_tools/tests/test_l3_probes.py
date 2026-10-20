@@ -8,6 +8,7 @@ import io
 import re
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import pyarrow as pa
@@ -311,6 +312,25 @@ def test_el_envoltorio_no_reenvia_seeks_al_final_ni_lecturas_desde_el_final():
     assert wrapped.tell() == 8
     assert wrapped.seek(2, 1) == 10
     assert wrapped.read(2) == data[10:12]
+
+
+def test_el_envoltorio_actualiza_las_estadisticas_bajo_el_candado():
+    probe = load("l3_probe_reader")
+    data = bytes(range(100))
+    wrapped = probe._CountedFile(RangedFile(data), "l1", "ruta", len(data))
+    done = threading.Event()
+
+    def read() -> None:
+        wrapped.read(10)
+        done.set()
+
+    with probe.STATS.lock:
+        worker = threading.Thread(target=read)
+        worker.start()
+        assert not done.wait(0.2)  # la lectura espera el candado de las estadísticas
+    worker.join(5)
+    assert done.is_set()
+    assert probe.STATS.bytes["l1"] == 10
 
 
 def test_un_parquet_real_se_abre_a_traves_del_envoltorio():
