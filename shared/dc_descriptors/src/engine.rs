@@ -151,7 +151,7 @@ impl fmt::Display for ConfirmTimeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "el tick de confirmación {} del evento {} del θ {} tiene transact_time {} y L2 
+            "el tick de confirmación {} del evento {} del θ {} tiene transact_time {} y L2 \
              dice confirm_time {}",
             self.bounds[1], self.event, self.theta, self.got, self.wanted
         )
