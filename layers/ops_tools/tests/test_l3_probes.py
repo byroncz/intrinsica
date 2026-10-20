@@ -101,6 +101,17 @@ def test_un_theta_cuenta_lo_mismo_que_el_lector(lake):
     assert "≤ 1 GiB (modo chunks) (1024 MiB)" in out
 
 
+def test_el_umbral_de_rss_nombra_el_modo_row_groups(lake):
+    l1, l2, events = lake
+    code, out = run_probe(
+        "--theta",
+        theta_text(min(events)),
+        *args(l1, l2, "--modo", "row-groups", "--sin-contar-io"),
+    )
+    assert_only_rss_may_fail(code, out)
+    assert "≤ 1 GiB (modo row-groups) (1024 MiB)" in out
+
+
 def test_todos_los_theta_decodifican_cada_row_group_una_vez(lake, capsys):
     l1, l2, events = lake
     probe = load("l3_probe_reader")

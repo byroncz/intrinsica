@@ -597,7 +597,7 @@ def run(ns: argparse.Namespace) -> int:
         limit_text = f"1 GiB + presupuesto de {ns.max_event_ticks} ticks"
     else:
         limit = GIB
-        limit_text = "1 GiB (modo chunks)"
+        limit_text = f"1 GiB (modo {ns.modo})"
 
     log(f"pared por fase: {phases}; total {wall:.1f} s")
     log(
