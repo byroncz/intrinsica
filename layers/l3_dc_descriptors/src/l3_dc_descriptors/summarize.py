@@ -98,8 +98,9 @@ DEFAULT_WRITERS = 12
 # Row groups de salida sellados que esperan escribirse, por escritor, antes de dejar de
 # empujar row groups nuevos: acota lo sellado que se acumula en RAM si escribir se atrasa. El
 # tope total es `PENDING_PER_WRITER × W` y cada row group sellado pesa ≈ 8 MiB (256 B por
-# evento × 32 768 eventos): con W = 12 y 3 son 36 ≈ 290 MiB, lo mismo que 8 con W = 4 (32 ≈
-# 260 MiB). Con 8 y W = 12 serían 96 ≈ 770 MiB, que es lo que T4c pagó de más (+850 MiB).
+# evento × ≈ 34 000 eventos): con W = 12 y 3 son 36 ≈ 290 MiB, lo mismo que 8 con W = 4 (32 ≈
+# 260 MiB). Con 8 y W = 12 serían 96 ≈ 770 MiB, y T4b (W = 12) ya pagó +467 MiB sobre T4
+# (2 331 contra 1 864).
 PENDING_PER_WRITER = 3
 
 
