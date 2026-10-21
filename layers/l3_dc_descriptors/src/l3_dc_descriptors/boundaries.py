@@ -17,6 +17,7 @@ import threading
 from collections import deque
 from collections.abc import Iterator
 from concurrent.futures import Executor
+from types import MappingProxyType
 from typing import Self
 
 import pyarrow as pa
@@ -32,11 +33,13 @@ L2_LOT_BYTES = 8 << 20
 L2_BATCH_ROWS = 32_768
 # Los tipos de las columnas de L2 que el motor lee como bytes de Arrow sin convertirlas
 # (las cuatro de ids y tiempo, `int64`, las comprueba `EventFile`).
-L2_TYPES = {
-    "direction": pa.int8(),
-    "confirm_price": DECIMAL,
-    "extreme_price": DECIMAL,
-}
+L2_TYPES = MappingProxyType(
+    {
+        "direction": pa.int8(),
+        "confirm_price": DECIMAL,
+        "extreme_price": DECIMAL,
+    }
+)
 # Lotes que `BatchStream` trae por delante de quien los consume, por θ.
 L2_AHEAD = 2
 
@@ -47,7 +50,7 @@ def check_types(file: EventFile) -> None:
     El motor recibe los buffers tal cual, sin convertirlos: un precio en otro ancho se
     leería mal en silencio.
     """
-    check_columns(file.schema, L2_TYPES, file.path)
+    check_columns(file.schema, dict(L2_TYPES), file.path)
 
 
 class BatchStream:

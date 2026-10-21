@@ -9,11 +9,17 @@ lago con row groups de L1 repartidos a mano fuerza un evento que cruza tres row 
 cuya referencia es el último tick de un row group y uno que cubre varios row groups enteros.
 """
 
+import ast
+import importlib
+import inspect
 import itertools
+import pkgutil
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
 
+import l3_dc_descriptors
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pyref
@@ -29,6 +35,9 @@ from l3_dc_descriptors import (
     summarize,
     summarize_month,
 )
+from l3_dc_descriptors.context import RunContext, Unit
+from l3_dc_descriptors.cpu import CpuLimit
+from l3_dc_descriptors.pipeline import process_unit
 from l3_dc_descriptors.timing import BusyClock, Phases, ReadMeter
 from l3_lake import M1, M2, build_lake, fixture_ticks, month_cuts
 
@@ -174,6 +183,105 @@ def test_it_never_uses_more_io_threads_than_thetas():
     assert 1 <= summarize._workers(None, 50) <= 50
 
 
+@pytest.mark.parametrize(
+    ("cores", "thetas", "expected"),
+    [
+        (3.72, 50, 12),
+        (4.0, 50, 12),
+        (8.0, 50, 24),
+        (8.0, 5, 5),
+        (0.2, 50, 1),
+        (0.5, 50, 2),
+    ],
+)
+def test_the_default_pool_is_three_threads_per_vcpu_rounded_up(
+    monkeypatch, cores, thetas, expected
+):
+    monkeypatch.setattr(summarize, "cpu_limit", lambda: CpuLimit(cores, 8, "cgroup-v2"))
+    assert summarize._workers(None, thetas) == expected
+
+
+def test_ordered_returns_in_item_order_and_raises_the_first_failure_in_item_order():
+    def work(n: int) -> int:
+        time.sleep(0.02 * (5 - n))  # los últimos terminan antes que los primeros
+        if n in (2, 4):
+            raise RuntimeError(f"falla {n}")
+        return n * 10
+
+    with ThreadPoolExecutor(5) as pool:
+        assert summarize.ordered(pool, lambda n: n * 10, range(5)) == [
+            0,
+            10,
+            20,
+            30,
+            40,
+        ]
+        with pytest.raises(RuntimeError, match="falla 2"):
+            summarize.ordered(pool, work, range(5))
+    with pytest.raises(RuntimeError, match="falla 2"):
+        summarize.ordered(None, work, range(5))
+
+
+def test_a_pool_of_one_thread_is_no_pool():
+    with summarize.theta_pool(1) as pool:
+        assert pool is None
+    with summarize.theta_pool(3) as pool:
+        assert isinstance(pool, ThreadPoolExecutor)
+
+
+def _modules():
+    for info in pkgutil.iter_modules(l3_dc_descriptors.__path__):
+        if info.name == "__main__":  # importarlo ejecuta la CLI
+            continue
+        yield importlib.import_module(f"l3_dc_descriptors.{info.name}")
+
+
+def test_no_module_declares_global_state():
+    # Ningún `global` y ningún contenedor mutable a nivel de módulo.
+    for module in _modules():
+        tree = ast.parse(inspect.getsource(module))
+        assert not [n for n in ast.walk(tree) if isinstance(n, ast.Global)], module
+        mutable = [
+            name
+            for name, value in vars(module).items()
+            if isinstance(value, (list, dict, set, bytearray))
+            and not name.startswith("__")
+        ]
+        assert mutable == [], (module.__name__, mutable)
+
+
+@pytest.mark.parametrize("threads", [1, 2, 4])
+def test_the_lineage_is_the_same_with_any_pool(lake, tmp_path, threads):
+    def lineage(**options):
+        ctx = RunContext(
+            mode="backfill",
+            run_id="run",
+            image_version="0.8.0+test",
+            series_start=M1,
+            landing_root=str(lake.l1),
+            events_root=str(lake.l2),
+            summaries_root=str(lake.l3),
+            dq_root=str(tmp_path / "dq"),
+            **options,
+        )
+        result = process_unit(Unit(*M2), ctx, lake.thetas)
+        assert result.ok
+        rows = [f for f in result.findings if f.check_type == "summaries_summary"]
+        return {
+            f.details["theta"]: (
+                f.details["l2_events_content_hash"],
+                f.details["l2_carry_over_content_hash"],
+                f.details["content_hash"],
+            )
+            for f in rows
+        }, result.timing
+
+    expected, _ = lineage(threads=1)
+    got, timing = lineage(threads=threads)
+    assert got == expected and len(got) == len(lake.thetas)
+    assert timing.phases.lineage_s > 0 and timing.phases.gate_s > 0
+
+
 def test_the_phases_report_how_it_ran(lake):
     phases = Phases()
     summarize_month(
@@ -253,9 +361,10 @@ def hand_made_cuts(lake, month) -> list[int]:
     return cuts
 
 
-def crossing(ticks, cuts, events) -> tuple[int, int]:
-    """Cuántos eventos cruzan tres row groups o más, y cuántos tienen su referencia como
-    último tick de un row group.
+def crossing(ticks, cuts, events) -> tuple[int, int, int]:
+    """Cuántos eventos cruzan tres row groups o más, cuántos tienen su referencia como
+    último tick de un row group y cuántos cruzan un row group entero sin ninguna de sus
+    tres fronteras (referencia, confirmación, extremo) dentro.
     """
     edges = list(itertools.accumulate(cuts))
     group = {}
@@ -271,9 +380,17 @@ def crossing(ticks, cuts, events) -> tuple[int, int]:
         group[e["extreme_agg_trade_id"]] - group[e["reference_agg_trade_id"]] >= 2
         for e in inside
     )
+    bare = 0
+    for e in inside:
+        first, stop = (
+            group[e["reference_agg_trade_id"]],
+            group[e["extreme_agg_trade_id"]],
+        )
+        between = set(range(first + 1, stop)) - {group.get(e["confirm_agg_trade_id"])}
+        bare += bool(between)
     last = {ticks[edge - 1].id for edge in edges}
     on_edge = sum(e["reference_agg_trade_id"] in last for e in events)
-    return wide, on_edge
+    return wide, on_edge, bare
 
 
 @pytest.mark.parametrize(
@@ -287,8 +404,8 @@ def test_events_over_three_row_groups_and_on_a_row_group_edge(
     cuts = hand_made_cuts(lake, month)
     relayout(lake, month, cuts)
     events = [e for theta in lake.thetas for e in lake.events[theta, month]]
-    wide, on_edge = crossing(lake.ticks[month], cuts, events)
-    assert wide > 0 and on_edge > 0
+    wide, on_edge, bare = crossing(lake.ticks[month], cuts, events)
+    assert wide > 0 and on_edge > 0 and bare > 0
     wanted = pyref.summarize_month(
         lake.l1, lake.l2, tmp_path / "py", month, lake.theta_texts, series_start=M1
     )
@@ -725,6 +842,38 @@ def test_an_engine_error_aborts_the_unit_the_same_way_with_any_knobs(
     assert caught.value.details["theta"] in lake.theta_texts
     assert l3_threads() == []
     assert not [p for p in (tmp_path / "out").rglob("*") if p.is_file()]
+
+
+def test_an_event_that_never_closes_is_the_same_error_as_the_reference(tmp_path, ticks):
+    from l3_dc_descriptors import L2StateInconsistent
+
+    lake = build_lake(tmp_path / "lake", ticks, month_cuts(ticks, 1500, 3000))
+    month = lake.months[1]
+    # L1 termina antes del extremo del último evento de un θ: el evento queda sin cerrar.
+    last = lake.events[lake.thetas[0], month][-1]["extreme_agg_trade_id"]
+    path = l1_path(str(lake.l1), ("binance", "spot", "BTCUSDT"), month)
+    table = pq.read_table(path)
+    keep = [i for i, v in enumerate(table["agg_trade_id"].to_pylist()) if v < last]
+    pq.write_table(table.take(keep), path, row_group_size=150)
+    errors = []
+    for name, runner in (("py", pyref.summarize_month), ("rs", summarize_month)):
+        with pytest.raises(L2StateInconsistent) as caught:
+            runner(
+                lake.l1,
+                lake.l2,
+                tmp_path / name,
+                month,
+                lake.theta_texts,
+                series_start=M1,
+            )
+        errors.append(caught.value)
+    wanted, got = errors
+    assert got.check_type == wanted.check_type
+    for key in ("theta", "field", "got", "wanted"):
+        assert got.details[key] == wanted.details[key], key
+    assert got.details["field"] == "extreme_agg_trade_id"
+    assert got.details["got"] == "ausente"
+    assert l3_threads() == []
 
 
 def test_a_price_in_another_width_is_refused_before_the_engine_reads_it(
