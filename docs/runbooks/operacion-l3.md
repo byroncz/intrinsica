@@ -409,7 +409,7 @@ Se acepta una combinación si `rss_peak_mib` queda ≤ 2 048 a 4 vCPU.
 | `read_s` | Lo que el hilo principal esperó a las lecturas (L1 y fronteras de L2) |
 | `read_wall_s`, `read_bytes` | Pared con alguna lectura en vuelo y bytes comprimidos que viajaron (L1 y L2). La regla del humano: leer a la velocidad del volumen (1,25 GB en 2021-01, ≤ 15 s). Con contrapresión crece sin que la lectura sea lenta: `read_bytes / read_wall_s` es la tasa mientras hay lecturas |
 | `write_s` | Pared con algún escritor ocupado. Pegada a `aggregate_s` y con `engine_busy` bajo, los escritores son el cuello: sube `L3_WRITERS` |
-| `gate_s`, `setup_s`, `aggregate_s`, `publish_s`, `reconcile_s` | Tramos seguidos del hilo principal; `other_s` es lo que falta hasta `wall_s`. `gate_s` es la pasada de entrada de los θ (compuerta, apertura y carry-over en una tarea por θ) y `setup_s`, el pie de L1, el motor y los escritores; `lineage_s` ya no existe |
+| `gate_s`, `setup_s`, `aggregate_s`, `publish_s`, `reconcile_s` | Tramos seguidos del hilo principal; `other_s` es lo que falta hasta `wall_s`. `gate_s` es abrir `events.parquet` de los θ (una tarea por θ) y `setup_s`, el motor, el pie de L1 y la compuerta de carry-over (los escritores se abren en el pool en ese tramo, sin que nadie los espere); `lineage_s` ya no existe |
 | `minor_faults`, `major_faults`, `voluntary_switches`, `involuntary_switches` | Contadores del kernel de la unidad. Con `cpu_system_s` alto: muchos fallos de página (millones) apuntan a memoria y asignador; muchos cambios de contexto voluntarios, a candados o red; ninguno de los dos, a otra causa |
 | `boundaries_peak_mib` | Máximo de fronteras de L2 que el motor tuvo en mano |
 

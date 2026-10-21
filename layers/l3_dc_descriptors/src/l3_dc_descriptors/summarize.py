@@ -25,14 +25,17 @@ eventos cierran, así que lo retenido es O(lote + eventos abiertos), no O(mes). 
 los θ y de los row groups no cambia un bit de la salida: el motor deja cada fila en la casilla
 de su evento y sella los row groups de salida de cada θ en orden.
 
-**Una pasada por θ (ITSC-365).** La compuerta de entrada y la apertura son una sola tarea por
-θ en el pool de E/S: abrir `events.parquet` (si falta, `l2_missing`), leer el carry-over del
-mes (y su hash) y el del anterior, abrir el `FamilyWriter` con el esqueleto en RAM que deja la
-lectura de L2 (`L2Events`) y arrancar la lectura anticipada de sus fronteras. Los 50 θ corren
-a la vez, así que la fase dura lo que el θ más lento, no la suma de dos pasadas. El motor se
-construye con los tamaños de row group de los 50 θ (su constructor los pide todos), de modo
-que arranca cuando la última pasada termina; lo que sí se solapa con ella es la lectura de
-las fronteras de L2 de los θ que ya terminaron y el pie de L1.
+**Entrada de los θ en dos tramos (ITSC-365).** El primer tramo, una tarea por θ en el pool de
+E/S, abre `events.parquet` (si falta, `l2_missing`), comprueba sus tipos y arranca la lectura
+anticipada de sus fronteras; de ahí salen el pie del archivo y, con él, los tamaños de row
+group que el constructor del motor pide de los 50 θ. El segundo tramo (la compuerta de
+carry-over del mes y del anterior, con el hash del mes, y la apertura del `FamilyWriter` con
+el esqueleto en RAM que deja `L2Events`) corre en el mismo pool mientras el hilo principal
+construye el motor y espera el pie de L1. El orquestador espera los carry-overs antes del
+primer `push` (la conciliación anota con ellos los ids que va a contar) y los escritores solo
+cuando necesita el primero: los row groups sellados los esperan (`_LateWriter`) y el
+orquestador los reúne todos antes de conciliar y publicar. Un fallo al abrir un escritor
+detiene la unidad en el siguiente `push`, no al final.
 
 Cada archivo de L2 se lee una vez: los mismos lotes alimentan al motor, al
 `l2_events_content_hash` y a la comprobación de las claves del esqueleto. El carry-over se
@@ -209,14 +212,30 @@ def _open_all[T: AbstractContextManager](
     return items
 
 
+def _submit[T](
+    pool: ThreadPoolExecutor | None, fn: Callable[..., T], *args
+) -> Future[T]:
+    """`fn(*args)` en el pool; sin pool, ahora mismo y en este hilo, ya resuelto."""
+    if pool is not None:
+        return pool.submit(fn, *args)
+    future: Future[T] = Future()
+    try:
+        future.set_result(fn(*args))
+    except BaseException as error:  # noqa: BLE001 - sale en `result()`, como con pool
+        future.set_exception(error)
+    return future
+
+
 class _Input:
-    """Lo que la pasada de entrada de un θ deja abierto y leído.
+    """Lo que la entrada de un θ deja abierto y leído.
 
     `file` es su `events.parquet`; `events`, lo que se sacó de él al leerlo (linaje y
-    esqueleto); `stream`, sus lotes de fronteras, ya en lectura anticipada; `writer`, su
-    `FamilyWriter` abierto. `carry`, `carry_hash` y `previous_direction` son la compuerta de
-    entrada (§9.2). Como context manager cierra, en este orden, la lectura anticipada, el
-    escritor (que descarta el temporal si no hubo `commit`) y el archivo.
+    esqueleto); `stream`, sus lotes de fronteras, ya en lectura anticipada. Esos tres salen
+    del primer tramo. El segundo los deja en dos futuros: `gate`, la compuerta de entrada
+    (§9.2), cuyo resultado el orquestador vuelca en `carry`, `carry_hash` y
+    `previous_direction`, y `writer`, el `FamilyWriter` abierto. Como context manager cierra,
+    en este orden, la lectura anticipada, el escritor (que descarta el temporal si no hubo
+    `commit`) y el archivo.
     """
 
     __slots__ = (
@@ -224,19 +243,50 @@ class _Input:
         "carry_hash",
         "events",
         "file",
+        "gate",
         "previous_direction",
         "stream",
         "writer",
     )
+
+    def __init__(self) -> None:
+        self.gate: Future | None = None
+        self.writer: Future[FamilyWriter] | None = None
 
     def __exit__(self, *exc) -> None:
         try:
             self.stream.close()
         finally:
             try:
-                self.writer.__exit__(*exc)
+                _close_writer(self.writer, exc)
             finally:
                 self.file.close()
+
+
+def _close_writer(opening: Future[FamilyWriter] | None, exc: tuple) -> None:
+    """Cierra el `FamilyWriter` que se abre en el pool: lo cancela si no empezó, y si no, espera
+    a que termine y lo cierra (si no se abrió, `_open_writer` ya limpió).
+    """
+    if opening is None or opening.cancel():
+        return
+    if opening.exception() is None:
+        opening.result().__exit__(*exc)
+
+
+class _LateWriter:
+    """El escritor de un θ cuya apertura puede no haber terminado: espera a que termine.
+
+    `SealedWriters` solo pide `write_row_group`; el primer row group sellado de un θ llega
+    mucho después de que su archivo se abrió, así que la espera casi nunca existe.
+    """
+
+    __slots__ = ("_opening",)
+
+    def __init__(self, opening: Future[FamilyWriter]) -> None:
+        self._opening = opening
+
+    def write_row_group(self, batch) -> None:
+        self._opening.result().write_row_group(batch)
 
 
 def _open_events(l2_root: str, key, month: Month, text: str) -> EventFile:
@@ -270,39 +320,60 @@ def _enter_theta(
     pool: ThreadPoolExecutor | None,
     phases: Phases,
     l2_root: str,
-    l3_root: str,
     key: tuple[str, str, str],
     month: Month,
-    series_start: Month,
     theta: Decimal,
     text: str,
 ) -> _Input:
-    """La pasada de entrada de un θ: compuerta (§9.2) y apertura en una sola tarea.
+    """El primer tramo de la entrada de un θ: su `events.parquet`, abierto y en lectura.
 
-    En orden: abrir `events.parquet` (si falta, `l2_missing`), leer el carry-over del mes y
-    su hash y el del mes anterior, comprobar los tipos de L2, abrir el `FamilyWriter` con el
-    esqueleto en RAM y arrancar la lectura anticipada de las fronteras. Un fallo cierra lo
-    que ya se abrió y se relanza.
+    En orden: abrir `events.parquet` (si falta, `l2_missing`), comprobar los tipos de L2,
+    preparar lo que se saca de él al leerlo (`L2Events`) y arrancar la lectura anticipada de
+    las fronteras. Un fallo cierra el archivo y se relanza. La compuerta de carry-over y el
+    escritor son el segundo tramo (`_read_gate`, `_open_writer`).
     """
     item = _Input()
     item.file = _open_events(l2_root, key, month, text)
     try:
-        item.carry, item.carry_hash = read_carry_over_hashed(l2_root, key, text, month)
-        item.previous_direction = (
-            0
-            if month == series_start
-            else read_carry_over(
-                l2_root, key, text, month_of(month_ordinal(month) - 1)
-            ).direction
-        )
         check_types(item.file)
         item.events = L2Events(item.file, theta)
-        item.writer = _open_writer(l3_root, key, month, text, item.events)
+        item.stream = BatchStream(item.file, pool, phases.read, tap=item.events.tap)
     except BaseException:
         item.file.close()
         raise
-    item.stream = BatchStream(item.file, pool, phases.read, tap=item.events.tap)
     return item
+
+
+def _read_gate(
+    l2_root: str,
+    key: tuple[str, str, str],
+    month: Month,
+    series_start: Month,
+    text: str,
+):
+    """La compuerta de carry-over de un θ (§9.2): el del mes con su hash y la dirección del
+    anterior (0 en el primer mes de la serie, que no tiene anterior).
+    """
+    carry, carry_hash = read_carry_over_hashed(l2_root, key, text, month)
+    previous = (
+        0
+        if month == series_start
+        else read_carry_over(
+            l2_root, key, text, month_of(month_ordinal(month) - 1)
+        ).direction
+    )
+    return carry, carry_hash, previous
+
+
+def _await_gates(inputs: Sequence[_Input]) -> None:
+    """Espera la compuerta de todos los θ y deja su resultado en cada uno.
+
+    Si alguno falló, relanza el error del primero en el orden de `inputs`, como `ordered`.
+    """
+    wait([item.gate for item in inputs])
+    for item in inputs:
+        item.carry, item.carry_hash, item.previous_direction = item.gate.result()
+        item.gate = None
 
 
 def _require_statistics(file: EventFile, name: str) -> tuple[int, int] | None:
@@ -317,10 +388,15 @@ def _require_statistics(file: EventFile, name: str) -> tuple[int, int] | None:
     return found
 
 
-def _check(collector: Collector, sink: SealedWriters) -> None:
-    """Relanza el error de quien recoge o escribe lo sellado, si lo hubo."""
+def _check(collector: Collector, sink: SealedWriters, inputs: Sequence[_Input]) -> None:
+    """Relanza el error de quien recoge o escribe lo sellado, o de un escritor que no logró
+    abrirse, si lo hubo.
+    """
     for error in (collector.error, sink.error):
         if error is not None:
+            raise error
+    for item in inputs:
+        if item.writer.done() and (error := item.writer.exception()) is not None:
             raise error
 
 
@@ -330,6 +406,7 @@ def _push_all(
     feeds: Sequence[native.BoundaryFeed],
     collector: Collector,
     sink: SealedWriters,
+    inputs: Sequence[_Input],
     month: Month,
     phases: Phases,
     l1: L1Month,
@@ -348,9 +425,9 @@ def _push_all(
     pushed = 0
     while True:
         while engine.inflight() >= phases.inflight or sink.pending >= limit:
-            _check(collector, sink)
+            _check(collector, sink, inputs)
             time.sleep(POLL_S)
-        _check(collector, sink)
+        _check(collector, sink, inputs)
         started = time.perf_counter()
         rg = next(source, None)
         if rg is not None:
@@ -449,37 +526,41 @@ def summarize_month(
         if pending is not None:
             stack.callback(_close_l1, pending)
 
-        # La compuerta de entrada (§9.2) y la apertura son una sola pasada por θ: los 50 en
-        # el pool a la vez, y si alguno falla se lanza el primero en el orden de `texts`. El
-        # orden de entrada es el inverso del cierre: lo último que se abre (hilos, motor)
-        # se cierra primero.
+        # Primer tramo de la entrada: el `events.parquet` de los 50 θ abiertos y en lectura,
+        # todos en el pool a la vez; si alguno falla se lanza el primero en el orden de
+        # `texts`. El orden de entrada es el inverso del cierre: lo último que se abre
+        # (hilos, motor) se cierra primero.
         inputs = _open_all(
             pool,
             stack,
             lambda i: _enter_theta(
-                pool,
-                phases,
-                l2_root,
-                l3_root,
-                key,
-                month,
-                series_start,
-                values[i],
-                texts[i],
+                pool, phases, l2_root, key, month, values[i], texts[i]
             ),
             range(len(texts)),
         )
         phases.gate_s += time.perf_counter() - started
         began = time.perf_counter()
+        # Segundo tramo, en el pool mientras este hilo construye el motor: la compuerta de
+        # carry-over de todos primero, que se espera antes del primer `push`, y después los
+        # escritores, que se esperan al escribir el primer row group sellado de cada θ.
+        for item, text in zip(inputs, texts, strict=True):
+            item.gate = _submit(
+                pool, _read_gate, l2_root, key, month, series_start, text
+            )
+        for item, text in zip(inputs, texts, strict=True):
+            item.writer = _submit(
+                pool, _open_writer, l3_root, key, month, text, item.events
+            )
+        # El motor pide los tamaños de row group de los 50 θ, que están en el pie de sus
+        # `events.parquet`: no necesita los escritores abiertos.
+        engine = native.new_engine(
+            values, [item.events.row_groups for item in inputs], phases.engine_threads
+        )
+        stack.callback(engine.close)
         if pending is not None:
             l1 = pending.result()
         else:
             l1 = stack.enter_context(closing(L1Month(l1_root, key, month)))
-        family = [item.writer for item in inputs]
-        engine = native.new_engine(
-            values, [w.row_groups for w in family], phases.engine_threads
-        )
-        stack.callback(engine.close)
 
         # Dónde empiezan y terminan los eventos de todos los θ, con las estadísticas del
         # pie de L2 (sin leer datos): el primer row group de L1 que se lee es el que
@@ -489,6 +570,7 @@ def summarize_month(
         extremes = [_require_statistics(f, "extreme_agg_trade_id") for f in files]
         # Los ids hasta los que la conciliación cuenta ticks, con lo que se sabe antes de
         # leer L1; si el motor encuentra otros, `count_up_to` decodifica como siempre.
+        _await_gates(inputs)
         l1.watch(_reconciliation_targets(inputs, references, extremes))
         feeds = [
             native.BoundaryFeed(engine, position, item.stream, phases.retained)
@@ -498,7 +580,7 @@ def summarize_month(
             stack.enter_context(
                 ThreadPoolExecutor(phases.writers, thread_name_prefix="l3-write")
             ),
-            family,
+            [_LateWriter(item.writer) for item in inputs],
             values,
             texts,
             month,
@@ -525,7 +607,15 @@ def summarize_month(
                     )
                 )
                 pushed = _push_all(
-                    engine, row_groups, feeds, collector, sink, month, phases, l1
+                    engine,
+                    row_groups,
+                    feeds,
+                    collector,
+                    sink,
+                    inputs,
+                    month,
+                    phases,
+                    l1,
                 )
                 phases.items = pushed * sum(1 for f in files if any(f.rows))
             # Completa la lectura de L2: el hash de cada archivo cubre todos sus lotes. En
@@ -537,13 +627,16 @@ def summarize_month(
             phases.aggregate_s += time.perf_counter() - begun
             phases.engine_busy = engine.busy()
             collector.stop()
-            _check(collector, sink)
+            _check(collector, sink, inputs)
             sink.join()
         except dc_pyo3.DescriptorError as error:
             converted = native.to_summarize_error(error, texts, month)
             if converted is error:
                 raise
             raise converted from error
+
+        wait([item.writer for item in inputs])
+        family = [item.writer.result() for item in inputs]
 
         begun = time.perf_counter()
         reconciled = ordered(

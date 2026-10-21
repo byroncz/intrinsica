@@ -65,8 +65,8 @@ que no llegó al mes previo (`l3_frontier`) o al que L2 no le ha llegado (`l2_mi
 [`docs/data-contracts.md`](../../docs/data-contracts.md). Cada excepción tipada del núcleo
 (tabla de abajo) se traduce a su hallazgo con los `details` que ya trae. `unit_timing` lleva lo
 que necesita la medición del umbral 3 de [§10.3](../../docs/TRD/l3.md#103-sonda-del-lector-de-tramas--umbrales-de-aceptación-se-escriben-antes-de-medir):
-pared total y por fase (todas son pared: `gate_s`, la pasada de entrada de los θ (compuerta y
-apertura juntas); `setup_s`, `aggregate_s` del motor, `publish_s`, `reconcile_s`; `lineage_s`
+pared total y por fase (todas son pared: `gate_s`, abrir `events.parquet` de los θ; `setup_s`,
+el motor, el pie de L1 y la compuerta de carry-over; `aggregate_s` del motor, `publish_s`, `reconcile_s`; `lineage_s`
 ya no existe: el linaje sale de los bytes que se leen; `read_s` es lo que el hilo principal esperó a las lecturas y
 `read_wall_s` y `write_s` la pared con alguna lectura o algún escritor ocupado), la configuración
 (`threads`, `engine_threads`, `readers`, `inflight`, `writers`), lo que hizo el motor
@@ -206,14 +206,18 @@ group de L1 más antiguo que algún evento del mes necesita, y el acumulador par
 
 ## Mecánica de una unidad
 
-1. **Compuerta de entrada.** Antes de abrir nada se comprueba, por θ y en el pool de E/S, que existan
-   `events.parquet` y `carry_over.parquet` del mes (y el carry-over del mes
-   anterior, salvo en `series_start`), y que un carry-over con `direction ≠ 0`
-   tenga evento pendiente.
-2. **Apertura** (`setup_s`). En el mismo pool: los 50 escritores (`FamilyWriter`: cada uno lee el pie
-   de su esqueleto) y los 50 `events.parquet` (`EventFile`: archivo y pie una sola vez, solo las
-   siete columnas de §7.1, `EVENT_COLUMNS`). Con las estadísticas de los pies se sabe la primera
-   referencia y el último extremo del mes sin leer datos; después se crea el motor.
+1. **Apertura** (`gate_s`). En el pool de E/S, una tarea por θ: abrir `events.parquet`
+   (`EventFile`: archivo y pie una sola vez; si falta, `l2_missing`), comprobar sus tipos y
+   arrancar la lectura anticipada de sus fronteras (las 11 columnas, de las que el motor recibe
+   las siete de §7.1, `EVENT_COLUMNS`). Con las estadísticas de los pies se sabe la primera
+   referencia y el último extremo del mes sin leer datos, y los tamaños de row group que pide
+   el motor.
+2. **Compuerta de entrada y escritores** (`setup_s`). En el mismo pool, mientras este hilo crea el
+   motor y espera el pie de L1: el carry-over del mes (y el del mes anterior, salvo en
+   `series_start`) de cada θ, y los 50 escritores (`FamilyWriter`, con el esqueleto en RAM).
+   Antes del primer `push` se esperan los carry-overs, y un carry-over con `direction ≠ 0` debe
+   tener evento pendiente; los escritores no se esperan: cada θ espera al suyo al escribir su
+   primer row group sellado, y uno que no logra abrirse detiene la unidad en el siguiente `push`.
 3. **Lectura y empuje.** `L1.row_groups(readers = R)` entrega los row groups de L1 en orden, desde el
    que contiene la primera referencia hasta el que contiene el último extremo (más los de meses
    anteriores que algún evento necesita, ADR-L3-12); cada uno se decodifica **una vez** para todos

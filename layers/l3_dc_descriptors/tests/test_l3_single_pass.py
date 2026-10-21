@@ -4,15 +4,18 @@ vez. Cada prueba fija una garantía que se conserva y la compara con la referenc
 (`reference_gate`): el mismo valor, sin el viaje de más.
 """
 
+import threading
 from decimal import Decimal
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+from dc_frames import FramesInputError
 from dc_frames import family as family_module
 from dc_frames import lake as frames_lake
 from dc_frames.lake import L1, EventFile, l1_path
 from l3_dc_descriptors import SkeletonMismatch, boundaries, native, summarize_month
+from l3_dc_descriptors import summarize as orchestrator
 from l3_dc_descriptors.boundaries import L2Events
 from l3_dc_descriptors.reconcile import L1Month
 from l3_dc_descriptors.summarize import DEFAULT_KEY, DEFAULT_WRITERS, _engine_threads
@@ -352,6 +355,85 @@ def test_a_unit_reconciles_without_decoding_l1_again(lake, monkeypatch):
     run(lake, M2)
     month_path = l1_path(lake.l1, DEFAULT_KEY, M2)
     assert [p for p in reads if p == month_path] == []
+
+
+# --- Entrada en dos tramos: el motor no espera a los escritores ----------------------------
+
+THREAD_PREFIXES = ("l3-theta", "l3-write", "l3-collector")
+
+
+def test_the_engine_gets_its_first_row_group_before_the_writers_are_open(
+    lake, monkeypatch, tmp_path
+):
+    """Un escritor que no termina de abrirse hasta que el motor recibe un row group de L1 no
+    detiene la unidad: los escritores son el segundo tramo de la entrada.
+    """
+    pushed = threading.Event()
+    push = native.push
+
+    def spying_push(*args):
+        pushed.set()
+        return push(*args)
+
+    open_writer = orchestrator._open_writer
+
+    def late(l3_root, key, month, text, skeleton):
+        if text == lake.theta_texts[0]:
+            assert pushed.wait(10), (
+                "el motor no recibió nada con el escritor abriéndose"
+            )
+        return open_writer(l3_root, key, month, text, skeleton)
+
+    monkeypatch.setattr(native, "push", spying_push)
+    monkeypatch.setattr(orchestrator, "_open_writer", late)
+    results = run(lake, M2, l3=tmp_path, threads=4)
+    assert pushed.is_set() and len(results) == len(lake.thetas)
+
+
+@pytest.mark.parametrize("threads", [1, 4])
+def test_a_writer_that_cannot_open_aborts_the_unit_without_publishing(
+    lake, monkeypatch, tmp_path, threads
+):
+    open_writer = orchestrator._open_writer
+
+    def broken(l3_root, key, month, text, skeleton):
+        if text == lake.theta_texts[1]:
+            raise FramesInputError("no se pudo abrir el escritor")
+        return open_writer(l3_root, key, month, text, skeleton)
+
+    monkeypatch.setattr(orchestrator, "_open_writer", broken)
+    with pytest.raises(FramesInputError, match="no se pudo abrir el escritor"):
+        run(lake, M2, l3=tmp_path, threads=threads)
+    assert [p for p in tmp_path.rglob("*") if p.is_file()] == []
+    assert [
+        t.name for t in threading.enumerate() if t.name.startswith(THREAD_PREFIXES)
+    ] == []
+
+
+@pytest.mark.parametrize("threads", [1, 4])
+def test_a_stream_that_cannot_start_closes_the_file_it_opened(
+    lake, monkeypatch, tmp_path, threads
+):
+    opened, closed = [], []
+    init, close = EventFile.__init__, EventFile.close
+
+    def spy_init(self, path, *args, **kwargs):
+        opened.append(path)
+        init(self, path, *args, **kwargs)
+
+    def spy_close(self):
+        closed.append(self.path)
+        close(self)
+
+    def refuse(*args, **kwargs):
+        raise RuntimeError("el pool se cierra")
+
+    monkeypatch.setattr(EventFile, "__init__", spy_init)
+    monkeypatch.setattr(EventFile, "close", spy_close)
+    monkeypatch.setattr(orchestrator, "BatchStream", refuse)
+    with pytest.raises(RuntimeError, match="el pool se cierra"):
+        run(lake, M2, l3=tmp_path, threads=threads)
+    assert opened and sorted(closed) == sorted(opened)
 
 
 # --- Valores por defecto -------------------------------------------------------------------

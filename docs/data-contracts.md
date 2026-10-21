@@ -632,9 +632,10 @@ mismo que traen las excepciones del resumidor, de las que sale la mayoría de lo
   con los suyos y el mes está obsoleto (`--force --from <mes> --thetas <θ>`).
 - **`unit_timing`** (`info`, `pass`): uno por unidad (mes), no por θ. `metric_value` es la
   pared (`wall_s`). `details` lleva el tiempo por fase, todas en **pared**
-  (desde la 2.0.0 del TRD-L3): `gate_s` (la pasada de entrada de los θ: compuerta, apertura de
-  `events.parquet`, carry-over y escritor, en una sola tarea por θ), `setup_s` (el pie de L1, el
-  motor y los escritores de salida), `aggregate_s` (el motor, del primer row group a que termina
+  (desde la 2.0.0 del TRD-L3): `gate_s` (el primer tramo de la entrada de los θ: abrir
+  `events.parquet` y arrancar la lectura de sus fronteras, una tarea por θ), `setup_s` (el
+  motor, el pie de L1 y la compuerta de carry-over; los escritores se abren en el pool durante
+  ese tramo, sin que nadie los espere), `aggregate_s` (el motor, del primer row group a que termina
   el último ítem), `publish_s` (publicar los archivos) y `reconcile_s` (conciliación) son tramos
   seguidos del hilo principal y, con `other_s`, suman `wall_s`. `lineage_s` ya no existe (desde
   la 2.1.0): el hash de las entradas de L2 sale de los bytes que la lectura trae.

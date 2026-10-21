@@ -7,9 +7,11 @@ el límite efectivo de CPU. Todo se acumula en objetos que crea la unidad (`Phas
 unidades en el mismo proceso, en hilos o tareas distintas, no se pisan.
 
 Todas las fases son **pared**, no suma sobre hilos (ITSC-363): `gate_s`, `setup_s`,
-`reconcile_s` y `publish_s` son tramos seguidos del hilo principal; `gate_s` es la pasada de
-entrada de los θ (compuerta y apertura juntas, ITSC-365) y `setup_s`, lo que queda hasta el
-primer row group (pie de L1, motor, escritores); el linaje ya no es una fase: sale de los
+`reconcile_s` y `publish_s` son tramos seguidos del hilo principal; `gate_s` es el primer
+tramo de la entrada de los θ (abrir `events.parquet` y arrancar la lectura de sus fronteras,
+ITSC-365) y `setup_s`, lo que queda hasta el primer row group (motor, pie de L1 y compuerta
+de carry-over; los escritores se abren en ese tramo, pero nadie los espera); el linaje ya no
+es una fase: sale de los
 bytes que la lectura trae (`lineage_s` desapareció en ITSC-365);
 `aggregate_s` es la pared del motor, del primer `push` a que el último ítem termina;
 `write_s`, la pared con algún escritor ocupado (la unión de sus intervalos), y
@@ -372,9 +374,10 @@ class Timing:
     def details(self) -> dict:
         """El payload del hallazgo `unit_timing` (segundos con ms de resolución).
 
-        Todas las fases son pared (ver el módulo). `gate_s`, la pasada de entrada de los θ:
-        compuerta de entrada, apertura de `events.parquet`, carry-over y escritor, en una
-        sola tarea por θ; `setup_s`, el pie de L1, el motor y los escritores de salida;
+        Todas las fases son pared (ver el módulo). `gate_s`, el primer tramo de la entrada
+        de los θ: abrir `events.parquet` y arrancar la lectura de sus fronteras, una tarea
+        por θ; `setup_s`, el motor, el pie de L1 y la compuerta de carry-over (los
+        escritores se abren en el pool durante ese tramo, sin que nadie los espere);
         `aggregate_s`, la pared del motor, del primer row group a que termina el último
         ítem (incluye lo que espera por las lecturas y por la contrapresión); `write_s`, la
         pared con algún escritor ocupado; `publish_s`, publicar los archivos; `reconcile_s`,
