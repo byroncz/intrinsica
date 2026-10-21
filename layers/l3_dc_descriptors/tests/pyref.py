@@ -39,10 +39,10 @@ from l3_dc_descriptors.schema import (
 from l3_dc_descriptors.summarize import (
     DEFAULT_KEY,
     ThetaResult,
-    _gate_theta,
     _inconsistent,
     _theta,
 )
+from reference_gate import gate_theta, lineage
 from rowgroup import Closed, Prefixes, ThetaAggregator
 
 C_TICKS, OS_TICKS = COLUMN["c_ticks"], COLUMN["os_ticks"]
@@ -153,7 +153,7 @@ def summarize_month(
         )
     texts = {theta: f"{theta:.8f}" for theta in values}
     gated = [
-        _gate_theta(l2_root, key, month, series_start, text) for text in texts.values()
+        gate_theta(l2_root, key, month, series_start, text) for text in texts.values()
     ]
     carries = dict(zip(texts, gated, strict=True))
 
@@ -207,6 +207,10 @@ def summarize_month(
         for theta, lane in lanes.items():
             digest = lane.commit()
             results[theta] = ThetaResult(
-                lane.writer.path, lane.rows, digest, reconciled[theta]
+                lane.writer.path,
+                lane.rows,
+                digest,
+                reconciled[theta],
+                *lineage(l2_root, key, lane.text, month),
             )
     return results

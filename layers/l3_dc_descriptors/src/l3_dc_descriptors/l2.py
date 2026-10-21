@@ -11,8 +11,9 @@ from types import MappingProxyType
 
 import pyarrow as pa
 import pyarrow.fs as pafs
+from dc_frames import FramesInputError
 from dc_frames.lake import Month, check_columns, open_parquet, partition_path
-from pyutils import resolve_fs
+from pyutils import ContentHasher, resolve_fs
 
 from l3_dc_descriptors.errors import L2InputMissing, L2StateInconsistent
 
@@ -63,11 +64,48 @@ def read_carry_over(
     y lanza `L2StateInconsistent` (ADR-L3-05): la conciliación supone que una dirección
     fijada implica un evento pendiente. `direction = 0` es un estado válido.
     """
+    return _read(l2_root, key, theta, month, hashed=False)[0]
+
+
+def read_carry_over_hashed(
+    l2_root: str, key: tuple[str, str, str], theta: str, month: Month
+) -> tuple[CarryOver, str]:
+    """`read_carry_over` y, de la misma lectura, el `content_hash` del archivo.
+
+    Es el que L2 publica como `carry_over_content_hash` en `events_summary`: un
+    `ContentHasher` sobre el esquema del archivo y todas sus columnas. El archivo tiene una
+    fila, así que leerlo entero cuesta lo mismo que leer las cinco columnas que se usan.
+    """
+    carry, digest = _read(l2_root, key, theta, month, hashed=True)
+    assert digest is not None
+    return carry, digest
+
+
+def _read(
+    l2_root: str,
+    key: tuple[str, str, str],
+    theta: str,
+    month: Month,
+    *,
+    hashed: bool,
+) -> tuple[CarryOver, str | None]:
     path = l2_file(l2_root, key, theta, month, CARRY_OVER)
-    require(path, theta, month, CARRY_OVER)
-    with closing(open_parquet(path, "el carry-over de L2")) as parquet:
+    try:
+        parquet = open_parquet(path, "el carry-over de L2")
+    except FramesInputError:
+        # `open_parquet` ya comprobó que existe; si falta, es el hallazgo de la compuerta.
+        require(path, theta, month, CARRY_OVER)
+        raise
+    with closing(parquet):
         check_columns(parquet.schema_arrow, _COLUMNS, path)
-        row = parquet.read(columns=list(_COLUMNS)).to_pylist()
+        table = parquet.read(columns=None if hashed else list(_COLUMNS))
+        digest = None
+        if hashed:
+            hasher = ContentHasher(parquet.schema_arrow)
+            for batch in table.to_batches():
+                hasher.update(batch)
+            digest = hasher.hexdigest()
+    row = table.select(list(_COLUMNS)).to_pylist()
     if len(row) != 1:
         raise L2StateInconsistent.mismatch(
             theta, month, "filas de carry_over.parquet", len(row), 1
@@ -86,4 +124,4 @@ def read_carry_over(
         raise L2StateInconsistent.no_pending(
             theta, month, carry.direction, carry.has_pending
         )
-    return carry
+    return carry, digest

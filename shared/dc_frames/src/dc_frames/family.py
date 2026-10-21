@@ -8,11 +8,12 @@ roto daría resultados falsos sin error: este escritor lo comprueba fila a fila 
 coincide, aborta con `FamilySkeletonMismatch` (`family_skeleton_mismatch`) sin publicar.
 """
 
+import os
 import re
 from contextlib import closing
 from pathlib import Path
 from types import TracebackType
-from typing import Self
+from typing import Protocol, Self
 
 import numpy as np
 import pyarrow as pa
@@ -43,13 +44,89 @@ def family_path(
     return partition_path(root, key, theta, month, f"{family}.parquet")
 
 
+class Skeleton(Protocol):
+    """Lo que un `FamilyWriter` necesita saber del archivo cuyo esqueleto repite.
+
+    `path` es el archivo (para los mensajes de error) y `row_groups`, las filas de cada
+    row group no vacío, en orden. `differing_key` compara las claves (`theta` y
+    `confirm_agg_trade_id`) del row group `n` que se escribe, cuya primera fila es la
+    `first_row` del archivo, contra las del esqueleto: devuelve el detalle de la primera
+    diferencia, o `None` si son las mismas. `close` suelta lo que el esqueleto tenga abierto.
+
+    El esqueleto por defecto (`_FileSkeleton`) relee las claves del archivo de cada row
+    group; quien ya tiene esas claves en RAM (L3 las vio al leer `events.parquet`) pasa el
+    suyo y el escritor no vuelve al almacenamiento.
+    """
+
+    path: str
+    row_groups: list[int]
+
+    def differing_key(
+        self, n: int, first_row: int, batch: pa.RecordBatch
+    ) -> str | None:
+        """Ver la clase."""
+        ...
+
+    def close(self) -> None:
+        """Ver la clase."""
+        ...
+
+
+class _FileSkeleton:
+    """El esqueleto de un archivo Parquet: sus claves se leen de él, un row group a la vez."""
+
+    def __init__(self, path: str) -> None:
+        self.path = path
+        self._source = ParquetSource(path, "el esqueleto de la familia")
+        try:
+            check_columns(
+                self._source.schema, {"confirm_agg_trade_id": pa.int64()}, path
+            )
+            if "theta" not in self._source.schema.names:
+                raise FramesInputError(f"{path}: falta la columna 'theta'")
+            meta = self._source.metadata
+            # Los row groups vacíos no se escriben: no hay fila que ponerles.
+            self._groups = [
+                (i, meta.row_group(i).num_rows)
+                for i in range(meta.num_row_groups)
+                if meta.row_group(i).num_rows
+            ]
+        except Exception:
+            self._source.close()
+            raise
+        self.row_groups = [rows for _, rows in self._groups]
+
+    def differing_key(
+        self, n: int, first_row: int, batch: pa.RecordBatch
+    ) -> str | None:
+        # Un lector de vida corta con `pre_buffer` sobre el archivo ya abierto: las dos
+        # columnas viajan juntas, sin abrir el archivo de nuevo en cada row group.
+        with closing(self._source.reader()) as reader:
+            wanted = reader.read_row_group(self._groups[n][0], columns=list(KEYS))
+        for name in KEYS:
+            same = pc.equal(batch.column(name), wanted.column(name).combine_chunks())
+            # Una clave nula compara a null: sin `fill_null` pasaría la comprobación.
+            same = same.fill_null(False)
+            if not pc.all(same).as_py():
+                row = pc.index(same, False).as_py()
+                return (
+                    f"row group {n}, fila {first_row + row}: "
+                    f"{name} no es el del esqueleto"
+                )
+        return None
+
+    def close(self) -> None:
+        self._source.close()
+
+
 class FamilyWriter:
     """Escribe un archivo de familia, un row group a la vez, contra su esqueleto.
 
-    `skeleton_path` es el archivo cuyo esqueleto se repite: `events.parquet` de L2 para
-    `summaries.parquet` y `summaries.parquet` de la partición para las demás familias.
-    Si no existe, falla con `FramesInputError`: una familia distinta de `summaries` de
-    un mes no se escribe sin su `summaries.parquet`.
+    `skeleton` es el esqueleto que se repite: la ruta del archivo (`events.parquet` de L2
+    para `summaries.parquet` y `summaries.parquet` de la partición para las demás
+    familias) o un objeto `Skeleton`. Con una ruta, el escritor la abre y la cierra; si no
+    existe, falla con `FramesInputError`: una familia distinta de `summaries` de un mes no
+    se escribe sin su `summaries.parquet`. Un `Skeleton` que se pasa lo cierra quien lo creó.
 
     `schema` trae las claves `theta` y `confirm_agg_trade_id` (sin nulos) y las columnas
     de la familia, y no copia otras columnas de L2. Cada llamada a `write_row_group`
@@ -63,7 +140,8 @@ class FamilyWriter:
     renombra sobre el destino: un fallo, o salir del bloque `with` sin `commit`, deja el
     archivo anterior intacto. `commit` devuelve el `content_hash` del contenido lógico.
 
-    Memoria: un row group de la familia y las dos columnas de claves del esqueleto.
+    Memoria: un row group de la familia y, con una ruta, las dos columnas de claves del
+    esqueleto.
     """
 
     def __init__(
@@ -71,29 +149,19 @@ class FamilyWriter:
         path: str,
         schema: pa.Schema,
         state_version: str,
-        skeleton_path: str,
+        skeleton: str | os.PathLike[str] | Skeleton,
     ) -> None:
         if not _VERSION.fullmatch(state_version):
             raise ValueError(f"state_version {state_version!r} no es semver (X.Y.Z)")
         _require_keys(schema)
         self.path = path
-        self.skeleton_path = skeleton_path
-        self._skeleton = ParquetSource(skeleton_path, "el esqueleto de la familia")
+        self._owned = isinstance(skeleton, str | os.PathLike)
+        self._skeleton: Skeleton = (
+            _FileSkeleton(str(skeleton)) if self._owned else skeleton  # type: ignore[arg-type]
+        )
+        self.skeleton_path = self._skeleton.path
         try:
-            check_columns(
-                self._skeleton.schema,
-                {"confirm_agg_trade_id": pa.int64()},
-                skeleton_path,
-            )
-            if "theta" not in self._skeleton.schema.names:
-                raise FramesInputError(f"{skeleton_path}: falta la columna 'theta'")
-            meta = self._skeleton.metadata
-            # Los row groups vacíos no se escriben: no hay fila que ponerles.
-            self._groups = [
-                (i, meta.row_group(i).num_rows)
-                for i in range(meta.num_row_groups)
-                if meta.row_group(i).num_rows
-            ]
+            self._groups = self._skeleton.row_groups
             self._schema = schema.remove_metadata()
             self._writer = PartitionWriter(
                 path,
@@ -103,16 +171,20 @@ class FamilyWriter:
             )
             self._hasher = ContentHasher(self._schema)
         except Exception:
-            self._skeleton.close()
+            self._close_skeleton()
             raise
         self._written = 0
         self._rows = 0
         self._last_id: int | None = None
 
+    def _close_skeleton(self) -> None:
+        if self._owned:
+            self._skeleton.close()
+
     @property
     def row_groups(self) -> list[int]:
         """Filas de cada row group del esqueleto: lo que `write_row_group` espera."""
-        return [rows for _, rows in self._groups]
+        return list(self._groups)
 
     def __enter__(self) -> Self:
         self._writer.__enter__()
@@ -127,7 +199,7 @@ class FamilyWriter:
         try:
             self._writer.__exit__(exc_type, exc, tb)
         finally:
-            self._skeleton.close()
+            self._close_skeleton()
 
     def write_row_group(self, batch: pa.RecordBatch) -> None:
         """Escribe el siguiente row group; debe repetir el del esqueleto."""
@@ -142,13 +214,13 @@ class FamilyWriter:
             raise self._mismatch(
                 f"el esqueleto tiene {len(self._groups)} row groups y se escribe otro"
             )
-        index, rows = self._groups[n]
+        rows = self._groups[n]
         if batch.num_rows != rows:
             raise self._mismatch(
                 f"el row group {n} tiene {batch.num_rows} filas y el del esqueleto {rows}"
             )
         self._check_order(batch, n)
-        self._check_keys(batch, n, index)
+        self._check_keys(batch, n)
         self._hasher.update(batch)
         self._writer.write_batch(batch)
         self._written += 1
@@ -185,20 +257,10 @@ class FamilyWriter:
             )
         self._last_id = int(ids[-1])
 
-    def _check_keys(self, batch: pa.RecordBatch, n: int, index: int) -> None:
-        # Un lector de vida corta con `pre_buffer` sobre el archivo ya abierto: las dos
-        # columnas viajan juntas, sin abrir el archivo de nuevo en cada row group.
-        with closing(self._skeleton.reader()) as reader:
-            wanted = reader.read_row_group(index, columns=list(KEYS))
-        for name in KEYS:
-            same = pc.equal(batch.column(name), wanted.column(name).combine_chunks())
-            # Una clave nula compara a null: sin `fill_null` pasaría la comprobación.
-            same = same.fill_null(False)
-            if not pc.all(same).as_py():
-                row = pc.index(same, False).as_py()
-                raise self._mismatch(
-                    f"row group {n}, fila {self._rows + row}: {name} no es el del esqueleto"
-                )
+    def _check_keys(self, batch: pa.RecordBatch, n: int) -> None:
+        detail = self._skeleton.differing_key(n, self._rows, batch)
+        if detail is not None:
+            raise self._mismatch(detail)
 
 
 def _require_keys(schema: pa.Schema) -> None:
@@ -213,4 +275,4 @@ def _require_keys(schema: pa.Schema) -> None:
         raise ValueError("theta debe ser decimal")
 
 
-__all__ = ["KEYS", "SUMMARIES", "FamilyWriter", "family_path"]
+__all__ = ["KEYS", "SUMMARIES", "FamilyWriter", "Skeleton", "family_path"]

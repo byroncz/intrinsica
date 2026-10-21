@@ -49,7 +49,7 @@ errores del lector, y porque `pyutils` no sabe nada de L3.
   ubicar las fronteras él mismo.
 - `Frame(transact_time, price, quantity, is_buyer_maker)`: cuatro arrays de
   Arrow con los tipos de L1. No trae `agg_trade_id` ni `is_best_match`.
-- `FamilyWriter(path, schema, state_version, skeleton_path)`,
+- `FamilyWriter(path, schema, state_version, skeleton)`,
   `family_path(root, key, theta, month, family)` y `l2_path(root, key, theta,
   month)`: el escritor de familias y las rutas de la partición. Ver
   [Escritor de familias](#escritor-de-familias).
@@ -336,9 +336,21 @@ with FamilyWriter(summaries, SCHEMA, "1.0.0", events) as writer:
   cuyo `check_type` es `family_skeleton_mismatch`, y no se publica nada.
 - Un lote vacío no cuenta como row group. Una partición sin eventos da un
   archivo válido de cero filas.
-- Si `skeleton_path` no existe falla con `FramesInputError`: un archivo de
+- Si `skeleton` es una ruta y no existe falla con `FramesInputError`: un archivo de
   familia que no sea `summaries.parquet` no se escribe sin el `summaries.parquet`
-  de su mes.
+  de su mes. Con una ruta, el escritor relee las claves del esqueleto de cada row
+  group (un viaje al almacenamiento por row group).
+- `skeleton` también puede ser un objeto `Skeleton` (`dc_frames.family`) para quien ya
+  tiene las claves en RAM, como L3 al leer `events.parquet` (ITSC-365): `path`,
+  `row_groups` (filas de cada row group no vacío), `differing_key(n, first_row,
+  batch)` (el detalle de la primera diferencia de claves, o `None`) y `close()`. El
+  escritor aplica las mismas comprobaciones de filas, orden y límites, lanza el mismo
+  `FamilySkeletonMismatch` y no cierra un esqueleto que no abrió. El detalle del
+  mensaje lo pone el esqueleto: el de archivo dice la fila; el de L3 compara una huella
+  por row group y dice el row group y la clave.
+- `EventFile(..., all_columns=True)` lee todas las columnas del archivo (las
+  fronteras primero) y `L1(root, key, footers={mes: FileMetaData})` abre ese mes con
+  el pie que quien llama ya leyó, sin pedirlo de nuevo.
 - Propiedades físicas: ZSTD-3, estadísticas por columna, `sorting_columns` por
   `confirm_agg_trade_id`, `state_version` en los metadatos del archivo y ninguna
   columna con diccionario (`PartitionWriter(compact_encoding=True)`: enteros en

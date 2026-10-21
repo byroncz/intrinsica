@@ -243,3 +243,68 @@ def test_a_failing_constructor_closes_the_skeleton(partition, monkeypatch, faili
     with pytest.raises(RuntimeError, match="falla al construir"):
         FamilyWriter(summaries, FAMILY_SCHEMA, VERSION, events)
     assert len(opened) == 1 and opened[0]._file.closed
+
+
+class InMemorySkeleton:
+    """Un esqueleto en RAM: las filas por row group y las claves de cada uno."""
+
+    def __init__(self, path, groups):
+        self.path = path
+        self.row_groups = [len(g) for g in groups]
+        self._keys = groups
+        self.closed = False
+        self.calls = []
+
+    def differing_key(self, n, first_row, batch):
+        self.calls.append((n, first_row))
+        ids = batch.column("confirm_agg_trade_id").to_pylist()
+        return None if ids == self._keys[n] else f"row group {n}: otro id"
+
+    def close(self):
+        self.closed = True
+
+
+def keys_of(events):
+    return [
+        b.column("confirm_agg_trade_id").to_pylist() for b in family_batches(events)
+    ]
+
+
+def test_an_in_memory_skeleton_replaces_the_file_and_is_not_closed(
+    partition, monkeypatch
+):
+    events, summaries, _ = partition
+
+    def refuse(*args):
+        raise AssertionError("no debe abrir el archivo del esqueleto")
+
+    monkeypatch.setattr(family_module, "ParquetSource", refuse)
+    skeleton = InMemorySkeleton(events, keys_of(events))
+    digest = write(summaries, skeleton, family_batches(events))
+    assert group_sizes(summaries) == group_sizes(events)
+    assert digest == content_hash(pq.read_table(summaries))
+    # Una pregunta por row group, con el número de su primera fila; el esqueleto es de
+    # quien lo creó y el escritor no lo cierra.
+    sizes = skeleton.row_groups
+    assert skeleton.calls == [(n, sum(sizes[:n])) for n in range(len(sizes))]
+    assert not skeleton.closed
+
+
+def test_an_in_memory_skeleton_that_disagrees_aborts_like_the_file_does(partition):
+    events, summaries, _ = partition
+    groups = keys_of(events)
+    groups[2][0] += 1000
+    with pytest.raises(FamilySkeletonMismatch, match="row group 2: otro id") as error:
+        write(summaries, InMemorySkeleton(events, groups), family_batches(events))
+    assert error.value.detail == "row group 2: otro id"
+    assert not Path(summaries).exists()
+
+
+def test_an_in_memory_skeleton_still_checks_the_row_counts(partition):
+    events, summaries, _ = partition
+    groups = keys_of(events)
+    short = InMemorySkeleton(events, [groups[0][:-1], *groups[1:]])
+    with pytest.raises(
+        FamilySkeletonMismatch, match="tiene 3 filas y el del esqueleto 2"
+    ):
+        write(summaries, short, family_batches(events))

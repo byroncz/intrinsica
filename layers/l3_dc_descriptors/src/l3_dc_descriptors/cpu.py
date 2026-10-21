@@ -137,6 +137,37 @@ def process_cpu_s() -> tuple[float, float]:
     return usage.ru_utime, usage.ru_stime
 
 
+@dataclass(frozen=True)
+class KernelCounts:
+    """Lo que el kernel contó del proceso (acumulado, todos sus hilos), para explicar su CPU
+    de sistema: fallos de página (memoria que se pide y se devuelve), y cambios de contexto
+    (hilos que se bloquean y despiertan: candados, `futex`, red).
+    """
+
+    minor_faults: int
+    major_faults: int
+    voluntary_switches: int
+    involuntary_switches: int
+
+    def since(self, start: KernelCounts) -> KernelCounts:
+        return KernelCounts(
+            self.minor_faults - start.minor_faults,
+            self.major_faults - start.major_faults,
+            self.voluntary_switches - start.voluntary_switches,
+            self.involuntary_switches - start.involuntary_switches,
+        )
+
+
+def kernel_counts() -> KernelCounts:
+    """Los contadores de `getrusage` del proceso; la unidad usa la diferencia entre su
+    inicio y su final, como con `process_cpu_s`.
+    """
+    usage = resource.getrusage(resource.RUSAGE_SELF)
+    return KernelCounts(
+        usage.ru_minflt, usage.ru_majflt, usage.ru_nvcsw, usage.ru_nivcsw
+    )
+
+
 def _stat_value(stat: str | None, name: str) -> int | None:
     for line in (stat or "").splitlines():
         key, _, value = line.partition(" ")

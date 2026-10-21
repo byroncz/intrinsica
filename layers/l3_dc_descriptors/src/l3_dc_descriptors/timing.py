@@ -7,7 +7,12 @@ el límite efectivo de CPU. Todo se acumula en objetos que crea la unidad (`Phas
 unidades en el mismo proceso, en hilos o tareas distintas, no se pisan.
 
 Todas las fases son **pared**, no suma sobre hilos (ITSC-363): `gate_s`, `setup_s`,
-`reconcile_s`, `publish_s` y `lineage_s` son tramos seguidos del hilo principal;
+`reconcile_s` y `publish_s` son tramos seguidos del hilo principal; `gate_s` es el primer
+tramo de la entrada de los θ (abrir `events.parquet` y arrancar la lectura de sus fronteras,
+ITSC-365) y `setup_s`, lo que queda hasta el primer row group (motor, pie de L1 y compuerta
+de carry-over; los escritores se abren en ese tramo, pero nadie los espera); el linaje ya no
+es una fase: sale de los
+bytes que la lectura trae (`lineage_s` desapareció en ITSC-365);
 `aggregate_s` es la pared del motor, del primer `push` a que el último ítem termina;
 `write_s`, la pared con algún escritor ocupado (la unión de sus intervalos), y
 `read_wall_s`, la pared con alguna lectura de L1 o L2 en vuelo. `write_s` y `read_wall_s`
@@ -37,7 +42,7 @@ from dataclasses import dataclass, field
 import pyarrow.parquet as pq
 from dc_frames import lake
 
-from l3_dc_descriptors.cpu import CpuLimit
+from l3_dc_descriptors.cpu import CpuLimit, KernelCounts
 
 MIB = 1 << 20
 
@@ -146,7 +151,6 @@ class Phases:
         "inflight",
         "inflight_max",
         "items",
-        "lineage_s",
         "publish_s",
         "read",
         "read_s",
@@ -176,7 +180,6 @@ class Phases:
         self.write_s = 0.0
         self.publish_s = 0.0
         self.reconcile_s = 0.0
-        self.lineage_s = 0.0
         self.read = ReadMeter()
         self.write = BusyClock()
         self.retained = Retained()
@@ -342,6 +345,7 @@ class Timing:
     cpu_throttled_s: float | None
     cpu_user_s: float
     cpu_system_s: float
+    kernel: KernelCounts
 
     @property
     def cpu_s(self) -> float:
@@ -364,34 +368,33 @@ class Timing:
     @property
     def other_s(self) -> float:
         p = self.phases
-        explained = (
-            p.gate_s
-            + p.setup_s
-            + p.aggregate_s
-            + p.publish_s
-            + p.reconcile_s
-            + p.lineage_s
-        )
+        explained = p.gate_s + p.setup_s + p.aggregate_s + p.publish_s + p.reconcile_s
         return max(0.0, self.wall_s - explained)
 
     def details(self) -> dict:
         """El payload del hallazgo `unit_timing` (segundos con ms de resolución).
 
-        Todas las fases son pared (ver el módulo). `gate_s`, la compuerta de entrada;
-        `setup_s`, abrir escritores, L2 y el motor; `aggregate_s`, la pared del motor, del
-        primer row group a que termina el último ítem (incluye lo que espera por las
-        lecturas y por la contrapresión); `write_s`, la pared con algún escritor ocupado;
-        `publish_s`, publicar los archivos; `reconcile_s`, §9.1; `lineage_s`, el hash de las
-        entradas de L2. `read_s` es lo que el hilo principal esperó a las lecturas y
-        `read_wall_s`, la pared con alguna lectura de L1 o L2 en vuelo (lectura y
-        decodificación); `read_bytes`, los bytes comprimidos que leyó de las dos. `threads`
-        es el pool de E/S (compuerta, L2 y linaje); `engine_threads`, los hilos del motor;
-        `readers`, los row groups de L1 que se leen a la vez; `inflight`, el tope de row
-        groups empujados al motor que aún anclan sus ticks e `inflight_max`, el máximo que
-        hubo; `boundaries_peak_mib`, el máximo de fronteras de L2 que el motor tuvo en mano; `writers`, los escritores; `engine_busy`, la fracción del tiempo del bucle
-        con ítems en la cola del motor; `items`, los ítems `(row group, θ)` que corrió.
+        Todas las fases son pared (ver el módulo). `gate_s`, el primer tramo de la entrada
+        de los θ: abrir `events.parquet` y arrancar la lectura de sus fronteras, una tarea
+        por θ; `setup_s`, el motor, el pie de L1 y la compuerta de carry-over (los
+        escritores se abren en el pool durante ese tramo, sin que nadie los espere);
+        `aggregate_s`, la pared del motor, del primer row group a que termina el último
+        ítem (incluye lo que espera por las lecturas y por la contrapresión); `write_s`, la
+        pared con algún escritor ocupado; `publish_s`, publicar los archivos; `reconcile_s`,
+        §9.1. `read_s` es lo que el hilo principal esperó a las lecturas y `read_wall_s`, la
+        pared con alguna lectura de L1 o L2 en vuelo (lectura, decodificación y el hash del
+        linaje de L2); `read_bytes`, los bytes comprimidos que leyó de las dos. `threads` es
+        el pool de E/S (pasada de entrada, L2, conciliación y publicación); `engine_threads`,
+        los hilos del motor; `readers`, los row groups de L1 que se leen a la vez; `inflight`,
+        el tope de row groups empujados al motor que aún anclan sus ticks e `inflight_max`,
+        el máximo que hubo; `boundaries_peak_mib`, el máximo de fronteras de L2 que el motor
+        tuvo en mano; `writers`, los escritores; `engine_busy`, la fracción del tiempo del
+        bucle con ítems en la cola del motor; `items`, los ítems `(row group, θ)` que corrió.
         `cpu_user_s` y `cpu_system_s` son la CPU del proceso (todos sus hilos) durante la
-        unidad y `cpu_utilization`, `cpu_s / (wall_s × cores)`.
+        unidad y `cpu_utilization`, `cpu_s / (wall_s × cores)`. `minor_faults`,
+        `major_faults`, `voluntary_switches` e `involuntary_switches` son los contadores
+        del kernel (`getrusage`) de la unidad: explican `cpu_system_s` (memoria contra
+        candados y red).
         """
         p = self.phases
         seconds = {
@@ -404,7 +407,6 @@ class Timing:
             "write_s": p.write.seconds,
             "publish_s": p.publish_s,
             "reconcile_s": p.reconcile_s,
-            "lineage_s": p.lineage_s,
             "other_s": self.other_s,
         }
         counts = self.row_groups
@@ -442,4 +444,8 @@ class Timing:
             "cpu_system_s": round(self.cpu_system_s, 3),
             "cpu_s": round(self.cpu_s, 3),
             "cpu_utilization": None if utilization is None else round(utilization, 3),
+            "minor_faults": self.kernel.minor_faults,
+            "major_faults": self.kernel.major_faults,
+            "voluntary_switches": self.kernel.voluntary_switches,
+            "involuntary_switches": self.kernel.involuntary_switches,
         }

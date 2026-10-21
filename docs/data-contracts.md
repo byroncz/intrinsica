@@ -632,13 +632,16 @@ mismo que traen las excepciones del resumidor, de las que sale la mayoría de lo
   con los suyos y el mes está obsoleto (`--force --from <mes> --thetas <θ>`).
 - **`unit_timing`** (`info`, `pass`): uno por unidad (mes), no por θ. `metric_value` es la
   pared (`wall_s`). `details` lleva el tiempo por fase, todas en **pared**
-  (desde la 2.0.0 del TRD-L3): `gate_s` (compuerta de entrada), `setup_s` (abrir escritores, archivos
-  de L2 y motor), `aggregate_s` (el motor, del primer row group a que termina el último ítem),
-  `publish_s` (publicar los archivos), `reconcile_s` (conciliación) y `lineage_s` (hash de las
-  entradas de L2) son tramos seguidos del hilo principal y, con `other_s`, suman `wall_s`.
+  (desde la 2.0.0 del TRD-L3): `gate_s` (el primer tramo de la entrada de los θ: abrir
+  `events.parquet` y arrancar la lectura de sus fronteras, una tarea por θ), `setup_s` (el
+  motor, el pie de L1 y la compuerta de carry-over; los escritores se abren en el pool durante
+  ese tramo, sin que nadie los espere), `aggregate_s` (el motor, del primer row group a que termina
+  el último ítem), `publish_s` (publicar los archivos) y `reconcile_s` (conciliación) son tramos
+  seguidos del hilo principal y, con `other_s`, suman `wall_s`. `lineage_s` ya no existe (desde
+  la 2.1.0): el hash de las entradas de L2 sale de los bytes que la lectura trae.
   `write_s` (la pared con algún escritor ocupado) y `read_wall_s` (la pared con alguna lectura de
   L1 o L2 en vuelo) corren dentro de `aggregate_s`; `read_s` es lo que el hilo principal esperó
-  a las lecturas y `read_bytes`, los bytes comprimidos que viajaron de L1 y L2. La configuración
+  a las lecturas (`read_wall_s` incluye decodificar y hashear los lotes de L2) y `read_bytes`, los bytes comprimidos que viajaron de L1 y L2. La configuración
   con que corrió: `threads` (pool de E/S, `L3_THREADS`), `engine_threads` (`L3_ENGINE_THREADS`),
   `readers` (`L3_READERS`), `inflight` (`L3_INFLIGHT`) y `writers` (`L3_WRITERS`); y lo que
   hizo el motor: `inflight_max` (máximo de row groups empujados que aún anclaban sus ticks),
@@ -657,7 +660,9 @@ mismo que traen las excepciones del resumidor, de las que sale la mayoría de lo
   `null` si el cgroup no lo expone) y la CPU que consumió la unidad: `cpu_user_s`,
   `cpu_system_s`, `cpu_s` (su suma, de todos los hilos) y `cpu_utilization` =
   `cpu_s / (wall_s × cores)`, medidos con `getrusage` entre el inicio y el final de la
-  unidad. No cuenta las lecturas de la conciliación (solo
+  unidad; con ellos, `minor_faults`, `major_faults`, `voluntary_switches` e
+  `involuntary_switches` (fallos de página y cambios de contexto del proceso en la unidad,
+  también de `getrusage`), que separan la CPU de sistema en memoria, candados y red. No cuenta las lecturas de la conciliación (solo
   `agg_trade_id` de los row groups de las fronteras). Va aparte de `summaries_summary`
   porque sus tiempos cambian en cada corrida y el de `summaries_summary` no puede.
 - **`unit_profile`** (`info`, `pass`): uno por unidad (mes), solo si la corrida lleva

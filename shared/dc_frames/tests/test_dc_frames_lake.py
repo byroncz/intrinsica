@@ -276,3 +276,53 @@ def test_a_lot_travels_in_a_few_requests_not_one_per_row_group_and_column(
     # de columnas; con ellas, el tramo entero viaja en una o dos.
     assert len(log) <= 2 < len(everything)
     assert sum(length for _, length in log) >= 0.9 * size
+
+
+def test_an_event_file_with_all_columns_reads_every_column_once(events_path):
+    path, _ = events_path
+    with lake.EventFile(str(path), "L2", all_columns=True) as file:
+        # Las fronteras primero y luego el resto, sin repetir ninguna.
+        assert file.columns[:4] == [
+            "reference_agg_trade_id",
+            "confirm_agg_trade_id",
+            "extreme_agg_trade_id",
+            "confirm_time",
+        ]
+        assert sorted(file.columns) == sorted(file.schema.names)
+        assert len(set(file.columns)) == len(file.columns)
+        batches = list(file.batches(file.lots(1 << 40)[0], 5, 1 << 20))
+        assert all(batch.schema.names == file.columns for batch in batches)
+        got = pa.Table.from_batches(batches)
+    assert got.equals(pq.read_table(path, columns=file.columns))
+
+
+def test_l1_opens_a_month_with_the_footer_it_was_given(tmp_path, monkeypatch):
+    from frames_lake import KEY, MONTH, build_lake
+
+    l1_root, _, ticks, _ = build_lake(tmp_path)
+    first = ticks[0]["id"]
+    path = lake.l1_path(str(l1_root), KEY, MONTH)
+    with closing(lake.open_parquet(path, "L1")) as parquet:
+        footer = parquet.metadata
+    opened = []
+    real = lake.open_parquet
+
+    def spy(p, what, metadata=None, pre_buffer=False):
+        opened.append(metadata)
+        return real(p, what, metadata, pre_buffer)
+
+    monkeypatch.setattr(lake, "open_parquet", spy)
+    alone = [
+        g.low
+        for g in lake.L1(str(l1_root), KEY).row_groups(
+            MONTH, MONTH, first, lambda *_: True
+        )
+    ]
+    # Sin pie compartido, buscar el mes y recorrerlo lo leen cada uno: dos lecturas.
+    assert sum(metadata is None for metadata in opened) == 2
+    opened.clear()
+    shared = lake.L1(str(l1_root), KEY, {MONTH: footer})
+    got = [g.low for g in shared.row_groups(MONTH, MONTH, first, lambda *_: True)]
+    assert got == alone
+    # Con el pie en mano ninguna apertura del mes lo pide de nuevo.
+    assert opened and all(m is not None and m.equals(footer) for m in opened)

@@ -378,9 +378,9 @@ Python lee, escribe y mide; los hilos nativos del motor calculan. Son opcionales
 |---|---|---|
 | `L3_READERS` | R: row groups de L1 que se leen y decodifican a la vez. Entero ≥ 1 | 2 |
 | `L3_INFLIGHT` | K: row groups empujados al motor que aún anclan sus ticks; el orquestador no pide el K + 1 hasta que uno termina. Entero ≥ 1 | 4 |
-| `L3_WRITERS` | W: escritores de row groups de salida (cada θ en orden, uno a la vez por θ). Entero ≥ 1 | 4 |
-| `L3_ENGINE_THREADS` | Hilos nativos del motor. Entero ≥ 1 | los vCPU efectivos (`ceil(cores)` de `unit_timing`): 4 en `l3-backfill` |
-| `L3_THREADS` | Pool de E/S: compuerta de entrada, apertura de archivos, lectura de las fronteras de L2, conciliación, publicación y linaje. Entero ≥ 1; nunca se usan más que θ | `ceil(3 × cores)`, nunca más que θ: 12 a 4 vCPU y 24 a 8 |
+| `L3_WRITERS` | W: escritores de row groups de salida (cada θ en orden, uno a la vez por θ). Entero ≥ 1. 12 es el techo medido: con 24 la pared empeoró 17 % (T4c) | 12 |
+| `L3_ENGINE_THREADS` | Hilos nativos del motor. Entero ≥ 1 | los vCPU efectivos redondeados (`round(cores)` de `unit_timing`): 4 en `l3-backfill` |
+| `L3_THREADS` | Pool de E/S: pasada de entrada de cada θ (compuerta y apertura), lectura de las fronteras de L2, conciliación y publicación. Entero ≥ 1; nunca se usan más que θ | `ceil(3 × cores)`, nunca más que θ: 12 a 4 vCPU y 24 a 8 |
 
 El stack `l3` no fija ninguna: los valores siguen a los vCPU y el resultado (tablas y
 `content_hash`) es el mismo en cualquier combinación. Un valor que no sea un entero ≥ 1 termina
@@ -389,8 +389,13 @@ apertura, la conciliación y la publicación van en serie y las fronteras de L2 
 principal); sirve de línea base. `L3_PREFETCH` ya no existe.
 
 **Qué cuesta cada uno en memoria.** Cada row group de L1 en vuelo suma ≈ 48 MB anclados (K) o,
-mientras se decodifica, ≈ 1,8 × 48 MB (R, por los temporales de Arrow). Los escritores no mostraron un costo
-estable en local (W = 6 contra W = 4 no cambió el RSS). La cuenta completa está en
+mientras se decodifica, ≈ 1,8 × 48 MB (R, por los temporales de Arrow). **Los escritores** pesan por lo
+sellado que esperan: el orquestador no empuja otro row group mientras haya
+`PENDING_PER_WRITER × W` row groups de salida sin escribir. Cada uno ocupa ≈ 8 MiB (256 B por
+evento × ≈ 34 000 eventos por row group de L2 en 2021-01). Con `PENDING_PER_WRITER = 3` y
+W = 12 el tope son 36 row groups ≈ 290 MiB, igual que los 8 × 4 de antes; con 8 y W = 12 eran
+96 ≈ 770 MiB y T4b midió `rss_peak_mib` 2 331 contra 1 864 de T4 (W = 4). Si cambias W,
+rehaz la cuenta: `3 × W × 8 MiB`. La cuenta completa está en
 [TRD-L3 ADR-L3-16, «Memoria del orquestador»](../TRD/l3.md#616-adr-l3-16--motor-de-agregación-nativo-ítems-por-row-group-y-θ-casillas-por-evento-fusión-asociativa).
 Se acepta una combinación si `rss_peak_mib` queda ≤ 2 048 a 4 vCPU.
 
@@ -404,7 +409,8 @@ Se acepta una combinación si `rss_peak_mib` queda ≤ 2 048 a 4 vCPU.
 | `read_s` | Lo que el hilo principal esperó a las lecturas (L1 y fronteras de L2) |
 | `read_wall_s`, `read_bytes` | Pared con alguna lectura en vuelo y bytes comprimidos que viajaron (L1 y L2). La regla del humano: leer a la velocidad del volumen (1,25 GB en 2021-01, ≤ 15 s). Con contrapresión crece sin que la lectura sea lenta: `read_bytes / read_wall_s` es la tasa mientras hay lecturas |
 | `write_s` | Pared con algún escritor ocupado. Pegada a `aggregate_s` y con `engine_busy` bajo, los escritores son el cuello: sube `L3_WRITERS` |
-| `aggregate_s`, `setup_s`, `publish_s`, `reconcile_s`, `lineage_s`, `gate_s` | Tramos seguidos del hilo principal; `other_s` es lo que falta hasta `wall_s` |
+| `gate_s`, `setup_s`, `aggregate_s`, `publish_s`, `reconcile_s` | Tramos seguidos del hilo principal; `other_s` es lo que falta hasta `wall_s`. `gate_s` es abrir `events.parquet` de los θ (una tarea por θ) y `setup_s`, el motor, el pie de L1 y la compuerta de carry-over (los escritores se abren en el pool en ese tramo, sin que nadie los espere); `lineage_s` ya no existe |
+| `minor_faults`, `major_faults`, `voluntary_switches`, `involuntary_switches` | Contadores del kernel de la unidad. Con `cpu_system_s` alto: muchos fallos de página (millones) apuntan a memoria y asignador; muchos cambios de contexto voluntarios, a candados o red; ninguno de los dos, a otra causa |
 | `boundaries_peak_mib` | Máximo de fronteras de L2 que el motor tuvo en mano |
 
 Para comparar dos corridas usa `wall_s`, `cpu_s` y `cpu_utilization`. `run-job.yml` no admite
@@ -420,7 +426,16 @@ gcloud run jobs execute l3-backfill \
   --wait
 ```
 
-**La corrida T4 de ITSC-363** (los valores por defecto: R = 2, K = 4, W = 4, motor de 4 hilos a
+**La corrida T5 de ITSC-365** (los valores por defecto: R = 2, K = 4, W = 12, motor de 4 hilos a
+4 vCPU, imagen 0.12.0) se lanza igual, y antes una corrida con `L3_PROFILE=1` para explicar
+`cpu_system_s` (ver la tabla de arriba y la entrada de ITSC-365 en
+[TRD-L3 ADR-L3-16](../TRD/l3.md#616-adr-l3-16--motor-de-agregación-nativo-ítems-por-row-group-y-θ-casillas-por-evento-fusión-asociativa)).
+Metas de T5: `cpu_utilization` ≥ 0,90 (objetivo 0,95), `wall_s` ≤ 100 s (el piso de T4b es
+73 s), `rss_peak_mib` ≤ 2 048, `cpu_throttled_s` ≤ 25 y los 50 `content_hash` y los 50
+`unassigned_ticks` idénticos a los de ITSC-335. El resultado va como comentario en ITSC-365 y
+como fila en el cuadro de §10.2.
+
+**La corrida T4 de ITSC-363** (los valores por defecto de entonces: R = 2, K = 4, W = 4, motor de 4 hilos a
 4 vCPU) se lanza con *Actions → Run job*, `l3-backfill`, `from = to = 2021-01` y `force`, tras el
 merge y el `apply` del stack `l3`; el resultado se registra como comentario en ITSC-363 y en el
 cuadro de
