@@ -371,3 +371,16 @@ def test_it_reports_the_kernel_counters_that_explain_the_system_cpu(lake, tmp_pa
         assert details["major_faults"] >= 0
         assert details["voluntary_switches"] > 0
         assert details["involuntary_switches"] >= 0
+
+
+def test_unit_timing_records_the_mmap_threshold(lake, tmp_path, monkeypatch):
+    # El umbral que `tune_allocators` dejó fijado viaja en el hallazgo, para que cada
+    # corrida diga con cuál corrió (None si quedó dinámico).
+    monkeypatch.setenv("MALLOC_MMAP_THRESHOLD_", "65536")
+    result = process_unit(unit_of(M2), context(lake, tmp_path), lake.thetas)
+    assert result.timing.details()["mmap_threshold"] == 65536
+    (row,) = (f for f in result.findings if f.check_type == "unit_timing")
+    assert row.details["mmap_threshold"] == 65536
+    monkeypatch.delenv("MALLOC_MMAP_THRESHOLD_")
+    result = process_unit(unit_of(M2), context(lake, tmp_path), lake.thetas)
+    assert result.timing.details()["mmap_threshold"] is None

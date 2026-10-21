@@ -346,6 +346,7 @@ class Timing:
     cpu_user_s: float
     cpu_system_s: float
     kernel: KernelCounts
+    mmap_threshold: int | None = None
 
     @property
     def cpu_s(self) -> float:
@@ -394,7 +395,9 @@ class Timing:
         unidad y `cpu_utilization`, `cpu_s / (wall_s × cores)`. `minor_faults`,
         `major_faults`, `voluntary_switches` e `involuntary_switches` son los contadores
         del kernel (`getrusage`) de la unidad: explican `cpu_system_s` (memoria contra
-        candados y red).
+        candados y red). `mmap_threshold` es el umbral de `mmap` de glibc con que corrió
+        (`MALLOC_MMAP_THRESHOLD_` o 16 384; `None` si quedó dinámico), para que cada
+        corrida diga con qué corrió.
         """
         p = self.phases
         seconds = {
@@ -448,4 +451,5 @@ class Timing:
             "major_faults": self.kernel.major_faults,
             "voluntary_switches": self.kernel.voluntary_switches,
             "involuntary_switches": self.kernel.involuntary_switches,
+            "mmap_threshold": self.mmap_threshold,
         }

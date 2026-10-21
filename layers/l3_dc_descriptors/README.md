@@ -65,7 +65,7 @@ que no llegó al mes previo (`l3_frontier`) o al que L2 no le ha llegado (`l2_mi
 [`docs/data-contracts.md`](../../docs/data-contracts.md). Cada excepción tipada del núcleo
 (tabla de abajo) se traduce a su hallazgo con los `details` que ya trae. `unit_timing` lleva lo
 que necesita la medición del umbral 3 de [§10.3](../../docs/TRD/l3.md#103-sonda-del-lector-de-tramas--umbrales-de-aceptación-se-escriben-antes-de-medir):
-pared total y por fase (todas son pared: `gate_s`, abrir `events.parquet` de los θ; `setup_s`,
+pared total y por fase (todas son pared: `gate_s`, abrir `events.parquet` de los θ y arrancar la lectura de sus fronteras; `setup_s`,
 el motor, el pie de L1 y la compuerta de carry-over; `aggregate_s` del motor, `publish_s`, `reconcile_s`; `lineage_s`
 ya no existe: el linaje sale de los bytes que se leen; `read_s` es lo que el hilo principal esperó a las lecturas y
 `read_wall_s` y `write_s` la pared con alguna lectura o algún escritor ocupado), la configuración

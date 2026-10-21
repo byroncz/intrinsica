@@ -24,6 +24,7 @@ from l3_dc_descriptors.cpu import cpu_limit, kernel_counts, process_cpu_s, throt
 from l3_dc_descriptors.errors import SummarizeError
 from l3_dc_descriptors.frontier import theta_text
 from l3_dc_descriptors.landing import missing_input
+from l3_dc_descriptors.memory import mmap_threshold
 from l3_dc_descriptors.profiling import top_functions
 from l3_dc_descriptors.summarize import ThetaResult, summarize_month
 from l3_dc_descriptors.timing import (
@@ -147,6 +148,7 @@ def _process_unit(unit: Unit, ctx: RunContext, thetas: list[int]) -> Result:
         cpu_user_s=cpu_user_s,
         cpu_system_s=cpu_system_s,
         kernel=kernel_counts().since(kernel_started),
+        mmap_threshold=mmap_threshold(),
     )
     return Result(
         (

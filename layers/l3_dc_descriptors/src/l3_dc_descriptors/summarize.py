@@ -521,7 +521,8 @@ def summarize_month(
     with ExitStack() as stack:
         pool = stack.enter_context(theta_pool(threads))
         # El pie de L1 se lee mientras los θ pasan su entrada. Si algún θ falla, el error
-        # de L2 sale primero, como cuando la compuerta iba antes que L1.
+        # de L2 sale primero, como cuando la compuerta iba antes que L1: su resultado
+        # se pide después de esperar la compuerta de carry-over.
         pending = pool.submit(L1Month, l1_root, key, month) if pool else None
         if pending is not None:
             stack.callback(_close_l1, pending)
@@ -557,6 +558,9 @@ def summarize_month(
             values, [item.events.row_groups for item in inputs], phases.engine_threads
         )
         stack.callback(engine.close)
+        # La compuerta de carry-over se espera antes que el pie de L1: con L1 ilegible y un
+        # carry-over ausente sale el `l2_missing` de la compuerta, no el error de L1.
+        _await_gates(inputs)
         if pending is not None:
             l1 = pending.result()
         else:
@@ -570,7 +574,6 @@ def summarize_month(
         extremes = [_require_statistics(f, "extreme_agg_trade_id") for f in files]
         # Los ids hasta los que la conciliación cuenta ticks, con lo que se sabe antes de
         # leer L1; si el motor encuentra otros, `count_up_to` decodifica como siempre.
-        _await_gates(inputs)
         l1.watch(_reconciliation_targets(inputs, references, extremes))
         feeds = [
             native.BoundaryFeed(engine, position, item.stream, phases.retained)
