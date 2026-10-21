@@ -11,30 +11,21 @@ llama lo emita y decida qué hacer con el rango.
 
 import cProfile
 import time
-from contextlib import closing
 from dataclasses import dataclass, replace
 from decimal import Decimal
 
-import pyarrow.parquet as pq
-from dc_frames import FramesError, l2_path
-from dc_frames.lake import l1_path, partition_path
+from dc_frames import FramesError
+from dc_frames.lake import l1_path
 from dq import Finding
-from pyutils import ContentHasher, resolve_fs
 
 from l3_dc_descriptors import findings
 from l3_dc_descriptors.context import RunContext, Unit
 from l3_dc_descriptors.cpu import cpu_limit, process_cpu_s, throttled_s
 from l3_dc_descriptors.errors import SummarizeError
 from l3_dc_descriptors.frontier import theta_text
-from l3_dc_descriptors.l2 import CARRY_OVER
 from l3_dc_descriptors.landing import missing_input
 from l3_dc_descriptors.profiling import top_functions
-from l3_dc_descriptors.summarize import (
-    ThetaResult,
-    ordered,
-    summarize_month,
-    theta_pool,
-)
+from l3_dc_descriptors.summarize import ThetaResult, summarize_month
 from l3_dc_descriptors.timing import (
     Phases,
     RowGroupCount,
@@ -62,23 +53,6 @@ class Result:
     @property
     def ok(self) -> bool:
         return self.error is None
-
-
-def file_hash(path: str) -> str:
-    """El `content_hash` de un Parquet, un row group a la vez.
-
-    Es el mismo que L2 deja en `events_summary` (`ContentHasher` sobre el esquema del
-    archivo), sin cargar el archivo entero: el pico es un row group.
-    """
-    fs, resolved = resolve_fs(path)
-    with closing(pq.ParquetFile(resolved, filesystem=fs)) as parquet:
-        hasher = ContentHasher(parquet.schema_arrow)
-        for i in range(parquet.num_row_groups):
-            table = parquet.read_row_group(i)
-            for batch in table.to_batches():
-                hasher.update(batch)
-            del table
-        return hasher.hexdigest()
 
 
 def _theta(value: Decimal) -> int:
@@ -148,11 +122,10 @@ def _process_unit(unit: Unit, ctx: RunContext, thetas: list[int]) -> Result:
     ) as error:  # L1 o L2 fuera de contrato: sin hallazgo propio (§9.3)
         return Result((), error=str(error))
 
-    thetas_written = [_theta(value) for value in written]
-    lineage = _lineage(ctx, unit, thetas_written, phases)
     summaries, stats = [], []
-    for theta, result in zip(thetas_written, written.values(), strict=True):
-        summaries.append((theta, result, lineage[theta]))
+    for value, result in written.items():
+        theta = _theta(value)
+        summaries.append((theta, result))
         stats.append(_stats(theta, result))
     wall_s = time.perf_counter() - started
     cpu_user_s, cpu_system_s = (
@@ -182,13 +155,11 @@ def _process_unit(unit: Unit, ctx: RunContext, thetas: list[int]) -> Result:
                     theta=theta_text(theta),
                     rows=result.rows,
                     content_hash=result.content_hash,
-                    l2_events_content_hash=events_hash,
-                    l2_carry_over_content_hash=carry_hash,
+                    l2_events_content_hash=result.l2_events_content_hash,
+                    l2_carry_over_content_hash=result.l2_carry_over_content_hash,
                     unassigned_ticks=result.reconciliation.unassigned,
                 )
-                for theta, result, (events_hash, carry_hash) in sorted(
-                    summaries, key=lambda item: item[0]
-                )
+                for theta, result in sorted(summaries, key=lambda item: item[0])
             ),
             findings.unit_timing(ctx, unit, timing),
         ),
@@ -204,28 +175,3 @@ def _stats(theta: int, result: ThetaResult) -> ThetaStats:
         reconciliation.closed,
         reconciliation.before_month,
     )
-
-
-def _lineage(
-    ctx: RunContext, unit: Unit, thetas: list[int], phases: Phases
-) -> dict[int, tuple[str, str]]:
-    """Los `content_hash` de las entradas de L2 que usó cada θ: `events` y `carry_over`.
-
-    Los `file_hash` de todos los archivos corren en un pool del tamaño del de θ. `lineage_s`
-    es la pared de la fase: lo que el hilo principal esperó, no la suma de los hashes.
-    """
-    started = time.perf_counter()
-    paths = [
-        path
-        for theta in thetas
-        for path in (
-            l2_path(ctx.events_root, unit.key, theta_text(theta), unit.at),
-            partition_path(
-                ctx.events_root, unit.key, theta_text(theta), unit.at, CARRY_OVER
-            ),
-        )
-    ]
-    with theta_pool(phases.threads) as pool:
-        hashes = ordered(pool, file_hash, paths)
-    phases.lineage_s += time.perf_counter() - started
-    return {theta: (hashes[2 * i], hashes[2 * i + 1]) for i, theta in enumerate(thetas)}

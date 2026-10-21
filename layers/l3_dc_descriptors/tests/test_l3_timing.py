@@ -127,12 +127,11 @@ def test_the_phases_explain_the_wall(lake, tmp_path):
         "aggregate_s",
         "publish_s",
         "reconcile_s",
-        "lineage_s",
     )
     assert all(details[name] >= 0 for name in (*phases, "other_s"))
     assert sum(details[name] for name in phases) <= details["wall_s"] + 0.01
     assert details["read_s"] > 0 and details["write_s"] > 0
-    assert details["read_wall_s"] > 0 and details["lineage_s"] > 0
+    assert details["read_wall_s"] > 0 and "lineage_s" not in details
     assert details["read_s"] <= details["aggregate_s"] + 0.01
     assert details["write_s"] <= details["aggregate_s"] + 0.05
     assert details["read_wall_s"] <= details["wall_s"]
@@ -314,7 +313,7 @@ def test_it_reports_the_knobs_it_used(lake, tmp_path):
     ctx = replace(context(lake, tmp_path), threads=50)
     details = process_unit(unit_of(M2), ctx, lake.thetas).timing.details()
     assert details["threads"] == len(lake.thetas)
-    assert (details["readers"], details["inflight"], details["writers"]) == (2, 4, 4)
+    assert (details["readers"], details["inflight"], details["writers"]) == (2, 4, 12)
     default = process_unit(unit_of(M2), context(lake, tmp_path), lake.thetas)
     assert 1 <= default.timing.details()["threads"] <= len(lake.thetas)
 

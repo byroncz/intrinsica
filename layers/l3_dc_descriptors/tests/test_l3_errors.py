@@ -11,7 +11,7 @@ from dc_frames import (
     FramesInputError,
 )
 from dc_frames.lake import EventFile
-from l3_dc_descriptors import SkeletonMismatch, summarize_month
+from l3_dc_descriptors import SkeletonMismatch, native, summarize_month
 from l3_dc_descriptors.event import EVENT_COLUMNS
 from l3_dc_descriptors.summarize import _inconsistent
 from l3_lake import M1, M2, build_lake, fixture_ticks, month_cuts
@@ -61,7 +61,9 @@ def test_boundary_error_keeps_a_tiny_theta_as_text():
     }
 
 
-def test_the_summarizer_decodes_only_the_seven_columns_of_l2(lake, monkeypatch):
+def test_the_summarizer_decodes_each_column_of_l2_once_and_gives_the_engine_seven(
+    lake, monkeypatch
+):
     seen = []
     original = EventFile.batches
 
@@ -76,15 +78,26 @@ def test_the_summarizer_decodes_only_the_seven_columns_of_l2(lake, monkeypatch):
         keys.append(None if columns is None else set(columns))
         return read(self, i, columns=columns, **kwargs)
 
+    delivered = []
+    push = native.push_boundaries
+
+    def spy_push(engine, position, batch, retained=None):
+        delivered.append(batch.schema.names)
+        return push(engine, position, batch, retained)
+
     monkeypatch.setattr(EventFile, "batches", spy)
     monkeypatch.setattr(pq.ParquetFile, "read_row_group", spy_keys)
+    monkeypatch.setattr(native, "push_boundaries", spy_push)
     run(lake)
-    # El motor recibe exactamente las siete columnas de L2.
-    assert seen and all(columns == set(EVENT_COLUMNS) for columns in seen)
-    # Los row groups de `events.parquet` solo los lee, enteros, el escritor de familias, que
-    # compara las claves del esqueleto (`theta` y la confirmación).
-    skeleton = {"theta", "confirm_agg_trade_id"}
-    assert skeleton in keys and all(columns is not None for columns in keys)
+    # Se decodifican las 11 columnas una sola vez (el hash del linaje las necesita todas) y
+    # el motor recibe exactamente las siete que usa.
+    every = set(pq.read_schema(next((lake.l2).rglob("events.parquet"))).names)
+    assert len(every) == 11
+    assert seen and all(columns == every for columns in seen)
+    assert delivered and all(names == list(EVENT_COLUMNS) for names in delivered)
+    # El escritor no relee las claves del esqueleto: ningún row group de `events.parquet`
+    # se pide por segunda vez (`theta` y la confirmación juntas eran esa relectura).
+    assert {"theta", "confirm_agg_trade_id"} not in keys
 
 
 def test_skeleton_mismatch_on_write_names_theta_month_and_family(lake, monkeypatch):

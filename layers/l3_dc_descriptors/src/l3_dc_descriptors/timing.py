@@ -7,7 +7,10 @@ el límite efectivo de CPU. Todo se acumula en objetos que crea la unidad (`Phas
 unidades en el mismo proceso, en hilos o tareas distintas, no se pisan.
 
 Todas las fases son **pared**, no suma sobre hilos (ITSC-363): `gate_s`, `setup_s`,
-`reconcile_s`, `publish_s` y `lineage_s` son tramos seguidos del hilo principal;
+`reconcile_s` y `publish_s` son tramos seguidos del hilo principal; `gate_s` es la pasada de
+entrada de los θ (compuerta y apertura juntas, ITSC-365) y `setup_s`, lo que queda hasta el
+primer row group (pie de L1, motor, escritores); el linaje ya no es una fase: sale de los
+bytes que la lectura trae (`lineage_s` desapareció en ITSC-365);
 `aggregate_s` es la pared del motor, del primer `push` a que el último ítem termina;
 `write_s`, la pared con algún escritor ocupado (la unión de sus intervalos), y
 `read_wall_s`, la pared con alguna lectura de L1 o L2 en vuelo. `write_s` y `read_wall_s`
@@ -146,7 +149,6 @@ class Phases:
         "inflight",
         "inflight_max",
         "items",
-        "lineage_s",
         "publish_s",
         "read",
         "read_s",
@@ -176,7 +178,6 @@ class Phases:
         self.write_s = 0.0
         self.publish_s = 0.0
         self.reconcile_s = 0.0
-        self.lineage_s = 0.0
         self.read = ReadMeter()
         self.write = BusyClock()
         self.retained = Retained()
@@ -364,32 +365,27 @@ class Timing:
     @property
     def other_s(self) -> float:
         p = self.phases
-        explained = (
-            p.gate_s
-            + p.setup_s
-            + p.aggregate_s
-            + p.publish_s
-            + p.reconcile_s
-            + p.lineage_s
-        )
+        explained = p.gate_s + p.setup_s + p.aggregate_s + p.publish_s + p.reconcile_s
         return max(0.0, self.wall_s - explained)
 
     def details(self) -> dict:
         """El payload del hallazgo `unit_timing` (segundos con ms de resolución).
 
-        Todas las fases son pared (ver el módulo). `gate_s`, la compuerta de entrada;
-        `setup_s`, abrir escritores, L2 y el motor; `aggregate_s`, la pared del motor, del
-        primer row group a que termina el último ítem (incluye lo que espera por las
-        lecturas y por la contrapresión); `write_s`, la pared con algún escritor ocupado;
-        `publish_s`, publicar los archivos; `reconcile_s`, §9.1; `lineage_s`, el hash de las
-        entradas de L2. `read_s` es lo que el hilo principal esperó a las lecturas y
-        `read_wall_s`, la pared con alguna lectura de L1 o L2 en vuelo (lectura y
-        decodificación); `read_bytes`, los bytes comprimidos que leyó de las dos. `threads`
-        es el pool de E/S (compuerta, L2 y linaje); `engine_threads`, los hilos del motor;
-        `readers`, los row groups de L1 que se leen a la vez; `inflight`, el tope de row
-        groups empujados al motor que aún anclan sus ticks e `inflight_max`, el máximo que
-        hubo; `boundaries_peak_mib`, el máximo de fronteras de L2 que el motor tuvo en mano; `writers`, los escritores; `engine_busy`, la fracción del tiempo del bucle
-        con ítems en la cola del motor; `items`, los ítems `(row group, θ)` que corrió.
+        Todas las fases son pared (ver el módulo). `gate_s`, la pasada de entrada de los θ:
+        compuerta de entrada, apertura de `events.parquet`, carry-over y escritor, en una
+        sola tarea por θ; `setup_s`, el pie de L1, el motor y los escritores de salida;
+        `aggregate_s`, la pared del motor, del primer row group a que termina el último
+        ítem (incluye lo que espera por las lecturas y por la contrapresión); `write_s`, la
+        pared con algún escritor ocupado; `publish_s`, publicar los archivos; `reconcile_s`,
+        §9.1. `read_s` es lo que el hilo principal esperó a las lecturas y `read_wall_s`, la
+        pared con alguna lectura de L1 o L2 en vuelo (lectura, decodificación y el hash del
+        linaje de L2); `read_bytes`, los bytes comprimidos que leyó de las dos. `threads` es
+        el pool de E/S (pasada de entrada, L2, conciliación y publicación); `engine_threads`,
+        los hilos del motor; `readers`, los row groups de L1 que se leen a la vez; `inflight`,
+        el tope de row groups empujados al motor que aún anclan sus ticks e `inflight_max`,
+        el máximo que hubo; `boundaries_peak_mib`, el máximo de fronteras de L2 que el motor
+        tuvo en mano; `writers`, los escritores; `engine_busy`, la fracción del tiempo del
+        bucle con ítems en la cola del motor; `items`, los ítems `(row group, θ)` que corrió.
         `cpu_user_s` y `cpu_system_s` son la CPU del proceso (todos sus hilos) durante la
         unidad y `cpu_utilization`, `cpu_s / (wall_s × cores)`.
         """
@@ -404,7 +400,6 @@ class Timing:
             "write_s": p.write.seconds,
             "publish_s": p.publish_s,
             "reconcile_s": p.reconcile_s,
-            "lineage_s": p.lineage_s,
             "other_s": self.other_s,
         }
         counts = self.row_groups

@@ -279,7 +279,7 @@ def test_the_lineage_is_the_same_with_any_pool(lake, tmp_path, threads):
     expected, _ = lineage(threads=1)
     got, timing = lineage(threads=threads)
     assert got == expected and len(got) == len(lake.thetas)
-    assert timing.phases.lineage_s > 0 and timing.phases.gate_s > 0
+    assert timing.phases.gate_s > 0 and not hasattr(timing.phases, "lineage_s")
 
 
 def test_the_phases_report_how_it_ran(lake):

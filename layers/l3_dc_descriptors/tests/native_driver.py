@@ -19,7 +19,8 @@ from l3_dc_descriptors import native
 from l3_dc_descriptors.event import EVENT_COLUMNS
 from l3_dc_descriptors.reconcile import L1Month, reconcile
 from l3_dc_descriptors.schema import FAMILY, STATE_VERSION, SUMMARIES_SCHEMA
-from l3_dc_descriptors.summarize import DEFAULT_KEY, ThetaResult, _gate_theta
+from l3_dc_descriptors.summarize import DEFAULT_KEY, ThetaResult
+from reference_gate import gate_theta, lineage
 
 
 def summarize_native(
@@ -98,7 +99,7 @@ def summarize_native(
         for theta, text, writer, (rows, closed, before, first, last) in zip(
             values, thetas, writers, stats, strict=True
         ):
-            carry, previous = _gate_theta(l2_root, key, month, series_start, text)
+            carry, previous = gate_theta(l2_root, key, month, series_start, text)
             reconciliation = reconcile(
                 l1,
                 theta=text,
@@ -111,7 +112,11 @@ def summarize_native(
                 carry=carry,
             )
             results[theta] = ThetaResult(
-                writer.path, rows, writer.commit(), reconciliation
+                writer.path,
+                rows,
+                writer.commit(),
+                reconciliation,
+                *lineage(l2_root, key, text, month),
             )
         return results
 

@@ -7,7 +7,7 @@ ni de L2 (las capas no se importan entre sí, RNF-14 del maestro).
 import contextvars
 import os
 from collections import deque
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import closing
 from dataclasses import dataclass
@@ -288,15 +288,29 @@ def _read_together(
 
 
 class L1:
-    """L1 de un activo: entrega sus row groups en orden de id, de uno en uno."""
+    """L1 de un activo: entrega sus row groups en orden de id, de uno en uno.
 
-    def __init__(self, root: str | Path, key: tuple[str, str, str]) -> None:
+    `footers` son los pies (`FileMetaData`) que quien llama ya leyó, por mes: abrir ese mes
+    no los vuelve a pedir al almacenamiento (el pie de un mes de L1 pesa MiB y el lector lo
+    abría dos veces antes del primer row group).
+    """
+
+    def __init__(
+        self,
+        root: str | Path,
+        key: tuple[str, str, str],
+        footers: Mapping[Month, pq.FileMetaData] | None = None,
+    ) -> None:
         self._root = root
         self._key = key
+        self._footers = footers or {}
 
     def _open(self, month: Month) -> tuple[pq.ParquetFile, str]:
+        """El archivo del mes; con su pie en `footers` no lo vuelve a leer."""
         path = l1_path(self._root, self._key, month)
-        parquet = open_parquet(path, f"L1 del mes {month[0]:04d}-{month[1]:02d}")
+        parquet = open_parquet(
+            path, f"L1 del mes {month[0]:04d}-{month[1]:02d}", self._footers.get(month)
+        )
         try:
             check_columns(parquet.schema_arrow, L1_COLUMNS, path)
         except FramesInputError:
@@ -495,10 +509,11 @@ class EventFile:
     """`events.parquet` de un θ y un mes, abierto una sola vez y leído por tramos.
 
     Las columnas se piden por nombre (las tres fronteras y `confirm_time` siempre, más
-    `columns`). El archivo se abre una vez (un `NativeFile`: un viaje para el tamaño y otro
-    para el pie) y cada tramo se lee con una sola llamada a `batches`, sobre ese mismo
-    archivo: `open_parquet` por row group repetía el viaje de la apertura 1 335 veces en
-    2021-01 (H8, ITSC-362).
+    `columns`, o todas las del archivo con `all_columns`; los lotes salen en el orden de
+    `columns`: las fronteras primero y luego el resto en el orden del archivo). El archivo
+    se abre una vez (un `NativeFile`: un viaje para el tamaño y otro para el pie) y cada
+    tramo se lee con una sola llamada a `batches`, sobre ese mismo archivo: `open_parquet`
+    por row group repetía el viaje de la apertura 1 335 veces en 2021-01 (H8, ITSC-362).
 
     **Pocas peticiones grandes.** Un tramo (`lots`) son varios row groups seguidos. Con las
     opciones de caché por defecto de Arrow, `pre_buffer` pide cada rango de columna por
@@ -516,7 +531,12 @@ class EventFile:
     """
 
     def __init__(
-        self, path: str, what: str, columns: Sequence[str] | None = None
+        self,
+        path: str,
+        what: str,
+        columns: Sequence[str] | None = None,
+        *,
+        all_columns: bool = False,
     ) -> None:
         fs, resolved = resolve_fs(path)
         try:
@@ -529,7 +549,8 @@ class EventFile:
             self.schema: pa.Schema = self._fragment.physical_schema
             expected = {name: pa.int64() for name in (*BOUNDARY_COLUMNS, CONFIRM_TIME)}
             check_columns(self.schema, expected, path)
-            self.columns = list(dict.fromkeys([*expected, *(columns or ())]))
+            wanted = self.schema.names if all_columns else columns or ()
+            self.columns = list(dict.fromkeys([*expected, *wanted]))
             for name in self.columns:
                 if name not in self.schema.names:
                     raise FramesInputError(f"{path}: falta la columna {name!r}")

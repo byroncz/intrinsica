@@ -42,6 +42,14 @@ class L1Month:
     que contiene el id se decodifica, y solo esa columna. El archivo se abre una vez y cada
     lectura usa un lector de vida corta (`ParquetSource`), así que `count_up_to` se puede
     llamar desde varios hilos a la vez.
+
+    **Sin decodificar de nuevo (ITSC-365).** El lector ya decodificó los row groups que los
+    eventos tocan, y entre ellos están los que contienen los extremos de la conciliación.
+    Con `watch(ids)` se anotan los ids que se van a contar y, mientras el lector entrega row
+    groups, `observe(ids_del_row_group)` guarda cuántos ticks del row group son ≤ cada id
+    anotado que cae dentro de él. `count_up_to` usa ese número y solo decodifica el row group
+    si el lector no lo entregó. El archivo se abre una vez y su pie (`footer`) se comparte
+    con el lector (`dc_frames.lake.L1(footers=...)`).
     """
 
     def __init__(self, l1_root: str, key: tuple[str, str, str], month: Month) -> None:
@@ -62,6 +70,27 @@ class L1Month:
                 )
             self._groups.append((i, group.num_rows, stats.min, stats.max))
         self.rows = sum(rows for _, rows, _, _ in self._groups)
+        self._targets = np.empty(0, np.int64)
+        self._inside: dict[int, int] = {}
+
+    @property
+    def footer(self):
+        """El pie del archivo (`FileMetaData`), para no leerlo de nuevo."""
+        return self._parquet.metadata
+
+    def watch(self, targets) -> None:
+        """Anota los ids cuyo conteo se va a pedir (`count_up_to`)."""
+        self._targets = np.unique(np.fromiter(targets, np.int64))
+
+    def observe(self, ids: np.ndarray) -> None:
+        """Un row group del mes que el lector entregó: cuenta los ticks ≤ cada id anotado
+        que cae dentro de él. Lo llama un solo hilo (el del orquestador).
+        """
+        low, high = ids[0], ids[-1]
+        inside = self._targets[(self._targets >= low) & (self._targets < high)]
+        if inside.size:
+            counts = np.searchsorted(ids, inside, "right")
+            self._inside.update(zip(inside.tolist(), counts.tolist(), strict=True))
 
     def count_up_to(self, agg_trade_id: int) -> int:
         """Los ticks del mes con id ≤ `agg_trade_id`."""
@@ -70,6 +99,9 @@ class L1Month:
             if high <= agg_trade_id:
                 total += rows
             elif low <= agg_trade_id:
+                if agg_trade_id in self._inside:
+                    total += self._inside[agg_trade_id]
+                    continue
                 with closing(self._parquet.reader()) as reader:
                     ids = reader.read_row_group(i, columns=["agg_trade_id"])
                 ids = ids.column(0).combine_chunks().to_numpy(zero_copy_only=False)

@@ -547,11 +547,11 @@ def test_without_the_knobs_the_defaults_apply(lake, tmp_path, catalog):
         details = row["details"]
         assert 1 <= details["threads"] <= len(lake.thetas)
         assert details["threads"] <= max(1, math.ceil(3 * details["cores"]))
-        assert details["engine_threads"] == max(1, math.ceil(details["cores"]))
+        assert details["engine_threads"] == max(1, round(details["cores"]))
         assert (details["readers"], details["inflight"], details["writers"]) == (
             2,
             4,
-            4,
+            12,
         )
 
 
