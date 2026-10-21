@@ -359,3 +359,15 @@ def test_the_profile_sees_the_calls_of_the_pool_threads():
     profiler.runcall(run)
     calls = {f[2]: v[1] for f, v in pstats.Stats(profiler).stats.items()}
     assert calls["busy"] == 12
+
+
+def test_it_reports_the_kernel_counters_that_explain_the_system_cpu(lake, tmp_path):
+    # Fallos de página y cambios de contexto de la unidad (diferencia de `getrusage`): con
+    # ellos se separa la CPU de sistema en memoria, candados y red (ADR-L3-16, ITSC-365).
+    ctx = context(lake, tmp_path)
+    for month in lake.months:
+        details = process_unit(unit_of(month), ctx, lake.thetas).timing.details()
+        assert details["minor_faults"] > 0
+        assert details["major_faults"] >= 0
+        assert details["voluntary_switches"] > 0
+        assert details["involuntary_switches"] >= 0

@@ -35,11 +35,17 @@ que ningún θ necesita se salta sin leer L1.
 Entorno: `L3_LANDING_ROOT` (L1), `L3_EVENTS_ROOT` (L2), `L3_SUMMARIES_ROOT` (L3) y
 `L3_DQ_ROOT` (lago de hallazgos), además de `L3_SERIES_START` y `L3_THETAS_URI`. Opcionales,
 enteros ≥ 1 (otro valor es código 2): `L3_READERS` (lectores de L1, R; por defecto 2),
-`L3_INFLIGHT` (row groups en el motor, K; 4), `L3_WRITERS` (escritores, W; 4),
-`L3_ENGINE_THREADS` (hilos del motor; por defecto los vCPU efectivos) y `L3_THREADS` (pool de
+`L3_INFLIGHT` (row groups en el motor, K; 4), `L3_WRITERS` (escritores, W; 12),
+`L3_ENGINE_THREADS` (hilos del motor; por defecto `round(vCPU efectivos)`) y `L3_THREADS` (pool de
 E/S; por defecto `ceil(3 × vCPU)`, nunca más que θ), más `L3_PROFILE=1`. El stack `l3` no fija
 ninguna, así que los valores siguen a los vCPU del job; para sobrescribirlas en una corrida, ver el
 [runbook](../../docs/runbooks/operacion-l3.md#hilos-y-topes-de-la-unidad-l3_readers-l3_inflight-l3_writers-l3_engine_threads-y-l3_threads).
+**Memoria de los escritores (ITSC-365):** el orquestador no empuja más row groups mientras haya
+`PENDING_PER_WRITER × W` row groups de salida sellados sin escribir (3 × 12 = 36 por defecto);
+cada uno pesa ≈ 8 MiB (256 B por evento × ≈ 34 000 eventos), así que el tope son ≈ 290 MiB, lo
+mismo que 8 × 4 de antes. Con 8 y W = 12 serían 96 (≈ 770 MiB): es lo que T4b pagó de más
+(RSS 2 331 MiB). Si subes W o bajas el tamaño del row group, rehaz la cuenta y compárala con los
+2 048 MiB de la meta.
 `L3_PREFETCH` ya no existe (ITSC-363). `CLOUD_RUN_TASK_INDEX` distinto de 0 es código 2. `IMAGE_VERSION` la fija la imagen.
 
 **Códigos de salida** ([§8.4](../../docs/TRD/l3.md#84-códigos-de-salida)): 0 éxito; 1 fallo
@@ -59,8 +65,9 @@ que no llegó al mes previo (`l3_frontier`) o al que L2 no le ha llegado (`l2_mi
 [`docs/data-contracts.md`](../../docs/data-contracts.md). Cada excepción tipada del núcleo
 (tabla de abajo) se traduce a su hallazgo con los `details` que ya trae. `unit_timing` lleva lo
 que necesita la medición del umbral 3 de [§10.3](../../docs/TRD/l3.md#103-sonda-del-lector-de-tramas--umbrales-de-aceptación-se-escriben-antes-de-medir):
-pared total y por fase (todas son pared: `gate_s`, `setup_s`, `aggregate_s` del motor, `publish_s`,
-`reconcile_s`, `lineage_s`; `read_s` es lo que el hilo principal esperó a las lecturas y
+pared total y por fase (todas son pared: `gate_s`, la pasada de entrada de los θ (compuerta y
+apertura juntas); `setup_s`, `aggregate_s` del motor, `publish_s`, `reconcile_s`; `lineage_s`
+ya no existe: el linaje sale de los bytes que se leen; `read_s` es lo que el hilo principal esperó a las lecturas y
 `read_wall_s` y `write_s` la pared con alguna lectura o algún escritor ocupado), la configuración
 (`threads`, `engine_threads`, `readers`, `inflight`, `writers`), lo que hizo el motor
 (`inflight_max`, `engine_busy`, `items`), `read_bytes`, `boundaries_peak_mib`,
@@ -69,7 +76,8 @@ pared total y por fase (todas son pared: `gate_s`, `setup_s`, `aggregate_s` del 
 gancho sobre `dc_frames.lake.open_parquet` como hace la sonda de `ops_tools`),
 `row_groups_repeated` (debe ser 0), eventos y ticks por θ y en total, el límite efectivo de
 CPU y la CPU que consumió la unidad (`cpu_user_s`, `cpu_system_s`, `cpu_s` y
-`cpu_utilization`, de `getrusage`). Con `L3_PROFILE=1` la unidad corre bajo `cProfile` y suma el
+`cpu_utilization`, de `getrusage`, con `minor_faults`, `major_faults`, `voluntary_switches` e
+`involuntary_switches`, que explican la CPU de sistema). Con `L3_PROFILE=1` la unidad corre bajo `cProfile` y suma el
 hallazgo `unit_profile` (las 40 funciones más caras por tiempo propio y acumulado); sin la
 variable no cambia nada. Cómo lanzarlo: [runbook](../../docs/runbooks/operacion-l3.md#perfilar-una-unidad).
 

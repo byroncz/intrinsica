@@ -40,7 +40,7 @@ from dataclasses import dataclass, field
 import pyarrow.parquet as pq
 from dc_frames import lake
 
-from l3_dc_descriptors.cpu import CpuLimit
+from l3_dc_descriptors.cpu import CpuLimit, KernelCounts
 
 MIB = 1 << 20
 
@@ -343,6 +343,7 @@ class Timing:
     cpu_throttled_s: float | None
     cpu_user_s: float
     cpu_system_s: float
+    kernel: KernelCounts
 
     @property
     def cpu_s(self) -> float:
@@ -387,7 +388,10 @@ class Timing:
         tuvo en mano; `writers`, los escritores; `engine_busy`, la fracción del tiempo del
         bucle con ítems en la cola del motor; `items`, los ítems `(row group, θ)` que corrió.
         `cpu_user_s` y `cpu_system_s` son la CPU del proceso (todos sus hilos) durante la
-        unidad y `cpu_utilization`, `cpu_s / (wall_s × cores)`.
+        unidad y `cpu_utilization`, `cpu_s / (wall_s × cores)`. `minor_faults`,
+        `major_faults`, `voluntary_switches` e `involuntary_switches` son los contadores
+        del kernel (`getrusage`) de la unidad: explican `cpu_system_s` (memoria contra
+        candados y red).
         """
         p = self.phases
         seconds = {
@@ -437,4 +441,8 @@ class Timing:
             "cpu_system_s": round(self.cpu_system_s, 3),
             "cpu_s": round(self.cpu_s, 3),
             "cpu_utilization": None if utilization is None else round(utilization, 3),
+            "minor_faults": self.kernel.minor_faults,
+            "major_faults": self.kernel.major_faults,
+            "voluntary_switches": self.kernel.voluntary_switches,
+            "involuntary_switches": self.kernel.involuntary_switches,
         }

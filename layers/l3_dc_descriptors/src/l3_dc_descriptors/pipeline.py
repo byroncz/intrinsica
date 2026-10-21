@@ -20,7 +20,7 @@ from dq import Finding
 
 from l3_dc_descriptors import findings
 from l3_dc_descriptors.context import RunContext, Unit
-from l3_dc_descriptors.cpu import cpu_limit, process_cpu_s, throttled_s
+from l3_dc_descriptors.cpu import cpu_limit, kernel_counts, process_cpu_s, throttled_s
 from l3_dc_descriptors.errors import SummarizeError
 from l3_dc_descriptors.frontier import theta_text
 from l3_dc_descriptors.landing import missing_input
@@ -80,6 +80,7 @@ def process_unit(unit: Unit, ctx: RunContext, thetas: list[int]) -> Result:
 def _process_unit(unit: Unit, ctx: RunContext, thetas: list[int]) -> Result:
     started = time.perf_counter()
     cpu_started = process_cpu_s()
+    kernel_started = kernel_counts()
     missing = missing_input(str(ctx.landing_root), unit.key, unit.at)
     if missing is not None:
         check_type, details = missing
@@ -145,6 +146,7 @@ def _process_unit(unit: Unit, ctx: RunContext, thetas: list[int]) -> Result:
         ),
         cpu_user_s=cpu_user_s,
         cpu_system_s=cpu_system_s,
+        kernel=kernel_counts().since(kernel_started),
     )
     return Result(
         (
