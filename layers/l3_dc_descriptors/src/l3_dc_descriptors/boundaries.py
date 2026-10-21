@@ -79,8 +79,9 @@ class L2Events:
     - **Esqueleto.** Por cada row group no vacío guarda la huella (SHA-256) de sus
       `confirm_agg_trade_id` y si su `theta` es el de la partición en todas las filas. El
       escritor compara la huella de lo que el motor selló, que copió esos ids de L2, con la
-      del row group que L3 leyó: mismas filas, mismo orden y mismas claves, en 32 B por
-      row group y sin un viaje a GCS. Las filas por row group salen del pie del archivo.
+      del row group que L3 leyó, y su `theta` con el de la partición: mismas filas, mismo
+      orden y mismas claves, en 33 B por row group y sin un viaje a GCS. Las filas por row
+      group salen del pie del archivo.
 
     Un lote no cruza row groups (`EventFile.batches`); aun así `tap` reparte por filas, así
     que un lote que los cruzara tampoco movería ninguna huella. Un solo hilo a la vez llama
@@ -113,7 +114,8 @@ class L2Events:
                 batch.num_rows - start, self.row_groups[self._group] - self._filled
             )
             self._ids.update(ids[start : start + take])
-            self._same_theta &= _all_equal(theta.slice(start, take), self._theta)
+            other = _first_other(theta.slice(start, take), self._theta)
+            self._same_theta &= other is None
             self._filled += take
             start += take
             if self._filled == self.row_groups[self._group]:
@@ -139,8 +141,21 @@ class L2Events:
         digest, same_theta = seen
         if not same_theta:
             return f"row group {n}, fila {first_row}: theta no es el del esqueleto"
-        wanted = hashlib.sha256(_ids(batch.column("confirm_agg_trade_id"))).digest()
-        if wanted != digest:
+        # Lo sellado se compara por sus dos claves: el `theta` que escribió el motor contra el
+        # de la partición y sus ids contra la huella de los que L3 leyó de L2.
+        other = _first_other(batch.column("theta"), self._theta)
+        if other is not None:
+            return (
+                f"row group {n}, fila {first_row + other}: theta no es el del esqueleto"
+            )
+        sealed = batch.column("confirm_agg_trade_id")
+        if sealed.null_count:
+            row = pc.index(sealed.is_null(), True).as_py()
+            return (
+                f"row group {n}, fila {first_row + row}: "
+                "confirm_agg_trade_id no es el del esqueleto"
+            )
+        if hashlib.sha256(_ids(sealed)).digest() != digest:
             return (
                 f"row group {n}, desde la fila {first_row}: confirm_agg_trade_id "
                 "no es el del esqueleto"
@@ -158,12 +173,14 @@ def _ids(column: pa.Array) -> np.ndarray:
     return np.ascontiguousarray(column.to_numpy(zero_copy_only=False))
 
 
-def _all_equal(column: pa.Array, theta: Decimal) -> bool:
-    """Si todas las filas son `theta` (un nulo o una fila distinta dan `False`)."""
+def _first_other(column: pa.Array, theta: Decimal) -> int | None:
+    """La primera fila que no es `theta` (un nulo cuenta como distinto), o `None`."""
     if not len(column):
-        return True
+        return None
     same = pc.equal(column, pa.scalar(theta, column.type)).fill_null(False)
-    return bool(pc.all(same).as_py())
+    if pc.all(same).as_py():
+        return None
+    return pc.index(same, False).as_py()
 
 
 class BatchStream:

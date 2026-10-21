@@ -150,32 +150,62 @@ def test_the_writer_never_opens_the_skeleton_nor_rereads_events(lake, monkeypatc
     }
 
 
-@pytest.mark.parametrize("threads", [1, 4])
-def test_a_misaligned_row_group_is_a_family_skeleton_mismatch(
-    lake, monkeypatch, tmp_path, threads
-):
-    """Un id de confirmación distinto del que L3 leyó en L2 en un row group sellado aborta
-    con el mismo `family_skeleton_mismatch` que daba la relectura del esqueleto.
+def alter_first_sealed(monkeypatch, name, change):
+    """El primer row group que el motor sella para el segundo θ sale con `name` cambiada:
+    `change(valores)` devuelve la columna nueva (un `pa.array`).
     """
     sealed = native.to_batch
 
-    def shifted(theta, item):
+    def altered(theta, item):
         position, index, batch = sealed(theta, item)
         if position == 1 and index == 0:
-            ids = batch.column("confirm_agg_trade_id").to_numpy().copy()
-            ids[0] -= 1
-            at = batch.schema.get_field_index("confirm_agg_trade_id")
-            batch = batch.set_column(at, batch.schema.field(at), pa.array(ids))
+            at = batch.schema.get_field_index(name)
+            column = change(batch.column(at))
+            batch = batch.set_column(at, batch.schema.field(at), column)
         return position, index, batch
 
-    monkeypatch.setattr(native, "to_batch", shifted)
+    monkeypatch.setattr(native, "to_batch", altered)
+
+
+def shift_first_id(column):
+    ids = column.to_numpy().copy()
+    ids[0] -= 1
+    return pa.array(ids)
+
+
+def null_second_id(column):
+    ids = column.to_pylist()
+    ids[1] = None
+    return pa.array(ids, column.type)
+
+
+def other_theta(column):
+    return pa.array([Decimal("0.00000007")] * len(column), column.type)
+
+
+@pytest.mark.parametrize("threads", [1, 4])
+@pytest.mark.parametrize(
+    ("name", "change", "detail"),
+    [
+        ("confirm_agg_trade_id", shift_first_id, "confirm_agg_trade_id no es"),
+        ("confirm_agg_trade_id", null_second_id, "fila 1: confirm_agg_trade_id no es"),
+        ("theta", other_theta, "fila 0: theta no es"),
+    ],
+    ids=["id", "null id", "theta"],
+)
+def test_a_misaligned_row_group_is_a_family_skeleton_mismatch(
+    lake, monkeypatch, tmp_path, threads, name, change, detail
+):
+    """Una clave distinta de la que L3 leyó en L2, en un row group sellado, aborta con el
+    mismo `family_skeleton_mismatch` que daba la relectura del esqueleto, también si el
+    id es nulo y también si lo que cambió es el `theta`.
+    """
+    alter_first_sealed(monkeypatch, name, change)
     with pytest.raises(SkeletonMismatch) as error:
         run(lake, M2, l3=tmp_path, threads=threads)
     assert error.value.check_type == "family_skeleton_mismatch"
     assert error.value.details["theta"] == lake.theta_texts[1]
-    assert (
-        "confirm_agg_trade_id no es el del esqueleto" in error.value.details["detail"]
-    )
+    assert detail in error.value.details["detail"]
     assert [p for p in tmp_path.rglob("*") if p.is_file()] == []
 
 
