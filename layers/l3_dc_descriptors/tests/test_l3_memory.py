@@ -145,8 +145,11 @@ def test_peak_is_a_row_group_and_does_not_grow_with_events(tmp_path):
     # debajo de los 10 row groups del evento largo (48 MB con 100 000 ticks por row group).
     assert few["peak"] < 10 * ROW_GROUP_BYTES
     assert many["peak"] < 10 * ROW_GROUP_BYTES
-    # Casi veinte veces más eventos no suben el pico.
-    assert many["peak"] < 1.25 * few["peak"]
+    # Casi veinte veces más eventos no suben el pico. El pico de cada corrida varía entre
+    # ≈ 18 y 25 MB según la carrera entre el lector y el motor (6 corridas seguidas:
+    # many/few entre 0,94 y 1,02), así que se compara con holgura absoluta, como en la
+    # prueba siguiente, y no con una razón.
+    assert many["peak"] < few["peak"] + 2 * ROW_GROUP_BYTES
 
 
 def test_peak_does_not_grow_with_the_ticks_of_the_largest_event(tmp_path):
