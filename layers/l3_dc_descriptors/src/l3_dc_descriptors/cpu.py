@@ -4,7 +4,7 @@
 la cuota de vCPU del job es un límite del cgroup (`cpu.max`) y la máquina reporta más
 cores (6, 6 y 9 con 2, 4 y 8 vCPU, ITSC-281). El límite efectivo es el menor de los dos.
 Es la lectura de cgroups de `l2_dc_events.cpu`: las capas no se importan entre sí
-(RNF-L3-04). `summarize` deriva de ella el tamaño por defecto del pool de θ (`L3_THREADS`, 3 hilos por vCPU).
+(RNF-L3-04). `summarize` deriva de ella el tamaño por defecto del pool de E/S (`L3_THREADS`, 3 hilos por vCPU) y de los hilos del motor (`L3_ENGINE_THREADS`, uno por vCPU).
 """
 
 import os

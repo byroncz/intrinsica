@@ -50,7 +50,7 @@ from dc_frames import (
 from dc_frames.lake import L1, EventFile, Month, month_of, month_ordinal
 
 from l3_dc_descriptors import native
-from l3_dc_descriptors.boundaries import BatchStream
+from l3_dc_descriptors.boundaries import BatchStream, check_types
 from l3_dc_descriptors.cpu import cpu_limit
 from l3_dc_descriptors.errors import L2StateInconsistent, SkeletonMismatch, month_text
 from l3_dc_descriptors.event import EVENT_COLUMNS
@@ -379,13 +379,15 @@ def summarize_month(
         # Dónde empiezan y terminan los eventos de todos los θ, con las estadísticas del
         # pie de L2 (sin leer datos): el primer row group de L1 que se lee es el que
         # contiene la primera referencia y el último, el que contiene el último extremo.
+        for file in files:
+            check_types(file)
         references = [_require_statistics(f, "reference_agg_trade_id") for f in files]
         extremes = [_require_statistics(f, "extreme_agg_trade_id") for f in files]
         streams = [BatchStream(file, pool, phases.read) for file in files]
         for stream in reversed(streams):
             stack.callback(stream.close)
         feeds = [
-            native.BoundaryFeed(engine, position, stream)
+            native.BoundaryFeed(engine, position, stream, phases.retained)
             for position, stream in enumerate(streams)
         ]
         sink = SealedWriters(

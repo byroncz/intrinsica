@@ -554,7 +554,6 @@ def test_a_writer_error_is_kept_and_stops_the_rest():
         assert isinstance(sink.error, SkeletonMismatch)
         sink.put(fake_sealed(1, 1))  # tras el error no se encola nada
         assert sink.pending == 0
-        sink.wait_below(1)  # con un error no espera
 
 
 def test_the_same_row_group_twice_is_an_error():
@@ -646,8 +645,8 @@ def test_a_read_error_comes_out_at_the_batch_that_would_have_brought_it(events_f
         def compressed(self, lot):
             return self.file.compressed(lot)
 
-        def batches(self, lot, rows):
-            yield from itertools.islice(self.file.batches(lot, rows), 1)
+        def batches(self, lot, rows, request):
+            yield from itertools.islice(self.file.batches(lot, rows, request), 1)
             raise OSError("se cortó la lectura")
 
     with ThreadPoolExecutor(2) as pool, EventFile(events_file, "x") as file:
@@ -679,3 +678,92 @@ def test_a_busy_clock_unites_the_intervals_of_concurrent_operations():
     for t in threads:
         t.join()
     assert 0.09 < clock.seconds < 0.4  # no 4 × 0,1 s: la pared, no la suma
+
+
+def lake_events(lake, text: str, month):
+    base = "provider=binance/market=spot/asset=BTCUSDT"
+    return (
+        lake.l2
+        / f"{base}/theta={text}/year={month[0]}/month={month[1]:02d}/events.parquet"
+    )
+
+
+@pytest.mark.parametrize(
+    "knobs",
+    [
+        {"threads": 1, "readers": 1, "inflight": 1, "writers": 1, "engine_threads": 1},
+        {"threads": 4, "readers": 2, "inflight": 4, "writers": 4, "engine_threads": 4},
+    ],
+)
+def test_an_engine_error_aborts_the_unit_the_same_way_with_any_knobs(
+    tmp_path, ticks, knobs
+):
+    from l3_dc_descriptors import L2StateInconsistent
+
+    lake = build_lake(tmp_path / "lake", ticks, month_cuts(ticks, 1500, 3000))
+    month = lake.months[1]
+    # Un id de confirmación que no es un tick de L1: el motor lo ubica y lo rechaza.
+    missing = lake.events[lake.thetas[0], month][4]["confirm_agg_trade_id"]
+    path = l1_path(str(lake.l1), ("binance", "spot", "BTCUSDT"), month)
+    table = pq.read_table(path)
+    keep = [i for i, v in enumerate(table["agg_trade_id"].to_pylist()) if v != missing]
+    pq.write_table(table.take(keep), path, row_group_size=150)
+    messages = set()
+    with pytest.raises(L2StateInconsistent) as caught:
+        summarize_month(
+            lake.l1,
+            lake.l2,
+            tmp_path / "out",
+            month,
+            lake.theta_texts,
+            series_start=M1,
+            **knobs,
+        )
+    messages.add(str(caught.value))
+    assert caught.value.details["field"] == "confirm_agg_trade_id"
+    assert caught.value.details["got"] == str(missing)
+    assert caught.value.details["theta"] in lake.theta_texts
+    assert l3_threads() == []
+    assert not [p for p in (tmp_path / "out").rglob("*") if p.is_file()]
+
+
+def test_a_price_in_another_width_is_refused_before_the_engine_reads_it(
+    tmp_path, ticks
+):
+    from dc_frames import FramesInputError
+
+    lake = build_lake(tmp_path / "lake", ticks, month_cuts(ticks, 1500, 3000))
+    path = lake_events(lake, lake.theta_texts[0], M2)
+    table = pq.read_table(path)
+    index = table.schema.get_field_index("confirm_price")
+    wide = table["confirm_price"].cast(pa.decimal128(20, 8))
+    pq.write_table(table.set_column(index, "confirm_price", wide), path)
+    with pytest.raises(FramesInputError, match="confirm_price"):
+        summarize_month(
+            lake.l1, lake.l2, tmp_path / "out", M2, lake.theta_texts, series_start=M1
+        )
+    assert l3_threads() == []
+    assert not [p for p in (tmp_path / "out").rglob("*") if p.is_file()]
+
+
+def test_the_unit_reports_the_boundaries_the_engine_held(lake, tiny_l2):
+    phases = Phases()
+    summarize_month(
+        lake.l1,
+        lake.l2,
+        lake.l3,
+        M2,
+        lake.theta_texts,
+        series_start=M1,
+        phases=phases,
+        inflight=1,
+    )
+    # Con lotes de 3 eventos, el motor suelta cada uno al cerrar sus eventos: lo que tuvo
+    # en mano es una fracción de las fronteras del mes.
+    month_bytes = sum(
+        pq.ParquetFile(lake_events(lake, text, M2)).metadata.num_rows
+        for text in lake.theta_texts
+    )
+    assert 0 < phases.retained.peak
+    assert phases.retained.peak < month_bytes * 65
+    assert phases.retained.current == 0

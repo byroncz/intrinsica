@@ -29,6 +29,7 @@ from l3_dc_descriptors.errors import (
     SkeletonMismatch,
 )
 from l3_dc_descriptors.schema import FAMILY, SUMMARIES_SCHEMA
+from l3_dc_descriptors.timing import Retained
 
 # Las 18 columnas de datos como las comprueba el motor: (nombre, bytes por valor, nulable).
 ENGINE_SCHEMA = tuple(
@@ -76,15 +77,22 @@ def event_batch(batch: pa.RecordBatch) -> EventBatch:
 
 
 def push_boundaries(
-    engine: dc_pyo3.Engine, position: int, batch: pa.RecordBatch
+    engine: dc_pyo3.Engine,
+    position: int,
+    batch: pa.RecordBatch,
+    retained: Retained | None = None,
 ) -> None:
     """Entrega al motor un lote de eventos del θ en `position`, detrás de los anteriores.
 
     `batch` son filas consecutivas de `events.parquet` (un row group de `EventGroup.batch`
     o un tramo). El motor retiene sus buffers de Arrow (no se copian) hasta que sus eventos
-    cierran, así que el llamador no necesita conservarlos.
+    cierran, así que el llamador no necesita conservarlos. Con `retained`, anota el lote
+    para medir cuántos bytes de fronteras tiene el motor en mano.
     """
-    engine.push_boundaries(position, event_batch(batch))
+    entry = event_batch(batch)
+    engine.push_boundaries(position, entry)
+    if retained is not None:
+        retained.hold(batch.nbytes, entry.reference[0].obj)
 
 
 class BoundaryFeed:
@@ -101,9 +109,11 @@ class BoundaryFeed:
         engine: dc_pyo3.Engine,
         position: int,
         batches: Iterable[pa.RecordBatch],
+        retained: Retained | None = None,
     ) -> None:
         self._engine = engine
         self._position = position
+        self._retained = retained
         self._batches = iter(batches)
         self._last: int | None = None  # referencia del último evento entregado
 
@@ -115,7 +125,7 @@ class BoundaryFeed:
                 return
             if batch.num_rows == 0:
                 continue
-            push_boundaries(self._engine, self._position, batch)
+            push_boundaries(self._engine, self._position, batch, self._retained)
             self._last = batch.column("reference_agg_trade_id")[-1].as_py()
 
 

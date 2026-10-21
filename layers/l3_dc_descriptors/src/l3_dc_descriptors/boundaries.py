@@ -20,7 +20,7 @@ from concurrent.futures import Executor
 from typing import Self
 
 import pyarrow as pa
-from dc_frames.lake import EventFile
+from dc_frames.lake import DECIMAL, EventFile, check_columns
 
 from l3_dc_descriptors.timing import ReadMeter
 
@@ -30,8 +30,24 @@ from l3_dc_descriptors.timing import ReadMeter
 L2_LOT_BYTES = 8 << 20
 # Eventos por lote que se entrega al motor: ≈ 2 MiB decodificados (65 B por evento).
 L2_BATCH_ROWS = 32_768
+# Los tipos de las columnas de L2 que el motor lee como bytes de Arrow sin convertirlas
+# (las cuatro de ids y tiempo, `int64`, las comprueba `EventFile`).
+L2_TYPES = {
+    "direction": pa.int8(),
+    "confirm_price": DECIMAL,
+    "extreme_price": DECIMAL,
+}
 # Lotes que `BatchStream` trae por delante de quien los consume, por θ.
 L2_AHEAD = 2
+
+
+def check_types(file: EventFile) -> None:
+    """`FramesInputError` si una columna de L2 no tiene el tipo que el motor espera.
+
+    El motor recibe los buffers tal cual, sin convertirlos: un precio en otro ancho se
+    leería mal en silencio.
+    """
+    check_columns(file.schema, L2_TYPES, file.path)
 
 
 class BatchStream:
@@ -76,7 +92,7 @@ class BatchStream:
     def _read(self) -> Iterator[pa.RecordBatch]:
         for lot in self._file.lots(self._lot_bytes):
             self._meter.add(self._file.compressed(lot))
-            yield from self._file.batches(lot, self._batch_rows)
+            yield from self._file.batches(lot, self._batch_rows, self._lot_bytes)
 
     def _pull(self) -> pa.RecordBatch | None:
         with self._meter.reading():

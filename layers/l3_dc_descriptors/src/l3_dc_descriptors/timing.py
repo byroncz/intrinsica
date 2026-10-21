@@ -28,6 +28,7 @@ import resource
 import sys
 import threading
 import time
+import weakref
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -101,6 +102,36 @@ class ReadMeter:
             return self._bytes
 
 
+class Retained:
+    """Bytes de fronteras de L2 que el motor tiene en mano, con su máximo.
+
+    `hold(size, anchor)` anota un lote que se entregó al motor; cuando `anchor` (el buffer
+    de Arrow que el motor ancla) se libera, el lote deja de contar. Mide lo que el motor de
+    verdad retiene, que es de lotes enteros, no una cuenta de eventos (ITSC-363). Es seguro
+    entre hilos: el motor suelta los lotes desde sus propios hilos.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._current = 0
+        self.peak = 0
+
+    def hold(self, size: int, anchor: object) -> None:
+        with self._lock:
+            self._current += size
+            self.peak = max(self.peak, self._current)
+        weakref.finalize(anchor, self._release, size)
+
+    def _release(self, size: int) -> None:
+        with self._lock:
+            self._current -= size
+
+    @property
+    def current(self) -> int:
+        with self._lock:
+            return self._current
+
+
 class Phases:
     """Segundos de cada fase de la unidad y la configuración con que corrió. El hilo
     principal llena las fases; los relojes (`read`, `write`) los comparten los hilos de
@@ -121,6 +152,7 @@ class Phases:
         "read_s",
         "readers",
         "reconcile_s",
+        "retained",
         "setup_s",
         "threads",
         "write",
@@ -147,6 +179,7 @@ class Phases:
         self.lineage_s = 0.0
         self.read = ReadMeter()
         self.write = BusyClock()
+        self.retained = Retained()
 
 
 @dataclass(frozen=True, slots=True)
@@ -355,7 +388,7 @@ class Timing:
         es el pool de E/S (compuerta, L2 y linaje); `engine_threads`, los hilos del motor;
         `readers`, los row groups de L1 que se leen a la vez; `inflight`, el tope de row
         groups empujados al motor que aún anclan sus ticks e `inflight_max`, el máximo que
-        hubo; `writers`, los escritores; `engine_busy`, la fracción del tiempo del bucle
+        hubo; `boundaries_peak_mib`, el máximo de fronteras de L2 que el motor tuvo en mano; `writers`, los escritores; `engine_busy`, la fracción del tiempo del bucle
         con ítems en la cola del motor; `items`, los ítems `(row group, θ)` que corrió.
         `cpu_user_s` y `cpu_system_s` son la CPU del proceso (todos sus hilos) durante la
         unidad y `cpu_utilization`, `cpu_s / (wall_s × cores)`.
@@ -387,6 +420,7 @@ class Timing:
             "engine_busy": round(p.engine_busy, 3),
             "items": p.items,
             "read_bytes": p.read.bytes,
+            "boundaries_peak_mib": round(p.retained.peak / MIB, 1),
             "rss_peak_mib": round(self.rss_peak_bytes / MIB, 1),
             "rss_peak_scope": self.rss_scope,
             "row_groups_month": counts.month,

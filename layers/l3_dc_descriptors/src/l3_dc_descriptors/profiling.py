@@ -5,12 +5,12 @@ absolutos**: `cProfile` instrumenta cada llamada y añade entre 30 % y 100 % de 
 a las funciones pequeñas y muy llamadas. Sin la variable, nada de este módulo se usa: ni se
 crea un `Profile` ni cambia `unit_timing`.
 
-Con hilos (el lector anticipado y el pool de θ de `summarize`): desde Python 3.12 `cProfile`
-usa `sys.monitoring` y ve las llamadas de **todos** los hilos que corren mientras está
-activo, no solo las del hilo que lo activa (lo comprueba `test_l3_timing`). Las
-`tottime_s` y `cumtime_s` son entonces tiempo de hilo sumado, no pared: pueden pasar de
-`wall_s`, y el perfil con hilos sirve para ver dónde se gasta el trabajo, no cuánto
-dura la unidad.
+Con hilos (los lectores, el pool de E/S, el recolector y los escritores de `summarize`):
+desde Python 3.12 `cProfile` usa `sys.monitoring` y ve las llamadas de **todos** los hilos de
+Python que corren mientras está activo, no solo las del hilo que lo activa (lo comprueba
+`test_l3_timing`). No ve los hilos nativos del motor. Las `tottime_s` y `cumtime_s` son
+entonces tiempo de hilo sumado, no pared: pueden pasar de `wall_s`, y el perfil con hilos sirve
+para ver dónde se gasta el trabajo de Python, no cuánto dura la unidad.
 """
 
 import cProfile

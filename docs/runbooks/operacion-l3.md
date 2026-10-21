@@ -41,8 +41,8 @@ rango con la sección siguiente.
    Deben existir `l3-backfill` y `l3-monthly`; el primero con `timeoutSeconds:
    86400`, `maxRetries: 1`, `cpu: '4'` y `memory: 4Gi` en `limits`. Las raíces
    (`L3_LANDING_ROOT`, `L3_EVENTS_ROOT`, `L3_SUMMARIES_ROOT`, `L3_DQ_ROOT`),
-   `L3_SERIES_START` y `L3_THETAS_URI` van en `env`; `L3_THREADS` y `L3_PREFETCH` son opcionales
-   (ver "Hilos de la unidad").
+   `L3_SERIES_START` y `L3_THETAS_URI` van en `env`; `L3_THREADS`, `L3_READERS`, `L3_INFLIGHT`,
+   `L3_WRITERS` y `L3_ENGINE_THREADS` son opcionales (ver "Hilos y topes de la unidad").
 2. **Imagen `l3_dc_descriptors`** de `layers/l3_dc_descriptors/VERSION`. El stack
    `l3` deriva el tag de ese archivo: sin `apply` posterior al merge, el job
    sigue con la imagen vieja.
@@ -368,57 +368,76 @@ Para leer el resultado, baja la carpeta `detected_date=` del día y corre la var
 perfil del snippet de "Leer un fallo": imprime las claves de `unit_timing` y las 15
 primeras filas de `unit_profile`.
 
-## Hilos de la unidad: `L3_THREADS` y `L3_PREFETCH`
+## Hilos y topes de la unidad: `L3_READERS`, `L3_INFLIGHT`, `L3_WRITERS`, `L3_ENGINE_THREADS` y `L3_THREADS`
 
-Cada mes usa hilos dentro de su tarea ([ADR-L3-15](../TRD/l3.md#615-adr-l3-15--lector-anticipado-y-pool-de-θ-por-row-group-hilos-no-procesos)):
-un hilo lector que trae el siguiente row group de L1 mientras se procesa el actual y un pool
-que agrega y escribe los θ de cada row group. Son opcionales y se dejan sin fijar:
+Cada mes es un orquestador de E/S que alimenta al motor nativo
+([ADR-L3-16](../TRD/l3.md#616-adr-l3-16--motor-de-agregación-nativo-ítems-por-row-group-y-θ-casillas-por-evento-fusión-asociativa)):
+Python lee, escribe y mide; los hilos nativos del motor calculan. Son opcionales y se dejan sin fijar:
 
 | Variable | Qué fija | Por defecto |
 |---|---|---|
-| `L3_THREADS` | Hilos del pool de θ. Entero ≥ 1; nunca se usan más que θ | `ceil(3 × cores)` de `unit_timing`, nunca más que θ: 12 en `l3-backfill` (4 vCPU) y 24 a 8 vCPU. El stack `l3` no lo fija: el valor sigue a los vCPU |
-| `L3_PREFETCH` | Row groups que el lector trae de ventaja, además del que está en proceso. Entero ≥ 0; 0 apaga el hilo lector | 2 (uno en proceso y dos listos). El stack `l3` no lo fija |
+| `L3_READERS` | R: row groups de L1 que se leen y decodifican a la vez. Entero ≥ 1 | 2 |
+| `L3_INFLIGHT` | K: row groups empujados al motor que aún anclan sus ticks; el orquestador no pide el K + 1 hasta que uno termina. Entero ≥ 1 | 4 |
+| `L3_WRITERS` | W: escritores de row groups de salida (cada θ en orden, uno a la vez por θ). Entero ≥ 1 | 4 |
+| `L3_ENGINE_THREADS` | Hilos nativos del motor. Entero ≥ 1 | los vCPU efectivos (`ceil(cores)` de `unit_timing`): 4 en `l3-backfill` |
+| `L3_THREADS` | Pool de E/S: compuerta de entrada, apertura de archivos, lectura de las fronteras de L2, conciliación, publicación y linaje. Entero ≥ 1; nunca se usan más que θ | `ceil(3 × cores)`, nunca más que θ: 12 a 4 vCPU y 24 a 8 |
 
-`L3_THREADS=1` con `L3_PREFETCH=0` es el flujo secuencial de antes, útil como línea base o
-si se sospecha de los hilos: el resultado (tablas y `content_hash`) es el mismo en cualquier
-combinación. Un valor que no sea un entero válido termina la corrida con código 2, sin
-escribir nada. Cada `prefetch` extra cuesta ≈ 48 MB de RSS (un row group de L1 decodificado). Un pool del mismo tamaño hace la compuerta de entrada y otro el linaje (`gate_s` y `lineage_s` son la pared de cada fase).
+El stack `l3` no fija ninguna: los valores siguen a los vCPU y el resultado (tablas y
+`content_hash`) es el mismo en cualquier combinación. Un valor que no sea un entero ≥ 1 termina
+la corrida con código 2, sin escribir nada. `L3_THREADS=1` quita el pool de E/S (la compuerta, la
+apertura, la conciliación y la publicación van en serie y las fronteras de L2 se leen en el hilo
+principal); sirve de línea base. `L3_PREFETCH` ya no existe.
 
-`unit_timing` dice lo que se usó (`threads`, `prefetch`); para sobrescribir los valores por defecto hay que lanzar desde Cloud Shell, como en el ejemplo de abajo. Con hilos, `aggregate_s` y `write_s`
-son **suma sobre los hilos**: pueden pasar de `wall_s`, y eso es lo esperado. Para comparar
-dos corridas usa `wall_s`, `cpu_s` y `cpu_utilization`.
+**Qué cuesta cada uno en memoria.** Cada row group de L1 en vuelo suma ≈ 48 MB anclados (K) o,
+mientras se decodifica, ≈ 1,8 × 48 MB (R, por los temporales de Arrow). Los escritores no mostraron un costo
+estable en local (W = 6 contra W = 4 no cambió el RSS). La cuenta completa está en
+[TRD-L3 ADR-L3-16, «Memoria del orquestador»](../TRD/l3.md#616-adr-l3-16--motor-de-agregación-nativo-ítems-por-row-group-y-θ-casillas-por-evento-fusión-asociativa).
+Se acepta una combinación si `rss_peak_mib` queda ≤ 2 048 a 4 vCPU.
 
-`run-job.yml` no admite variables de entorno: para fijarlas en una corrida suelta se
-lanza **desde Cloud Shell**, como el perfil (`--update-env-vars` vale solo para esa
-ejecución; el job no cambia). Por ejemplo, la línea base secuencial de 2021-01:
+**Cómo leer `unit_timing`** (todas las fases son pared; [TRD-L3 §9.3](../TRD/l3.md#93-tipos-de-chequeo-check_type)):
+
+| Campo | Qué dice |
+|---|---|
+| `cpu_utilization` | `cpu_s / (wall_s × cores)`: la medida del objetivo (meta de T4: ≥ 0,90; objetivo de E6: 0,95) |
+| `engine_busy` | Fracción del tiempo del bucle con ítems en la cola del motor. Si es baja, el motor espera entrada: mira `read_s` y `inflight_max` |
+| `inflight_max` | Máximo de row groups en el motor. Si toca `inflight` y `engine_busy` es alto, el motor no es el que espera; si no lo toca, subir K no ayuda |
+| `read_s` | Lo que el hilo principal esperó a las lecturas (L1 y fronteras de L2) |
+| `read_wall_s`, `read_bytes` | Pared con alguna lectura en vuelo y bytes comprimidos que viajaron (L1 y L2). La regla del humano: leer a la velocidad del volumen (1,25 GB en 2021-01, ≤ 15 s). Con contrapresión crece sin que la lectura sea lenta: `read_bytes / read_wall_s` es la tasa mientras hay lecturas |
+| `write_s` | Pared con algún escritor ocupado. Pegada a `aggregate_s` y con `engine_busy` bajo, los escritores son el cuello: sube `L3_WRITERS` |
+| `aggregate_s`, `setup_s`, `publish_s`, `reconcile_s`, `lineage_s`, `gate_s` | Tramos seguidos del hilo principal; `other_s` es lo que falta hasta `wall_s` |
+| `boundaries_peak_mib` | Máximo de fronteras de L2 que el motor tuvo en mano |
+
+Para comparar dos corridas usa `wall_s`, `cpu_s` y `cpu_utilization`. `run-job.yml` no admite
+variables de entorno: para fijarlas en una corrida suelta se lanza **desde Cloud Shell**
+(`--update-env-vars` vale solo para esa ejecución; el job no cambia). Por ejemplo, un solo
+lector y un solo escritor:
 
 ```bash
 gcloud run jobs execute l3-backfill \
   --project <proyecto> --region <región> \
-  --update-env-vars L3_THREADS=1,L3_PREFETCH=0 \
+  --update-env-vars L3_READERS=1,L3_WRITERS=1 \
   --args="--mode,backfill,--from=2021-01,--to=2021-01,--force" \
   --wait
 ```
 
-La corrida T3d de ITSC-360 (los valores por defecto: 12 hilos y prefetch 2 a 4 vCPU) se lanza con
-*Actions → Run job*, `l3-backfill`, `from = to = 2021-01` y `force`; el resultado se
-registra como comentario en ITSC-360 y en el cuadro de
+**La corrida T4 de ITSC-363** (los valores por defecto: R = 2, K = 4, W = 4, motor de 4 hilos a
+4 vCPU) se lanza con *Actions → Run job*, `l3-backfill`, `from = to = 2021-01` y `force`, tras el
+merge y el `apply` del stack `l3`; el resultado se registra como comentario en ITSC-363 y en el
+cuadro de
 [TRD-L3 §10.2](../TRD/l3.md#102-dimensionamiento--hipótesis-de-partida-y-primera-medición).
-La prueba de la espera al lector se lanza desde Cloud Shell con el mismo comando de arriba y
-`--update-env-vars L3_PREFETCH=3` (sin `L3_THREADS`); se acepta si `rss_peak_mib` ≤ 2 048.
-Las metas de T3d son `wall_s` ≤ 300 s y `gate_s + lineage_s + read_s + reconcile_s` ≤ 60 s
-([TRD-L3 §10.2](../TRD/l3.md#102-dimensionamiento--hipótesis-de-partida-y-primera-medición)):
-si se cumplen, T5 (ITSC-352) puede empezar; si no, no empieza. No son la condición de reversión.
-La condición para conservar los valores por defecto es la de ITSC-357: si la corrida no la
-cumple (50 `content_hash` idénticos, `rss_peak_mib` ≤ 2 048 y pared ≥ 15 % menor que T1),
-el stack `l3` fija `L3_THREADS=1` y `L3_PREFETCH=0` por Terraform, sin revertir código.
+Metas: `cpu_utilization` ≥ 0,90, `wall_s` ≤ 120 s, `rss_peak_mib` ≤ 2 048, `read_wall_s` ≤ 15 s y
+los 50 `content_hash` idénticos a los de ITSC-335. Si `read_wall_s` no se cumple, antes de tocar
+nada se mide el ancho de banda de GCS al job con la descarga de un objeto grande (un
+`consolidated.parquet` entero) y se compara con `read_bytes / read_wall_s`. Para ajustar R, K y W
+se repite la corrida con `--update-env-vars` y se anota cada una como una fila más del cuadro.
 Un perfil con hilos (`L3_PROFILE=1`) ve todos los hilos y sus tiempos son de hilo, no de pared.
 
 ## Lector de tramas: `DC_FRAMES_IO_THREADS` y `readers`
 
-`dc_frames` lee cada row group con `pre_buffer=True`, en un archivo que abre y cierra por
-row group: Arrow junta los rangos de bytes de las columnas y los pide a la vez, en vez de una
-petición por columna y por página. Cuántas peticiones viajan en paralelo lo fija el pool de E/S de Arrow:
+`dc_frames` lee cada row group de L1 con `pre_buffer=True`, en un archivo que abre y cierra por
+row group, y las fronteras de L2 (`events.parquet`) por tramos de varios row groups sobre un
+archivo abierto una vez (`EventFile`, [TRD-L3 ADR-L3-16](../TRD/l3.md#616-adr-l3-16--motor-de-agregación-nativo-ítems-por-row-group-y-θ-casillas-por-evento-fusión-asociativa)):
+Arrow junta los rangos de bytes y los pide a la vez, en vez de una petición por columna y por página. Cuántas peticiones viajan en paralelo lo fija el pool de E/S de Arrow:
 
 | Variable | Qué fija | Por defecto |
 |---|---|---|
@@ -427,10 +446,9 @@ petición por columna y por página. Cuántas peticiones viajan en paralelo lo f
 Se lee al importar `dc_frames`, que solo importan `l3_dc_descriptors` y `ops_tools`. Los `VERSION` de L1, L2 y viz suben igual, porque `shared/` entra en cada imagen.
 Como `L3_THREADS`, solo se sobrescribe lanzando desde Cloud Shell con `--update-env-vars`.
 Más hilos de E/S no aceleran un row group suelto (es un solo rango de ≈ 15 MB): ayudan
-cuando varios row groups se leen a la vez (`readers` > 1). `read_row_groups(readers=R)` aún
-no lo usa L3: el orquestador lo adopta en la hija 3 de E6 (hoy L3 sigue con
-`readers = 1` más su lector anticipado, `L3_PREFETCH`). Cada lector de más cuesta ≈ 48 MB de
-RSS ([README de dc_frames](../../shared/dc_frames/README.md#lectura-pre_buffer-pool-de-es-y-readers)).
+cuando varios row groups se leen a la vez: los `L3_READERS` lectores de L1 y los tramos de
+L2 de los 50 θ comparten este pool. Si `read_wall_s` de T4 no cumple, subir este valor es la
+primera prueba. Cada lector de más cuesta ≈ 48 MB de RSS (≈ 1,8 × mientras decodifica) ([README de dc_frames](../../shared/dc_frames/README.md#lectura-pre_buffer-pool-de-es-y-readers)).
 
 ### Sonda del lector con `readers` (ITSC-362)
 

@@ -217,6 +217,11 @@ def test_row_groups_peak_is_a_row_group_and_does_not_grow_with_events(
     # el pico a ~2,9: con 2,5 la prueba lo atrapa y aún deja 18 % de margen. Con R > 1 la
     # cuenta es R + 1 decodificados y medimos R + 2,1 (R = 2: 4,1; R = 3: 5,1), así que el
     # umbral es R + 2,5 y el margen sigue siendo de ~0,4.
+    # Esta cuenta es la del fixture: un hilo de CPU y de E/S y dos θ de eventos mínimos. No es
+    # una cota en GCS, donde la sonda de ITSC-362 midió 228 MiB contra 95 previstos por dos
+    # términos que el fixture no tiene: los row groups de eventos de 50 θ en la mano (≈ 2 MiB
+    # cada uno) y la decodificación con hilos, que pica a ≈ 1,8 row groups por lector. La
+    # cuenta que cierra en GCS está en el README, «Por qué el umbral de memoria no era una cota».
     limit = (decoded_row_groups(readers) + 1.5) * ROW_GROUP_BYTES
     assert few["peak"] < limit
     assert many["peak"] < limit

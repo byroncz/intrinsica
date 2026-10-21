@@ -16,6 +16,7 @@ from typing import Self
 
 import numpy as np
 import pyarrow as pa
+import pyarrow.dataset as ds
 import pyarrow.fs as pafs
 import pyarrow.parquet as pq
 from pyutils import resolve_fs
@@ -490,23 +491,42 @@ class ParquetSource:
         self.close()
 
 
-class EventFile(ParquetSource):
+class EventFile:
     """`events.parquet` de un θ y un mes, abierto una sola vez y leído por tramos.
 
     Las columnas se piden por nombre (las tres fronteras y `confirm_time` siempre, más
-    `columns`). Un tramo (`lots`) son varios row groups seguidos que se leen con una sola
-    llamada a `batches`: los rangos de todos viajan a la vez, en pocas peticiones grandes.
+    `columns`). El archivo se abre una vez (un `NativeFile`: un viaje para el tamaño y otro
+    para el pie) y cada tramo se lee con una sola llamada a `batches`, sobre ese mismo
+    archivo: `open_parquet` por row group repetía el viaje de la apertura 1 335 veces en
+    2021-01 (H8, ITSC-362).
+
+    **Pocas peticiones grandes.** Un tramo (`lots`) son varios row groups seguidos. Con las
+    opciones de caché por defecto de Arrow, `pre_buffer` pide cada rango de columna por
+    separado y solo cuando el decodificador lo necesita: ≈ 2 peticiones de ≈ 200 KiB por row
+    group, medidas con un archivo real. Aquí `batches` fija `hole_size_limit` y
+    `range_size_limit` en el tamaño del tramo y `lazy=False`: Arrow junta los rangos de todas
+    las columnas de todos los row groups del tramo (incluidas las que no se piden, que
+    caben en los huecos) y los pide a la vez, de modo que un tramo de ≈ 8 MiB viaja en una o
+    dos peticiones.
 
     `batches` entrega los eventos en lotes de a lo más `batch_rows` filas, cada uno con
     sus propios buffers: quien retiene un lote ancla solo ese lote y no el tramo. Un mismo
-    `batches` no se recorre desde dos hilos a la vez; dos `batches` distintos sí.
+    `batches` no se recorre desde dos hilos a la vez; dos `batches` distintos sí. Quien
+    llama cierra el archivo.
     """
 
     def __init__(
         self, path: str, what: str, columns: Sequence[str] | None = None
     ) -> None:
-        super().__init__(path, what)
+        fs, resolved = resolve_fs(path)
         try:
+            self._file = fs.open_input_file(resolved)
+        except FileNotFoundError:
+            raise FramesInputError(f"falta {what}: {path}") from None
+        try:
+            self._fragment = ds.ParquetFileFormat().make_fragment(self._file)
+            self._fragment.ensure_complete_metadata()
+            self.schema: pa.Schema = self._fragment.physical_schema
             expected = {name: pa.int64() for name in (*BOUNDARY_COLUMNS, CONFIRM_TIME)}
             check_columns(self.schema, expected, path)
             self.columns = list(dict.fromkeys([*expected, *(columns or ())]))
@@ -514,13 +534,24 @@ class EventFile(ParquetSource):
                 if name not in self.schema.names:
                     raise FramesInputError(f"{path}: falta la columna {name!r}")
         except BaseException:
-            self.close()
+            self._file.close()
             raise
+        self.path = path
+        self.metadata: pq.FileMetaData = self._fragment.metadata
         self.rows = [
             self.metadata.row_group(i).num_rows
             for i in range(self.metadata.num_row_groups)
         ]
         self._index = {name: self.schema.get_field_index(name) for name in self.columns}
+
+    def close(self) -> None:
+        self._file.close()
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
 
     def id_range(self, name: str) -> tuple[int, int] | None:
         """`(mínimo, máximo)` de la columna `name` en todo el archivo con las estadísticas
@@ -539,12 +570,16 @@ class EventFile(ParquetSource):
         return None if low is None else (low, high)
 
     def compressed(self, row_groups: Sequence[int]) -> int:
-        """Bytes comprimidos de las columnas pedidas en esos row groups."""
-        return sum(
-            self.metadata.row_group(i).column(self._index[name]).total_compressed_size
-            for i in row_groups
-            for name in self.columns
-        )
+        """Bytes comprimidos de esos row groups, de todas las columnas: lo que viaja de GCS
+        al leerlos (ver «Pocas peticiones grandes» en la clase).
+        """
+        total = 0
+        for i in row_groups:
+            group = self.metadata.row_group(i)
+            total += sum(
+                group.column(c).total_compressed_size for c in range(group.num_columns)
+            )
+        return total
 
     def lots(self, lot_bytes: int) -> list[list[int]]:
         """Los row groups no vacíos, en orden, agrupados en tramos de row groups
@@ -564,14 +599,28 @@ class EventFile(ParquetSource):
         return lots
 
     def batches(
-        self, row_groups: Sequence[int], batch_rows: int
+        self, row_groups: Sequence[int], batch_rows: int, request_bytes: int
     ) -> Iterator[pa.RecordBatch]:
-        """Los eventos de `row_groups` en lotes de `batch_rows` filas (el último puede ser
-        menor), con un lector propio que se cierra al agotar el generador.
+        """Los eventos de `row_groups` en lotes de a lo más `batch_rows` filas.
+
+        `request_bytes` es el tamaño máximo de una petición: Arrow junta los rangos que
+        distan menos que eso y no pide más de eso a la vez (lo natural es el tamaño del
+        tramo, ver `lots`). Un lote nunca cruza row groups, así que el último de cada row
+        group puede ser menor. Se lee a lo más un lote por delante del que se pide.
         """
-        with closing(self.reader()) as reader:
-            yield from reader.iter_batches(
-                batch_size=batch_rows,
-                row_groups=list(row_groups),
-                columns=self.columns,
-            )
+        options = ds.ParquetFragmentScanOptions(
+            pre_buffer=True,
+            cache_options=pa.CacheOptions(
+                hole_size_limit=request_bytes,
+                range_size_limit=request_bytes,
+                lazy=False,
+            ),
+        )
+        scan = self._fragment.subset(row_group_ids=list(row_groups))
+        yield from scan.to_batches(
+            columns=self.columns,
+            batch_size=batch_rows,
+            batch_readahead=1,
+            fragment_readahead=1,
+            fragment_scan_options=options,
+        )

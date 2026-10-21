@@ -1,9 +1,11 @@
 """Apertura de Parquet: `pre_buffer` y el pool de E/S de Arrow (`DC_FRAMES_IO_THREADS`)."""
 
+import io
 import os
 import pathlib
 import subprocess
 import sys
+import threading
 from contextlib import closing
 
 import pyarrow as pa
@@ -121,20 +123,21 @@ def test_an_event_file_opens_once_and_reads_by_lots_of_row_groups(
         for lot in two[:-1]:
             assert file.compressed(lot) >= wanted_bytes > file.compressed(lot[:-1])
         # Cada tramo se lee con un lector propio y el archivo no se vuelve a abrir.
-        got = pa.Table.from_batches([b for lot in two for b in file.batches(lot, 5)])
+        got = pa.Table.from_batches(
+            [b for lot in two for b in file.batches(lot, 5, 1 << 20)]
+        )
         assert opened == [str(path)]
     wanted = pq.read_table(path, columns=file.columns)
     assert got.equals(wanted)
 
 
-def test_batches_have_their_own_buffers_and_at_most_batch_rows_rows(events_path):
+def test_a_batch_has_at_most_batch_rows_rows_and_never_crosses_a_row_group(events_path):
     path, _ = events_path
     with lake.EventFile(str(path), "L2") as file:
-        batches = list(file.batches(file.lots(1 << 40)[0], 4))
-    assert all(b.num_rows <= 4 for b in batches)
-    first, second = batches[0].column(0).buffers()[1], batches[1].column(0).buffers()[1]
-    assert first.address != second.address
-    assert sum(b.num_rows for b in batches) == sum(file.rows)
+        batches = list(file.batches(file.lots(1 << 40)[0], 4, 1 << 20))
+        sizes = [rows for rows in file.rows if rows]
+    expected = [min(4, rows - start) for rows in sizes for start in range(0, rows, 4)]
+    assert [b.num_rows for b in batches] == expected
 
 
 def test_an_event_file_gives_the_id_ranges_from_the_footer(events_path):
@@ -193,8 +196,6 @@ def test_an_event_file_that_is_missing_or_lacks_a_column_fails_and_closes(tmp_pa
 
 
 def test_readers_of_one_source_can_read_at_the_same_time(events_path):
-    import threading
-
     path, _ = events_path
     with lake.ParquetSource(str(path), "L2") as source:
         groups = source.metadata.num_row_groups
@@ -216,3 +217,62 @@ def test_readers_of_one_source_can_read_at_the_same_time(events_path):
             t.join()
     whole = pq.read_table(path).column("confirm_agg_trade_id").to_pylist()
     assert [v for i in range(groups) for v in results[i]] == whole
+
+
+class CountingFile(io.RawIOBase):
+    """Un archivo local que anota cada lectura `(posición, bytes)` que le hace Arrow."""
+
+    def __init__(self, path, log: list) -> None:
+        super().__init__()
+        self._raw = open(path, "rb")  # noqa: SIM115 - se cierra en `close`
+        self._log = log
+        self._lock = threading.Lock()
+
+    def readable(self) -> bool:
+        return True
+
+    def seekable(self) -> bool:
+        return True
+
+    def seek(self, offset, whence=0):
+        return self._raw.seek(offset, whence)
+
+    def tell(self):
+        return self._raw.tell()
+
+    def readinto(self, buffer):
+        with self._lock:
+            position = self._raw.tell()
+            data = self._raw.read(len(buffer))
+            self._log.append((position, len(data)))
+            buffer[: len(data)] = data
+            return len(data)
+
+    def close(self):
+        self._raw.close()
+        super().close()
+
+
+def test_a_lot_travels_in_a_few_requests_not_one_per_row_group_and_column(
+    events_path, monkeypatch
+):
+    path, _ = events_path
+    log: list[tuple[int, int]] = []
+
+    class Fs:
+        def open_input_file(self, target):
+            return pa.PythonFile(CountingFile(target, log), mode="r")
+
+    monkeypatch.setattr(lake, "resolve_fs", lambda target: (Fs(), target))
+    with lake.EventFile(str(path), "L2", EVENT_COLUMNS) as file:
+        everything = file.lots(1 << 40)[0]
+        assert len(everything) > 3
+        log.clear()
+        got = pa.Table.from_batches(list(file.batches(everything, 4, 1 << 20)))
+        size = file.compressed(everything)
+    wanted = pq.read_table(path, columns=file.columns)
+    assert got.equals(wanted)
+    # Sin las opciones de caché del tramo serían ≥ 1 petición por row group y por rango
+    # de columnas; con ellas, el tramo entero viaja en una o dos.
+    assert len(log) <= 2 < len(everything)
+    assert sum(length for _, length in log) >= 0.9 * size

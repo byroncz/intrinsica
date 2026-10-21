@@ -146,12 +146,6 @@ class SealedWriters:
                 self._texts[position], self._month, FAMILY, error.detail
             ) from error
 
-    def wait_below(self, limit: int) -> None:
-        """Espera a que haya menos de `limit` row groups sin escribir, o a un error."""
-        with self._cond:
-            while self._pending >= limit and self._error is None:
-                self._cond.wait()
-
     def join(self) -> None:
         """Espera a que se escriba todo lo entregado; relanza el primer error."""
         with self._cond:
