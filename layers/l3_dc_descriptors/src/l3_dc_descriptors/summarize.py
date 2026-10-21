@@ -559,7 +559,7 @@ def summarize_month(
         )
         stack.callback(engine.close)
         # La compuerta de carry-over se espera antes que el pie de L1: con L1 ilegible y un
-        # carry-over ausente sale el `l2_missing` de la compuerta, no el error de L1.
+        # carry-over ausente sale el `l2_input_missing` de la compuerta, no el error de L1.
         _await_gates(inputs)
         if pending is not None:
             l1 = pending.result()
