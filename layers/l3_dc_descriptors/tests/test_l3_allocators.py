@@ -3,6 +3,7 @@
 """
 
 import logging
+import os
 
 import pytest
 from l3_dc_descriptors import memory
@@ -23,18 +24,34 @@ class FakeLibc:
         return int(self.accepts)
 
 
+def forget_env(mp: pytest.MonkeyPatch) -> None:
+    """Quita la variable y deja anotado que, al deshacer, vuelva a estar ausente.
+
+    `delenv` sobre una variable que no existe no anota nada: lo que `tune_allocators`
+    escribe después se filtraría al resto de la sesión. `setenv` primero sí lo anota.
+    """
+    mp.setenv(ENV, "")
+    mp.delenv(ENV)
+
+
 @pytest.fixture
 def libc(monkeypatch):
     fake = FakeLibc()
     monkeypatch.setattr(memory.ctypes, "CDLL", lambda _: fake)
-    monkeypatch.delenv(
-        ENV, raising=False
-    )  # que el fixture restaure lo que tune_allocators deje
+    forget_env(monkeypatch)
     return fake
 
 
-def test_without_the_variable_the_threshold_is_16_kib(libc, monkeypatch):
+def test_forgetting_the_variable_restores_its_absence(monkeypatch):
     monkeypatch.delenv(ENV, raising=False)
+    mp = pytest.MonkeyPatch()
+    forget_env(mp)
+    os.environ[ENV] = "16384"  # lo que deja `tune_allocators`
+    mp.undo()
+    assert ENV not in os.environ
+
+
+def test_without_the_variable_the_threshold_is_16_kib(libc):
     memory.tune_allocators()
     assert libc.calls == [(memory._M_MMAP_THRESHOLD, 16384)]
     assert DEFAULT_MMAP_THRESHOLD == 16384
