@@ -99,7 +99,7 @@ def _image_version(env: Mapping[str, str]) -> str:
 
 
 def _count(env: Mapping[str, str], name: str, *, minimum: int) -> int | None:
-    """Un entero de entorno (`L3_THREADS`, `L3_PREFETCH`), o `None` si no está o está vacío."""
+    """Un entero de entorno (`L3_THREADS`, `L3_READERS`, ...), o `None` si no está o está vacío."""
     raw = env.get(name)
     if raw is None or not raw.strip():
         return None
@@ -127,7 +127,10 @@ def _context(mode: str, series_start: Month, env: Mapping[str, str]) -> RunConte
         dq_root=env["L3_DQ_ROOT"],
         profile=env.get("L3_PROFILE") == "1",
         threads=_count(env, "L3_THREADS", minimum=1),
-        prefetch=_count(env, "L3_PREFETCH", minimum=0),
+        readers=_count(env, "L3_READERS", minimum=1),
+        inflight=_count(env, "L3_INFLIGHT", minimum=1),
+        writers=_count(env, "L3_WRITERS", minimum=1),
+        engine_threads=_count(env, "L3_ENGINE_THREADS", minimum=1),
     )
 
 

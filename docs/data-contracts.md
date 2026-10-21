@@ -631,14 +631,20 @@ mismo que traen las excepciones del resumidor, de las que sale la mayoría de lo
   corrida y el linaje contra L2: si L2 se reprocesa y cambia, estos hashes ya no coinciden
   con los suyos y el mes está obsoleto (`--force --from <mes> --thetas <θ>`).
 - **`unit_timing`** (`info`, `pass`): uno por unidad (mes), no por θ. `metric_value` es la
-  pared (`wall_s`). `details` lleva el tiempo por fase: `gate_s` (compuerta de entrada, pared de la fase en el pool de θ),
-  `read_s` (lectura y decodificación: lo que el hilo principal esperó al lector por cada
-  row group), `aggregate_s`, `write_s` (armar y escribir los row groups de salida y
-  publicar), `reconcile_s` (conciliación) y `lineage_s` (hash de las entradas de L2, pared de la fase en el pool de θ). Con
-  `threads = 1` y `prefetch = 0` todas son pared y, con `other_s`, suman `wall_s`; con
-  hilos, `aggregate_s` y `write_s` son **suma sobre los hilos** y pueden pasar de
-  `wall_s`. `threads` y `prefetch` son los hilos del pool de θ y los row groups de
-  ventaja del lector que usó la unidad (`L3_THREADS` y `L3_PREFETCH`). Además: `rss_peak_mib`
+  pared (`wall_s`). `details` lleva el tiempo por fase, todas en **pared**
+  (desde la 2.0.0 del TRD-L3): `gate_s` (compuerta de entrada), `setup_s` (abrir escritores, archivos
+  de L2 y motor), `aggregate_s` (el motor, del primer row group a que termina el último ítem),
+  `publish_s` (publicar los archivos), `reconcile_s` (conciliación) y `lineage_s` (hash de las
+  entradas de L2) son tramos seguidos del hilo principal y, con `other_s`, suman `wall_s`.
+  `write_s` (la pared con algún escritor ocupado) y `read_wall_s` (la pared con alguna lectura de
+  L1 o L2 en vuelo) corren dentro de `aggregate_s`; `read_s` es lo que el hilo principal esperó
+  a las lecturas y `read_bytes`, los bytes comprimidos que viajaron de L1 y L2. La configuración
+  con que corrió: `threads` (pool de E/S, `L3_THREADS`), `engine_threads` (`L3_ENGINE_THREADS`),
+  `readers` (`L3_READERS`), `inflight` (`L3_INFLIGHT`) y `writers` (`L3_WRITERS`); y lo que
+  hizo el motor: `inflight_max` (máximo de row groups empujados que aún anclaban sus ticks),
+  `engine_busy` (fracción del tiempo con ítems en la cola del motor), `items` (ítems
+  `(row group, θ)`) y `boundaries_peak_mib` (máximo de fronteras de L2 que el motor tuvo en mano).
+  `prefetch` ya no existe. Además: `rss_peak_mib`
   (`VmHWM`) con `rss_peak_scope` (`unit` si el pico se reinició al empezar la unidad,
   `process` si el sistema no lo permite y es el de todo el proceso); las decodificaciones
   de row group de L1, `row_groups_month` (del archivo del mes), `row_groups_previous` (de

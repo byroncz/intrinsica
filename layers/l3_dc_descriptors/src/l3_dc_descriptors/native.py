@@ -9,8 +9,8 @@ en Arrow los row groups de salida que el motor sella y convierte sus errores en 
 excepciones tipadas de `errors` y del lector. No agrega nada: la aritmética y los
 invariantes de §7.2 viven en Rust (ADR-L3-16).
 
-Todavía no está en el flujo de `summarize_month`: lo conecta el orquestador (ITSC-358 es
-solo el motor). `rowgroup.py` sigue siendo la referencia con la que se compara.
+Lo orquesta `summarize.summarize_month` (ITSC-363). La referencia con la que se compara
+es la agregación de Python por row group, que vive en `tests/` (`rowgroup.py`, `pyref.py`).
 """
 
 from collections.abc import Iterable, Sequence
@@ -29,6 +29,7 @@ from l3_dc_descriptors.errors import (
     SkeletonMismatch,
 )
 from l3_dc_descriptors.schema import FAMILY, SUMMARIES_SCHEMA
+from l3_dc_descriptors.timing import Retained
 
 # Las 18 columnas de datos como las comprueba el motor: (nombre, bytes por valor, nulable).
 ENGINE_SCHEMA = tuple(
@@ -76,15 +77,22 @@ def event_batch(batch: pa.RecordBatch) -> EventBatch:
 
 
 def push_boundaries(
-    engine: dc_pyo3.Engine, position: int, batch: pa.RecordBatch
+    engine: dc_pyo3.Engine,
+    position: int,
+    batch: pa.RecordBatch,
+    retained: Retained | None = None,
 ) -> None:
     """Entrega al motor un lote de eventos del θ en `position`, detrás de los anteriores.
 
     `batch` son filas consecutivas de `events.parquet` (un row group de `EventGroup.batch`
     o un tramo). El motor retiene sus buffers de Arrow (no se copian) hasta que sus eventos
-    cierran, así que el llamador no necesita conservarlos.
+    cierran, así que el llamador no necesita conservarlos. Con `retained`, anota el lote
+    para medir cuántos bytes de fronteras tiene el motor en mano.
     """
-    engine.push_boundaries(position, event_batch(batch))
+    entry = event_batch(batch)
+    engine.push_boundaries(position, entry)
+    if retained is not None:
+        retained.hold(batch.nbytes, entry.reference[0].obj)
 
 
 class BoundaryFeed:
@@ -101,9 +109,11 @@ class BoundaryFeed:
         engine: dc_pyo3.Engine,
         position: int,
         batches: Iterable[pa.RecordBatch],
+        retained: Retained | None = None,
     ) -> None:
         self._engine = engine
         self._position = position
+        self._retained = retained
         self._batches = iter(batches)
         self._last: int | None = None  # referencia del último evento entregado
 
@@ -115,7 +125,7 @@ class BoundaryFeed:
                 return
             if batch.num_rows == 0:
                 continue
-            push_boundaries(self._engine, self._position, batch)
+            push_boundaries(self._engine, self._position, batch, self._retained)
             self._last = batch.column("reference_agg_trade_id")[-1].as_py()
 
 
@@ -264,12 +274,17 @@ def to_summarize_error(
                 f"el esqueleto tiene {error.rows} filas y llega el evento {error.event}",
             )
         case "incomplete":
-            return SkeletonMismatch(
-                theta,
-                month,
-                FAMILY,
-                f"faltan {error.missing} de las {error.expected} filas del esqueleto",
+            # Las casillas que quedan vacías al terminar L1 son eventos sin cerrar: el
+            # extremo de alguno no existe como tick (el hallazgo del lector de antes).
+            result = L2StateInconsistent.mismatch(
+                theta, month, "extreme_agg_trade_id", "ausente", "un tick de L1"
             )
+            result.details["message"] = (
+                "L1 terminó antes de cerrar todos los eventos; el extremo no existe "
+                f"como tick. θ {theta}: faltan {error.missing} de las "
+                f"{error.expected} filas del esqueleto"
+            )
+            return result
     return error
 
 

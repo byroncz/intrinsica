@@ -53,6 +53,8 @@ errores del lector, y porque `pyutils` no sabe nada de L3.
   `family_path(root, key, theta, month, family)` y `l2_path(root, key, theta,
   month)`: el escritor de familias y las rutas de la partición. Ver
   [Escritor de familias](#escritor-de-familias).
+- `dc_frames.lake.EventFile` y `ParquetSource`: archivos abiertos una vez y leídos por tramos
+  (ver [Archivos abiertos una vez](#archivos-abiertos-una-vez-y-leídos-por-tramos-itsc-363)).
 - Errores: `FrameBoundaryError` (con los atributos `theta`, `field`, `got` y `wanted`;
   una frontera de L2 no es un tick de L1, o el
   tick de confirmación no tiene `transact_time = confirm_time`),
@@ -213,6 +215,53 @@ columna (5 en L1) y cada página por separado y en serie, y un row group de 48 M
   Cada lector de más cuesta ≈ 48 MB de RSS.
 - `pre_buffer` y el pool de E/S valen también para `read_frames` y `frames_of`; `readers`
   no: ahí el lector sigue siendo secuencial.
+
+### Por qué el umbral de memoria no era una cota (ITSC-363)
+
+El umbral de la prueba, `(K + 1,5) × row group`, salió de un fixture y no valía en GCS: la sonda
+de ITSC-362 midió un pico del pool de Arrow de 228 MiB con un lector (previsto 95) y 304 con dos
+(previsto 172). Faltaban dos términos, medidos aparte:
+
+1. **Leer un row group pica a ≈ 1,8× su tamaño decodificado**, no a 1×. Arrow descomprime cada
+   chunk de columna en un temporal del tamaño del chunk antes de decodificarlo, y las cinco columnas
+   se decodifican en paralelo. Con un archivo de un row group de 1 M de ticks (46,1 MiB
+   decodificados): 78 MiB sin `pre_buffer`, 82 con él (1,78×); por columna, de 1,96× a 2,15×. Con
+   `pre_buffer` quedan además ≈ 10 MiB de caché comprimido hasta cerrar el lector.
+2. **Los row groups de eventos de L2 de los 50 θ, en la mano a la vez** (`read_row_groups`):
+   ≈ 2 MiB por θ con siete columnas, 80 a 105 MiB con 50 θ.
+
+La cuenta cierra con la sonda local sobre 2020-01 (50 θ, row groups de 45 MiB): 82 + 80 = 162 MiB
+con un lector (medido 162) y 162 + 82 = 244 con dos (medido 249). En GCS, con row groups de 48 MiB:
+82 × 48/46 + 100 ≈ 185 a 230 con un lector (medido 228) y +76 por el segundo lector (304 − 228).
+El umbral honesto es entonces `R × 1,8 + 1` row groups más lo que L2 tenga en la mano, no `K + 1,5`.
+El resumidor de L3 ya no usa `read_row_groups` (ver la sección siguiente); su cuenta de memoria está
+en TRD-L3 ADR-L3-16.
+
+## Archivos abiertos una vez y leídos por tramos (ITSC-363)
+
+`dc_frames.lake` trae dos piezas para leer muchos pedazos de un mismo archivo sin pagar el viaje
+de apertura cada vez (H8 de ITSC-362: 1 335 aperturas de `events.parquet` en 2021-01):
+
+- `ParquetSource(path, what)`: abre el archivo como `NativeFile` y lee el pie una vez. `reader()`
+  devuelve un `ParquetFile` de vida corta con `pre_buffer` sobre ese mismo archivo, con el pie ya
+  leído; varios lectores pueden leer a la vez (un lector, no). Lo usan el escritor de familias
+  (las dos claves del esqueleto de cada row group) y la conciliación de L3 (`L1Month`).
+- `EventFile(path, what, columns)`: `events.parquet` de un θ y un mes por tramos.
+  `lots(lot_bytes)` agrupa row groups seguidos que suman al menos `lot_bytes` comprimidos;
+  `batches(row_groups, batch_rows, request_bytes)` los entrega en lotes de a lo más `batch_rows`
+  filas; `id_range(columna)` da el mínimo y el máximo de una columna con las estadísticas del pie,
+  sin leer datos. **Pocas peticiones grandes:** con las opciones de caché por defecto de Arrow,
+  `pre_buffer` pide ≈ 2 rangos de ≈ 200 KiB por row group y solo cuando el decodificador los
+  necesita (medido con un contador de lecturas en un archivo real: 40 lecturas de 184 KiB de
+  mediana para 20 row groups). `batches` usa la API de datasets de Arrow con
+  `CacheOptions(hole_size_limit = request_bytes, range_size_limit = request_bytes, lazy = False)`:
+  Arrow junta los rangos de todas las columnas de todos los row groups del tramo, incluidas las que
+  no se piden (caben en los huecos), y los pide a la vez (el mismo archivo da 2 lecturas de ≈ 7 MiB).
+  Cuesta leer esas columnas de más (+40 % de bytes en el archivo de prueba) y el caché del tramo
+  vive mientras se recorre. Un lote nunca cruza row groups y es una vista de los buffers de su row
+  group: el último de cada row group puede ser menor y soltarlo suelta el row group cuando ya no
+  queda ningún lote suyo. Se lee a lo más un lote por delante del que se pide.
+
 
 ## Presupuesto de ticks (`max_event_ticks`)
 

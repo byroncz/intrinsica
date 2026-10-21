@@ -1,73 +1,80 @@
 """El resumidor: de L1 y L2 de un mes a `summaries.parquet` de cada θ (TRD-L3 §8.1).
 
-Una pasada por mes y por lista de θ, sin estado entre meses (ADR-L3-12). El lector
-entrega cada row group de L1 una vez, con las fronteras de los eventos de todos los θ como
-posiciones (ADR-L3-14): `Prefixes` calcula lo común a los θ y, por θ, `ThetaAggregator`
-agrega todos los eventos del row group en llamadas vectorizadas y completa el evento
-abierto con su acumulador parcial. El row group se suelta antes de pedir el siguiente.
-Cada θ arma su row group de salida (el mismo número de filas que el de `events.parquet`)
-en un buffer por columna y lo entrega al escritor de familias.
+Una pasada por mes y por lista de θ, sin estado entre meses (ADR-L3-12). Este módulo es el
+orquestador de la pasada (ITSC-363, ADR-L3-16): Python lee, escribe y mide; **no calcula**.
+La aritmética, las posiciones de las fronteras y los siete invariantes de §7.2 viven en el
+motor nativo (`dc_pyo3.Engine`, crate `dc_descriptors`), que tiene sus propios hilos.
 
-Dos tipos de hilo, sin tocar la aritmética (ADR-L3-15): un lector que trae y decodifica
-el siguiente row group mientras se procesa el actual (`_ReadAhead`, `prefetch` row groups
-de ventaja) y un pool que reparte los θ de cada row group, cada uno escribiendo su
-archivo. El mismo pool hace la compuerta de entrada, antes del primer row group, y la
-unidad (`pipeline`) crea otro del mismo tamaño para el linaje, después. El hilo principal espera los θ del row group antes de abrir el siguiente: el
-estado de un θ es secuencial entre row groups (el evento abierto en la frontera), así que
-cada `_Lane` corre en un solo hilo a la vez y en orden de row group. Con `threads=1` y
-`prefetch=0` el flujo es el secuencial de siempre.
+```text
+  L2 (50 events.parquet) ─ pool de E/S ─► BoundaryFeed ─┐ fronteras, por delante de cada row group
+  L1 (consolidated) ─ read_row_groups(R) ─► push ───────┤
+                                                        ▼
+                                                  motor nativo (hilos, ítems (row group, θ))
+                                                        │ pop_sealed
+                                            Collector ──┴─► SealedWriters (W hilos, cola por θ)
+                                                                   ▼
+                                                        FamilyWriter de cada θ ─► commit
+```
+
+Un row group de L1 se empuja cuando hay lugar: a lo más `inflight` (K) row groups anclan sus
+ticks en el motor, y los que esperan escribirse no pasan de un tope; el lector trae `readers`
+(R) row groups por delante. Antes de cada `push`, `BoundaryFeed.cover(high)` entrega al motor
+las fronteras de L2 que ese row group toca, y no más: el motor suelta cada lote cuando sus
+eventos cierran, así que lo retenido es O(lote + eventos abiertos), no O(mes). El orden de
+los θ y de los row groups no cambia un bit de la salida: el motor deja cada fila en la casilla
+de su evento y sella los row groups de salida de cada θ en orden.
+
+Atómico por archivo: nada se publica hasta que todo el mes se resumió y concilió. Con
+`threads=1` no hay pool de E/S: la compuerta, la apertura, la conciliación y la publicación
+van en serie en el hilo principal (los hilos del motor y del lector no se apagan).
 """
 
-import contextvars
 import math
-import queue
-import threading
 import time
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable, Sequence
 from concurrent.futures import ThreadPoolExecutor, wait
 from contextlib import AbstractContextManager, ExitStack, closing, nullcontext
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
-from typing import Self
 
+import dc_pyo3
 from dc_frames import (
     FamilySkeletonMismatch,
     FamilyWriter,
     FrameBoundaryError,
-    RowGroupFrames,
-    ThetaEvents,
+    FramesInputError,
     family_path,
     l2_path,
-    read_row_groups,
 )
-from dc_frames.lake import Month, month_of, month_ordinal
+from dc_frames.lake import L1, EventFile, Month, month_of, month_ordinal
 
+from l3_dc_descriptors import native
+from l3_dc_descriptors.boundaries import BatchStream, check_types
 from l3_dc_descriptors.cpu import cpu_limit
 from l3_dc_descriptors.errors import L2StateInconsistent, SkeletonMismatch, month_text
 from l3_dc_descriptors.event import EVENT_COLUMNS
 from l3_dc_descriptors.l2 import EVENTS, CarryOver, read_carry_over, require
+from l3_dc_descriptors.outputs import POLL_S, Collector, SealedWriters
 from l3_dc_descriptors.reconcile import L1Month, Reconciliation, reconcile
-from l3_dc_descriptors.rowgroup import Closed, Prefixes, ThetaAggregator
-from l3_dc_descriptors.schema import (
-    COLUMN,
-    FAMILY,
-    STATE_VERSION,
-    SUMMARIES_SCHEMA,
-    RowGroupBuffer,
-)
+from l3_dc_descriptors.schema import FAMILY, STATE_VERSION, SUMMARIES_SCHEMA
 from l3_dc_descriptors.timing import Phases
 
 DEFAULT_KEY = ("binance", "spot", "BTCUSDT")
-C_TICKS, OS_TICKS = COLUMN["c_ticks"], COLUMN["os_ticks"]
 _THETA_SCALE = Decimal("1e-8")
-# Row groups que el lector trae de ventaja: uno en proceso y dos listos. Es el valor de
-# T3b y T3c, no de una comparación con 1; con 2 el hilo principal aún esperó 43 s al
-# lector en 2021-01 (T3c, ITSC-360).
-DEFAULT_PREFETCH = 2
-# Hilos por vCPU efectivo: la espera de red y de disco de cada θ se solapa con el cómputo
-# de otros. De 12 a 24 hilos a 4 vCPU la pared bajó 1 % y la RSS subió 130 MiB (ITSC-360).
+# Hilos del pool de E/S por vCPU efectivo: la espera de red de cada θ (compuerta, apertura,
+# lectura de L2, conciliación, publicación y linaje) se solapa con la de otros (ITSC-360).
 THREADS_PER_CORE = 3
+# Lectores de L1 (R), row groups en vuelo en el motor (K) y escritores (W). Ley de Little
+# (ITSC-363): con el motor al 95 % la unidad consume ≈ 1 row group por segundo y con
+# `pre_buffer` una lectura tarda ≈ 0,6 s, así que dos lectores bastan; K = 4 deja uno en
+# cómputo, dos por terminar y uno por empezar.
+DEFAULT_READERS = 2
+DEFAULT_INFLIGHT = 4
+DEFAULT_WRITERS = 4
+# Row groups de salida sellados que esperan escribirse, por escritor, antes de dejar de
+# empujar row groups nuevos: acota lo sellado que se acumula en RAM si escribir se atrasa.
+PENDING_PER_WRITER = 8
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,100 +85,6 @@ class ThetaResult:
     rows: int
     content_hash: str
     reconciliation: Reconciliation
-
-
-class _Lane:
-    """El avance de un θ en la pasada: su agregador, su escritor, su row group de salida y
-    sus cuentas.
-
-    Es lo único que `add` escribe: recibe `Prefixes` y `ThetaEvents` solo para leerlos, así
-    que los θ de un row group se pueden agregar en hilos distintos sin coordinarse. Un
-    solo hilo a la vez corre `add` de un mismo θ, y en orden de row group.
-    `aggregate_s` y `write_s` son los segundos que este θ gastó agregando y armando y
-    escribiendo sus row groups: se suman sobre los θ, así que con hilos pasan de la pared.
-    """
-
-    def __init__(
-        self,
-        theta: Decimal,
-        text: str,
-        month: Month,
-        writer: FamilyWriter,
-        carry: CarryOver,
-        previous_direction: int,
-    ) -> None:
-        self.text = text
-        self.month = month
-        self.writer = writer
-        self.carry = carry
-        self.previous_direction = previous_direction
-        self.aggregator = ThetaAggregator(text, month)
-        self._theta = int(theta.scaleb(8))
-        self._sizes = iter(writer.row_groups)
-        self._rows: RowGroupBuffer | None = None
-        self.rows = 0
-        self.aggregate_s = 0.0
-        self.write_s = 0.0
-        self.closed_ticks = 0
-        self.before_month = 0
-        self.first_reference: int | None = None
-        self.last_extreme: int | None = None
-
-    def _mismatch(self, detail: str) -> SkeletonMismatch:
-        return SkeletonMismatch(self.text, self.month, FAMILY, detail)
-
-    def add(self, agg: Prefixes, events: ThetaEvents) -> None:
-        started = time.perf_counter()
-        closed = self.aggregator.feed(agg, events)
-        self.aggregate_s += time.perf_counter() - started
-        if closed is None:
-            return
-        started = time.perf_counter()
-        try:
-            self._write(closed)
-        finally:
-            self.write_s += time.perf_counter() - started
-        self.rows += len(closed.rows)
-        self.closed_ticks += int(
-            closed.rows[:, C_TICKS].sum() + closed.rows[:, OS_TICKS].sum()
-        )
-        self.before_month += closed.before_month
-        if self.first_reference is None:
-            self.first_reference = closed.first_reference
-        self.last_extreme = closed.last_extreme
-
-    def _write(self, closed: Closed) -> None:
-        """Pasa las filas al row group de salida; lo escribe cada vez que se llena."""
-        done = 0
-        while done < len(closed.rows):
-            if self._rows is None:
-                size = next(self._sizes, None)
-                if size is None:
-                    raise self._mismatch(
-                        f"el esqueleto tiene {len(self.writer.row_groups)} row groups y "
-                        f"se escribe otro ({self.writer.path})"
-                    )
-                self._rows = RowGroupBuffer(size)
-            take = min(self._rows.size - self._rows.fill, len(closed.rows) - done)
-            self._rows.extend(closed.rows[done : done + take])
-            done += take
-            if self._rows.fill == self._rows.size:
-                batch = self._rows.to_batch(self._theta)
-                try:
-                    self.writer.write_row_group(batch)
-                except FamilySkeletonMismatch as error:
-                    raise self._mismatch(error.detail) from error
-                self._rows = None
-
-    def commit(self) -> str:
-        """Publica el archivo del θ y devuelve su `content_hash`."""
-        started = time.perf_counter()
-        try:
-            return self.writer.commit()
-        except FamilySkeletonMismatch as error:
-            raise self._mismatch(error.detail) from error
-        finally:
-            self.write_s += time.perf_counter() - started
 
 
 def ordered[T, R](
@@ -190,121 +103,8 @@ def ordered[T, R](
     return [future.result() for future in futures]
 
 
-def _consume(
-    rg: RowGroupFrames,
-    lanes: dict[Decimal, _Lane],
-    pool: ThreadPoolExecutor | None,
-    phases: Phases,
-) -> None:
-    """Agrega un row group en todos los θ que lo tocan; al volver no queda nada de él.
-
-    Sin `pool`, los θ van en serie en este hilo. Con `pool`, cada θ es una tarea y se
-    espera a todas antes de volver: los 50 pares (row group, θ) terminan antes de abrir
-    los del siguiente. Si fallan varios θ, se lanza el primero en el orden de `rg.thetas`,
-    el mismo que lanzaría el bucle en serie.
-    """
-    started = time.perf_counter()
-    agg = Prefixes(rg.frame)
-    phases.aggregate_s += time.perf_counter() - started
-    ordered(pool, lambda events: lanes[events.theta].add(agg, events), rg.thetas)
-
-
-class _Failed:
-    """Un error del hilo lector, para relanzarlo en el hilo principal."""
-
-    def __init__(self, error: BaseException) -> None:
-        self.error = error
-
-
-_END = object()
-
-
-class _ReadAhead:
-    """Un hilo que consume el lector de row groups y deja a lo más `depth` de ventaja.
-
-    Es un iterador sobre los row groups de `source`, para usarse en un `with`. El hilo
-    pide el siguiente row group mientras el principal procesa el actual; `depth` es
-    cuántos puede tener decodificados además del que está en proceso (1: uno en proceso y
-    uno listo). Los permisos acotan lo decodificado, no solo lo encolado: el hilo no pide
-    el siguiente al lector sin un permiso, así que nunca conviven más de `depth + 1`.
-
-    Corre en una copia del contexto de quien lo crea: el contador de row groups de
-    `unit_timing` viaja en una `ContextVar` y un hilo nuevo no la hereda. Un error del
-    lector (`FrameBoundaryError`, de entrada) se relanza en `__next__`. Al salir del `with`
-    el hilo termina y suelta lo que tuviera; hay que salir antes de cerrar el lector, que
-    mientras el hilo lo ejecuta no se puede cerrar.
-    """
-
-    def __init__(self, source: Iterator[RowGroupFrames], depth: int) -> None:
-        self._source = source
-        self._permits = threading.Semaphore(depth)
-        self._ready: queue.SimpleQueue = queue.SimpleQueue()
-        self._stop = threading.Event()
-        self._finished = False
-        self._thread = threading.Thread(
-            target=contextvars.copy_context().run,
-            args=(self._fill,),
-            name="l3-read-ahead",
-            daemon=True,
-        )
-
-    def __enter__(self) -> Self:
-        self._thread.start()
-        return self
-
-    def __exit__(self, *exc) -> None:
-        self._stop.set()
-        self._permits.release()
-        self._thread.join()
-        while not self._ready.empty():  # soltar los row groups que no se usaron
-            self._ready.get_nowait()
-
-    def __iter__(self) -> Self:
-        return self
-
-    def __next__(self) -> RowGroupFrames:
-        if self._finished:
-            raise StopIteration
-        item = self._ready.get()
-        self._permits.release()
-        if item is _END:
-            self._finished = True
-            raise StopIteration
-        if isinstance(item, _Failed):
-            self._finished = True
-            raise item.error
-        return item
-
-    def _fill(self) -> None:
-        while True:
-            self._permits.acquire()
-            if self._stop.is_set():
-                return
-            try:
-                item = next(self._source, _END)
-            except BaseException as error:  # noqa: BLE001 - se relanza en __next__
-                self._ready.put(_Failed(error))
-                return
-            self._ready.put(item)
-            if item is _END:
-                return
-
-
-def _timed_next(row_groups: Iterator[RowGroupFrames], phases: Phases):
-    """El siguiente row group (o `None`), sumando a `read_s` lo que el hilo principal
-    esperó por él: sin lector anticipado, todo lo que tardó el lector en leerlo,
-    decodificarlo y entregarlo con las posiciones de todos los θ; con él, solo lo que
-    faltó de esa espera cuando el hilo principal terminó el row group anterior.
-    """
-    started = time.perf_counter()
-    try:
-        return next(row_groups, None)
-    finally:
-        phases.read_s += time.perf_counter() - started
-
-
 def _workers(requested: int | None, thetas: int) -> int:
-    """Hilos del pool: lo pedido o, por defecto, `THREADS_PER_CORE` por vCPU efectivo
+    """Hilos del pool de E/S: lo pedido o, por defecto, `THREADS_PER_CORE` por vCPU efectivo
     (redondeado hacia arriba); nunca más que θ.
     """
     if requested is None:
@@ -312,8 +112,15 @@ def _workers(requested: int | None, thetas: int) -> int:
     return min(requested, thetas)
 
 
+def _engine_threads(requested: int | None) -> int:
+    """Hilos del motor: lo pedido o, por defecto, los vCPU efectivos (redondeado hacia arriba)."""
+    if requested is None:
+        requested = max(1, math.ceil(cpu_limit().cores))
+    return requested
+
+
 def theta_pool(threads: int) -> AbstractContextManager[ThreadPoolExecutor | None]:
-    """El pool de θ de `threads` hilos para un `with`, o `None` (todo en serie) con uno."""
+    """El pool de E/S de `threads` hilos para un `with`, o `None` (todo en serie) con uno."""
     if threads <= 1:
         return nullcontext()
     return ThreadPoolExecutor(threads, thread_name_prefix="l3-theta")
@@ -355,6 +162,109 @@ def _inconsistent(error: FrameBoundaryError, month: Month) -> L2StateInconsisten
     return result
 
 
+def _open_all[T: AbstractContextManager](
+    pool: ThreadPoolExecutor | None,
+    stack: ExitStack,
+    make: Callable[[str], T],
+    texts: Sequence[str],
+) -> list[T]:
+    """Abre `make(texto)` de cada θ en el pool y registra el `__exit__` de cada uno en
+    `stack`, para que se cierren con la excepción que los alcance.
+
+    `make` devuelve el objeto ya abierto. Si alguno falla, los que sí se abrieron se
+    cierran antes de relanzar el primer error.
+    """
+    opened: list[T] = []
+
+    def one(text: str) -> T:
+        item = make(text)
+        opened.append(item)
+        return item
+
+    try:
+        items = ordered(pool, one, texts)
+    except BaseException as error:
+        for item in reversed(opened):
+            item.__exit__(type(error), error, error.__traceback__)
+        raise
+    for item in items:
+        stack.push(item)
+    return items
+
+
+def _open_writer(l2_root: str, l3_root: str, key, month: Month, text: str):
+    """El `FamilyWriter` del θ, ya abierto (su temporal creado)."""
+    writer = FamilyWriter(
+        family_path(l3_root, key, text, month, FAMILY),
+        SUMMARIES_SCHEMA,
+        STATE_VERSION,
+        l2_path(l2_root, key, text, month),
+    )
+    try:
+        return writer.__enter__()
+    except BaseException as error:
+        writer.__exit__(type(error), error, error.__traceback__)
+        raise
+
+
+def _require_statistics(file: EventFile, name: str) -> tuple[int, int] | None:
+    """El rango de `name` del archivo, o `None` si no tiene filas; sin estadísticas falla."""
+    if not any(file.rows):
+        return None
+    found = file.id_range(name)
+    if found is None:
+        raise FramesInputError(
+            f"{file.path}: el archivo no trae estadísticas de {name}"
+        )
+    return found
+
+
+def _check(collector: Collector, sink: SealedWriters) -> None:
+    """Relanza el error de quien recoge o escribe lo sellado, si lo hubo."""
+    for error in (collector.error, sink.error):
+        if error is not None:
+            raise error
+
+
+def _push_all(
+    engine: dc_pyo3.Engine,
+    row_groups,
+    feeds: Sequence[native.BoundaryFeed],
+    collector: Collector,
+    sink: SealedWriters,
+    month: Month,
+    phases: Phases,
+) -> int:
+    """Empuja al motor los row groups de L1, cada uno con las fronteras que toca.
+
+    Un row group se pide al lector solo cuando hay menos de `inflight` en el motor y pocos
+    sellados sin escribir (contrapresión): el lector trae por delante a lo más `readers`,
+    así que en RAM hay a lo más `inflight + readers + 1` row groups de L1. `read_s` suma lo
+    que este hilo esperó al lector y a las fronteras de L2. Devuelve cuántos empujó.
+    """
+    limit = PENDING_PER_WRITER * phases.writers
+    source = iter(row_groups)
+    pushed = 0
+    while True:
+        while engine.inflight() >= phases.inflight or sink.pending >= limit:
+            _check(collector, sink)
+            time.sleep(POLL_S)
+        _check(collector, sink)
+        started = time.perf_counter()
+        rg = next(source, None)
+        if rg is not None:
+            high = rg.high
+            for feed in feeds:
+                feed.cover(high)
+        phases.read_s += time.perf_counter() - started
+        if rg is None:
+            return pushed
+        native.push(engine, pushed, rg.ids, rg.columns, rg.month < month)
+        del rg  # el motor retiene sus buffers hasta terminarlo
+        pushed += 1
+        phases.inflight_max = max(phases.inflight_max, engine.inflight())
+
+
 def summarize_month(
     l1_root: str | Path,
     l2_root: str | Path,
@@ -368,7 +278,10 @@ def summarize_month(
     asset: str = DEFAULT_KEY[2],
     phases: Phases | None = None,
     threads: int | None = None,
-    prefetch: int | None = None,
+    readers: int | None = None,
+    inflight: int | None = None,
+    writers: int | None = None,
+    engine_threads: int | None = None,
 ) -> dict[Decimal, ThetaResult]:
     """Escribe `summaries.parquet` del mes para cada θ y devuelve lo que dejó de cada uno.
 
@@ -376,21 +289,25 @@ def summarize_month(
     estar en meses anteriores de L1, que el lector relee. `series_start` es el primer mes
     de la serie: el único cuyo mes anterior no tiene carry-over de L2.
 
-    `threads` es el tamaño del pool que comprueba la entrada y agrega los θ de cada row
-    group (por defecto `THREADS_PER_CORE` × vCPU efectivos, nunca más que θ) y `prefetch`, cuántos row groups trae de ventaja el
-    lector (por defecto `DEFAULT_PREFETCH`; 0 lo deja en el hilo principal). Con `threads=1`
-    y `prefetch=0` el flujo es el secuencial; el resultado no depende de ellos.
+    Los hilos y los topes son del orquestador y no cambian el resultado: `threads` es el
+    pool de E/S (compuerta, apertura, lectura de L2, conciliación y publicación; por defecto
+    `THREADS_PER_CORE` × vCPU efectivos, nunca más que θ; con 1 no hay pool y esos pasos
+    van en serie), `readers` los row groups de L1 que se leen a la vez (R), `inflight` los
+    que pueden anclar sus ticks en el motor (K), `writers` los escritores (W) y
+    `engine_threads` los hilos del motor (por defecto los vCPU efectivos). Ver el módulo
+    para la cuenta de memoria.
 
-    Atómico por archivo: la unidad comprueba la entrada de L2, resume
-    todos los θ y concilia los ticks de cada uno antes de publicar el primero; un error
-    de entrada, de resumen o de conciliación (todos son `SummarizeError` o `FramesError`)
-    no deja ningún archivo y borra los temporales. Si la publicación misma falla en un θ
-    (por ejemplo, el `move` a GCS), los θ ya publicados quedan: re-ejecutar el mes los
-    reescribe con el mismo contenido.
+    Atómico por archivo: la unidad comprueba la entrada de L2, resume todos los θ y concilia
+    los ticks de cada uno antes de publicar el primero; un error de entrada, de resumen o de
+    conciliación (todos son `SummarizeError` o `FramesError`) no deja ningún archivo y borra
+    los temporales. Un error del motor en cualquier ítem se convierte en la misma excepción
+    tipada que lanzaba el resumidor de Python (`native.to_summarize_error`). Si la
+    publicación misma falla en un θ (por ejemplo, el `move` a GCS), los θ ya publicados
+    quedan: re-ejecutar el mes los reescribe con el mismo contenido.
 
-    Sin estado: todo lo que la unidad acumula (los `_Lane`, los tiempos) es suyo y muere
-    con ella. `phases`, si se pasa, recibe los segundos de la compuerta, la lectura, la
-    agregación, la escritura y la conciliación (ver `timing`).
+    Sin estado: todo lo que la unidad acumula (el motor, los escritores, los tiempos) es
+    suyo y muere con ella. `phases`, si se pasa, recibe los segundos de cada fase y la
+    configuración con que corrió (ver `timing`).
     """
     phases = phases if phases is not None else Phases()
     started = time.perf_counter()
@@ -404,14 +321,22 @@ def summarize_month(
             f"el mes {month_text(month)} es anterior al inicio de la serie "
             f"{month_text(series_start)}"
         )
-    if threads is not None and threads < 1:
-        raise ValueError(f"threads {threads} debe ser al menos 1")
-    if prefetch is not None and prefetch < 0:
-        raise ValueError(f"prefetch {prefetch} no puede ser negativo")
+    for name, value in (
+        ("threads", threads),
+        ("readers", readers),
+        ("inflight", inflight),
+        ("writers", writers),
+        ("engine_threads", engine_threads),
+    ):
+        if value is not None and value < 1:
+            raise ValueError(f"{name} {value} debe ser al menos 1")
     threads = _workers(threads, len(values))
-    prefetch = DEFAULT_PREFETCH if prefetch is None else prefetch
-    phases.threads, phases.prefetch = threads, prefetch
-    texts = {theta: f"{theta:.8f}" for theta in values}
+    phases.threads = threads
+    phases.readers = DEFAULT_READERS if readers is None else readers
+    phases.inflight = DEFAULT_INFLIGHT if inflight is None else inflight
+    phases.writers = DEFAULT_WRITERS if writers is None else writers
+    phases.engine_threads = _engine_threads(engine_threads)
+    texts = [f"{theta:.8f}" for theta in values]
 
     # Compuerta de entrada (§9.2), antes de abrir ningún escritor: los θ se comprueban en
     # el pool y, si alguno falla, se lanza el primero en el orden de `texts`.
@@ -419,74 +344,130 @@ def summarize_month(
         gated = ordered(
             pool,
             lambda text: _gate_theta(l2_root, key, month, series_start, text),
-            texts.values(),
+            texts,
         )
-    carries = dict(zip(texts, gated, strict=True))
     phases.gate_s += time.perf_counter() - started
 
+    began = time.perf_counter()
     with ExitStack() as stack:
-        lanes: dict[Decimal, _Lane] = {}
-        for theta, text in texts.items():
-            writer = FamilyWriter(
-                family_path(l3_root, key, text, month, FAMILY),
-                SUMMARIES_SCHEMA,
-                STATE_VERSION,
+        pool = stack.enter_context(theta_pool(threads))
+        # Abrir los 50 escritores (cada uno lee el pie de su esqueleto) y los 50 archivos
+        # de L2 en el pool, no uno tras otro. El orden de entrada es el inverso del cierre:
+        # lo último que se abre (hilos, motor) se cierra primero.
+        files = _open_all(
+            pool,
+            stack,
+            lambda text: EventFile(
                 l2_path(l2_root, key, text, month),
-            )
-            stack.enter_context(writer)
-            lanes[theta] = _Lane(theta, text, month, writer, *carries[theta])
-        l1 = stack.enter_context(closing(L1Month(l1_root, key, month)))
-        row_groups = stack.enter_context(
-            closing(
-                read_row_groups(
-                    values,
-                    l1_root,
-                    l2_root,
-                    month,
-                    month,
-                    *key,
-                    columns=EVENT_COLUMNS,
-                )
-            )
+                f"L2 del θ {text} en {month_text(month)}",
+                EVENT_COLUMNS,
+            ),
+            texts,
         )
-        try:
-            # Los hilos viven solo durante el recorrido: al salir (también por un error)
-            # el pool termina sus tareas y el lector suelta lo que traía.
-            with ExitStack() as workers:
-                source = (
-                    workers.enter_context(_ReadAhead(row_groups, prefetch))
-                    if prefetch
-                    else row_groups
-                )
-                pool = workers.enter_context(theta_pool(threads))
-                while (rg := _timed_next(source, phases)) is not None:
-                    _consume(rg, lanes, pool, phases)
-                    del rg  # el siguiente row group no convive con este
-        except FrameBoundaryError as error:
-            raise _inconsistent(error, month) from error
-        phases.aggregate_s += sum(lane.aggregate_s for lane in lanes.values())
+        family = _open_all(
+            pool,
+            stack,
+            lambda text: _open_writer(l2_root, l3_root, key, month, text),
+            texts,
+        )
+        l1 = stack.enter_context(closing(L1Month(l1_root, key, month)))
+        engine = native.new_engine(
+            values, [w.row_groups for w in family], phases.engine_threads
+        )
+        stack.callback(engine.close)
+
+        # Dónde empiezan y terminan los eventos de todos los θ, con las estadísticas del
+        # pie de L2 (sin leer datos): el primer row group de L1 que se lee es el que
+        # contiene la primera referencia y el último, el que contiene el último extremo.
+        for file in files:
+            check_types(file)
+        references = [_require_statistics(f, "reference_agg_trade_id") for f in files]
+        extremes = [_require_statistics(f, "extreme_agg_trade_id") for f in files]
+        streams = [BatchStream(file, pool, phases.read) for file in files]
+        for stream in reversed(streams):
+            stack.callback(stream.close)
+        feeds = [
+            native.BoundaryFeed(engine, position, stream, phases.retained)
+            for position, stream in enumerate(streams)
+        ]
+        sink = SealedWriters(
+            stack.enter_context(
+                ThreadPoolExecutor(phases.writers, thread_name_prefix="l3-write")
+            ),
+            family,
+            values,
+            texts,
+            month,
+            phases.write,
+        )
+        stack.callback(sink.stop)
+        collector = stack.enter_context(Collector(engine, sink))
+        phases.setup_s += time.perf_counter() - began
 
         begun = time.perf_counter()
-        reconciled = {
-            theta: reconcile(
+        try:
+            if any(references):
+                first = min(r[0] for r in references if r)
+                last = max(e[1] for e in extremes if e)
+                row_groups = stack.enter_context(
+                    closing(
+                        L1(l1_root, key).row_groups(
+                            month,
+                            month,
+                            first,
+                            lambda low, high: high >= first and low <= last,
+                            readers=phases.readers,
+                        )
+                    )
+                )
+                pushed = _push_all(
+                    engine, row_groups, feeds, collector, sink, month, phases
+                )
+                phases.items = pushed * sum(1 for f in files if any(f.rows))
+            stats = engine.finish()
+            phases.aggregate_s += time.perf_counter() - begun
+            phases.engine_busy = engine.busy()
+            collector.stop()
+            _check(collector, sink)
+            sink.join()
+        except dc_pyo3.DescriptorError as error:
+            converted = native.to_summarize_error(error, texts, month)
+            if converted is error:
+                raise
+            raise converted from error
+
+        begun = time.perf_counter()
+        reconciled = ordered(
+            pool,
+            lambda i: reconcile(
                 l1,
-                theta=lane.text,
+                theta=texts[i],
                 month=month,
-                closed=lane.closed_ticks,
-                before_month=lane.before_month,
-                last_extreme=lane.last_extreme,
-                first_reference=lane.first_reference,
-                previous_direction=lane.previous_direction,
-                carry=lane.carry,
-            )
-            for theta, lane in lanes.items()
-        }
+                closed=stats[i][1],
+                before_month=stats[i][2],
+                last_extreme=stats[i][4],
+                first_reference=stats[i][3],
+                previous_direction=gated[i][1],
+                carry=gated[i][0],
+            ),
+            range(len(values)),
+        )
         phases.reconcile_s += time.perf_counter() - begun
-        results = {}
-        for theta, lane in lanes.items():
-            digest = lane.commit()
-            results[theta] = ThetaResult(
-                lane.writer.path, lane.rows, digest, reconciled[theta]
-            )
-        phases.write_s += sum(lane.write_s for lane in lanes.values())
-    return results
+
+        begun = time.perf_counter()
+        digests = ordered(
+            pool, lambda i: _commit(family[i], texts[i], month), range(len(values))
+        )
+        phases.publish_s += time.perf_counter() - begun
+        return {
+            theta: ThetaResult(family[i].path, stats[i][0], digests[i], reconciled[i])
+            for i, theta in enumerate(values)
+        }
+
+
+def _commit(writer: FamilyWriter, text: str, month: Month) -> str:
+    """Publica el archivo del θ y devuelve su `content_hash`."""
+    try:
+        return writer.commit()
+    except FamilySkeletonMismatch as error:
+        raise SkeletonMismatch(text, month, FAMILY, error.detail) from error

@@ -6,13 +6,13 @@ el límite efectivo de CPU. Todo se acumula en objetos que crea la unidad (`Phas
 `RowGroupCount`) y que mueren con ella: ningún módulo guarda cuentas, así que dos
 unidades en el mismo proceso, en hilos o tareas distintas, no se pisan.
 
-`gate_s` y `lineage_s` son la pared de su fase: lo que el hilo principal esperó mientras el
-pool comprobaba la entrada de L2 o hasheaba sus archivos (ITSC-360); `reconcile_s` es pared
-de un solo hilo. `read_s` es lo que el hilo principal esperó al lector (con lectura
-anticipada, solo lo que faltó de la espera). `aggregate_s` y `write_s` son **suma sobre los hilos**: cada θ cuenta lo que
-gastó agregando y escribiendo, así que con `threads > 1` pueden pasar de `wall_s` (hasta
-`threads × wall_s`) y `other_s`, que es lo que falta hasta la pared, queda en 0 como
-mínimo. Con `threads = 1` y `prefetch = 0` son pared y suman a lo más `wall_s`.
+Todas las fases son **pared**, no suma sobre hilos (ITSC-363): `gate_s`, `setup_s`,
+`reconcile_s`, `publish_s` y `lineage_s` son tramos seguidos del hilo principal;
+`aggregate_s` es la pared del motor, del primer `push` a que el último ítem termina;
+`write_s`, la pared con algún escritor ocupado (la unión de sus intervalos), y
+`read_wall_s`, la pared con alguna lectura de L1 o L2 en vuelo. `write_s` y `read_wall_s`
+corren dentro de `aggregate_s`, no a su lado: `other_s` es lo que falta hasta `wall_s` de
+las fases del hilo principal. `read_s` es lo que el hilo principal esperó a las lecturas.
 
 **El gancho de row groups.** Contar las decodificaciones de L1 exige mirar los
 `read_row_group` del lector, que abre sus archivos con `dc_frames.lake.open_parquet`
@@ -26,6 +26,9 @@ lector.
 
 import resource
 import sys
+import threading
+import time
+import weakref
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -39,31 +42,144 @@ from l3_dc_descriptors.cpu import CpuLimit
 MIB = 1 << 20
 
 
+class BusyClock:
+    """Segundos con al menos una operación en curso: la pared de una fase concurrente.
+
+    `busy()` marca una operación; con varias a la vez los intervalos se unen, así que el
+    total no pasa de la pared aunque haya muchos hilos. Es seguro entre hilos.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._active = 0
+        self._since = 0.0
+        self._seconds = 0.0
+
+    @contextmanager
+    def busy(self) -> Iterator[None]:
+        with self._lock:
+            if self._active == 0:
+                self._since = time.perf_counter()
+            self._active += 1
+        try:
+            yield
+        finally:
+            with self._lock:
+                self._active -= 1
+                if self._active == 0:
+                    self._seconds += time.perf_counter() - self._since
+
+    @property
+    def seconds(self) -> float:
+        with self._lock:
+            open_for = time.perf_counter() - self._since if self._active else 0.0
+            return self._seconds + open_for
+
+
+class ReadMeter:
+    """Lo que la unidad leyó de L1 y L2: bytes comprimidos y la pared de las lecturas.
+
+    Cada lectura (`reading()`) corre dentro de su hilo, también de L1 por el gancho de
+    `count_row_groups`; la pared es la unión de sus intervalos (`BusyClock`), lectura y
+    decodificación juntas, que es lo que Arrow hace en una llamada.
+    """
+
+    def __init__(self) -> None:
+        self.clock = BusyClock()
+        self._lock = threading.Lock()
+        self._bytes = 0
+
+    def reading(self):
+        return self.clock.busy()
+
+    def add(self, size: int) -> None:
+        with self._lock:
+            self._bytes += size
+
+    @property
+    def bytes(self) -> int:
+        with self._lock:
+            return self._bytes
+
+
+class Retained:
+    """Bytes de fronteras de L2 que el motor tiene en mano, con su máximo.
+
+    `hold(size, anchor)` anota un lote que se entregó al motor; cuando `anchor` (el buffer
+    de Arrow que el motor ancla) se libera, el lote deja de contar. Mide lo que el motor de
+    verdad retiene, que es de lotes enteros, no una cuenta de eventos (ITSC-363). Es seguro
+    entre hilos: el motor suelta los lotes desde sus propios hilos.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._current = 0
+        self.peak = 0
+
+    def hold(self, size: int, anchor: object) -> None:
+        with self._lock:
+            self._current += size
+            self.peak = max(self.peak, self._current)
+        weakref.finalize(anchor, self._release, size)
+
+    def _release(self, size: int) -> None:
+        with self._lock:
+            self._current -= size
+
+    @property
+    def current(self) -> int:
+        with self._lock:
+            return self._current
+
+
 class Phases:
-    """Segundos de cada fase de la unidad y los hilos que usó. Los llena la unidad (hilo
-    principal) con lo que cada θ (`_Lane`) contó en su propio contador, sin compartirlo.
+    """Segundos de cada fase de la unidad y la configuración con que corrió. El hilo
+    principal llena las fases; los relojes (`read`, `write`) los comparten los hilos de
+    lectura y de escritura.
     """
 
     __slots__ = (
         "aggregate_s",
+        "engine_busy",
+        "engine_threads",
         "gate_s",
+        "inflight",
+        "inflight_max",
+        "items",
         "lineage_s",
-        "prefetch",
+        "publish_s",
+        "read",
         "read_s",
+        "readers",
         "reconcile_s",
+        "retained",
+        "setup_s",
         "threads",
+        "write",
         "write_s",
+        "writers",
     )
 
     def __init__(self) -> None:
         self.threads = 1
-        self.prefetch = 0
+        self.readers = 1
+        self.inflight = 1
+        self.writers = 1
+        self.engine_threads = 1
+        self.inflight_max = 0
+        self.items = 0
+        self.engine_busy = 0.0
         self.gate_s = 0.0
+        self.setup_s = 0.0
         self.read_s = 0.0
         self.aggregate_s = 0.0
         self.write_s = 0.0
+        self.publish_s = 0.0
         self.reconcile_s = 0.0
         self.lineage_s = 0.0
+        self.read = ReadMeter()
+        self.write = BusyClock()
+        self.retained = Retained()
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,21 +217,27 @@ class RowGroupCount:
     repeated: int = 0
     bytes_in: int = 0
     month_total: int = 0
+    meter: ReadMeter | None = None
     _seen: set[tuple[str, int]] = field(default_factory=set, repr=False)
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def opened(self, path: str, row_groups: int) -> None:
         if path == self.month_path:
             self.month_total = row_groups
 
     def decoded(self, path: str, index: int, size: int) -> None:
-        if path == self.month_path:
-            self.month += 1
-        else:
-            self.previous += 1
-        if (path, index) in self._seen:
-            self.repeated += 1
-        self._seen.add((path, index))
-        self.bytes_in += size
+        # Los lectores de L1 corren en hilos: las cuentas se actualizan bajo un candado.
+        with self._lock:
+            if path == self.month_path:
+                self.month += 1
+            else:
+                self.previous += 1
+            if (path, index) in self._seen:
+                self.repeated += 1
+            self._seen.add((path, index))
+            self.bytes_in += size
+        if self.meter is not None:
+            self.meter.add(size)
 
 
 _COUNT: ContextVar[RowGroupCount | None] = ContextVar("l3_row_groups", default=None)
@@ -151,7 +273,11 @@ def _open_counting(
     read = parquet.read_row_group
 
     def read_row_group(i, columns=None, **kwargs):
-        table = read(i, columns=columns, **kwargs)
+        if count.meter is None:
+            table = read(i, columns=columns, **kwargs)
+        else:
+            with count.meter.reading():
+                table = read(i, columns=columns, **kwargs)
         count.decoded(path, i, _compressed(parquet, i, columns))
         return table
 
@@ -240,9 +366,9 @@ class Timing:
         p = self.phases
         explained = (
             p.gate_s
-            + p.read_s
+            + p.setup_s
             + p.aggregate_s
-            + p.write_s
+            + p.publish_s
             + p.reconcile_s
             + p.lineage_s
         )
@@ -251,23 +377,32 @@ class Timing:
     def details(self) -> dict:
         """El payload del hallazgo `unit_timing` (segundos con ms de resolución).
 
-        `read_s` es lectura y decodificación, lo que el hilo principal esperó al lector por
-        cada row group (con `prefetch > 0`, solo lo que el lector no alcanzó a traer
-        mientras se procesaba el anterior); `aggregate_s`, la agregación de los θ, y
-        `write_s`, armar y escribir los row groups de salida y publicar, ambos sumados
-        sobre los hilos (pueden pasar de `wall_s`); `reconcile_s`, §9.1; `lineage_s`, el
-        hash de las entradas de L2; `gate_s`, la compuerta de entrada. `threads` y
-        `prefetch` son los hilos del pool de θ y los row groups de ventaja del lector que
-        usó la unidad. `cpu_user_s` y `cpu_system_s` son la CPU del proceso (todos sus
-        hilos) durante la unidad y `cpu_utilization`, `cpu_s / (wall_s × cores)`.
+        Todas las fases son pared (ver el módulo). `gate_s`, la compuerta de entrada;
+        `setup_s`, abrir escritores, L2 y el motor; `aggregate_s`, la pared del motor, del
+        primer row group a que termina el último ítem (incluye lo que espera por las
+        lecturas y por la contrapresión); `write_s`, la pared con algún escritor ocupado;
+        `publish_s`, publicar los archivos; `reconcile_s`, §9.1; `lineage_s`, el hash de las
+        entradas de L2. `read_s` es lo que el hilo principal esperó a las lecturas y
+        `read_wall_s`, la pared con alguna lectura de L1 o L2 en vuelo (lectura y
+        decodificación); `read_bytes`, los bytes comprimidos que leyó de las dos. `threads`
+        es el pool de E/S (compuerta, L2 y linaje); `engine_threads`, los hilos del motor;
+        `readers`, los row groups de L1 que se leen a la vez; `inflight`, el tope de row
+        groups empujados al motor que aún anclan sus ticks e `inflight_max`, el máximo que
+        hubo; `boundaries_peak_mib`, el máximo de fronteras de L2 que el motor tuvo en mano; `writers`, los escritores; `engine_busy`, la fracción del tiempo del bucle
+        con ítems en la cola del motor; `items`, los ítems `(row group, θ)` que corrió.
+        `cpu_user_s` y `cpu_system_s` son la CPU del proceso (todos sus hilos) durante la
+        unidad y `cpu_utilization`, `cpu_s / (wall_s × cores)`.
         """
         p = self.phases
         seconds = {
             "wall_s": self.wall_s,
             "gate_s": p.gate_s,
+            "setup_s": p.setup_s,
             "read_s": p.read_s,
+            "read_wall_s": p.read.clock.seconds,
             "aggregate_s": p.aggregate_s,
-            "write_s": p.write_s,
+            "write_s": p.write.seconds,
+            "publish_s": p.publish_s,
             "reconcile_s": p.reconcile_s,
             "lineage_s": p.lineage_s,
             "other_s": self.other_s,
@@ -277,7 +412,15 @@ class Timing:
         return {
             **{name: round(value, 3) for name, value in seconds.items()},
             "threads": p.threads,
-            "prefetch": p.prefetch,
+            "engine_threads": p.engine_threads,
+            "readers": p.readers,
+            "inflight": p.inflight,
+            "inflight_max": p.inflight_max,
+            "writers": p.writers,
+            "engine_busy": round(p.engine_busy, 3),
+            "items": p.items,
+            "read_bytes": p.read.bytes,
+            "boundaries_peak_mib": round(p.retained.peak / MIB, 1),
             "rss_peak_mib": round(self.rss_peak_bytes / MIB, 1),
             "rss_peak_scope": self.rss_scope,
             "row_groups_month": counts.month,

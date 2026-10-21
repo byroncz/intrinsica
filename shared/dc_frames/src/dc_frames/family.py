@@ -9,6 +9,7 @@ coincide, aborta con `FamilySkeletonMismatch` (`family_skeleton_mismatch`) sin p
 """
 
 import re
+from contextlib import closing
 from pathlib import Path
 from types import TracebackType
 from typing import Self
@@ -18,7 +19,7 @@ import pyarrow as pa
 import pyarrow.compute as pc
 from pyutils import ContentHasher, PartitionWriter
 
-from dc_frames.lake import Month, check_columns, open_parquet, partition_path
+from dc_frames.lake import Month, ParquetSource, check_columns, partition_path
 from dc_frames.types import FamilySkeletonMismatch, FramesInputError
 
 KEYS = ("theta", "confirm_agg_trade_id")
@@ -77,14 +78,14 @@ class FamilyWriter:
         _require_keys(schema)
         self.path = path
         self.skeleton_path = skeleton_path
-        self._skeleton = open_parquet(skeleton_path, "el esqueleto de la familia")
+        self._skeleton = ParquetSource(skeleton_path, "el esqueleto de la familia")
         try:
             check_columns(
-                self._skeleton.schema_arrow,
+                self._skeleton.schema,
                 {"confirm_agg_trade_id": pa.int64()},
                 skeleton_path,
             )
-            if "theta" not in self._skeleton.schema_arrow.names:
+            if "theta" not in self._skeleton.schema.names:
                 raise FramesInputError(f"{skeleton_path}: falta la columna 'theta'")
             meta = self._skeleton.metadata
             # Los row groups vacíos no se escriben: no hay fila que ponerles.
@@ -185,7 +186,10 @@ class FamilyWriter:
         self._last_id = int(ids[-1])
 
     def _check_keys(self, batch: pa.RecordBatch, n: int, index: int) -> None:
-        wanted = self._skeleton.read_row_group(index, columns=list(KEYS))
+        # Un lector de vida corta con `pre_buffer` sobre el archivo ya abierto: las dos
+        # columnas viajan juntas, sin abrir el archivo de nuevo en cada row group.
+        with closing(self._skeleton.reader()) as reader:
+            wanted = reader.read_row_group(index, columns=list(KEYS))
         for name in KEYS:
             same = pc.equal(batch.column(name), wanted.column(name).combine_chunks())
             # Una clave nula compara a null: sin `fill_null` pasaría la comprobación.

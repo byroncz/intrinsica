@@ -33,13 +33,14 @@ que ningún θ necesita se salta sin leer L1.
 | `--asset` | Activo; por defecto `BTCUSDT` |
 
 Entorno: `L3_LANDING_ROOT` (L1), `L3_EVENTS_ROOT` (L2), `L3_SUMMARIES_ROOT` (L3) y
-`L3_DQ_ROOT` (lago de hallazgos), además de `L3_SERIES_START` y `L3_THETAS_URI`. Opcionales:
-`L3_THREADS` (hilos del pool de θ; por defecto `ceil(3 × vCPU efectivos)`, nunca más que θ: 12 a
-4 vCPU y 24 a 8; entero ≥ 1), `L3_PREFETCH` (row groups que el lector trae de ventaja; por defecto 2,
-0 lo apaga; entero ≥ 0) y `L3_PROFILE=1`. El stack `l3` no fija ninguna de las dos, así que el valor
-sigue a los vCPU del job; para sobrescribirlas en una corrida, ver el
-[runbook](../../docs/runbooks/operacion-l3.md#hilos-de-la-unidad-l3_threads-y-l3_prefetch). Un valor que no sea un entero válido es código 2.
-`CLOUD_RUN_TASK_INDEX` distinto de 0 es código 2. `IMAGE_VERSION` la fija la imagen.
+`L3_DQ_ROOT` (lago de hallazgos), además de `L3_SERIES_START` y `L3_THETAS_URI`. Opcionales,
+enteros ≥ 1 (otro valor es código 2): `L3_READERS` (lectores de L1, R; por defecto 2),
+`L3_INFLIGHT` (row groups en el motor, K; 4), `L3_WRITERS` (escritores, W; 4),
+`L3_ENGINE_THREADS` (hilos del motor; por defecto los vCPU efectivos) y `L3_THREADS` (pool de
+E/S; por defecto `ceil(3 × vCPU)`, nunca más que θ), más `L3_PROFILE=1`. El stack `l3` no fija
+ninguna, así que los valores siguen a los vCPU del job; para sobrescribirlas en una corrida, ver el
+[runbook](../../docs/runbooks/operacion-l3.md#hilos-y-topes-de-la-unidad-l3_readers-l3_inflight-l3_writers-l3_engine_threads-y-l3_threads).
+`L3_PREFETCH` ya no existe (ITSC-363). `CLOUD_RUN_TASK_INDEX` distinto de 0 es código 2. `IMAGE_VERSION` la fija la imagen.
 
 **Códigos de salida** ([§8.4](../../docs/TRD/l3.md#84-códigos-de-salida)): 0 éxito; 1 fallo
 de la unidad (entrada de L1 o L2 ausente, L2 incoherente, esqueleto, conciliación) o `monthly`
@@ -58,7 +59,11 @@ que no llegó al mes previo (`l3_frontier`) o al que L2 no le ha llegado (`l2_mi
 [`docs/data-contracts.md`](../../docs/data-contracts.md). Cada excepción tipada del núcleo
 (tabla de abajo) se traduce a su hallazgo con los `details` que ya trae. `unit_timing` lleva lo
 que necesita la medición del umbral 3 de [§10.3](../../docs/TRD/l3.md#103-sonda-del-lector-de-tramas--umbrales-de-aceptación-se-escriben-antes-de-medir):
-pared total y por fase (`read_s` lectura y decodificación, `aggregate_s`, `write_s`),
+pared total y por fase (todas son pared: `gate_s`, `setup_s`, `aggregate_s` del motor, `publish_s`,
+`reconcile_s`, `lineage_s`; `read_s` es lo que el hilo principal esperó a las lecturas y
+`read_wall_s` y `write_s` la pared con alguna lectura o algún escritor ocupado), la configuración
+(`threads`, `engine_threads`, `readers`, `inflight`, `writers`), lo que hizo el motor
+(`inflight_max`, `engine_busy`, `items`), `read_bytes`, `boundaries_peak_mib`,
 `rss_peak_mib` (`VmHWM`, reiniciado al empezar la unidad), `row_groups_month` y
 `row_groups_previous` (decodificaciones de L1 del mes y de meses anteriores, contadas con un
 gancho sobre `dc_frames.lake.open_parquet` como hace la sonda de `ops_tools`),
@@ -68,70 +73,88 @@ CPU y la CPU que consumió la unidad (`cpu_user_s`, `cpu_system_s`, `cpu_s` y
 hallazgo `unit_profile` (las 40 funciones más caras por tiempo propio y acumulado); sin la
 variable no cambia nada. Cómo lanzarlo: [runbook](../../docs/runbooks/operacion-l3.md#perfilar-una-unidad).
 
-## Hilos dentro de la unidad
+## Orquestador sobre el motor nativo (ITSC-363)
 
-La CLI procesa los meses en serie, pero cada mes usa hilos (ADR-L3-15, [TRD-L3 §8.1](../../docs/TRD/l3.md#81-núcleo-del-resumidor-común-a-los-dos-modos)):
-un hilo lector trae y decodifica el siguiente row group mientras se procesa el actual
-(`L3_PREFETCH`) y un pool de `L3_THREADS` hilos reparte los θ de cada row group, cada uno
-escribiendo su archivo. El mismo pool hace la compuerta de entrada de L2 antes de abrir ningún escritor y,
-después del último row group, un pool del mismo tamaño hashea los archivos de L2 del linaje; ambos
-conservan el orden de los θ y el primer error. El hilo principal espera los θ del row group antes de tomar el siguiente,
-así que cada θ corre en un solo hilo a la vez y en orden. Con `L3_THREADS=1` y `L3_PREFETCH=0` el
-flujo es el secuencial de antes y el resultado es idéntico en cualquier combinación
-(`tests/test_l3_parallel.py`). Qué sostiene esto:
+La CLI procesa los meses en serie y `summarize_month` es el **orquestador** de cada mes
+([ADR-L3-16](../../docs/TRD/l3.md), [TRD-L3 §8.1](../../docs/TRD/l3.md#81-núcleo-del-resumidor-común-a-los-dos-modos)):
+Python lee, escribe y mide; **no calcula**. La aritmética, las posiciones de las fronteras y los
+invariantes de §7.2 viven en el motor de Rust (`shared/dc_descriptors`, `dc_pyo3.Engine`), que
+tiene sus propios hilos. Python orquesta, Arrow transporta, Rust calcula.
 
+```text
+ L2 (50 events.parquet) ─ pool de E/S ─► BoundaryFeed ─┐ fronteras, por delante de cada row group
+ L1 (consolidated) ─ L1.row_groups(readers = R) ─► push ┤
+                                                        ▼
+                                          motor nativo (hilos, ítems (row group, θ))
+                                                        │ pop_sealed
+                                      Collector ────────┴─► SealedWriters (W hilos, cola por θ)
+                                                                  ▼
+                                                      FamilyWriter de cada θ ─► commit
+```
+
+| Módulo | Qué hace |
+|---|---|
+| `summarize.py` | `summarize_month`: la compuerta, la apertura, el bucle de `push` con contrapresión, `finish`, la conciliación y la publicación |
+| `boundaries.py` | `BatchStream`: los lotes de eventos de L2 de un θ, dos por delante, leídos en el pool de E/S |
+| `outputs.py` | `Collector` (vacía `pop_sealed`) y `SealedWriters` (pool de W escritores con una cola por θ y su «siguiente esperado») |
+| `native.py` | El adaptador del motor: `BoundaryFeed`, `push`, `to_batch`, `to_summarize_error` |
+| `timing.py` | `Phases`, `BusyClock` (pared de una fase concurrente), `ReadMeter`, `Retained` |
+
+Qué sostiene la corrida:
+
+- **Cuatro topes, no cuatro colas sin fondo.** R lectores de L1 traen row groups por delante; el
+  orquestador no pide el siguiente mientras el motor tenga K en vuelo (`engine.inflight()`) ni
+  haya `8 × W` row groups sellados sin escribir. En RAM hay a lo más `K + R + 1` row groups de L1
+  (≈ 48 MB cada uno), las fronteras de L2 de los eventos de esos row groups, los buffers de salida
+  abiertos y los sellados por escribir.
+- **Las fronteras de L2 van por delante, y no más.** Antes de cada `push`, `cover(high)` entrega
+  lotes hasta que el último evento entregado empieza después del último id del row group (lo que
+  `Engine.push` exige). Cada θ abre su `events.parquet` una vez (`dc_frames.lake.EventFile`) y lo lee
+  por tramos de ≈ 8 MiB comprimidos en pocas peticiones, no una por row group.
+- **Cada θ escribe en orden.** El motor ya entrega cada θ en orden de row group de salida; la cola
+  de `SealedWriters` lo garantiza aunque llegaran al revés y nunca atiende a dos escritores del
+  mismo θ a la vez, porque el escritor de familias no lo admite.
 - **Sin estado global.** Ningún módulo guarda un contenedor mutable ni usa `global`
-  (`tests/test_l3_parallel.py` lo comprueba). El trabajo por θ sobre un row group,
-  `_Lane.add(Prefixes, ThetaEvents)`, solo lee sus argumentos y escribe en su propio `_Lane`
-  (su agregador, su escritor, su buffer de salida y sus cuentas); `Prefixes` se calcula una vez
-  por row group y es de solo lectura.
-- **La unidad por mes es una función sin estado entre meses.** `pipeline.process_unit(unit, ctx,
-  thetas)` recibe datos inmutables (`Unit`, `RunContext`) y devuelve un `Result` con sus
-  hallazgos y tiempos; la CLI los emite al volver. Se puede invocar desde otra tarea o hilo.
-- **Hallazgos y tiempos por unidad.** `Phases`, `RowGroupCount` y `Timing` los crea la unidad.
-  El único punto de proceso es el gancho de `open_parquet`: se instala una vez, delega en el
-  original y cuenta en un `ContextVar`, así que dos unidades en hilos distintos no se mezclan.
-- **Prueba.** `summarize_month` con 1, 2 y 4 hilos y 0, 1 y 2 de prefetch da exactamente la misma
-  tabla y el mismo `content_hash` que la referencia secuencial sobre el fixture. No mide velocidad.
-- **Qué mide `unit_timing` con hilos.** `threads` y `prefetch` dicen lo usado. `read_s` es lo que el
-  hilo principal esperó al lector; `aggregate_s` y `write_s` son **suma sobre los hilos** y pueden
-  pasar de `wall_s`. El perfil (`L3_PROFILE=1`) ve las llamadas de todos los hilos (Python ≥ 3.12,
-  `sys.monitoring`): sus tiempos son de hilo, no de pared.
-
-**Límite conocido para los hilos.** Los tramos pesados están en NumPy y Arrow, que sueltan
-el GIL: los prefijos y las diferencias de `Segments`, `reduceat`, la decodificación de Parquet, la
-codificación ZSTD, la subida y el hash del escritor. Lo que queda en Python puro y lo retiene: la
-**recomposición de `Σ price·quantity`** en entero de Python por segmento (`_vwaps` y
-`Segments.words.tolist()`), el **VWAP** (`divide_half_even`), el control de flujo y, solo si una
-comprobación del lote falla, el camino por evento de `build_row`. Ese tramo crece con los eventos
-(≈ 5,7 µs de los 24,9 µs por evento) y los hilos no lo aceleran: por Amdahl, con ≈ 23 % serial el
-techo es 4,3× y a 4 vCPU se espera 1,5× a 2,5×. Lo que los hilos sí esconden es la espera: T1
-(ITSC-356, 2021-01) midió que la unidad esperaba el 62 % de su pared (`cpu_utilization` 0,092), en
-lecturas de PyArrow y escritura que sueltan el GIL. Lo medido con hilos (corrida T3) está en
-[TRD-L3 §10.2](../../docs/TRD/l3.md#102-dimensionamiento--hipótesis-de-partida-y-primera-medición). Lo ataca el
-motor nativo (ITSC-358, ADR-L3-16; ver abajo) y no los procesos: la data no se replica. Dos cosas más que no son por unidad en un proceso con meses en
-paralelo: `rss_peak_mib` y `cpu_throttled_s` son del proceso.
+  (`tests/test_l3_parallel.py` lo comprueba). `pipeline.process_unit(unit, ctx, thetas)` recibe
+  datos inmutables (`Unit`, `RunContext`) y devuelve un `Result`; `Phases`, `RowGroupCount` y
+  `Timing` los crea la unidad. El único punto de proceso es el gancho de `open_parquet`: se
+  instala una vez, delega en el original y cuenta en un `ContextVar`.
+- **Errores.** Un error del motor (`DescriptorError`), de un escritor o de la lectura aborta la
+  unidad sin publicar; los hilos terminan antes de que se cierren los escritores y se borren los
+  temporales. El motor valida solo los ticks que alguna fase toca: una cantidad negativa que
+  ninguna fase toca (p. ej. el primer tick del mes) lo acepta, la referencia de Python la
+  rechazaba (TRD-L3, ADR-L3-16, costo asumido 3).
+- **Pruebas.** `tests/test_l3_parallel.py`: las 24 combinaciones de hilos del motor (1, 2, 4),
+  lectores (1, 2), row groups en vuelo (1, 4) y escritores (1, 4), con las fronteras en un lote o
+  en lotes de 3 eventos, dan exactamente la tabla, el `content_hash` y la conciliación de la
+  referencia de Python (`tests/pyref.py`); más un lago con row groups de L1 repartidos a mano, la
+  cola por θ, la contrapresión y los errores. No mide velocidad.
+- **Qué mide `unit_timing`.** Todas las fases son pared. `engine_busy` es la fracción del tiempo
+  con ítems en la cola del motor; si `cpu_utilization` no llega a 0,95, se explica con ella, con
+  `read_s` y con `write_s` ([runbook](../../docs/runbooks/operacion-l3.md)). El perfil
+  (`L3_PROFILE=1`) ve las llamadas de todos los hilos de Python (≥ 3.12, `sys.monitoring`), no las
+  del motor: sus tiempos son de hilo, no de pared.
 
 ## Motor nativo de agregación (ITSC-358)
 
-`native.py` adapta el motor de Rust (`shared/dc_descriptors`, expuesto por `dc_pyo3.Engine`) a
-lo que entrega el lector: `push_boundaries` entrega por lotes las columnas de L2 de los eventos
-de cada θ (Arrow, sin copia; el índice de un evento es su casilla) y `BoundaryFeed` los entrega
-por delante del row group que los toca, y no más (el motor suelta cada lote al cerrarse sus
-eventos), `push` empuja los buffers de
-Arrow de cada row group sin copia, con la columna `agg_trade_id`, y el motor calcula él mismo
-dónde cae cada frontera (ADR-L3-16), `to_batch` envuelve en Arrow los row groups de salida que el motor sella y
-`to_summarize_error` convierte sus errores en las excepciones tipadas de `errors`, con el
-mismo `check_type` y los mismos `details`. **Todavía no está en el flujo de `summarize_month`**:
-lo conecta el orquestador (hija 3 de E6). Mientras tanto, `rowgroup.py` es la referencia contra
-la que `tests/test_l3_native.py` comprueba que el motor, con 1 y 4 hilos, en cualquier orden
-de `push` y con las fronteras en lotes de pocos eventos intercalados con los `push`, da las
-mismas tablas, el mismo `content_hash` y la misma conciliación, y
-`tests/test_l3_native_memory.py` que la RSS que el motor añade no crece con los ticks del mes.
-`test_l3_native.py` comprueba también que el motor suelta un lote de fronteras al cerrarse sus
-eventos, y compara además las posiciones del motor con las de
-`read_row_groups`, row group a row group. El diseño y por qué
-es nativo están en [TRD-L3 ADR-L3-16](../../docs/TRD/l3.md).
+`native.py` adapta el motor de Rust (`shared/dc_descriptors`, expuesto por `dc_pyo3.Engine`):
+`push_boundaries` entrega por lotes las columnas de L2 de los eventos de cada θ (Arrow, sin copia;
+el índice de un evento es su casilla) y `BoundaryFeed` los entrega por delante del row group que los
+toca, y no más (el motor suelta cada lote al cerrarse sus eventos); `push` empuja los buffers de
+Arrow de cada row group sin copia, con la columna `agg_trade_id`, y el motor calcula él mismo dónde
+cae cada frontera (ADR-L3-16); `to_batch` envuelve en Arrow los row groups de salida que el motor
+sella y `to_summarize_error` convierte sus errores en las excepciones tipadas de `errors`, con el
+mismo `check_type` y los mismos `details` (un evento que queda sin cerrar al terminar L1 es el
+`l2_state_inconsistent` de «L1 terminó antes de cerrar todos los eventos»). Está conectado a
+`summarize_month` desde ITSC-363. La referencia con la que se compara es la agregación de Python por
+row group, que vive en `tests/` (`rowgroup.py` y `pyref.py`, el `summarize_month` anterior en
+serie): `tests/test_l3_native.py` comprueba que el motor, con 1 y 4 hilos, en cualquier orden de
+`push` y con las fronteras en lotes de pocos eventos intercalados con los `push`, da las mismas
+tablas, el mismo `content_hash` y la misma conciliación, y `tests/test_l3_native_memory.py` que la
+RSS que el motor añade no crece con los ticks del mes. `test_l3_native.py` comprueba también que el
+motor suelta un lote de fronteras al cerrarse sus eventos, y compara además las posiciones del
+motor con las de `read_row_groups`, row group a row group. El diseño y por qué es nativo están en
+[TRD-L3 ADR-L3-16](../../docs/TRD/l3.md).
 
 ## Uso en local del núcleo
 
@@ -175,54 +198,32 @@ group de L1 más antiguo que algún evento del mes necesita, y el acumulador par
 
 ## Mecánica de una unidad
 
-1. **Compuerta de entrada.** Antes de abrir nada se comprueba, por θ, que existan
+1. **Compuerta de entrada.** Antes de abrir nada se comprueba, por θ y en el pool de E/S, que existan
    `events.parquet` y `carry_over.parquet` del mes (y el carry-over del mes
    anterior, salvo en `series_start`), y que un carry-over con `direction ≠ 0`
    tenga evento pendiente.
-2. **Lectura.** `read_row_groups` con todos los θ del mes: una pasada sobre L1 en la
-   que cada row group se decodifica **una vez** para todos los θ, sin relecturas, y se
-   entrega con las posiciones `R`, `C` y `E` de los eventos de cada θ que lo tocan
-   (ADR-L3-14). De `events.parquet` solo se decodifican las siete columnas de §7.1
-   (`EVENT_COLUMNS`). El row group se suelta antes de pedir el siguiente.
-3. **Agregación por row group** (`rowgroup.py`), por θ y en llamadas vectorizadas, sin
-   bucle por evento ni por tick:
-   - `Prefixes`, una vez por row group: prefijos (sumas acumuladas) de `quantity` (todos
-     los ticks, `is_buyer_maker = true` y `false`, en `int64`) y de `price·quantity`
-     descompuesto en palabras de 21 bits (3 de precio × 3 de cantidad, 9 prefijos
-     `uint64`). Cada producto parcial es menor que 2⁴² y un row group admite hasta 2²⁰
-     ticks, así que toda diferencia de prefijos cabe en 63 bits. Nunca se multiplica
-     `price` por `quantity` en `int64` ni se reduce antes de multiplicar.
-   - `Segments`, por θ: el arreglo de cortes sale de las posiciones; los conteos son
-     diferencias de cortes; las sumas, diferencias de prefijos; el máximo y el mínimo de
-     `price`, `np.maximum.reduceat` y `np.minimum.reduceat` (solo sobre las fases con
-     ticks, porque `reduceat` no admite segmentos vacíos); el primer y el último
-     `transact_time`, indexación en los cortes; y el instante de confirmación, la máscara
-     `transact_time == confirm_time` restringida a la fase de confirmación. `Σ price·
-     quantity` se recompone en entero de Python por segmento.
-   - `Open`, el acumulador parcial: el evento abierto al cierre del row group deja sus
-     conteos, sumas (con las 5 palabras de `Σ price·quantity`), extremos, tiempos y los
-     del instante de confirmación. Es estado O(1) por θ, nunca ticks; el siguiente row
-     group lo fusiona con el tramo que le toca.
-4. **Cierre de los eventos** (`rowgroup._close_batch`, `event.build_row`). `buy + sell` de
-   cada fase debe igualar la suma de `quantity` de sus ticks. Los invariantes de fila del
-   contrato (conteos, precios del instante, extremo del overshoot, duración y VWAP) se
-   comparan con la fila de L2, sobre el lote de eventos que cerraron en el row group. El
-   VWAP se divide en entero y se redondea half-even a 10⁻⁸. Si algo no cuadra, el lote se
-   repite evento por evento con `build_row`, que es quien lanza el error de siempre. El
-   evento que viene de un row group anterior se cierra con `build_row` sobre su acumulador.
-5. **Escritura** (`FamilyWriter` de `shared/dc_frames`). Cada θ arma en
-   un buffer de NumPy por columna un row group con el mismo número de filas que el row group
-   de `events.parquet` y lo entrega al escritor, que comprueba filas, orden y
-   límites de row group contra `events.parquet`. ZSTD-3, estadísticas, sin
-   diccionario, `state_version` en los metadatos.
-6. **Conciliación** por θ y mes: `N_M = (Σ_cerrados − P_M) + Cola_M + U_M`.
-   `N_M`, `Cola_M` y `U_M` salen del pie de `consolidated.parquet` y de los ids de
-   L2; `Σ_cerrados` y `P_M` (`ticks_before_month` del lector), del resumidor.
-7. **Publicación.** Atómica por archivo y secuencial por θ: se publica solo cuando todos
-   los θ del mes pasaron los pasos anteriores. Un error de entrada, de resumen o de
-   conciliación borra los temporales y no deja ningún `summaries.parquet`. Si falla la
-   publicación de un θ (p. ej. el `move` a GCS), los ya publicados quedan; re-ejecutar
-   el mes los reescribe con el mismo contenido.
+2. **Apertura** (`setup_s`). En el mismo pool: los 50 escritores (`FamilyWriter`: cada uno lee el pie
+   de su esqueleto) y los 50 `events.parquet` (`EventFile`: archivo y pie una sola vez, solo las
+   siete columnas de §7.1, `EVENT_COLUMNS`). Con las estadísticas de los pies se sabe la primera
+   referencia y el último extremo del mes sin leer datos; después se crea el motor.
+3. **Lectura y empuje.** `L1.row_groups(readers = R)` entrega los row groups de L1 en orden, desde el
+   que contiene la primera referencia hasta el que contiene el último extremo (más los de meses
+   anteriores que algún evento necesita, ADR-L3-12); cada uno se decodifica **una vez** para todos
+   los θ. Antes de cada `push` se entregan al motor las fronteras de L2 que el row group toca. El
+   motor reparte ítems `(row group, θ)` en sus hilos, ubica las fronteras, suma las fases en
+   enteros exactos (`u128`), cierra cada evento en su casilla (con los siete invariantes de §7.2
+   contra su fila de L2) y sella los row groups de salida.
+4. **Escritura.** El recolector pasa lo sellado a `SealedWriters`; cada θ escribe en orden con
+   `FamilyWriter` de `shared/dc_frames`, que comprueba filas, orden y límites de row group contra
+   `events.parquet`. ZSTD-3, estadísticas, sin diccionario, `state_version` en los metadatos.
+5. **Conciliación** por θ y mes, en el pool: `N_M = (Σ_cerrados − P_M) + Cola_M + U_M`. `N_M`,
+   `Cola_M` y `U_M` salen del pie de `consolidated.parquet` y de los ids de L2; `Σ_cerrados` y
+   `P_M` (ticks cerrados y ticks de meses anteriores), de las cuentas del motor.
+6. **Publicación** (`publish_s`). Atómica por archivo: se publica solo cuando todos los θ del mes
+   pasaron los pasos anteriores, y los `commit` corren en el pool. Un error de entrada, de resumen
+   o de conciliación borra los temporales y no deja ningún `summaries.parquet`. Si falla la
+   publicación de un θ (p. ej. el `move` a GCS), los ya publicados quedan; re-ejecutar el mes los
+   reescribe con el mismo contenido.
 
 ## Errores
 
@@ -251,18 +252,22 @@ resumidor los convierte en `L2StateInconsistent` con esos cuatro valores.
 
 ## Memoria
 
-El pico es O(row group), no O(mes) ni O(eventos) ni O(ticks del evento más grande): un
-row group de L1 en vuelo (el lector no retiene el anterior), los 12 prefijos de la
-agregación (≈ 2 veces el row group decodificado) y sus temporales, un row group de
-eventos de L2 por θ, los arreglos de las fases de los eventos del row group y el row group
-de salida de cada θ. Un evento que abarca muchos row groups solo deja su acumulador
-parcial. `tests/test_l3_memory.py` lo mide en un proceso aparte (pool de Arrow más
-`tracemalloc`, que ve los arreglos de NumPy): el pico no crece con los eventos ni cuando el
-evento más grande pasa de 10 a 40 row groups.
+El pico es O(lote), no O(mes) ni O(eventos) ni O(ticks del evento más grande): `K + R + 1` row
+groups de L1 (siete con los valores por defecto, ≈ 48 MB cada uno anclado o ≈ 1,8 × mientras se
+decodifica), las fronteras de L2 de los eventos de esos row groups (`boundaries_peak_mib`; el motor
+suelta cada lote al cerrarse sus eventos) más un tramo comprimido en curso por θ, los buffers de
+salida abiertos y los sellados sin escribir (acotados por `8 × W`). Un evento que abarca muchos row
+groups solo deja su acumulador parcial. La cuenta completa, y por qué la sonda de ITSC-362 medía
+228 MiB y no los 95 previstos, está en TRD-L3 ADR-L3-16 («Memoria del orquestador»).
+`tests/test_l3_memory.py` lo mide en un proceso aparte (pool de Arrow más `tracemalloc`): el pico
+no crece con los eventos ni cuando el evento más grande pasa de 10 a 40 row groups.
+`rss_peak_mib` de `unit_timing` es la medida de la corrida (meta ≤ 2 048 a 4 vCPU).
 
 ## Pruebas
 
-`uv run pytest layers/l3_dc_descriptors`. El camino por evento anterior (Arrow compute
+`uv run pytest layers/l3_dc_descriptors`. `tests/rowgroup.py` y `tests/pyref.py` son la agregación
+de Python por row group y el `summarize_month` en serie de antes de ITSC-363: la referencia con la
+que `test_l3_parallel.py` y `test_l3_native.py` comparan el motor. El camino por evento anterior (Arrow compute
 sobre `read_frames(chunks=True)`) vive en `tests/by_event.py` como **oráculo**: debe dar la
 misma tabla y el mismo `content_hash` que el resumidor, también con eventos que cruzan row
 groups, `R`, `C` y `E` en el primer y el último tick de un row group, overshoot vacío, un

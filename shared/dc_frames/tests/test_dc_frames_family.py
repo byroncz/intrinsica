@@ -229,7 +229,7 @@ def test_arguments_are_validated(partition):
 def test_a_failing_constructor_closes_the_skeleton(partition, monkeypatch, failing):
     events, summaries, _ = partition
     opened = []
-    real = family_module.open_parquet
+    real = family_module.ParquetSource
 
     def spy(*args):
         opened.append(real(*args))
@@ -238,8 +238,8 @@ def test_a_failing_constructor_closes_the_skeleton(partition, monkeypatch, faili
     def boom(*args, **kwargs):
         raise RuntimeError("falla al construir")
 
-    monkeypatch.setattr(family_module, "open_parquet", spy)
+    monkeypatch.setattr(family_module, "ParquetSource", spy)
     monkeypatch.setattr(family_module, failing, boom)
     with pytest.raises(RuntimeError, match="falla al construir"):
         FamilyWriter(summaries, FAMILY_SCHEMA, VERSION, events)
-    assert len(opened) == 1 and opened[0].closed
+    assert len(opened) == 1 and opened[0]._file.closed
