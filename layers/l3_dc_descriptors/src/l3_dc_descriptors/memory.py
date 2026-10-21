@@ -30,7 +30,8 @@ MAX_MMAP_THRESHOLD = 32 << 20
 
 def _valid(text: str | None) -> int | None:
     """El umbral de `text` si es un entero entre 0 y `MAX_MMAP_THRESHOLD`; si no, `None`."""
-    # Solo dígitos decimales, como los lee glibc: nada de signo, espacios ni guiones bajos.
+    # Solo dígitos decimales, por decisión propia: glibc también acepta `0x…` y octales al
+    # arrancar, pero `mallopt` pisa lo que haya leído con el valor que sale de aquí.
     if text is None or not (text.isascii() and text.isdigit()):
         return None
     value = int(text)
