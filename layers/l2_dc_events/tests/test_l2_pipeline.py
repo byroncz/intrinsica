@@ -4,9 +4,10 @@ import dataclasses
 import dc_pyo3
 import pyarrow as pa
 import pytest
-from conftest import FIXTURES, price_int
 from l2_dc_events.landing import LandingError, open_consolidated, read_batches, ticks_of
 from l2_dc_events.pipeline import FEED_TICKS, RunContext, Unit, process_unit
+
+from conftest import FIXTURES, price_int
 
 # Por θ (`theta` = θ × 10⁸), el `agg_trade_id` de la confirmación con que abre
 # cada ventana de discrepancia contra la v0. Es `VENTANAS` de
