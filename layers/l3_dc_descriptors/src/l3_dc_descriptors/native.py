@@ -9,8 +9,8 @@ en Arrow los row groups de salida que el motor sella y convierte sus errores en 
 excepciones tipadas de `errors` y del lector. No agrega nada: la aritmética y los
 invariantes de §7.2 viven en Rust (ADR-L3-16).
 
-Todavía no está en el flujo de `summarize_month`: lo conecta el orquestador (ITSC-358 es
-solo el motor). `rowgroup.py` sigue siendo la referencia con la que se compara.
+Lo orquesta `summarize.summarize_month` (ITSC-363). La referencia con la que se compara
+es la agregación de Python por row group, que vive en `tests/` (`rowgroup.py`, `pyref.py`).
 """
 
 from collections.abc import Iterable, Sequence
@@ -264,12 +264,17 @@ def to_summarize_error(
                 f"el esqueleto tiene {error.rows} filas y llega el evento {error.event}",
             )
         case "incomplete":
-            return SkeletonMismatch(
-                theta,
-                month,
-                FAMILY,
-                f"faltan {error.missing} de las {error.expected} filas del esqueleto",
+            # Las casillas que quedan vacías al terminar L1 son eventos sin cerrar: el
+            # extremo de alguno no existe como tick (el hallazgo del lector de antes).
+            result = L2StateInconsistent.mismatch(
+                theta, month, "extreme_agg_trade_id", "ausente", "un tick de L1"
             )
+            result.details["message"] = (
+                "L1 terminó antes de cerrar todos los eventos; el extremo no existe "
+                f"como tick. θ {theta}: faltan {error.missing} de las "
+                f"{error.expected} filas del esqueleto"
+            )
+            return result
     return error
 
 

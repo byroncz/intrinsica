@@ -26,7 +26,6 @@ import numpy as np
 import pyarrow as pa
 from dc_frames import Frame, FramesInputError, ThetaEvents
 from dc_frames.lake import Month
-
 from l3_dc_descriptors.event import EVENT_COLUMNS, build_row
 from l3_dc_descriptors.phase import divide_half_even
 from l3_dc_descriptors.schema import COLUMN, LIMIT, WIDTH

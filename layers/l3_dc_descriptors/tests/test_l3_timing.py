@@ -112,16 +112,30 @@ def test_the_hook_does_not_touch_the_reader_outside_a_unit(lake):
         parquet.close()
 
 
+SERIAL = {"threads": 1, "readers": 1, "inflight": 1, "writers": 1, "engine_threads": 1}
+
+
 def test_the_phases_explain_the_wall(lake, tmp_path):
-    # En serie (un hilo, sin lector anticipado) las fases son pared y suman a lo más `wall_s`.
-    ctx = replace(context(lake, tmp_path), threads=1, prefetch=0)
+    # Las fases del hilo principal son tramos seguidos de la pared y suman a lo más
+    # `wall_s`; `read_s`, `write_s` y `read_wall_s` corren dentro de `aggregate_s`.
+    ctx = replace(context(lake, tmp_path), **SERIAL)
     result = process_unit(unit_of(M2), ctx, lake.thetas)
     details = result.timing.details()
-    phases = ("gate_s", "read_s", "aggregate_s", "write_s", "reconcile_s", "lineage_s")
+    phases = (
+        "gate_s",
+        "setup_s",
+        "aggregate_s",
+        "publish_s",
+        "reconcile_s",
+        "lineage_s",
+    )
     assert all(details[name] >= 0 for name in (*phases, "other_s"))
     assert sum(details[name] for name in phases) <= details["wall_s"] + 0.01
     assert details["read_s"] > 0 and details["write_s"] > 0
-    assert details["lineage_s"] > 0
+    assert details["read_wall_s"] > 0 and details["lineage_s"] > 0
+    assert details["read_s"] <= details["aggregate_s"] + 0.01
+    assert details["write_s"] <= details["aggregate_s"] + 0.05
+    assert details["read_wall_s"] <= details["wall_s"]
 
 
 def test_it_reports_events_and_ticks_per_theta_and_in_total(lake, tmp_path):
@@ -250,18 +264,22 @@ def test_a_failed_unit_has_no_profile(lake, tmp_path):
 # Hilos (ITSC-357)
 
 
-@pytest.mark.parametrize(("threads", "prefetch"), [(1, 0), (2, 1), (4, 2), (50, 1)])
-def test_the_counts_do_not_depend_on_threads_or_prefetch(
-    lake, tmp_path, threads, prefetch
-):
+@pytest.mark.parametrize(
+    "knobs",
+    [
+        SERIAL,
+        {"threads": 2, "readers": 2, "inflight": 2, "writers": 2, "engine_threads": 2},
+        {"threads": 4, "readers": 1, "inflight": 4, "writers": 4, "engine_threads": 4},
+        {"threads": 50, "readers": 2, "inflight": 1, "writers": 1, "engine_threads": 3},
+    ],
+)
+def test_the_counts_do_not_depend_on_the_knobs(lake, tmp_path, knobs):
     # El gancho de row groups vive en una ContextVar: con el lector en otro hilo, un
     # contexto sin propagar dejaría `row_groups_month` en cero.
     base = process_unit(
-        unit_of(M3),
-        replace(context(lake, tmp_path), threads=1, prefetch=0),
-        lake.thetas,
+        unit_of(M3), replace(context(lake, tmp_path), **SERIAL), lake.thetas
     ).timing
-    ctx = replace(context(lake, tmp_path), threads=threads, prefetch=prefetch)
+    ctx = replace(context(lake, tmp_path), **knobs)
     timing = process_unit(unit_of(M3), ctx, lake.thetas).timing
     assert timing.row_groups.month > 0 and timing.row_groups.previous > 0
     counts, expected = timing.row_groups, base.row_groups
@@ -280,27 +298,50 @@ def test_the_counts_do_not_depend_on_threads_or_prefetch(
     )
 
 
-def test_it_reports_the_threads_and_prefetch_it_used(lake, tmp_path):
-    ctx = replace(context(lake, tmp_path), threads=2, prefetch=0)
+def test_it_reports_the_knobs_it_used(lake, tmp_path):
+    knobs = {
+        "threads": 2,
+        "readers": 1,
+        "inflight": 3,
+        "writers": 2,
+        "engine_threads": 3,
+    }
+    ctx = replace(context(lake, tmp_path), **knobs)
     details = process_unit(unit_of(M2), ctx, lake.thetas).timing.details()
-    assert (details["threads"], details["prefetch"]) == (2, 0)
-    # Nunca más hilos que θ.
+    assert {name: details[name] for name in knobs} == knobs
+    assert 1 <= details["inflight_max"] <= 3
+    # Nunca más hilos de E/S que θ.
     ctx = replace(context(lake, tmp_path), threads=50)
     details = process_unit(unit_of(M2), ctx, lake.thetas).timing.details()
     assert details["threads"] == len(lake.thetas)
-    assert details["prefetch"] == 2
+    assert (details["readers"], details["inflight"], details["writers"]) == (2, 4, 4)
     default = process_unit(unit_of(M2), context(lake, tmp_path), lake.thetas)
     assert 1 <= default.timing.details()["threads"] <= len(lake.thetas)
 
 
-def test_aggregate_and_write_are_sums_over_the_threads(lake, tmp_path):
-    ctx = replace(context(lake, tmp_path), threads=4, prefetch=1)
-    details = process_unit(unit_of(M2), ctx, lake.thetas).timing.details()
+def test_the_engine_phase_and_the_read_volume_are_measured(lake, tmp_path):
+    knobs = {
+        "threads": 4,
+        "readers": 2,
+        "inflight": 2,
+        "writers": 2,
+        "engine_threads": 2,
+    }
+    ctx = replace(context(lake, tmp_path), **knobs)
+    timing = process_unit(unit_of(M2), ctx, lake.thetas).timing
+    details = timing.details()
     assert details["aggregate_s"] > 0 and details["write_s"] > 0
     assert details["other_s"] >= 0
-    # Cada hilo aporta a lo más su pared: la suma no pasa de `threads × wall_s`.
-    parallel = details["aggregate_s"] + details["write_s"]
-    assert parallel <= details["threads"] * details["wall_s"] + 0.01
+    assert 0 < details["engine_busy"] <= 1
+    # Un ítem por (row group, θ con eventos): los row groups que el motor recibió.
+    assert details["items"] > 0
+    assert details["items"] % len(lake.thetas) == 0
+    assert details["items"] // len(lake.thetas) == timing.row_groups.month + (
+        timing.row_groups.previous
+    )
+    # Los bytes leídos suman los de L1 que cuenta el gancho y los de L2.
+    assert details["read_bytes"] > details["bytes_in"] > 0
+    assert 0 < details["read_wall_s"] <= details["wall_s"]
     # Condición de merge de ITSC-357: el RSS del fixture con hilos queda dentro del límite.
     assert 0 < details["rss_peak_mib"] <= 2048
 

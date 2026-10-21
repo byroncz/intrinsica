@@ -12,6 +12,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Self
 
 import numpy as np
 import pyarrow as pa
@@ -446,3 +447,131 @@ def event_groups(
                 yield event_group(
                     table.to_batches()[0], f"{path}, row group {i}", month
                 )
+
+
+class ParquetSource:
+    """Un archivo Parquet abierto una sola vez, para leerlo a pedazos y de a muchos hilos.
+
+    Se abre como `NativeFile` (un viaje para el tamaño) y se lee el pie una vez; cada
+    `reader()` crea un `ParquetFile` de vida corta sobre ese mismo archivo, con el pie ya
+    leído y `pre_buffer`: sin un viaje de apertura por lectura (`open_parquet` por row
+    group repetía el de 1 335 aperturas en 2021-01, H8 de ITSC-362) y con los rangos de
+    bytes de lo que se pide junto, en pocas peticiones. Arrow suelta el caché comprimido
+    de `pre_buffer` al cerrar el lector. Un lector no admite lecturas concurrentes; varios
+    lectores sobre el mismo archivo sí. Quien llama cierra el archivo.
+    """
+
+    def __init__(self, path: str, what: str) -> None:
+        fs, resolved = resolve_fs(path)
+        try:
+            self._file = fs.open_input_file(resolved)
+        except FileNotFoundError:
+            raise FramesInputError(f"falta {what}: {path}") from None
+        try:
+            footer = pq.ParquetFile(self._file)
+        except BaseException:
+            self._file.close()
+            raise
+        self.path = path
+        self.metadata: pq.FileMetaData = footer.metadata
+        self.schema: pa.Schema = footer.schema_arrow
+
+    def reader(self) -> pq.ParquetFile:
+        """Un lector de vida corta con `pre_buffer`; hay que cerrarlo (`closing`)."""
+        return pq.ParquetFile(self._file, metadata=self.metadata, pre_buffer=True)
+
+    def close(self) -> None:
+        self._file.close()
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
+
+
+class EventFile(ParquetSource):
+    """`events.parquet` de un θ y un mes, abierto una sola vez y leído por tramos.
+
+    Las columnas se piden por nombre (las tres fronteras y `confirm_time` siempre, más
+    `columns`). Un tramo (`lots`) son varios row groups seguidos que se leen con una sola
+    llamada a `batches`: los rangos de todos viajan a la vez, en pocas peticiones grandes.
+
+    `batches` entrega los eventos en lotes de a lo más `batch_rows` filas, cada uno con
+    sus propios buffers: quien retiene un lote ancla solo ese lote y no el tramo. Un mismo
+    `batches` no se recorre desde dos hilos a la vez; dos `batches` distintos sí.
+    """
+
+    def __init__(
+        self, path: str, what: str, columns: Sequence[str] | None = None
+    ) -> None:
+        super().__init__(path, what)
+        try:
+            expected = {name: pa.int64() for name in (*BOUNDARY_COLUMNS, CONFIRM_TIME)}
+            check_columns(self.schema, expected, path)
+            self.columns = list(dict.fromkeys([*expected, *(columns or ())]))
+            for name in self.columns:
+                if name not in self.schema.names:
+                    raise FramesInputError(f"{path}: falta la columna {name!r}")
+        except BaseException:
+            self.close()
+            raise
+        self.rows = [
+            self.metadata.row_group(i).num_rows
+            for i in range(self.metadata.num_row_groups)
+        ]
+        self._index = {name: self.schema.get_field_index(name) for name in self.columns}
+
+    def id_range(self, name: str) -> tuple[int, int] | None:
+        """`(mínimo, máximo)` de la columna `name` en todo el archivo con las estadísticas
+        del pie, sin leer datos; `None` si no hay filas o algún row group no trae
+        estadísticas.
+        """
+        low = high = None
+        for i, rows in enumerate(self.rows):
+            if rows == 0:
+                continue
+            stats = self.metadata.row_group(i).column(self._index[name]).statistics
+            if stats is None or not stats.has_min_max:
+                return None
+            low = stats.min if low is None else min(low, stats.min)
+            high = stats.max if high is None else max(high, stats.max)
+        return None if low is None else (low, high)
+
+    def compressed(self, row_groups: Sequence[int]) -> int:
+        """Bytes comprimidos de las columnas pedidas en esos row groups."""
+        return sum(
+            self.metadata.row_group(i).column(self._index[name]).total_compressed_size
+            for i in row_groups
+            for name in self.columns
+        )
+
+    def lots(self, lot_bytes: int) -> list[list[int]]:
+        """Los row groups no vacíos, en orden, agrupados en tramos de row groups
+        consecutivos que suman al menos `lot_bytes` comprimidos (el último, lo que quede).
+        Cada tramo se lee con una sola llamada a `batches`.
+        """
+        lots: list[list[int]] = []
+        size = 0
+        for i, rows in enumerate(self.rows):
+            if rows == 0:
+                continue
+            if not lots or size >= lot_bytes:
+                lots.append([])
+                size = 0
+            lots[-1].append(i)
+            size += self.compressed([i])
+        return lots
+
+    def batches(
+        self, row_groups: Sequence[int], batch_rows: int
+    ) -> Iterator[pa.RecordBatch]:
+        """Los eventos de `row_groups` en lotes de `batch_rows` filas (el último puede ser
+        menor), con un lector propio que se cierra al agotar el generador.
+        """
+        with closing(self.reader()) as reader:
+            yield from reader.iter_batches(
+                batch_size=batch_rows,
+                row_groups=list(row_groups),
+                columns=self.columns,
+            )

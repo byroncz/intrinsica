@@ -62,19 +62,29 @@ def test_boundary_error_keeps_a_tiny_theta_as_text():
 
 def test_the_summarizer_decodes_only_the_seven_columns_of_l2(lake, monkeypatch):
     seen = []
-    original = pq.ParquetFile.read_row_group
+    original = pq.ParquetFile.iter_batches
 
-    def spy(self, i, columns=None, **kwargs):
-        if "reference_agg_trade_id" in self.schema_arrow.names:  # events.parquet
-            seen.append(None if columns is None else set(columns))
-        return original(self, i, columns=columns, **kwargs)
+    def spy(self, *args, columns=None, **kwargs):
+        seen.append(None if columns is None else set(columns))
+        return original(self, *args, columns=columns, **kwargs)
 
-    monkeypatch.setattr(pq.ParquetFile, "read_row_group", spy)
+    keys = []
+    read = pq.ParquetFile.read_row_group
+
+    def spy_keys(self, i, columns=None, **kwargs):
+        keys.append(None if columns is None else set(columns))
+        return read(self, i, columns=columns, **kwargs)
+
+    monkeypatch.setattr(pq.ParquetFile, "iter_batches", spy)
+    monkeypatch.setattr(pq.ParquetFile, "read_row_group", spy_keys)
     run(lake)
-    # El escritor de familias también lee las claves del esqueleto (`theta` y la confirmación).
-    allowed = set(EVENT_COLUMNS) | {"theta"}
-    assert all(columns is not None and columns <= allowed for columns in seen)
-    assert set(EVENT_COLUMNS) in seen
+    # El motor recibe exactamente las siete columnas de L2.
+    assert seen and all(columns == set(EVENT_COLUMNS) for columns in seen)
+    # Los row groups de `events.parquet` solo se leen enteros por el escritor de familias,
+    # que compara las claves del esqueleto (`theta` y la confirmación).
+    skeleton = {"theta", "confirm_agg_trade_id"}
+    events = [columns for columns in keys if columns == skeleton]
+    assert events and all(columns is not None for columns in keys)
 
 
 def test_skeleton_mismatch_on_write_names_theta_month_and_family(lake, monkeypatch):

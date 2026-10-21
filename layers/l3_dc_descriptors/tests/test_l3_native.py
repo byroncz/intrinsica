@@ -13,13 +13,10 @@ from decimal import Decimal
 import by_event
 import dc_pyo3
 import pyarrow.parquet as pq
+import pyref
 import pytest
 from dc_frames import l2_path
-from l3_dc_descriptors import (
-    SUMMARIES_SCHEMA,
-    L2StateInconsistent,
-    summarize_month,
-)
+from l3_dc_descriptors import SUMMARIES_SCHEMA, L2StateInconsistent
 from l3_lake import M1, build_lake, fixture_ticks, month_cuts
 from native_driver import summarize_native
 from pyutils import content_hash
@@ -37,15 +34,8 @@ def edge_lake(tmp_path_factory):
         l1_row_group=ROW_GROUP,
     )
     reference = {
-        month: summarize_month(
-            lake.l1,
-            lake.l2,
-            lake.l3,
-            month,
-            lake.theta_texts,
-            series_start=M1,
-            threads=1,
-            prefetch=0,
+        month: pyref.summarize_month(
+            lake.l1, lake.l2, lake.l3, month, lake.theta_texts, series_start=M1
         )
         for month in lake.months
     }
@@ -187,15 +177,8 @@ def test_a_broken_event_raises_the_same_error_as_the_python_summarizer(
     tamper(lake, theta, month, column, 3, value)
     texts = [f"{theta / 10**8:.8f}"]
     with pytest.raises(L2StateInconsistent) as wanted:
-        summarize_month(
-            lake.l1,
-            lake.l2,
-            tmp_path / "py",
-            month,
-            texts,
-            series_start=M1,
-            threads=1,
-            prefetch=0,
+        pyref.summarize_month(
+            lake.l1, lake.l2, tmp_path / "py", month, texts, series_start=M1
         )
     with pytest.raises(L2StateInconsistent) as got:
         summarize_native(
@@ -504,15 +487,8 @@ def test_a_boundary_that_does_not_match_l1_raises_the_error_of_the_reader(
     tamper(lake, theta, month, column, row, value)
     texts = [f"{theta / 10**8:.8f}"]
     with pytest.raises(L2StateInconsistent) as wanted:
-        summarize_month(
-            lake.l1,
-            lake.l2,
-            tmp_path / "py",
-            month,
-            texts,
-            series_start=M1,
-            threads=1,
-            prefetch=0,
+        pyref.summarize_month(
+            lake.l1, lake.l2, tmp_path / "py", month, texts, series_start=M1
         )
     with pytest.raises(L2StateInconsistent) as got:
         summarize_native(

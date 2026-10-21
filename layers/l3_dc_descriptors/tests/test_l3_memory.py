@@ -159,5 +159,7 @@ def test_peak_does_not_grow_with_the_ticks_of_the_largest_event(tmp_path):
 
     long, longest = peak(tmp_path, "long"), peak(tmp_path, "longest")
     assert longest["ticks"] > 3 * long["ticks"] > 0
-    assert longest["peak"] < 1.1 * long["peak"]
+    # Con row groups en vuelo que dependen de la carrera entre el lector y el motor, el
+    # pico se mueve unos MiB entre corridas; 30 row groups más en el evento sumarían ≈ 140 MB.
+    assert longest["peak"] < long["peak"] + 2 * ROW_GROUP_BYTES
     assert longest["peak"] < 10 * ROW_GROUP_BYTES

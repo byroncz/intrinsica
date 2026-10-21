@@ -7,11 +7,12 @@ L2; `Σ_cerrados` y `P_M`, del resumidor y del lector. Son fuentes distintas: po
 suma comprueba algo.
 """
 
+from contextlib import closing
 from dataclasses import dataclass
 
 import numpy as np
 from dc_frames import FramesInputError
-from dc_frames.lake import Month, l1_path, open_parquet
+from dc_frames.lake import Month, ParquetSource, l1_path
 
 from l3_dc_descriptors.errors import PhaseTicksMismatch
 from l3_dc_descriptors.l2 import CarryOver
@@ -38,14 +39,16 @@ class L1Month:
     """El pie de `consolidated.parquet` de un mes: cuántos ticks tiene y cuántos hay hasta un id.
 
     Cuenta con las estadísticas de `agg_trade_id` de cada row group; solo el row group
-    que contiene el id se decodifica, y solo esa columna.
+    que contiene el id se decodifica, y solo esa columna. El archivo se abre una vez y cada
+    lectura usa un lector de vida corta (`ParquetSource`), así que `count_up_to` se puede
+    llamar desde varios hilos a la vez.
     """
 
     def __init__(self, l1_root: str, key: tuple[str, str, str], month: Month) -> None:
         path = l1_path(l1_root, key, month)
-        self._parquet = open_parquet(path, f"L1 del mes {month[0]:04d}-{month[1]:02d}")
+        self._parquet = ParquetSource(path, f"L1 del mes {month[0]:04d}-{month[1]:02d}")
         meta = self._parquet.metadata
-        index = self._parquet.schema_arrow.get_field_index("agg_trade_id")
+        index = self._parquet.schema.get_field_index("agg_trade_id")
         self._groups: list[tuple[int, int, int, int]] = []
         for i in range(meta.num_row_groups):
             group = meta.row_group(i)
@@ -67,7 +70,8 @@ class L1Month:
             if high <= agg_trade_id:
                 total += rows
             elif low <= agg_trade_id:
-                ids = self._parquet.read_row_group(i, columns=["agg_trade_id"])
+                with closing(self._parquet.reader()) as reader:
+                    ids = reader.read_row_group(i, columns=["agg_trade_id"])
                 ids = ids.column(0).combine_chunks().to_numpy(zero_copy_only=False)
                 total += int(np.searchsorted(ids, agg_trade_id, "right"))
         return total

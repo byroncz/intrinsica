@@ -116,7 +116,9 @@ def _process_unit(unit: Unit, ctx: RunContext, thetas: list[int]) -> Result:
         )
 
     phases = Phases()
-    counts = RowGroupCount(l1_path(ctx.landing_root, unit.key, unit.at))
+    counts = RowGroupCount(
+        l1_path(ctx.landing_root, unit.key, unit.at), meter=phases.read
+    )
     scope = "unit" if reset_rss_peak() else "process"
     throttled = throttled_s()
     try:
@@ -133,7 +135,10 @@ def _process_unit(unit: Unit, ctx: RunContext, thetas: list[int]) -> Result:
                 asset=unit.asset,
                 phases=phases,
                 threads=ctx.threads,
-                prefetch=ctx.prefetch,
+                readers=ctx.readers,
+                inflight=ctx.inflight,
+                writers=ctx.writers,
+                engine_threads=ctx.engine_threads,
             )
     except SummarizeError as error:
         found = findings.from_error(ctx, unit, error)

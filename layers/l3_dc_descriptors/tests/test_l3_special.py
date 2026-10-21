@@ -6,12 +6,14 @@ from decimal import Decimal
 import numpy as np
 import oracle
 import pyarrow.parquet as pq
+import pyref
 import pytest
+import rowgroup
+from dc_frames import FramesInputError
 from l3_dc_descriptors import (
     SUMMARIES_SCHEMA,
     PhaseQuantityMismatch,
     PhaseValueError,
-    rowgroup,
     summarize_month,
 )
 from l3_dc_descriptors.phase import divide_half_even
@@ -48,6 +50,8 @@ def test_notional_that_overflows_int64_is_exact(tmp_path):
 
 
 def test_forced_quantity_difference_aborts(tmp_path, monkeypatch):
+    # La guarda es de la referencia de Python; en el motor `buy + sell` es la suma de
+    # `quantity` por construcción (ADR-L3-16).
     lake = build_lake(tmp_path, fixture_ticks(), thetas=THETAS)
     real = rowgroup.Prefixes.__init__
 
@@ -57,7 +61,9 @@ def test_forced_quantity_difference_aborts(tmp_path, monkeypatch):
 
     monkeypatch.setattr(rowgroup.Prefixes, "__init__", skewed)
     with pytest.raises(PhaseQuantityMismatch) as error:
-        run(lake)
+        pyref.summarize_month(
+            lake.l1, lake.l2, lake.l3, M1, lake.theta_texts, series_start=M1
+        )
     assert error.value.check_type == "phase_quantity_mismatch"
     details = error.value.details
     assert set(details) == {"theta", "confirm_agg_trade_id", "phase", "expected", "got"}
@@ -84,6 +90,53 @@ def test_quantity_that_does_not_fit_decimal_18_8_aborts(tmp_path):
     with pytest.raises(PhaseValueError, match="no cabe en DECIMAL"):
         run(lake)
     assert files(lake) == []
+
+
+def negative_lake(tmp_path, index: int):
+    ticks = fixture_ticks(seed=5)
+    ticks[index] = replace(ticks[index], quantity=Decimal(-1))
+    return build_lake(tmp_path, ticks, thetas=THETAS)
+
+
+def test_a_negative_quantity_in_a_phase_aborts_with_both_summarizers(tmp_path):
+    lake = negative_lake(tmp_path, len(fixture_ticks(seed=5)) // 2)
+    for summarizer in (pyref.summarize_month, summarize_month):
+        with pytest.raises(FramesInputError, match="negativos"):
+            summarizer(
+                lake.l1,
+                lake.l2,
+                tmp_path / summarizer.__module__,
+                M1,
+                lake.theta_texts,
+                series_start=M1,
+            )
+    assert files(lake) == []
+
+
+def test_a_negative_quantity_no_phase_touches_is_the_one_difference_with_the_reference(
+    tmp_path,
+):
+    """Costo asumido (3) de ADR-L3-16: el motor valida solo los ticks que alguna fase toca.
+    El primer tick del mes no es de ninguna fase (las fases son `(R, C]` y `(C, E]`): la
+    referencia de Python rechazaba el row group entero, el motor lo acepta y la conciliación
+    (§9.1) lo cuenta entre los ticks sin dueño, igual que sin el valor negativo.
+    """
+    lake = negative_lake(tmp_path, 0)
+    with pytest.raises(FramesInputError, match="negativos"):
+        pyref.summarize_month(
+            lake.l1, lake.l2, tmp_path / "py", M1, lake.theta_texts, series_start=M1
+        )
+    got = summarize_month(
+        lake.l1, lake.l2, tmp_path / "rs", M1, lake.theta_texts, series_start=M1
+    )
+    clean = build_lake(tmp_path / "clean", fixture_ticks(seed=5), thetas=THETAS)
+    wanted = pyref.summarize_month(
+        clean.l1, clean.l2, tmp_path / "ok", M1, clean.theta_texts, series_start=M1
+    )
+    for theta, result in got.items():
+        assert result.reconciliation == wanted[theta].reconciliation
+        assert result.reconciliation.unassigned > 0
+        assert result.content_hash == wanted[theta].content_hash
 
 
 @pytest.mark.parametrize(
