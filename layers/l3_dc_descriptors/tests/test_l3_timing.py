@@ -384,3 +384,15 @@ def test_unit_timing_records_the_mmap_threshold(lake, tmp_path, monkeypatch):
     monkeypatch.delenv("MALLOC_MMAP_THRESHOLD_")
     result = process_unit(unit_of(M2), context(lake, tmp_path), lake.thetas)
     assert result.timing.details()["mmap_threshold"] is None
+
+
+def test_unit_timing_records_the_trim_threshold(lake, tmp_path, monkeypatch):
+    # Lo que la imagen fijó en `MALLOC_TRIM_THRESHOLD_` viaja en el hallazgo (None si no).
+    monkeypatch.setenv("MALLOC_TRIM_THRESHOLD_", "1073741824")
+    result = process_unit(unit_of(M2), context(lake, tmp_path), lake.thetas)
+    assert result.timing.details()["trim_threshold"] == 1073741824
+    (row,) = (f for f in result.findings if f.check_type == "unit_timing")
+    assert row.details["trim_threshold"] == 1073741824
+    monkeypatch.delenv("MALLOC_TRIM_THRESHOLD_")
+    result = process_unit(unit_of(M2), context(lake, tmp_path), lake.thetas)
+    assert result.timing.details()["trim_threshold"] is None

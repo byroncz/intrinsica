@@ -42,16 +42,19 @@ RUN uv sync --locked --package l3_dc_descriptors --no-dev --no-editable
 FROM python:3.14-slim
 
 # VERSION viene del archivo layers/l3_dc_descriptors/VERSION; lo pasa el CI.
-# ARROW_DEFAULT_MEMORY_POOL y MALLOC_MMAP_THRESHOLD_ mantienen el RSS de la unidad O(lote),
-# como en L2 (medido en ITSC-275; ver l3_dc_descriptors/memory.py). L3 no lleva el catálogo
-# de θ: L3_THETAS_URI apunta al mismo l2/thetas.yaml que usa L2.
+# ARROW_DEFAULT_MEMORY_POOL mantiene el RSS de la unidad O(lote), como en L2 (ITSC-275).
+# MALLOC_MMAP_THRESHOLD_ en 32 MiB (el máximo de glibc) y MALLOC_TRIM_THRESHOLD_ en 1 GiB
+# (sin recorte del heap) no son los de L2: miden −31 % de CPU a cambio de un RSS de 3,1 GiB
+# (ITSC-366; decisión en TRD-L3 ADR-L3-16 y l3_dc_descriptors/memory.py). L3 no lleva el
+# catálogo de θ: L3_THETAS_URI apunta al mismo l2/thetas.yaml que usa L2.
 ARG VERSION=unknown
 ARG GIT_SHA=unknown
 ENV IMAGE_VERSION=${VERSION}+${GIT_SHA} \
     PATH=/app/.venv/bin:$PATH \
     PYTHONUNBUFFERED=1 \
     ARROW_DEFAULT_MEMORY_POOL=system \
-    MALLOC_MMAP_THRESHOLD_=16384
+    MALLOC_MMAP_THRESHOLD_=33554432 \
+    MALLOC_TRIM_THRESHOLD_=1073741824
 
 COPY --from=build /app/.venv /app/.venv
 
