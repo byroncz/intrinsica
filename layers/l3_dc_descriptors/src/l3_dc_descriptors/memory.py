@@ -1,12 +1,11 @@
 """Ajuste de los allocators para que el RSS de la unidad sea O(lote).
 
-Es el de L2 (`l2_dc_events.memory`, medido en ITSC-275): el pool por defecto de Arrow
+Parte del de L2 (`l2_dc_events.memory`, medido en ITSC-275): el pool por defecto de Arrow
 (`mimalloc`) retiene páginas por hilo y el umbral dinámico de `mmap` de glibc fragmenta el
 heap de cada hilo; con el pool del sistema (`ARROW_DEFAULT_MEMORY_POOL=system`, que Arrow
-lee al importarse y por eso va en el `ENV` de la imagen) y el umbral fijo en 16 KiB, la
-memoria liberada vuelve al sistema.
-
-L3 ya no usa los 16 KiB de L2 (ITSC-367). Con ese umbral cada buffer grande es un
+lee al importarse y por eso va en el `ENV` de la imagen) la memoria liberada vuelve al
+sistema. Eso sigue vigente en L3. Lo que L2 hace además, fijar el umbral de `mmap` en 16 KiB,
+L3 ya no lo usa (ITSC-367). Con ese umbral cada buffer grande es un
 `mmap`/`munmap` y se vuelve a tocar página por página: ≈ 32 M de fallos de página y ≈ 100 s
 de CPU de sistema por unidad (ITSC-366). Con el umbral en 32 MiB (el máximo de glibc) y sin
 recorte del heap (`MALLOC_TRIM_THRESHOLD_` en 1 GiB, que fija la imagen y glibc lee al
