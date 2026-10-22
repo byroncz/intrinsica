@@ -519,8 +519,8 @@ Run job*, `l3-backfill`, `from = to = 2021-01` y `force`, tras el merge y el `ap
 intermedios de `MALLOC_TRIM_THRESHOLD_` y no se inventan.
 
 **Entre unidades: se devuelve la memoria al cerrar (ITSC-371).** Un `backfill` corre decenas de
-meses en un proceso y cada mes crea pools de hilos nuevos: sin recorte del heap, las arenas que
-glibc le asignó a los hilos de un mes quedan llenas y el siguiente mes pide arenas nuevas. Con la
+meses en un proceso y, sin recorte del heap, glibc no devuelve al kernel lo que cada mes libera (la
+causa exacta es una hipótesis: TRD-L3 ADR-L3-16, «El RSS crece entre unidades»). Con la
 imagen 0.15.0 el RSS crecía de 350 a 650 MiB por mes y el contenedor murió con signal 9 en el
 quinto mes. Desde la 0.15.1 `process_unit` llama a `gc.collect()` y a `malloc_trim(0)` al terminar
 cada unidad, con éxito o con error, y `unit_timing` registra el `VmRSS` de antes y de después

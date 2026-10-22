@@ -100,9 +100,10 @@ def rss_bytes() -> int | None:
 def release_to_kernel() -> tuple[int | None, int | None]:
     """Devuelve al kernel la memoria libre de la unidad y dice el RSS antes y después.
 
-    Con el umbral de recorte de la imagen glibc no devuelve lo liberado, y cada unidad crea
-    pools de hilos nuevos que caen en arenas nuevas: sin esto las arenas de las unidades
-    anteriores quedan llenas y el RSS crece unidad a unidad hasta el OOM (ITSC-371).
+    Con el umbral de recorte de la imagen glibc no devuelve al kernel lo liberado en sus
+    arenas y el RSS crece unidad a unidad hasta el OOM (ITSC-371). La causa exacta es una
+    hipótesis: glibc reutiliza las arenas de los hilos terminados, y el trim reduce la deriva
+    a la mitad, no la elimina (TRD-L3 ADR-L3-16, «El RSS crece entre unidades»).
     `gc.collect()` suelta primero lo que solo retienen ciclos (buffers de Arrow anclados por
     ellos) y `malloc_trim(0)` recorre todas las arenas y devuelve las páginas libres; cuesta
     milisegundos y no toca datos. Sin `malloc_trim` (otro libc) avisa y sigue: el RSS no
