@@ -297,6 +297,8 @@ dos Parquet y no tiene la huella. Antes de escribir nada recalcula con
 escribir** si alguna difiere. Las particiones sin hallazgo se recalculan enteras.
 No pisa lo que ya existe, así que relanzarlo es seguro y completa lo que falte.
 
+Un script de `ops-script` que lea hallazgos **lista con `FileSelector(..., recursive=True, allow_not_found=True)` y lee esa lista de rutas; no abre el prefijo con `ds.dataset(prefijo)`**: pyarrow pide primero los metadatos del objeto `l2` sin barra para saber si es archivo o carpeta, la condición IAM solo permite `l2/...` y GCS responde 403, no 404 (ITSC-370).
+
 Última línea, siempre:
 
 ```text

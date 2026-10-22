@@ -9,6 +9,7 @@ import importlib.util
 from pathlib import Path
 
 import pyarrow as pa
+import pyarrow.fs as pafs
 import pyarrow.parquet as pq
 import pytest
 from pyutils import lineage
@@ -197,3 +198,92 @@ def test_nothing_to_cover_is_a_failure(tmp_path, capsys):
     (tmp_path / "dq").mkdir()
     assert load().main(args(tmp_path)) == 1
     assert "FALLO sin_particiones" in capsys.readouterr().out
+
+
+class IamLikeHandler(pafs.FileSystemHandler):
+    """Un disco local que responde como GCS con la condición IAM de ops-script (ITSC-370).
+
+    Preguntar por una ruta que no es un archivo existente ni termina en `/` (en GCS, el objeto
+    `l2` sin barra) da PermissionError, no "no existe"; el listado con selector pasa.
+    """
+
+    def __init__(self):
+        self.local = pafs.LocalFileSystem()
+
+    def get_type_name(self):
+        return "iam-like"
+
+    def __eq__(self, other):
+        return isinstance(other, IamLikeHandler)
+
+    def __ne__(self, other):
+        return not self == other
+
+    def get_file_info(self, paths):
+        infos = []
+        for path in paths:
+            info = self.local.get_file_info(path)
+            if info.type != pafs.FileType.File and not path.endswith("/"):
+                raise PermissionError(f"403 storage.objects.get denegado para {path}")
+            infos.append(info)
+        return infos
+
+    def get_file_info_selector(self, selector):
+        return self.local.get_file_info(selector)
+
+    def create_dir(self, path, recursive):
+        self.local.create_dir(path, recursive=recursive)
+
+    def delete_dir(self, path):
+        self.local.delete_dir(path)
+
+    def delete_dir_contents(self, path, missing_dir_ok=False):
+        self.local.delete_dir_contents(path, missing_dir_ok=missing_dir_ok)
+
+    def delete_root_dir_contents(self):
+        raise NotImplementedError
+
+    def delete_file(self, path):
+        self.local.delete_file(path)
+
+    def move(self, src, dest):
+        self.local.move(src, dest)
+
+    def copy_file(self, src, dest):
+        self.local.copy_file(src, dest)
+
+    def open_input_stream(self, path):
+        return self.local.open_input_stream(path)
+
+    def open_input_file(self, path):
+        return self.local.open_input_file(path)
+
+    def open_output_stream(self, path, metadata):
+        return self.local.open_output_stream(path, metadata=metadata)
+
+    def open_append_stream(self, path, metadata):
+        return self.local.open_append_stream(path, metadata=metadata)
+
+    def normalize_path(self, path):
+        return path
+
+
+def test_the_findings_are_read_without_asking_for_the_prefix_without_slash(
+    legacy, monkeypatch, capsys
+):
+    """El prefijo de hallazgos no puede consultarse como objeto: ds.dataset(prefijo) lo hacía."""
+    lake, _ = legacy
+    script = load()
+    real = script.resolve_fs
+    monkeypatch.setattr(
+        script,
+        "resolve_fs",
+        lambda root: (pafs.PyFileSystem(IamLikeHandler()), real(root)[1]),
+    )
+    with pytest.raises(PermissionError):
+        pafs.PyFileSystem(IamLikeHandler()).get_file_info(str(lake / "dq"))
+
+    assert script.main(args(lake, "--dry-run")) == 0
+    out = capsys.readouterr().out
+    assert out.strip().splitlines()[-1].startswith(f"particiones: {PARTITIONS};")
+    assert not published(lake)
