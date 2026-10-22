@@ -16,6 +16,7 @@ from decimal import Decimal
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pytest
 from frames_lake import (
     DEC,
     L1_SCHEMA,
@@ -93,11 +94,15 @@ UNITS_ROW_GROUP_BYTES = UNITS_ROW_GROUP * 48
 # glibc crea hasta 8 arenas por vCPU y el resultado depende de cuántas: se fijan las de los
 # 4 vCPU de Cloud Run (4 × 8) para que la prueba mida lo mismo en cualquier máquina.
 UNITS_ENV = {**IMAGE_ENV, "MALLOC_ARENA_MAX": "32"}
-# Lo que el RSS tras el trim puede pasar del de la primera unidad. Medido con 10 unidades en
-# 8 corridas: con el trim la deriva es de 65 a 109 MiB (arenas fragmentadas que ni
-# `malloc_trim` recupera; se estabiliza) y sin él, de 156 a 176 MiB y creciendo. La holgura
-# es de 7 row groups (≈ 128 MiB): entre las dos.
-UNITS_SLACK = 7 * UNITS_ROW_GROUP_BYTES
+# Lo que queda retenido al cerrar una unidad no puede pasar de lo que tuvo en vuelo a la vez:
+# R lectores + K row groups en el motor (`readers=6, inflight=6` en `UNITS`), decodificados
+# (≈ 220 MiB). Con el trim se midió una deriva de 65 a 114 MiB en 11 corridas.
+UNITS_IN_FLIGHT_BYTES = (6 + 6) * UNITS_ROW_GROUP_BYTES
+# Lo mínimo que el trim tiene que devolver de más que no hacerlo: dos de esos row groups
+# (≈ 37 MiB). Sin trim la deriva fue de 156 a 201 MiB y con él de 65 a 114; la diferencia más
+# chica fue de 47 MiB entre corridas sueltas y de 73 entre las de una misma sesión. Se
+# comparan una contra otra, en la misma máquina, y no contra un número absoluto.
+UNITS_TRIM_MIN_GAIN = 2 * UNITS_ROW_GROUP_BYTES
 MIB = 1 << 20
 
 
@@ -253,27 +258,38 @@ def write_units_lake(root) -> None:
         )
 
 
-def test_rss_after_closing_each_unit_does_not_grow_with_the_units(tmp_path):
-    """ITSC-371: con el asignador de la imagen glibc retiene lo liberado y cada unidad crea
-    pools de hilos nuevos, que caen en arenas nuevas: sin devolver la memoria al cerrar la
-    unidad el RSS crece unidad a unidad y un backfill largo muere por memoria. Las pruebas
-    de arriba miden una unidad y no lo ven.
-    """
-    write_units_lake(tmp_path)
-    runs = units(tmp_path, "trim")
+@pytest.fixture(scope="module")
+def unit_runs(tmp_path_factory) -> dict[str, list[dict]]:
+    """Las mismas 10 unidades con el trim de producción y sin él, para compararlas."""
+    root = tmp_path_factory.mktemp("units")
+    write_units_lake(root)
+    return {mode: units(root, mode) for mode in ("trim", "no-trim")}
 
+
+def drift(runs: list[dict]) -> float:
+    """Bytes que el RSS al cerrar una unidad llegó a pasar del de la primera."""
     after = [r["rss_after_trim_mib"] * MIB for r in runs]
-    # La deriva con el trim (arenas fragmentadas) queda por debajo de la holgura; ver UNITS_SLACK.
-    assert max(after) <= after[0] + UNITS_SLACK, after
+    return max(after) - after[0]
+
+
+def test_rss_after_closing_each_unit_does_not_grow_with_the_units(unit_runs):
+    """ITSC-371: con el asignador de la imagen glibc no devuelve al kernel lo liberado y, sin
+    hacerlo al cerrar la unidad, el RSS crece unidad a unidad y un backfill largo muere por
+    memoria (la causa exacta es una hipótesis, ver TRD-L3 ADR-L3-16). Las pruebas de arriba
+    miden una unidad y no lo ven.
+    """
+    runs = unit_runs["trim"]
+    # Lo que queda retenido no pasa de lo que la unidad tuvo en vuelo; ver UNITS_IN_FLIGHT_BYTES.
+    assert drift(runs) <= UNITS_IN_FLIGHT_BYTES, runs
+    # Y el trim recupera de verdad: la deriva es menor que sin él; ver UNITS_TRIM_MIN_GAIN.
+    assert drift(runs) + UNITS_TRIM_MIN_GAIN < drift(unit_runs["no-trim"]), unit_runs
     # El pico de la última unidad lo acota la unidad más grande, no la suma de las anteriores.
     peaks = [r["rss_peak_mib"] for r in runs]
     assert peaks[-1] <= 1.3 * max(peaks[:-1]), peaks
 
 
-def test_without_the_trim_the_rss_does_grow(tmp_path):
-    """Contraprueba de la anterior: sin el trim la misma holgura no se sostiene."""
-    write_units_lake(tmp_path)
-    runs = units(tmp_path, "no-trim")
-
-    after = [r["rss_after_trim_mib"] * MIB for r in runs]
-    assert max(after) > after[0] + UNITS_SLACK, after
+def test_without_the_trim_the_rss_does_grow(unit_runs):
+    """Contraprueba de la anterior: sin el trim el RSS al cerrar sí sube, así que la
+    comparación de arriba no pasa en vacío.
+    """
+    assert drift(unit_runs["no-trim"]) > UNITS_TRIM_MIN_GAIN, unit_runs
