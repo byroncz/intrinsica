@@ -94,15 +94,18 @@ UNITS_ROW_GROUP_BYTES = UNITS_ROW_GROUP * 48
 # glibc crea hasta 8 arenas por vCPU y el resultado depende de cuántas: se fijan las de los
 # 4 vCPU de Cloud Run (4 × 8) para que la prueba mida lo mismo en cualquier máquina.
 UNITS_ENV = {**IMAGE_ENV, "MALLOC_ARENA_MAX": "32"}
-# Lo que queda retenido al cerrar una unidad no puede pasar de lo que tuvo en vuelo a la vez:
-# R lectores + K row groups en el motor (`readers=6, inflight=6` en `UNITS`), decodificados
-# (≈ 220 MiB). Con el trim se midió una deriva de 65 a 114 MiB en 11 corridas.
+# Techo de lo que queda retenido al cerrar una unidad: lo que tuvo en vuelo a la vez, R lectores
+# + K row groups en el motor (`readers=6, inflight=6` en `UNITS`), decodificados (≈ 220 MiB).
+# Es un techo y no lo que detecta la falta del trim: sin trim la deriva (158 a 214 MiB en 8
+# corridas) también cabe, y con él fue de 61 a 140. Solo vale para estas 10 unidades; con 60 el
+# RSS tras el trim sigue subiendo ≈ 2 MiB por unidad (ADR-L3-16) y aquí no se afirma lo contrario.
 UNITS_IN_FLIGHT_BYTES = (6 + 6) * UNITS_ROW_GROUP_BYTES
-# Lo mínimo que el trim tiene que devolver de más que no hacerlo: dos de esos row groups
-# (≈ 37 MiB). Sin trim la deriva fue de 156 a 201 MiB y con él de 65 a 114; la diferencia más
-# chica fue de 47 MiB entre corridas sueltas y de 73 entre las de una misma sesión. Se
-# comparan una contra otra, en la misma máquina, y no contra un número absoluto.
-UNITS_TRIM_MIN_GAIN = 2 * UNITS_ROW_GROUP_BYTES
+# Lo que detecta la falta del trim es el nivel del RSS en las últimas unidades, con y sin trim
+# en la misma sesión: tres row groups (≈ 55 MiB) menos con el trim. En 16 corridas seguidas
+# (10 vCPU, 8 GiB) la diferencia fue de 100 a 133 MiB: el margen es de ≈ 45 MiB contra los
+# ± 15 MiB de ruido de una unidad, que al promediar cinco bajan a ≈ 7. Se comparan una contra
+# otra, en la misma máquina, y no contra un número absoluto.
+UNITS_TRIM_MIN_GAIN = 3 * UNITS_ROW_GROUP_BYTES
 MIB = 1 << 20
 
 
@@ -272,6 +275,12 @@ def drift(runs: list[dict]) -> float:
     return max(after) - after[0]
 
 
+def tail_level(runs: list[dict]) -> float:
+    """Promedio, en bytes, del RSS al cerrar la mitad final de las unidades."""
+    tail = [r["rss_after_trim_mib"] * MIB for r in runs[len(runs) // 2 :]]
+    return sum(tail) / len(tail)
+
+
 def test_rss_after_closing_each_unit_does_not_grow_with_the_units(unit_runs):
     """ITSC-371: con el asignador de la imagen glibc no devuelve al kernel lo liberado y, sin
     hacerlo al cerrar la unidad, el RSS crece unidad a unidad y un backfill largo muere por
@@ -281,8 +290,10 @@ def test_rss_after_closing_each_unit_does_not_grow_with_the_units(unit_runs):
     runs = unit_runs["trim"]
     # Lo que queda retenido no pasa de lo que la unidad tuvo en vuelo; ver UNITS_IN_FLIGHT_BYTES.
     assert drift(runs) <= UNITS_IN_FLIGHT_BYTES, runs
-    # Y el trim recupera de verdad: la deriva es menor que sin él; ver UNITS_TRIM_MIN_GAIN.
-    assert drift(runs) + UNITS_TRIM_MIN_GAIN < drift(unit_runs["no-trim"]), unit_runs
+    # Y el trim recupera de verdad: las últimas unidades quedan más abajo que sin él; ver
+    # UNITS_TRIM_MIN_GAIN. Esta comparación es la que falla cuando falta el trim.
+    gain = tail_level(unit_runs["no-trim"]) - tail_level(runs)
+    assert gain > UNITS_TRIM_MIN_GAIN, unit_runs
     # El pico de la última unidad lo acota la unidad más grande, no la suma de las anteriores.
     peaks = [r["rss_peak_mib"] for r in runs]
     assert peaks[-1] <= 1.3 * max(peaks[:-1]), peaks
