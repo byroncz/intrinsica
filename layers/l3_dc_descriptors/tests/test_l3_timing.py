@@ -396,3 +396,30 @@ def test_unit_timing_records_the_trim_threshold(lake, tmp_path, monkeypatch):
     monkeypatch.delenv("MALLOC_TRIM_THRESHOLD_")
     result = process_unit(unit_of(M2), context(lake, tmp_path), lake.thetas)
     assert result.timing.details()["trim_threshold"] is None
+
+
+def test_unit_timing_records_the_rss_before_and_after_the_trim(lake, tmp_path):
+    # ITSC-371: la unidad devuelve la memoria al kernel al cerrar y deja el RSS de antes y de
+    # después (VmRSS, no el pico) en el hallazgo.
+    result = process_unit(unit_of(M2), context(lake, tmp_path), lake.thetas)
+    details = result.timing.details()
+    assert details["rss_before_trim_mib"] > 0
+    assert details["rss_after_trim_mib"] > 0
+    (row,) = (f for f in result.findings if f.check_type == "unit_timing")
+    assert row.details["rss_before_trim_mib"] == details["rss_before_trim_mib"]
+    assert row.details["rss_after_trim_mib"] == details["rss_after_trim_mib"]
+
+
+def test_the_unit_trims_also_when_it_fails(lake, tmp_path, monkeypatch):
+    # Con éxito o con error: un fallo a medio mes también deja arenas llenas.
+    calls = []
+    monkeypatch.setattr(
+        pipeline, "release_to_kernel", lambda: calls.append(1) or (None, None)
+    )
+    ctx = context(lake, tmp_path)
+    assert process_unit(unit_of(M2), ctx, lake.thetas).ok
+    assert calls == [1]
+    # Sin el mes anterior en L2 la unidad falla dentro de `summarize_month`.
+    broken = replace(ctx, events_root=str(tmp_path / "nothing"))
+    assert not process_unit(unit_of(M2), broken, lake.thetas).ok
+    assert calls == [1, 1]

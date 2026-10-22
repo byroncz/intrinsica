@@ -110,3 +110,34 @@ def test_trim_threshold_is_what_the_environment_says_or_none(
     if text is not None:
         monkeypatch.setenv(TRIM_ENV, text)
     assert memory.trim_threshold() == expected
+
+
+def test_release_to_kernel_trims_every_arena_and_reports_the_rss(monkeypatch):
+    calls: list[int] = []
+
+    class Libc:
+        def malloc_trim(self, pad: int) -> int:
+            calls.append(pad)
+            return 1
+
+    monkeypatch.setattr(memory.ctypes, "CDLL", lambda _: Libc())
+    before, after = memory.release_to_kernel()
+    assert calls == [0]
+    assert before is not None and before > 0
+    assert after is not None and after > 0
+
+
+def test_release_to_kernel_without_malloc_trim_warns_and_goes_on(monkeypatch, caplog):
+    class Libc:  # un libc sin malloc_trim: `getattr` lanza AttributeError
+        pass
+
+    monkeypatch.setattr(memory.ctypes, "CDLL", lambda _: Libc())
+    with caplog.at_level(logging.WARNING, logger=memory.logger.name):
+        before, after = memory.release_to_kernel()
+    assert before is not None and after is not None
+    assert any("malloc_trim" in record.getMessage() for record in caplog.records)
+
+
+def test_rss_bytes_is_the_current_rss_not_the_peak():
+    rss = memory.rss_bytes()
+    assert rss is not None and rss > 1 << 20
