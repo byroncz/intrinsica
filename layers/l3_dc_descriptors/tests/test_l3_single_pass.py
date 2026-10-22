@@ -366,7 +366,10 @@ def test_the_engine_gets_its_first_row_group_before_the_writers_are_open(
     lake, monkeypatch, tmp_path
 ):
     """Un escritor que no termina de abrirse hasta que el motor recibe un row group de L1 no
-    detiene la unidad: los escritores son el segundo tramo de la entrada.
+    detiene la unidad. `gate_s` es el primer tramo de la entrada (abrir `events.parquet` y
+    arrancar sus fronteras) y `setup_s`, el segundo (el motor, el pie de L1 y la compuerta
+    de carry-over); los escritores se abren en el pool durante `setup_s` y nadie los espera
+    antes del primer `push` (§9.3).
     """
     pushed = threading.Event()
     push = native.push

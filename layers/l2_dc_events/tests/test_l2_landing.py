@@ -5,7 +5,6 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
-from conftest import table_of
 from l2_dc_events.landing import (
     COLUMNS,
     LandingError,
@@ -15,6 +14,8 @@ from l2_dc_events.landing import (
     ticks_of,
 )
 from l2_dc_events.timing import Phases
+
+from conftest import table_of
 
 
 def ticks(n, start=1):

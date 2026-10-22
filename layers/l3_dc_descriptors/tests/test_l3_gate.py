@@ -1,11 +1,13 @@
 """Una entrada de L2 faltante o incoherente aborta sin escribir (TRD-L3 §9.2, §13.6)."""
 
 from decimal import Decimal
+from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 import pytest
+from dc_frames.lake import l1_path
 from frames_lake import write_carry_over
 from l3_dc_descriptors import (
     L2InputMissing,
@@ -13,6 +15,7 @@ from l3_dc_descriptors import (
     PhaseTicksMismatch,
     summarize_month,
 )
+from l3_dc_descriptors.summarize import DEFAULT_KEY
 from l3_lake import M1, M2, build_lake, fixture_ticks, month_cuts
 
 SMALL, BIG = 100_000, 2_000_000
@@ -37,7 +40,7 @@ def l2_file(lake, theta: int, month, name: str):
     )
 
 
-def attempt(lake, month=M2, thetas=(SMALL, BIG)):
+def attempt(lake, month=M2, thetas=(SMALL, BIG), **options):
     """Corre la unidad y devuelve el error; no debe haber dejado ningún archivo."""
     with pytest.raises(Exception) as error:
         summarize_month(
@@ -47,6 +50,7 @@ def attempt(lake, month=M2, thetas=(SMALL, BIG)):
             month,
             [theta_text(t) for t in thetas],
             series_start=M1,
+            **options,
         )
     assert [p for p in lake.l3.rglob("*") if p.is_file()] == []
     return error.value
@@ -73,6 +77,17 @@ def test_missing_events_names_the_file(lake):
 def test_missing_carry_over(lake):
     l2_file(lake, SMALL, M2, "carry_over.parquet").unlink()
     error = attempt(lake)
+    assert isinstance(error, L2InputMissing)
+    assert error.details["file"] == "carry_over.parquet"
+
+
+@pytest.mark.parametrize("threads", [1, 4])
+def test_the_gate_error_comes_before_the_l1_error(lake, threads):
+    # Con L1 ilegible y un carry-over ausente sale el `l2_input_missing` de la compuerta,
+    # no el error de L1 (la compuerta se espera antes que el pie de L1).
+    Path(l1_path(lake.l1, DEFAULT_KEY, M2)).write_bytes(b"no es parquet")
+    l2_file(lake, SMALL, M2, "carry_over.parquet").unlink()
+    error = attempt(lake, threads=threads)
     assert isinstance(error, L2InputMissing)
     assert error.details["file"] == "carry_over.parquet"
 

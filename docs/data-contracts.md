@@ -662,7 +662,9 @@ mismo que traen las excepciones del resumidor, de las que sale la mayoría de lo
   `cpu_s / (wall_s × cores)`, medidos con `getrusage` entre el inicio y el final de la
   unidad; con ellos, `minor_faults`, `major_faults`, `voluntary_switches` e
   `involuntary_switches` (fallos de página y cambios de contexto del proceso en la unidad,
-  también de `getrusage`), que separan la CPU de sistema en memoria, candados y red. No cuenta las lecturas de la conciliación (solo
+  también de `getrusage`), que separan la CPU de sistema en memoria, candados y red; y
+  `mmap_threshold`, el umbral de `mmap` de glibc con que corrió (`MALLOC_MMAP_THRESHOLD_` o
+  16 384; `null` si quedó dinámico). No cuenta las lecturas de la conciliación (solo
   `agg_trade_id` de los row groups de las fronteras). Va aparte de `summaries_summary`
   porque sus tiempos cambian en cada corrida y el de `summaries_summary` no puede.
 - **`unit_profile`** (`info`, `pass`): uno por unidad (mes), solo si la corrida lleva
