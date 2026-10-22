@@ -287,7 +287,10 @@ igual cuota de CPU gasta −31 % de CPU y −25 % de pared, a cambio de un RSS d
 acotado por K, R, W y los sellados pendientes, no por el mes. Sin la variable (en local y en pruebas)
 `memory.tune_allocators()` fija el mismo umbral de `mmap`. Las cifras, la regla de retroceso (un mes
 sobre 3 500 MiB quita el `trim`) y cómo comparar otra configuración están en TRD-L3 ADR-L3-16 y en
-el runbook, «El asignador». `unit_timing` registra `mmap_threshold` y `trim_threshold`.
+el runbook, «El asignador». `unit_timing` registra `mmap_threshold` y `trim_threshold`. Al cerrar cada unidad `process_unit` devuelve
+la memoria libre al kernel (`gc.collect()` y `malloc_trim(0)`), porque un `backfill` corre muchos meses en
+un proceso y sin eso las arenas de cada mes se acumulan hasta el OOM (ITSC-371); `unit_timing` registra
+`rss_before_trim_mib` y `rss_after_trim_mib`.
 
 ## Pruebas
 

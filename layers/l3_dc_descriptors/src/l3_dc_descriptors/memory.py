@@ -16,6 +16,7 @@ que rigió (`mmap_threshold` y `trim_threshold`).
 """
 
 import ctypes
+import gc
 import logging
 import os
 
@@ -78,6 +79,46 @@ def _requested() -> int:
             DEFAULT_MMAP_THRESHOLD,
         )
     return DEFAULT_MMAP_THRESHOLD
+
+
+def rss_bytes() -> int | None:
+    """El RSS del proceso ahora (`VmRSS`), o `None` si no se puede leer.
+
+    No es `ru_maxrss`: ese es un pico y no baja, y lo que importa tras devolver memoria al
+    kernel es cuánto ocupa el proceso en este momento.
+    """
+    try:
+        with open("/proc/self/status") as status:
+            for line in status:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1]) * 1024
+    except OSError:
+        pass
+    return None
+
+
+def release_to_kernel() -> tuple[int | None, int | None]:
+    """Devuelve al kernel la memoria libre de la unidad y dice el RSS antes y después.
+
+    Con el umbral de recorte de la imagen glibc no devuelve lo liberado, y cada unidad crea
+    pools de hilos nuevos que caen en arenas nuevas: sin esto las arenas de las unidades
+    anteriores quedan llenas y el RSS crece unidad a unidad hasta el OOM (ITSC-371).
+    `gc.collect()` suelta primero lo que solo retienen ciclos (buffers de Arrow anclados por
+    ellos) y `malloc_trim(0)` recorre todas las arenas y devuelve las páginas libres; cuesta
+    milisegundos y no toca datos. Sin `malloc_trim` (otro libc) avisa y sigue: el RSS no
+    baja.
+    """
+    before = rss_bytes()
+    gc.collect()
+    try:
+        malloc_trim = ctypes.CDLL(None).malloc_trim
+    except AttributeError, OSError:
+        logger.warning(
+            "sin malloc_trim: la memoria libre no vuelve al kernel entre unidades"
+        )
+    else:
+        malloc_trim(0)
+    return before, rss_bytes()
 
 
 def tune_allocators() -> None:
