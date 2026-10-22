@@ -1,4 +1,4 @@
-# Runbook: operación de L3 (backfill histórico, lectura de fallos, cascada, cadena mensual, volumen y costo, perfil de una unidad, hilos de la unidad, verificación cruzada)
+# Runbook: operación de L3 (backfill histórico, lectura de fallos, cascada, cadena mensual, volumen y costo, perfil de una unidad, hilos de la unidad, verificación cruzada, comparación de corridas)
 
 Lo ejecuta el humano desde *Actions → Run job* y Cloud Shell; ningún agente
 dispara `terraform.yml` ni `run-job.yml`. Dice cómo se opera L3 una vez construido
@@ -579,9 +579,9 @@ se decodifican a lo sumo 2 row groups más que con 1, al final.
 
 ## Scripts de operación
 
-Dos scripts de `layers/ops_tools/scripts/`, para el job `ops-script`
+Tres scripts de `layers/ops_tools/scripts/`, para el job `ops-script`
 ([runbook de operación ad hoc](operacion-ops.md)). Se suben a
-`gs://<proyecto>-ops/scripts/` y se lanzan con `job` = `ops-script`. Ambos solo
+`gs://<proyecto>-ops/scripts/` y se lanzan con `job` = `ops-script`. Todos solo
 leen, toman las raíces del proyecto de `OPS_RESULTS_URI` y también aceptan rutas
 locales (`uv run`).
 
@@ -589,6 +589,7 @@ locales (`uv run`).
 | --- | --- | --- |
 | `l3_probe_reader.py` | Mide el lector de tramas (pared por fase, RSS, bytes, row groups) contra los umbrales de TRD-L3 §10.3 | `--theta all --from 2023-03`; con lectores, `--theta all --from 2021-01 --modo row-groups --readers 2 --sin-contar-io` |
 | `l3_check_month.py` | Verificación cruzada: agrega por su cuenta las tramas de cada evento del mes y compara fila a fila con `summaries.parquet` | `--month 2026-09` |
+| `l3_compare_runs.py` | Compara dos corridas por sus hallazgos (`content_hash` y `rows` de cada θ y mes) y, con `--timing`, mide la nueva | `--base-dates 2026-10-14:2026-10-16 --new-dates 2026-10-23: --timing` |
 
 ```bash
 gcloud storage cp layers/ops_tools/scripts/l3_check_month.py \
@@ -660,13 +661,78 @@ filas y pagan por tick: 6 a 10 s cada uno en 2026-09 y 60 a 75 s en 2023-03.
 Para un mes nuevo, extrapola de 2026-09 con la relación de ticks (7,3 × a
 2023-03) y de eventos (25 ×), y parte la corrida si la suma pasa de ≈ 3 000 s.
 
+### `l3_compare_runs.py`
+
+Prueba que dos corridas de L3 produjeron lo mismo **sin releer los Parquet**: compara, por
+`(θ, mes)`, el `content_hash` y las `rows` del hallazgo `summaries_summary` de una corrida
+**base** con los de una **nueva**. Mismo `content_hash` es mismo contenido lógico
+([RNF-L3-03](../TRD/l3.md)), así que 5 500 pares iguales (110 meses × 50 θ) son la prueba de
+que el núcleo nuevo no cambió ningún archivo. La referencia es la corrida de ITSC-335, que
+sigue en `dq-findings/l3/` aunque `force` reescriba L3: comparar es leer dos conjuntos de
+hallazgos.
+
+| `args` | Efecto |
+| --- | --- |
+| `--base-dates A:B --new-dates C:` | Cada lado por su `detected_date=` (UTC): `A`, `A:B`, `A:` o `:B`; los dos extremos entran |
+| `--base-run <run_id> --new-run <run_id>` | Cada lado por `run_id` (repetible); se combina con las fechas. Solo con `run_id` lee **todos** los días del lago: usa fechas |
+| `--from 2017-08 --to 2026-09` | Solo esos meses, en los dos lados |
+| `--timing` | Resume los `unit_timing` de la corrida nueva (abajo) |
+| `--baseline-vcpu-s 165000` | Con `--timing`: contra cuántos vCPU-s se compara |
+| `--dq-root`, `--provider`, `--market`, `--asset`, `--max-diffs 100` | Otra raíz (también local), otra serie, cuántas diferencias imprime |
+
+Un backfill se lanza por rangos y cada ejecución tiene su `run_id`, por eso el lado se elige
+por fechas. El día es el UTC de `detected_at`: una ejecución que cruza la medianoche UTC deja
+hallazgos en dos carpetas, y el rango debe incluir ambas. Si un `(θ, mes)` aparece en varias
+corridas de un lado, vale la última por `detected_at`; si esas corridas discrepan entre sí, el
+par sale `INCONSISTENTE` (una diferencia más): acota el lado con fechas o `run_id` hasta que
+solo quede la corrida que quieres comparar.
+
+Salida: una línea por diferencia (`DIFERENCIA θ=… 2021-01: content_hash base=… nueva=…`,
+`SOLO EN BASE`, `SOLO EN NUEVA`, `INCONSISTENTE`) y, al final, `compare runs: pares=… coinciden=…
+difieren=… solo_base=… solo_nueva=… inconsistentes=… veredicto=ok|diferencias`. Códigos: **0**
+si todo coincide, **1** si hay una sola diferencia, un lado sin hallazgos o el lago no se
+lee, **2** por uso. Una diferencia **nunca se tolera**: bloquea la épica hasta explicarla, y
+no se relanza el backfill esperando que desaparezca.
+
+Con `--timing` imprime después, de la corrida nueva y con el `unit_timing` más reciente de
+cada mes: la tabla por mes (`wall_s`, `cpu_utilization`, `rss_peak_mib`, `engine_busy`,
+`cores`), `cpu_utilization` p10, p50 y mínimo con el mes del mínimo, los meses bajo 0,80, la
+suma de `wall_s`, los vCPU-s (`Σ wall_s × cores`, contra `--baseline-vcpu-s`), el
+`rss_peak_mib` máximo y el `engine_busy` p50. La tabla queda en `results/` como
+`l3_compare_runs_timing_<fecha>.csv`. Es informativo: no cambia el código de salida. Los
+vCPU-s son el cómputo de las unidades; lo facturable es la pared de la ejecución, que incluye
+el arranque (`gcloud run jobs executions describe`).
+
+**Validar el núcleo nuevo (ITSC-364).** Todo lo dispara el humano; los agentes no lanzan
+jobs:
+
+1. Con el stack `l3` aplicado con la imagen vigente, *Actions → Run job*: `job` =
+   `l3-backfill`, `from` = `2017-08`, `to` vacío y `force` marcado. Rehace los 110 meses
+   (`force` exige `from`, y con `to` vacío llega al último mes con consolidado). Con la pared
+   nueva (≤ 120 s por mes, ≈ 3,7 h) cabe en una sola ejecución de 86 400 s y bajo las 6 h
+   de Actions. Anota la fecha UTC de inicio y de fin.
+2. Sube el script y lanza `ops-script` (`gcloud storage cp
+   layers/ops_tools/scripts/l3_compare_runs.py gs://<proyecto>-ops/scripts/l3_compare_runs.py`),
+   con las fechas de ITSC-335 como base y las del paso 1 como nueva:
+
+   ```
+   --base-dates <primer día de ITSC-335>:<último día> --new-dates <día del paso 1>: --timing --baseline-vcpu-s 165000
+   ```
+
+   El `--new-dates` queda abierto por el final para cubrir la medianoche UTC; si ya hubo
+   otras corridas después, ciérralo con el último día del backfill.
+3. Pega la última línea de la comparación (debe ser `pares=5500 coinciden=5500 …
+   veredicto=ok`) y las líneas de `--timing` como comentario de ITSC-364. Con eso se
+   escriben [TRD-L3 §10.2](../TRD/l3.md#102-dimensionamiento--hipótesis-de-partida-y-primera-medición)
+   y la decisión «Núcleo de L3 al 95 %».
+
 ### La trampa del 403 por prefijo
 
 La service account de `ops-script` lee `l1/`, `l2/`, `l3/` y `viz/tiles/` con
 condiciones IAM por prefijo. `pyarrow.dataset.dataset("gs://<bucket>/l3")` (o
 `pq.read_table` sobre un prefijo) pide primero el **objeto** `l3` sin barra, y la
 condición `startsWith("…/l3/")` lo niega: 403, aunque los archivos de abajo sean
-legibles (run 38659287542 de `ops-script`). Los dos scripts evitan el problema:
+legibles (run 38659287542 de `ops-script`). Los tres scripts evitan el problema:
 **listan de forma recursiva** y **abren cada archivo por su ruta completa**. Un
 script nuevo hace lo mismo; desde Cloud Shell, con tus credenciales, el 403 no
 aparece.
