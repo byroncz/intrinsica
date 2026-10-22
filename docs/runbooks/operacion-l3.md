@@ -397,7 +397,9 @@ W = 12 el tope son 36 row groups ≈ 290 MiB, igual que los 8 × 4 de antes; con
 96 ≈ 770 MiB y T4b midió `rss_peak_mib` 2 331 contra 1 864 de T4 (W = 4). Si cambias W,
 rehaz la cuenta: `3 × W × 8 MiB`. La cuenta completa está en
 [TRD-L3 ADR-L3-16, «Memoria del orquestador»](../TRD/l3.md#616-adr-l3-16--motor-de-agregación-nativo-ítems-por-row-group-y-θ-casillas-por-evento-fusión-asociativa).
-Se acepta una combinación si `rss_peak_mib` queda ≤ 2 048 a 4 vCPU.
+Se acepta una combinación si `rss_peak_mib` queda < 3 500 a 4 vCPU con el asignador de la imagen (la
+configuración por defecto mide 3 126 MiB); con el asignador de 16 KiB de L2 el criterio es ≤ 2 048.
+El límite y su regla de retroceso están en [«Asignador por defecto de L3»](#el-asignador-malloc_mmap_threshold_-y-malloc_trim_threshold_-itsc-366-itsc-367).
 
 **Cómo leer `unit_timing`** (todas las fases son pared; [TRD-L3 §9.3](../TRD/l3.md#93-tipos-de-chequeo-check_type)):
 
