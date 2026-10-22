@@ -8,6 +8,7 @@ convierte las excepciones en hallazgos de DQ.
 
 from l3_dc_descriptors.errors import (
     L2InputMissing,
+    L2LineageMissing,
     L2StateInconsistent,
     PhaseQuantityMismatch,
     PhaseTicksMismatch,
@@ -24,6 +25,7 @@ __all__ = [
     "STATE_VERSION",
     "SUMMARIES_SCHEMA",
     "L2InputMissing",
+    "L2LineageMissing",
     "L2StateInconsistent",
     "PhaseQuantityMismatch",
     "PhaseTicksMismatch",

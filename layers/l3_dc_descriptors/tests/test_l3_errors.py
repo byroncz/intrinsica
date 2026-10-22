@@ -61,7 +61,7 @@ def test_boundary_error_keeps_a_tiny_theta_as_text():
     }
 
 
-def test_the_summarizer_decodes_each_column_of_l2_once_and_gives_the_engine_seven(
+def test_the_summarizer_decodes_only_the_columns_it_uses_once_and_gives_the_engine_seven(
     lake, monkeypatch
 ):
     seen = []
@@ -89,11 +89,12 @@ def test_the_summarizer_decodes_each_column_of_l2_once_and_gives_the_engine_seve
     monkeypatch.setattr(pq.ParquetFile, "read_row_group", spy_keys)
     monkeypatch.setattr(native, "push_boundaries", spy_push)
     run(lake)
-    # Se decodifican las 11 columnas una sola vez (el hash del linaje las necesita todas) y
-    # el motor recibe exactamente las siete que usa.
+    # Se decodifican las siete columnas del motor más `theta` (el esqueleto), una sola vez y
+    # no las 11 del archivo: el linaje ya no se calcula, lo publica L2. El motor recibe
+    # exactamente las siete que usa.
     every = set(pq.read_schema(next((lake.l2).rglob("events.parquet"))).names)
     assert len(every) == 11
-    assert seen and all(columns == every for columns in seen)
+    assert seen and all(columns == {*EVENT_COLUMNS, "theta"} for columns in seen)
     assert delivered and all(names == list(EVENT_COLUMNS) for names in delivered)
     # El escritor no relee las claves del esqueleto: ningún row group de `events.parquet`
     # se pide por segunda vez (`theta` y la confirmación juntas eran esa relectura).

@@ -1,5 +1,6 @@
 """Una entrada de L2 faltante o incoherente aborta sin escribir (TRD-L3 §9.2, §13.6)."""
 
+import json
 from decimal import Decimal
 from pathlib import Path
 
@@ -11,6 +12,7 @@ from dc_frames.lake import l1_path
 from frames_lake import write_carry_over
 from l3_dc_descriptors import (
     L2InputMissing,
+    L2LineageMissing,
     L2StateInconsistent,
     PhaseTicksMismatch,
     summarize_month,
@@ -79,6 +81,68 @@ def test_missing_carry_over(lake):
     error = attempt(lake)
     assert isinstance(error, L2InputMissing)
     assert error.details["file"] == "carry_over.parquet"
+
+
+@pytest.mark.parametrize("threads", [1, 4])
+def test_missing_lineage_names_the_partition(lake, threads):
+    """Sin `content_hash.json` la unidad falla y no recalcula el linaje (ITSC-368)."""
+    l2_file(lake, BIG, M2, "content_hash.json").unlink()
+    error = attempt(lake, threads=threads)
+    assert isinstance(error, L2LineageMissing)
+    assert error.check_type == "l2_lineage_missing"
+    assert error.details == {
+        "theta": theta_text(BIG),
+        "month": "2017-09",
+        "file": "content_hash.json",
+        "reason": "no existe",
+    }
+    assert str(l2_file(lake, BIG, M2, "content_hash.json")) in str(error)
+
+
+@pytest.mark.parametrize(
+    "content, reason",
+    [
+        (b"no es json", "no es JSON"),
+        (b'{"events_content_hash": "a"}', "se esperaban las claves"),
+        (
+            (
+                b'{"events_content_hash": "a", "carry_over_content_hash": 1,'
+                b' "hasher_version": "1", "written_at": "x"}'
+            ),
+            "texto no vacío",
+        ),
+    ],
+)
+def test_an_invalid_lineage_is_a_missing_lineage(lake, content, reason):
+    l2_file(lake, SMALL, M2, "content_hash.json").write_bytes(content)
+    error = attempt(lake)
+    assert isinstance(error, L2LineageMissing)
+    assert reason in error.details["reason"]
+
+
+def test_the_lineage_is_read_from_the_partition_not_recomputed(lake):
+    """Lo que L3 registra es lo que dice el JSON, aunque no coincida con los Parquet."""
+    path = l2_file(lake, SMALL, M2, "content_hash.json")
+    published = json.loads(path.read_text())
+    published |= {"events_content_hash": "e" * 64, "carry_over_content_hash": "c" * 64}
+    path.write_text(json.dumps(published))
+    result = summarize_month(
+        lake.l1,
+        lake.l2,
+        lake.l3,
+        M2,
+        [theta_text(SMALL)],
+        series_start=M1,
+    )[Decimal(SMALL).scaleb(-8)]
+    assert result.l2_events_content_hash == "e" * 64
+    assert result.l2_carry_over_content_hash == "c" * 64
+
+
+def test_a_missing_file_is_reported_before_the_lineage(lake):
+    """Una partición sin carry-over (y sin huella, o con ella) es `l2_input_missing`."""
+    l2_file(lake, SMALL, M2, "carry_over.parquet").unlink()
+    l2_file(lake, SMALL, M2, "content_hash.json").unlink()
+    assert isinstance(attempt(lake), L2InputMissing)
 
 
 @pytest.mark.parametrize("threads", [1, 4])

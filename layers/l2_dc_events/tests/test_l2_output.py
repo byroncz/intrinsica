@@ -2,6 +2,7 @@
 
 import dataclasses
 import json
+from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -9,6 +10,7 @@ import dc_pyo3
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+from l2_dc_events import pipeline
 from l2_dc_events.carry import CarryOverError, Coordinates, read_carry_over, to_batch
 from l2_dc_events.landing import LandingError, open_consolidated, read_batches, ticks_of
 from l2_dc_events.pipeline import RunContext, Unit, process_unit
@@ -17,10 +19,17 @@ from l2_dc_events.thetas import load_thetas
 from l2_dc_events.write import (
     CARRY_OVER,
     EVENTS,
+    LINEAGE,
     format_theta,
     partition_path,
 )
-from pyutils import ContentHasher, PartitionWriter
+from pyutils import (
+    HASHER_VERSION,
+    ContentHasher,
+    PartitionWriter,
+    content_hash,
+    lineage,
+)
 
 THETAS = load_thetas()
 # Un θ del config con eventos en el fixture de un día (≈ 1,6 %).
@@ -168,10 +177,97 @@ def test_rerunning_the_month_gives_the_same_content_hash(
     assert first.events_hashes == second.events_hashes
     assert first.carry_over_hashes == second.carry_over_hashes
     assert len(set(first.events_hashes)) > 1  # cada θ tiene su contenido
-    # Ningún temporal huérfano: solo los 100 archivos publicados.
+    # Ningún temporal huérfano: solo los 150 archivos publicados.
     files = [p.name for p in Path(ctx.events_root).rglob("*") if p.is_file()]
-    assert sorted(set(files)) == [CARRY_OVER, EVENTS]
-    assert len(files) == 2 * len(THETAS)
+    assert sorted(set(files)) == [CARRY_OVER, LINEAGE, EVENTS]
+    assert len(files) == 3 * len(THETAS)
+
+
+def test_every_partition_publishes_its_lineage_next_to_the_parquet(
+    fixture_ticks, write_month, ctx
+):
+    """`content_hash.json` lleva los hashes de `events_summary` y el de un archivo releído."""
+    write_month(fixture_ticks, row_group_size=1_000)
+    result = process_unit(AUG, ctx)
+    summary = {
+        json_details(r)["theta"]: json_details(r)
+        for r in findings_of(ctx)
+        if r["check_type"] == "events_summary"
+    }
+    for index, theta in enumerate(THETAS):
+        published = lineage.read(path_of(ctx, AUG, theta, LINEAGE))
+        assert set(published) == {
+            "events_content_hash",
+            "carry_over_content_hash",
+            "hasher_version",
+            "written_at",
+        }
+        assert published["events_content_hash"] == result.events_hashes[index]
+        assert published["carry_over_content_hash"] == result.carry_over_hashes[index]
+        assert published["events_content_hash"] == summary[theta]["events_content_hash"]
+        assert (
+            published["carry_over_content_hash"]
+            == summary[theta]["carry_over_content_hash"]
+        )
+        assert published["hasher_version"] == HASHER_VERSION
+        # Y es el hash lógico de los archivos tal como quedaron en disco.
+        for name, key in ((EVENTS, "events"), (CARRY_OVER, "carry_over")):
+            assert published[f"{key}_content_hash"] == content_hash(
+                pq.read_table(path_of(ctx, AUG, theta, name))
+            )
+        written = datetime.fromisoformat(published["written_at"])
+        assert written.utcoffset() == timedelta(0)
+
+
+def test_the_lineage_is_published_last_and_replaces_the_old_one(
+    fixture_ticks, write_month, ctx, monkeypatch
+):
+    """Antes de escribir la huella están los dos Parquet y la anterior ya no está: si la
+    corrida muriera entre medias, la partición quedaría sin linaje y no con uno viejo.
+    """
+    write_month(fixture_ticks, row_group_size=1_000)
+    process_unit(AUG, ctx)
+    old = {
+        theta: Path(path_of(ctx, AUG, theta, LINEAGE)).read_bytes() for theta in THETAS
+    }
+    real = lineage.write
+    checked = []
+
+    def checking(path, content):
+        directory = Path(path).parent
+        assert (directory / EVENTS).is_file() and (directory / CARRY_OVER).is_file()
+        assert not Path(path).exists()
+        checked.append(path)
+        return real(path, content)
+
+    monkeypatch.setattr(pipeline.lineage, "write", checking)
+    process_unit(AUG, dataclasses.replace(ctx, run_id="otra"))
+    assert len(checked) == len(THETAS)
+    # Mismos hashes (la entrada es la misma); solo `written_at` puede cambiar.
+    for theta in THETAS:
+        new = json.loads(Path(path_of(ctx, AUG, theta, LINEAGE)).read_text())
+        before = json.loads(old[theta])
+        assert {k: v for k, v in new.items() if k != "written_at"} == {
+            k: v for k, v in before.items() if k != "written_at"
+        }
+
+
+def test_a_run_that_dies_before_the_lineage_leaves_the_partition_without_one(
+    fixture_ticks, write_month, ctx, monkeypatch
+):
+    write_month(fixture_ticks, row_group_size=1_000)
+    process_unit(AUG, ctx)
+
+    def dies(path, content):
+        raise RuntimeError("murió antes de la huella")
+
+    monkeypatch.setattr(pipeline.lineage, "write", dies)
+    with pytest.raises(RuntimeError, match="murió"):
+        process_unit(AUG, dataclasses.replace(ctx, run_id="otra"))
+    # Cada θ que llegó a publicar retiró la huella vieja: nunca queda una que describa
+    # archivos que ya no están.
+    left = [t for t in THETAS if Path(path_of(ctx, AUG, t, LINEAGE)).exists()]
+    assert len(left) < len(THETAS)
 
 
 def test_the_hash_does_not_depend_on_the_row_group_size(

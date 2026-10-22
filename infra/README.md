@@ -592,7 +592,8 @@ Regla: no lanzar a mano el mismo mes y modo que Scheduler esté ejecutando.
 
 Instancia del módulo `layer` con un solo modo: el job `ops-script` (y la service
 account `ops-script`), que corre un script Python tomado de GCS (ITSC-298). No
-es una capa de datos: no escribe en el lago. Cómo se usa, qué ve el humano y los
+es una capa de datos: no escribe en el lago, salvo crear `content_hash.json` en
+`dc-events/l2/` para el backfill del linaje (ITSC-368, abajo). Cómo se usa, qué ve el humano y los
 scripts de partida están en el
 [runbook de operación ad hoc](../docs/runbooks/operacion-ops.md).
 
@@ -611,6 +612,13 @@ scripts de partida están en el
   ninguno); y escritura solo en `ops/results/`
   (`roles/storage.objectCreator`, un binding propio del stack porque el módulo
   da un solo rol por bucket). Sin roles de IAM ni `run.jobs.update`.
+- **Backfill del linaje (ITSC-368).** Un binding más, propio del stack:
+  `roles/storage.objectCreator` sobre `dc-events` con la condición de que el nombre
+  empiece por `l2/` y termine en `/content_hash.json`. Solo crea (no pisa ni
+  borra): el script `l2_backfill_lineage.py` no puede tocar un Parquet ni una
+  huella ya publicada, y cualquier otro nombre sigue dando 403. El apply de `ops`
+  agrega 1 binding y no destruye ninguno. Va **antes** del backfill y del apply de
+  `l3` ([Cambios requeridos de L3](../docs/runbooks/operacion-l3.md#cambios-requeridos)).
 - **Cómputo.** 4 vCPU, 8 GiB, timeout 3600 s, `max_retries = 0` (un script ad
   hoc no se reintenta solo) y una sola tarea. La imagen es `ops_tools`
   (`layers/ops_tools/`, versión en su `VERSION`).

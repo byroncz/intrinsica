@@ -1,6 +1,7 @@
 # Job de operación (ITSC-298): corre un script Python ad hoc tomado de GCS. No es
-# una capa de datos: no escribe en el lago. Este stack no posee buckets (el
-# bucket ops lo crea data, como todos); solo pide acceso a sus prefijos.
+# una capa de datos: no escribe en el lago, con una excepción acotada (ITSC-368): crear
+# `content_hash.json` en las particiones de L2, para el backfill del linaje. Este stack no
+# posee buckets (el bucket ops lo crea data, como todos); solo pide acceso a sus prefijos.
 data "terraform_remote_state" "data" {
   backend = "gcs"
 
@@ -16,8 +17,8 @@ locals {
   ops     = local.buckets["ops"]
 
   # Solo lectura sobre el lago (landing, eventos, descriptores de L3, hallazgos,
-  # manifiesto y tiles de viz) y sobre los scripts. Nada de escritura en el
-  # lago: lo que un script quiera dejar va a results/, abajo.
+  # manifiesto y tiles de viz) y sobre los scripts. Lo que un script quiera dejar va a
+  # results/, abajo; la única escritura en el lago es la del linaje de L2 (más abajo).
   access = {
     (local.buckets["landing"])        = { role = "roles/storage.objectViewer", prefixes = ["l1/"] }
     (local.buckets["dc-events"])      = { role = "roles/storage.objectViewer", prefixes = ["l2/"] }
@@ -81,5 +82,22 @@ resource "google_storage_bucket_iam_member" "results_creator" {
     title       = "ops-script-${local.ops}-results"
     description = "Escritura de ops-script solo bajo results/"
     expression  = "resource.name.startsWith(\"projects/_/buckets/${local.ops}/objects/results/\")"
+  }
+}
+
+# Backfill del linaje de L2 (ITSC-368): `l2_backfill_lineage.py` crea `content_hash.json` en
+# las particiones de L2 publicadas antes de que L2 lo escribiera. objectCreator crea objetos
+# nuevos y no pisa ni borra, y la condición lo limita a ese nombre bajo l2/: un script no puede
+# tocar un Parquet, un hallazgo ni un `content_hash.json` ya publicado (403). Sin lectura ni
+# listado aquí: eso lo da el viewer de dc-events/l2/.
+resource "google_storage_bucket_iam_member" "lineage_creator" {
+  bucket = local.buckets["dc-events"]
+  role   = "roles/storage.objectCreator"
+  member = "serviceAccount:${module.layer.service_account_emails["script"]}"
+
+  condition {
+    title       = "ops-script-${local.buckets["dc-events"]}-lineage"
+    description = "Creación de content_hash.json solo bajo l2/ (backfill del linaje, ITSC-368)"
+    expression  = "resource.name.startsWith(\"projects/_/buckets/${local.buckets["dc-events"]}/objects/l2/\") && resource.name.endsWith(\"/content_hash.json\")"
   }
 }

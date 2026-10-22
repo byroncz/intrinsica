@@ -7,7 +7,7 @@ motor nativo (`dc_pyo3.Engine`, crate `dc_descriptors`), que tiene sus propios h
 
 ```text
   L2 (50 events.parquet) ─ pool de E/S ─► BoundaryFeed ─┐ fronteras, por delante de cada row group
-       └─ tap: hash de las 11 columnas y huella de las claves (linaje y esqueleto)
+       └─ tap: huella de las claves de cada row group (el esqueleto)
   L1 (consolidated) ─ read_row_groups(R) ─► push ───────┤
                                                         ▼
                                                   motor nativo (hilos, ítems (row group, θ))
@@ -29,17 +29,20 @@ de su evento y sella los row groups de salida de cada θ en orden.
 E/S, abre `events.parquet` (si falta, `l2_missing`), comprueba sus tipos y arranca la lectura
 anticipada de sus fronteras; de ahí salen el pie del archivo y, con él, los tamaños de row
 group que el constructor del motor pide de los 50 θ. El segundo tramo (la compuerta de
-carry-over del mes y del anterior, con el hash del mes, y la apertura del `FamilyWriter` con
+carry-over del mes y del anterior, con la huella del mes, y la apertura del `FamilyWriter` con
 el esqueleto en RAM que deja `L2Events`) corre en el mismo pool mientras el hilo principal
-construye el motor y espera el pie de L1. El orquestador espera los carry-overs antes del
-primer `push` (la conciliación anota con ellos los ids que va a contar) y los escritores solo
+construye el motor y espera el pie de L1. La compuerta lee también la huella que L2 publicó
+(`content_hash.json`): el linaje no se calcula aquí (ITSC-368). El orquestador espera los
+carry-overs antes del primer `push` (la conciliación anota con ellos los ids que va a contar)
+y los escritores solo
 cuando necesita el primero: los row groups sellados los esperan (`_LateWriter`) y el
 orquestador los reúne todos antes de conciliar y publicar. Un fallo al abrir un escritor
 detiene la unidad en el siguiente `push`, no al final.
 
-Cada archivo de L2 se lee una vez: los mismos lotes alimentan al motor, al
-`l2_events_content_hash` y a la comprobación de las claves del esqueleto. El carry-over se
-lee una vez y de ahí salen su contenido y su hash. Nada se relee para el linaje.
+Cada archivo de L2 se lee una vez: los mismos lotes alimentan al motor y a la comprobación de
+las claves del esqueleto. El carry-over se lee una vez. El linaje (`l2_events_content_hash` y
+`l2_carry_over_content_hash`) es el que L2 publicó en `content_hash.json`: se lee, no se
+recalcula, y si falta la unidad falla con `l2_lineage_missing`.
 
 Atómico por archivo: nada se publica hasta que todo el mes se resumió y concilió. Con
 `threads=1` no hay pool de E/S: la compuerta, la apertura, la conciliación y la publicación
@@ -67,13 +70,18 @@ from dc_frames import (
 from dc_frames.lake import L1, EventFile, Month, month_of, month_ordinal
 
 from l3_dc_descriptors import native
-from l3_dc_descriptors.boundaries import BatchStream, L2Events, check_types
+from l3_dc_descriptors.boundaries import (
+    EVENT_FILE_COLUMNS,
+    BatchStream,
+    L2Events,
+    check_types,
+)
 from l3_dc_descriptors.cpu import cpu_limit
 from l3_dc_descriptors.errors import L2StateInconsistent, SkeletonMismatch, month_text
 from l3_dc_descriptors.l2 import (
     EVENTS,
     read_carry_over,
-    read_carry_over_hashed,
+    read_lineage,
     require,
 )
 from l3_dc_descriptors.outputs import POLL_S, Collector, SealedWriters
@@ -110,7 +118,8 @@ PENDING_PER_WRITER = 3
 @dataclass(frozen=True, slots=True)
 class ThetaResult:
     """Lo que la unidad dejó de un θ: su archivo, sus filas, su hash, su conciliación y el
-    `content_hash` de las dos entradas de L2 que usó (el linaje de `summaries_summary`).
+    `content_hash` de las dos entradas de L2 que usó (el linaje de `summaries_summary`, tal
+    como L2 lo publicó).
     """
 
     path: str
@@ -229,10 +238,10 @@ def _submit[T](
 class _Input:
     """Lo que la entrada de un θ deja abierto y leído.
 
-    `file` es su `events.parquet`; `events`, lo que se sacó de él al leerlo (linaje y
-    esqueleto); `stream`, sus lotes de fronteras, ya en lectura anticipada. Esos tres salen
-    del primer tramo. El segundo los deja en dos futuros: `gate`, la compuerta de entrada
-    (§9.2), cuyo resultado el orquestador vuelca en `carry`, `carry_hash` y
+    `file` es su `events.parquet`; `events`, lo que se sacó de él al leerlo (el esqueleto);
+    `stream`, sus lotes de fronteras, ya en lectura anticipada. Esos tres salen del primer
+    tramo. El segundo los deja en dos futuros: `gate`, la compuerta de entrada (§9.2), cuyo
+    resultado el orquestador vuelca en `carry`, `lineage` y
     `previous_direction`, y `writer`, el `FamilyWriter` abierto. Como context manager cierra,
     en este orden, la lectura anticipada, el escritor (que descarta el temporal si no hubo
     `commit`) y el archivo.
@@ -240,10 +249,10 @@ class _Input:
 
     __slots__ = (
         "carry",
-        "carry_hash",
         "events",
         "file",
         "gate",
+        "lineage",
         "previous_direction",
         "stream",
         "writer",
@@ -290,11 +299,11 @@ class _LateWriter:
 
 
 def _open_events(l2_root: str, key, month: Month, text: str) -> EventFile:
-    """`events.parquet` del θ con todas sus columnas; si falta, `l2_missing` (§9.2)."""
+    """`events.parquet` del θ con las columnas que se usan; si falta, `l2_missing` (§9.2)."""
     path = l2_path(l2_root, key, text, month)
     try:
         return EventFile(
-            path, f"L2 del θ {text} en {month_text(month)}", all_columns=True
+            path, f"L2 del θ {text} en {month_text(month)}", EVENT_FILE_COLUMNS
         )
     except FramesInputError:
         require(path, text, month, EVENTS)  # lanza `L2InputMissing` si el archivo falta
@@ -351,10 +360,11 @@ def _read_gate(
     series_start: Month,
     text: str,
 ):
-    """La compuerta de carry-over de un θ (§9.2): el del mes con su hash y la dirección del
-    anterior (0 en el primer mes de la serie, que no tiene anterior).
+    """La compuerta de entrada de un θ (§9.2): el carry-over del mes, la dirección del
+    anterior (0 en el primer mes de la serie, que no tiene anterior) y la huella que L2
+    publicó del mes. La huella va al final: un archivo que falta se reporta antes que ella.
     """
-    carry, carry_hash = read_carry_over_hashed(l2_root, key, text, month)
+    carry = read_carry_over(l2_root, key, text, month)
     previous = (
         0
         if month == series_start
@@ -362,7 +372,7 @@ def _read_gate(
             l2_root, key, text, month_of(month_ordinal(month) - 1)
         ).direction
     )
-    return carry, carry_hash, previous
+    return carry, read_lineage(l2_root, key, text, month), previous
 
 
 def _await_gates(inputs: Sequence[_Input]) -> None:
@@ -372,7 +382,7 @@ def _await_gates(inputs: Sequence[_Input]) -> None:
     """
     wait([item.gate for item in inputs])
     for item in inputs:
-        item.carry, item.carry_hash, item.previous_direction = item.gate.result()
+        item.carry, item.lineage, item.previous_direction = item.gate.result()
         item.gate = None
 
 
@@ -621,9 +631,9 @@ def summarize_month(
                     l1,
                 )
                 phases.items = pushed * sum(1 for f in files if any(f.rows))
-            # Completa la lectura de L2: el hash de cada archivo cubre todos sus lotes. En
-            # este hilo y no en el pool: una tarea que espera a `BatchStream` ocuparía el
-            # hilo que la lectura necesita.
+            # Completa la lectura de L2: el esqueleto de cada archivo cubre todos sus row
+            # groups, también los que el motor no pidió. En este hilo y no en el pool: una
+            # tarea que espera a `BatchStream` ocuparía el hilo que la lectura necesita.
             for item in inputs:
                 _drain(item.stream)
             stats = engine.finish()
@@ -670,8 +680,8 @@ def summarize_month(
                 stats[i][0],
                 digests[i],
                 reconciled[i],
-                inputs[i].events.hexdigest(),
-                inputs[i].carry_hash,
+                inputs[i].lineage.events,
+                inputs[i].lineage.carry_over,
             )
             for i, theta in enumerate(values)
         }

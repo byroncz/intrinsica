@@ -35,6 +35,27 @@ class L2InputMissing(SummarizeError):
         )
 
 
+class L2LineageMissing(SummarizeError):
+    """La partición de L2 de `(θ, mes)` no trae su `content_hash.json`, o no es válido (§9.2).
+
+    L3 no recalcula el linaje: lo lee de lo que L2 publicó (ADR-L3-16). Sin ese objeto la
+    unidad falla, y se resuelve corriendo el backfill de ITSC-368 (o reprocesando el mes en L2).
+    """
+
+    check_type = "l2_lineage_missing"
+
+    def __init__(self, theta: str, month: Month, path: str, reason: str) -> None:
+        super().__init__(
+            f"falta el linaje de L2 del θ {theta} en {month_text(month)} ({reason}): {path}",
+            {
+                "theta": theta,
+                "month": month_text(month),
+                "file": "content_hash.json",
+                "reason": reason,
+            },
+        )
+
+
 class L2StateInconsistent(SummarizeError):
     """L2 contradice a L1 o a sí mismo: una frontera que no es tick, una fila que viola
     un invariante de §7.2 o un carry-over con `direction ≠ 0` sin evento pendiente.

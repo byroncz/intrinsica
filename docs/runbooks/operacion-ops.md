@@ -104,13 +104,18 @@ y `roles/storage.objectCreator` (solo crear) en `results/`. Sin roles de IAM, si
 | --- | --- | --- |
 | `<proyecto>-landing` | `l1/` | lectura |
 | `<proyecto>-dc-events` | `l2/` | lectura |
+| `<proyecto>-dc-events` | `l2/**/content_hash.json` | solo crear objetos nuevos (backfill del linaje, ITSC-368) |
 | `<proyecto>-dq-findings` | `l1/`, `l2/` | lectura |
 | `<proyecto>-manifest` | `l1/`, `l2/` | lectura |
 | `<proyecto>-viz` | `tiles/` | lectura |
 | `<proyecto>-ops` | `scripts/` | lectura |
 | `<proyecto>-ops` | `results/` | solo crear objetos nuevos |
 
-Cualquier otra escritura (el lago, `tiles/`, `scripts/`) falla con 403. El script corre
+La única escritura permitida en el lago es crear `content_hash.json` bajo `l2/` de
+`dc-events` (`objectCreator` con condición por nombre: no pisa ni borra, y un
+Parquet o un `content_hash.json` ya publicado da 403). Cualquier otra escritura (el
+resto del lago, `tiles/`, `scripts/`) falla con 403; `permisos.py` lo sigue
+comprobando con un nombre que no es ese. El script corre
 con esta identidad y tiene la imagen entera a su disposición: el riesgo
 (ejecutar código arbitrario) lo acotan estos permisos, los límites de abajo, la
 aprobación del environment `gcp` y que ningún agente dispara el workflow.
@@ -170,6 +175,15 @@ Un script ad hoc es para algo que corres una o dos veces. **Lo que se corre más
 de dos veces se gradúa**: pasa a este runbook (como los de abajo) o al código de
 la capa, con una card. Si lo corres a menudo, no debería depender de que alguien
 suba un archivo a mano.
+
+## El backfill del linaje de L2 (ITSC-368)
+
+`layers/ops_tools/scripts/l2_backfill_lineage.py` es el único script que escribe
+en el lago, y solo `content_hash.json` en las particiones de L2 que no lo tienen.
+Qué hace, sus `args` (`--dry-run`, `--sample-fraction`, `--must-verify`) y cómo
+leer su última línea: [runbook de L2](operacion-l2.md#linaje-publicado-y-su-backfill-itsc-368).
+Se corre una vez, antes del apply de L3; la prueba es
+`tests/test_l2_backfill_lineage.py`.
 
 ## Los primeros scripts
 

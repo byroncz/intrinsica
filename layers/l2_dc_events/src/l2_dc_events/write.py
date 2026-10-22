@@ -1,4 +1,4 @@
-"""Rutas de la salida de L2: particiones `events` y `carry_over` (§7.2 y §7.4).
+"""Rutas de la salida de L2: particiones `events` y `carry_over` (§7.2 y §7.4) y su huella.
 
 El escritor atómico y el hash de contenido son de `shared/pyutils`, los mismos
 que usa L1; aquí solo queda lo propio de L2.
@@ -6,8 +6,12 @@ que usa L1; aquí solo queda lo propio de L2.
 
 from pathlib import Path
 
+from pyutils import lineage
+
 EVENTS = "events.parquet"
 CARRY_OVER = "carry_over.parquet"
+# La huella de los dos Parquet (ADR-L2-11): se publica después de ambos.
+LINEAGE = lineage.LINEAGE
 THETA_DIGITS = 8
 
 

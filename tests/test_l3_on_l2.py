@@ -21,8 +21,10 @@ import pyarrow.dataset as ds
 import pyarrow.parquet as pq
 import pytest
 from l2_dc_events.landing import consolidated_path
+from l2_dc_events.write import CARRY_OVER, EVENTS, LINEAGE, partition_path
 from l3_dc_descriptors import cli as l3_cli
 from l3_dc_descriptors.frontier import frontiers, list_summaries
+from pyutils import content_hash, lineage
 
 TICKS = Path(__file__).resolve().parents[1] / "shared/dc_core/tests/fixtures/ticks.csv"
 THETAS = [100_000, 250_000, 500_000]
@@ -144,9 +146,52 @@ def test_l3_runs_on_what_l2_wrote_and_keeps_its_lineage(lake):
         assert details["l2_carry_over_content_hash"] == l2["carry_over_content_hash"]
         assert details["rows"] == l2["events"]
 
+        # Lo que L3 registra es lo que L2 publicó junto a los archivos y es, además, el
+        # hash lógico que da releerlos: L3 no lo calculó, pero no se aparta de él.
+        theta = int(Decimal(details["theta"]).scaleb(8))
+        where = [base / "l2", *KEY, theta, 2017, 8]
+        published = lineage.read(partition_path(*where, LINEAGE))
+        assert details["l2_events_content_hash"] == published["events_content_hash"]
+        assert (
+            details["l2_carry_over_content_hash"]
+            == published["carry_over_content_hash"]
+        )
+        for name, found in (
+            (EVENTS, details["l2_events_content_hash"]),
+            (CARRY_OVER, details["l2_carry_over_content_hash"]),
+        ):
+            assert content_hash(pq.read_table(partition_path(*where, name))) == found
+
     # La frontera de L3 acepta los archivos de L2 y llega al mes escrito.
     listed = list_summaries(str(base / "l3"), KEY)
     reached = frontiers(
         THETAS, listed, (2017, 8), str(base / "l3"), str(base / "l2"), KEY
     )
     assert set(reached.values()) == {2017 * 12 + 7}
+
+
+def test_l3_stops_with_a_finding_when_l2_did_not_publish_its_lineage(lake):
+    """Sin `content_hash.json` (un mes que el backfill no cubrió) L3 no recalcula nada: la
+    unidad falla con `l2_lineage_missing`, dice qué partición y no publica ningún archivo.
+    """
+    base, catalog = lake
+    theta = THETAS[1]
+    lost = Path(partition_path(base / "l2", *KEY, theta, 2017, 8, LINEAGE))
+    lost.unlink()
+    env = {
+        "L3_LANDING_ROOT": str(base / "l1"),
+        "L3_EVENTS_ROOT": str(base / "l2"),
+        "L3_SUMMARIES_ROOT": str(base / "l3"),
+        "L3_DQ_ROOT": str(base / "dq3"),
+        "L3_THETAS_URI": catalog,
+        "IMAGE_VERSION": "0.4.0+test",
+    }
+    args = ["--mode", "backfill", "--series-start", "2017-08"]
+    assert l3_cli.main(args, env) == 1
+
+    (row,) = _findings(base / "dq3", "l2_lineage_missing")
+    assert row["details"]["theta"] == f"{Decimal(theta).scaleb(-8):.8f}"
+    assert row["details"]["month"] == "2017-08"
+    assert row["details"]["file"] == LINEAGE
+    assert (row["severity"], row["status"]) == ("error", "fail")
+    assert not list((base / "l3").rglob("*.parquet"))

@@ -124,9 +124,11 @@ En GCS usa Application Default Credentials; no hay credenciales en código.
 ## Salida Parquet de L2
 
 Contrato hacia L3: los eventos Directional Change de cada θ, una partición por
-θ y mes, y el carry-over que encadena un mes con el siguiente.
-Fuente de diseño: [TRD-L2 §7.2](TRD/l2.md#72-salida--eventsparquet-contrato-hacia-l3)
-y [§7.4](TRD/l2.md#74-carry-over--contrato-y-disposición-física).
+θ y mes, el carry-over que encadena un mes con el siguiente y la huella
+(`content_hash.json`) de los dos.
+Fuente de diseño: [TRD-L2 §7.2](TRD/l2.md#72-salida--eventsparquet-contrato-hacia-l3),
+[§7.4](TRD/l2.md#74-carry-over--contrato-y-disposición-física) y
+[§7.5](TRD/l2.md#75-content_hashjson--la-huella-publicada-contrato-hacia-l3).
 Fuente en código: `EVENTS_SCHEMA` y `CARRY_OVER_SCHEMA` en
 [`layers/l2_dc_events/src/l2_dc_events/schema.py`](../layers/l2_dc_events/src/l2_dc_events/schema.py)
 y el escritor en
@@ -188,6 +190,24 @@ del mes. El mes siguiente la lee para continuar sin reprocesar ticks.
 | `pending_confirm_time` | int64 | sí | Tiempo de esa confirmación; nulo sin evento pendiente |
 | `pending_confirm_agg_trade_id` | int64 | sí | `agg_trade_id` de esa confirmación; nulo sin evento pendiente |
 
+### `content_hash.json` (huella publicada)
+
+Un objeto JSON pequeño por `(theta, year, month)`, en la partición de los dos
+Parquet, con el `content_hash` lógico de cada uno (ITSC-368,
+[ADR-L2-11](TRD/l2.md#611-adr-l2-11--el-productor-publica-su-huella-content_hashjson-junto-a-los-parquet)).
+L3 lo lee y lo registra como linaje; no lo recalcula.
+
+| Clave | Tipo | Descripción |
+|---|---|---|
+| `events_content_hash` | string (SHA-256 hex) | `ContentHasher` sobre `events.parquet`; es el `events_content_hash` de `events_summary` |
+| `carry_over_content_hash` | string (SHA-256 hex) | Ídem sobre `carry_over.parquet`; es el `carry_over_content_hash` de `events_summary` |
+| `hasher_version` | string | Versión del algoritmo de `ContentHasher` (`pyutils.HASHER_VERSION`); hoy `"1"` |
+| `written_at` | string | Momento de escritura, ISO 8601 en UTC (`2026-10-21T15:04:05+00:00`) |
+
+Las cuatro claves son obligatorias, de texto no vacío y no admite otras: si no
+se cumple, L3 lo trata como ausente (`l2_lineage_missing`). Si el objeto falta,
+la partición no tiene linaje publicado. Fuente en código: `pyutils.lineage`.
+
 ### Disposición física
 
 - **Raíz**: una ruta local o `gs://<bucket>/<prefijo>` de eventos.
@@ -196,8 +216,8 @@ del mes. El mes siguiente la lee para continuar sin reprocesar ticks.
   `theta=<t>` es de ancho fijo, `0.` más ocho decimales sin recortar ceros
   (`theta=0.00010000`, `theta=0.05000000`): ordena bien como texto y deja a la
   vista la escala que comparte con el precio.
-- **Archivos**: `events.parquet` y `carry_over.parquet`, juntos en la
-  partición del mes que los produce. Un evento se escribe en el mes que
+- **Archivos**: `events.parquet`, `carry_over.parquet` y `content_hash.json`,
+  juntos en la partición del mes que los produce. Un evento se escribe en el mes que
   confirma el **evento siguiente**, el que conoce su extremo (ADR-L2-06), no en
   el de su referencia ni necesariamente en el de `extreme_time`. El evento
   que sigue abierto al cierre del mes va al carry-over como
@@ -219,13 +239,17 @@ del mes. El mes siguiente la lee para continuar sin reprocesar ticks.
   `.<nombre>.<uuid>.tmp` en el mismo directorio o prefijo, y `commit` lo
   renombra sobre el destino). Nunca queda un archivo a medias ni se toca el
   anterior si algo falla; los detalles de GCS están en "Salida Parquet de L1".
-  Primero se publican los `events.parquet` y luego cada `carry_over.parquet`,
-  así que un carry-over presente significa que el mes de ese θ está completo.
+  Por θ se publica primero `events.parquet`, luego `carry_over.parquet` y al
+  final `content_hash.json`, así que un carry-over presente significa que el
+  mes de ese θ está completo y una huella presente, que describe los dos
+  archivos. Antes de reescribir una partición se retira su `content_hash.json`:
+  si la corrida muere a medias, la partición queda sin linaje y no con uno viejo.
 - **Idempotencia**: es contenido idéntico, no bytes idénticos. `pyutils.ContentHasher`
   calcula un SHA-256 del esquema más uno por columna sobre sus valores en orden,
   sin importar cómo se parta la serie en lotes ni en row groups. Re-ejecutar un
   mes con el mismo carry-over de entrada da el mismo `content_hash` en ambos
-  archivos de cada θ; el de cada θ queda en el hallazgo `events_summary`.
+  archivos de cada θ; el de cada θ queda en el hallazgo `events_summary` y en
+  `content_hash.json` (de ahí solo cambia `written_at` al re-ejecutar).
 - **Fail-closed**: para un mes que no es el primero de la serie, si falta el
   carry-over del mes anterior o su `state_version` no es la de la imagen, la
   unidad aborta sin escribir ningún evento y emite un hallazgo por θ
@@ -591,6 +615,11 @@ mismo que traen las excepciones del resumidor, de las que sale la mayoría de lo
   En `backfill`, antes de procesar el mes, detiene el rango de ese θ (los demás siguen) y
   la corrida termina con código 1. También lo lanza la compuerta de entrada si falta el
   `carry_over.parquet` del mes anterior.
+- **`l2_lineage_missing`** (`error`, `fail`): la partición de L2 de `(θ, mes)` no trae
+  `content_hash.json` o no es válido (`details.theta`, `details.month`, `details.file` =
+  `content_hash.json`, `details.reason`: `no existe` o qué incumple del formato). La unidad
+  aborta sin publicar; L3 no recalcula el linaje. Se resuelve con el backfill del linaje de
+  L2 o reprocesando el mes en L2 (ITSC-368).
 - **`l2_state_inconsistent`** (`error`, `fail`): L2 contradice a L1 o a sí mismo. Con
   `details.field`, `details.got` y `details.wanted` (una frontera que no es tick, una fila
   que viola un invariante de `summaries.parquet`; `details.message` lleva el texto del
@@ -626,7 +655,8 @@ mismo que traen las excepciones del resumidor, de las que sale la mayoría de lo
 - **`summaries_summary`** (`info`, `pass`): uno por θ y mes al terminar. `metric_value` es
   `details.rows`, las filas escritas; `details` lleva además `family`, el `content_hash` de
   `summaries.parquet`, `l2_events_content_hash` y `l2_carry_over_content_hash` (los de las
-  entradas de L2 que usó, calculados igual que L2 en su `events_summary`, que es donde
+  entradas de L2 que usó, leídos de su `content_hash.json` desde la 2.4.0 del TRD-L3 y
+  no recalculados; son los mismos que L2 registra en su `events_summary`, que es donde
   se comparan) y `unassigned_ticks` (`U_M` de la conciliación). Es la huella de la
   corrida y el linaje contra L2: si L2 se reprocesa y cambia, estos hashes ya no coinciden
   con los suyos y el mes está obsoleto (`--force --from <mes> --thetas <θ>`).
@@ -638,10 +668,10 @@ mismo que traen las excepciones del resumidor, de las que sale la mayoría de lo
   ese tramo, sin que nadie los espere), `aggregate_s` (el motor, del primer row group a que termina
   el último ítem), `publish_s` (publicar los archivos) y `reconcile_s` (conciliación) son tramos
   seguidos del hilo principal y, con `other_s`, suman `wall_s`. `lineage_s` ya no existe (desde
-  la 2.1.0): el hash de las entradas de L2 sale de los bytes que la lectura trae.
+  la 2.1.0) y, desde la 2.4.0, L3 no hashea las entradas de L2: lee la huella de `content_hash.json`.
   `write_s` (la pared con algún escritor ocupado) y `read_wall_s` (la pared con alguna lectura de
   L1 o L2 en vuelo) corren dentro de `aggregate_s`; `read_s` es lo que el hilo principal esperó
-  a las lecturas (`read_wall_s` incluye decodificar y hashear los lotes de L2) y `read_bytes`, los bytes comprimidos que viajaron de L1 y L2. La configuración
+  a las lecturas (`read_wall_s` incluye decodificar los lotes de L2) y `read_bytes`, los bytes comprimidos que viajaron de L1 y L2. La configuración
   con que corrió: `threads` (pool de E/S, `L3_THREADS`), `engine_threads` (`L3_ENGINE_THREADS`),
   `readers` (`L3_READERS`), `inflight` (`L3_INFLIGHT`) y `writers` (`L3_WRITERS`); y lo que
   hizo el motor: `inflight_max` (máximo de row groups empujados que aún anclaban sus ticks),

@@ -72,7 +72,7 @@ docker run --rm -v "$data:/data" \
   -e L2_DQ_ROOT=/data/dq \
   "$image" --mode backfill --from 2017-08 --series-start 2017-08 2>&1 | tee "$data/run.log"
 
-for name in events.parquet carry_over.parquet; do
+for name in events.parquet carry_over.parquet content_hash.json; do
   found="$(find "$data/events" -name "$name" -size +0 | wc -l)"
   [ "$found" -eq 50 ] \
     || { echo "::error::se esperaban 50 $name y hay $found"; exit 1; }

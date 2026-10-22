@@ -109,10 +109,12 @@ uv run python -m l2_dc_events --mode backfill --from 2020-01 --series-start 2020
    cada uno, y a lo más 2 tramos sin escribir (`MAX_CHUNKS_IN_FLIGHT`), así que
    nunca se acumula el mes de un θ ni la cola de escritura: la RAM es O(lote).
 5. Al final cierra el grupo de empate abierto (`finish_columns`, RF-L2-12) y
-   publica, en paralelo por θ: primero `events.parquet` y luego
+   publica, en paralelo por θ: primero `events.parquet`, luego
    `carry_over.parquet`, cada uno con escritura atómica (temporal más
-   `commit`). Un carry-over presente significa que el mes de ese θ quedó
-   completo.
+   `commit`), y al final `content_hash.json` con los dos `content_hash`
+   (ADR-L2-11; la huella anterior se retira antes de reescribir). Un
+   carry-over presente significa que el mes de ese θ quedó completo y una
+   huella presente, que describe los dos archivos.
 6. Emite los hallazgos de resumen y de tiempo por fase, y deja la línea `sonda:`.
 
 **Re-ejecutar un mes** da los mismos archivos: la entrada es la misma y nada
@@ -140,7 +142,7 @@ hallazgos"):
 | `theta_behind_frontier` | `monthly` no procesó un θ rezagado (warning); solo falla la unidad (código 1) si ningún θ quedó listo |
 | `theta_config_drift` | Informativo (`info`): el lago tiene un θ que el catálogo ya no incluye |
 | `dc_zero_tick_discarded` | La guarda de §9.1 descartó eventos (esperado: cero, nunca se emite) |
-| `events_summary` | Uno por θ al terminar: eventos escritos y `content_hash` de ambos archivos |
+| `events_summary` | Uno por θ al terminar: eventos escritos y `content_hash` de ambos archivos (los mismos que quedan en `content_hash.json`) |
 | `unit_timing` | Uno por mes al terminar: pared y tiempo por fase, límite efectivo de CPU y bytes leídos (ITSC-289) |
 
 ## El catálogo de θ
@@ -514,7 +516,7 @@ layers/l2_dc_events/smoke.sh l2_dc_events:dev
 `smoke.sh` convierte los 4 735 ticks de 2017-08-18
 (`shared/dc_core/tests/fixtures/ticks.csv`) en un `consolidated.parquet` con el
 esquema de L1, usando el pyarrow de la imagen, y corre el backfill de 2017-08.
-Verifica los 50 `events.parquet` y `carry_over.parquet`, un Parquet en el lago
+Verifica los 50 `events.parquet`, `carry_over.parquet` y `content_hash.json`, un Parquet en el lago
 de DQ y la línea con `content_hash`.
 
 ## Pruebas

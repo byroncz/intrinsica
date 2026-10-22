@@ -57,7 +57,10 @@ su serie contigua desde `--series-start` cuyo `summaries.parquet` es válido (es
 `state_version` y filas por row group iguales a `events.parquet` de L2 del mes). Sale de un
 listado de la raíz de L3 más el pie del archivo de cada θ; no se consulta cada partición. Un
 mes sin `events.parquet` y `carry_over.parquet` de L2 detiene el rango de ese θ con
-`l2_input_missing` (los demás siguen, la corrida termina con código 1). En `monthly`, un θ
+`l2_input_missing` (los demás siguen, la corrida termina con código 1). Una partición de L2
+con sus dos Parquet pero sin `content_hash.json` (el linaje que L2 publica, ITSC-368) falla la
+unidad con `l2_lineage_missing`: se cubre con el backfill del linaje antes del apply de la
+imagen ([runbook](../../docs/runbooks/operacion-l3.md#cambios-requeridos)). En `monthly`, un θ
 que no llegó al mes previo (`l3_frontier`) o al que L2 no le ha llegado (`l2_missing`) deja
 `theta_behind_frontier` y no falla la unidad mientras otro avance.
 
@@ -67,7 +70,7 @@ que no llegó al mes previo (`l3_frontier`) o al que L2 no le ha llegado (`l2_mi
 que necesita la medición del umbral 3 de [§10.3](../../docs/TRD/l3.md#103-sonda-del-lector-de-tramas--umbrales-de-aceptación-se-escriben-antes-de-medir):
 pared total y por fase (todas son pared: `gate_s`, abrir `events.parquet` de los θ y arrancar la lectura de sus fronteras; `setup_s`,
 el motor, el pie de L1 y la compuerta de carry-over; `aggregate_s` del motor, `publish_s`, `reconcile_s`; `lineage_s`
-ya no existe: el linaje sale de los bytes que se leen; `read_s` es lo que el hilo principal esperó a las lecturas y
+ya no existe: el linaje lo publica L2 y se lee; `read_s` es lo que el hilo principal esperó a las lecturas y
 `read_wall_s` y `write_s` la pared con alguna lectura o algún escritor ocupado), la configuración
 (`threads`, `engine_threads`, `readers`, `inflight`, `writers`), lo que hizo el motor
 (`inflight_max`, `engine_busy`, `items`), `read_bytes`, `boundaries_peak_mib`,
@@ -208,13 +211,14 @@ group de L1 más antiguo que algún evento del mes necesita, y el acumulador par
 
 1. **Apertura** (`gate_s`). En el pool de E/S, una tarea por θ: abrir `events.parquet`
    (`EventFile`: archivo y pie una sola vez; si falta, `l2_missing`), comprobar sus tipos y
-   arrancar la lectura anticipada de sus fronteras (las 11 columnas, de las que el motor recibe
-   las siete de §7.1, `EVENT_COLUMNS`). Con las estadísticas de los pies se sabe la primera
+   arrancar la lectura anticipada de sus fronteras (las siete columnas de §7.1, `EVENT_COLUMNS`,
+   más `theta` para el esqueleto: `EVENT_FILE_COLUMNS`; las otras cuatro no se decodifican). Con las estadísticas de los pies se sabe la primera
    referencia y el último extremo del mes sin leer datos, y los tamaños de row group que pide
    el motor.
 2. **Compuerta de entrada y escritores** (`setup_s`). En el mismo pool, mientras este hilo crea el
    motor y espera el pie de L1: el carry-over del mes (y el del mes anterior, salvo en
-   `series_start`) de cada θ, y los 50 escritores (`FamilyWriter`, con el esqueleto en RAM).
+   `series_start`) y la huella que L2 publicó del mes (`content_hash.json`, el linaje; no se
+   recalcula) de cada θ, y los 50 escritores (`FamilyWriter`, con el esqueleto en RAM).
    Antes del primer `push` se esperan los carry-overs, y un carry-over con `direction ≠ 0` debe
    tener evento pendiente; los escritores no se esperan: cada θ espera al suyo al escribir su
    primer row group sellado, y uno que no logra abrirse detiene la unidad en el siguiente `push`.
@@ -245,6 +249,7 @@ del hallazgo y sus `details` (valores JSON).
 | Excepción | `check_type` | `details` |
 |---|---|---|
 | `L2InputMissing` | `l2_input_missing` | `theta`, `month`, `file` |
+| `L2LineageMissing` | `l2_lineage_missing` | `theta`, `month`, `file` (`content_hash.json`), `reason` |
 | `L2StateInconsistent.mismatch` | `l2_state_inconsistent` | `theta`, `month`, `field`, `got`, `wanted` (y `message` si viene de una frontera del lector) |
 | `L2StateInconsistent.no_pending` | `l2_state_inconsistent` | `theta`, `month`, `direction`, `has_pending_event` |
 | `PhaseQuantityMismatch` | `phase_quantity_mismatch` | `theta`, `confirm_agg_trade_id`, `phase`, `expected`, `got` |
