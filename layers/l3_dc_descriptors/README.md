@@ -290,7 +290,8 @@ el RSS crecía, y por eso la devolución al cerrar de más abajo, ITSC-371). Sin
 sobre 3 500 MiB quita el `trim`) y cómo comparar otra configuración están en TRD-L3 ADR-L3-16 y en
 el runbook, «El asignador». `unit_timing` registra `mmap_threshold` y `trim_threshold`. Al cerrar cada unidad `process_unit` devuelve
 la memoria libre al kernel (`gc.collect()` y `malloc_trim(0)`), porque un `backfill` corre muchos meses en
-un proceso y sin eso las arenas de cada mes se acumulan hasta el OOM (ITSC-371); `unit_timing` registra
+un proceso y con el asignador de la imagen glibc no devuelve al kernel lo liberado, así que el RSS sube
+unidad a unidad hasta el OOM (ITSC-371; la causa exacta es una hipótesis, ver ADR-L3-16); `unit_timing` registra
 `rss_before_trim_mib` y `rss_after_trim_mib`.
 
 ## Pruebas
