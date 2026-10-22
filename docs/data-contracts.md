@@ -615,6 +615,11 @@ mismo que traen las excepciones del resumidor, de las que sale la mayoría de lo
   En `backfill`, antes de procesar el mes, detiene el rango de ese θ (los demás siguen) y
   la corrida termina con código 1. También lo lanza la compuerta de entrada si falta el
   `carry_over.parquet` del mes anterior.
+- **`l2_lineage_missing`** (`error`, `fail`): la partición de L2 de `(θ, mes)` no trae
+  `content_hash.json` o no es válido (`details.theta`, `details.month`, `details.file` =
+  `content_hash.json`, `details.reason`: `no existe` o qué incumple del formato). La unidad
+  aborta sin publicar; L3 no recalcula el linaje. Se resuelve con el backfill del linaje de
+  L2 o reprocesando el mes en L2 (ITSC-368).
 - **`l2_state_inconsistent`** (`error`, `fail`): L2 contradice a L1 o a sí mismo. Con
   `details.field`, `details.got` y `details.wanted` (una frontera que no es tick, una fila
   que viola un invariante de `summaries.parquet`; `details.message` lleva el texto del
@@ -650,7 +655,8 @@ mismo que traen las excepciones del resumidor, de las que sale la mayoría de lo
 - **`summaries_summary`** (`info`, `pass`): uno por θ y mes al terminar. `metric_value` es
   `details.rows`, las filas escritas; `details` lleva además `family`, el `content_hash` de
   `summaries.parquet`, `l2_events_content_hash` y `l2_carry_over_content_hash` (los de las
-  entradas de L2 que usó, calculados igual que L2 en su `events_summary`, que es donde
+  entradas de L2 que usó, leídos de su `content_hash.json` desde la 2.4.0 del TRD-L3 y
+  no recalculados; son los mismos que L2 registra en su `events_summary`, que es donde
   se comparan) y `unassigned_ticks` (`U_M` de la conciliación). Es la huella de la
   corrida y el linaje contra L2: si L2 se reprocesa y cambia, estos hashes ya no coinciden
   con los suyos y el mes está obsoleto (`--force --from <mes> --thetas <θ>`).
@@ -662,10 +668,10 @@ mismo que traen las excepciones del resumidor, de las que sale la mayoría de lo
   ese tramo, sin que nadie los espere), `aggregate_s` (el motor, del primer row group a que termina
   el último ítem), `publish_s` (publicar los archivos) y `reconcile_s` (conciliación) son tramos
   seguidos del hilo principal y, con `other_s`, suman `wall_s`. `lineage_s` ya no existe (desde
-  la 2.1.0): el hash de las entradas de L2 sale de los bytes que la lectura trae.
+  la 2.1.0) y, desde la 2.4.0, L3 no hashea las entradas de L2: lee la huella de `content_hash.json`.
   `write_s` (la pared con algún escritor ocupado) y `read_wall_s` (la pared con alguna lectura de
   L1 o L2 en vuelo) corren dentro de `aggregate_s`; `read_s` es lo que el hilo principal esperó
-  a las lecturas (`read_wall_s` incluye decodificar y hashear los lotes de L2) y `read_bytes`, los bytes comprimidos que viajaron de L1 y L2. La configuración
+  a las lecturas (`read_wall_s` incluye decodificar los lotes de L2) y `read_bytes`, los bytes comprimidos que viajaron de L1 y L2. La configuración
   con que corrió: `threads` (pool de E/S, `L3_THREADS`), `engine_threads` (`L3_ENGINE_THREADS`),
   `readers` (`L3_READERS`), `inflight` (`L3_INFLIGHT`) y `writers` (`L3_WRITERS`); y lo que
   hizo el motor: `inflight_max` (máximo de row groups empujados que aún anclaban sus ticks),
