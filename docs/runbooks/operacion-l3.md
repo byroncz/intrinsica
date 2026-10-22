@@ -531,13 +531,16 @@ decenas de MiB por mes. `rss_peak_mib` es un pico y no lo ve.
 **Si un backfill muere con signal 9 (OOM).** (1) Mira en `unit_timing` de los meses anteriores
 `rss_after_trim_mib` y `rss_peak_mib`: si el RSS al cerrar crece mes a mes, es retención entre
 unidades; si un solo mes pasa de 3 500 MiB, es la regla de retroceso de arriba. (2) Relanza **desde
-Cloud Shell** con el asignador de T5, que devuelve la memoria al kernel en cada `free`:
+Cloud Shell** con el asignador de T5, que devuelve la memoria al kernel en cada `free`. Repite los
+`--args` del run que murió, tal como los imprime `run-job-args.sh` (con `--force` si lo llevaba, como
+el de ITSC-364), y empieza en el mes que murió: los meses anteriores ya quedaron publicados. Sin
+`--force` un mes ya publicado se salta, así que quita la bandera solo si el run original no la llevaba.
 
 ```bash
 gcloud run jobs execute l3-backfill \
   --project <proyecto> --region <región> \
   --update-env-vars MALLOC_MMAP_THRESHOLD_=16384,MALLOC_TRIM_THRESHOLD_=131072 \
-  --args="--mode,backfill,--from=<AAAA-MM>,--to=<AAAA-MM>" \
+  --args="--mode,backfill,--from=<AAAA-MM del mes que murió>,--to=<AAAA-MM>,--force" \
   --wait
 ```
 
