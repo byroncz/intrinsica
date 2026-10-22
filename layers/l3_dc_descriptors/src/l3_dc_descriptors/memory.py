@@ -10,8 +10,9 @@ L3 ya no lo usa (ITSC-367). Con ese umbral cada buffer grande es un
 de CPU de sistema por unidad (ITSC-366). Con el umbral en 32 MiB (el máximo de glibc) y sin
 recorte del heap (`MALLOC_TRIM_THRESHOLD_` en 1 GiB, que fija la imagen y glibc lee al
 arrancar) glibc reutiliza el heap: −31 % de CPU a cambio de ≈ 1,1 GiB más de RSS (de 2,0 a
-3,1 GiB), todavía acotado por K, R, W y los sellados pendientes. Decisión y cifras: TRD-L3
-ADR-L3-16. `MALLOC_MMAP_THRESHOLD_` se puede cambiar por entorno; `unit_timing` registra lo
+3,1 GiB), todavía acotado por K, R, W y los sellados pendientes dentro de una unidad; entre
+unidades no se cumplió y `release_to_kernel` lo corrige al cerrar cada una (ITSC-371).
+Decisión y cifras: TRD-L3 ADR-L3-16. `MALLOC_MMAP_THRESHOLD_` se puede cambiar por entorno; `unit_timing` registra lo
 que rigió (`mmap_threshold` y `trim_threshold`).
 """
 

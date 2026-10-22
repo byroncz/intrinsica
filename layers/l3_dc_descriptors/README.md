@@ -284,7 +284,8 @@ no crece con los eventos ni cuando el evento más grande pasa de 10 a 40 row gro
 `MALLOC_TRIM_THRESHOLD_=1073741824` (sin recorte del heap), no con los 16 KiB de L2: en 2021-01 y a
 igual cuota de CPU gasta −31 % de CPU y −25 % de pared, a cambio de un RSS de ≈ 3,1 GiB en vez de
 2,0 (900 MiB bajo los 4 GiB del job). glibc retiene lo liberado para reutilizarlo; el pico sigue
-acotado por K, R, W y los sellados pendientes, no por el mes. Sin la variable (en local y en pruebas)
+acotado por K, R, W y los sellados pendientes, no por el mes (dentro de una unidad: entre unidades
+el RSS crecía, y por eso la devolución al cerrar de más abajo, ITSC-371). Sin la variable (en local y en pruebas)
 `memory.tune_allocators()` fija el mismo umbral de `mmap`. Las cifras, la regla de retroceso (un mes
 sobre 3 500 MiB quita el `trim`) y cómo comparar otra configuración están en TRD-L3 ADR-L3-16 y en
 el runbook, «El asignador». `unit_timing` registra `mmap_threshold` y `trim_threshold`. Al cerrar cada unidad `process_unit` devuelve
