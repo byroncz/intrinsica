@@ -112,9 +112,18 @@ def read_findings(
     alguna dejó otro par de hashes que la última.
     """
     fs, base = resolve_fs(dq_root)
-    dataset = ds.dataset(base, filesystem=fs, format="parquet", partitioning="hive")
-    if not dataset.files:  # sin hallazgos no hay ni esquema contra el cual filtrar
+    # Se lista con selector y no se abre el prefijo con `ds.dataset(base)`: para saber si `base`
+    # es archivo o carpeta, pyarrow pide los metadatos del objeto `l2` sin barra, y la condición
+    # IAM de ops-script solo da permiso bajo `l2/` (403, ITSC-370).
+    selector = pafs.FileSelector(f"{base}/", recursive=True, allow_not_found=True)
+    paths = sorted(
+        info.path
+        for info in fs.get_file_info(selector)
+        if info.type == pafs.FileType.File and info.path.endswith(".parquet")
+    )
+    if not paths:  # sin hallazgos no hay ni esquema contra el cual filtrar
         return {}
+    dataset = ds.dataset(paths, filesystem=fs, format="parquet")
     keep = (
         (pc.field("check_type") == "events_summary")
         & (pc.field("provider") == provider)

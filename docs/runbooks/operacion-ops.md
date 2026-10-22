@@ -185,6 +185,8 @@ leer su última línea: [runbook de L2](operacion-l2.md#linaje-publicado-y-su-ba
 Se corre una vez, antes del apply de L3; la prueba es
 `tests/test_l2_backfill_lineage.py`.
 
+Un script de `ops-script` que lea hallazgos **lista con `FileSelector(..., recursive=True, allow_not_found=True)` y lee esa lista de rutas; no abre el prefijo con `ds.dataset(prefijo)`**: pyarrow pide primero los metadatos del objeto `l2` sin barra para saber si es archivo o carpeta, la condición IAM solo permite `l2/...` y GCS responde 403, no 404 (ITSC-370).
+
 ## Los primeros scripts
 
 Los cuatro están en `docs/runbooks/ops-scripts/` y una prueba
