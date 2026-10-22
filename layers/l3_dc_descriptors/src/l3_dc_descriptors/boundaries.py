@@ -12,11 +12,13 @@ lotes en un pool de E/S, `L2_AHEAD` por delante de quien los consume, así que l
 leen en paralelo y el hilo principal casi nunca espera. Lo retenido por θ es el caché
 comprimido del tramo en curso más `L2_AHEAD + 1` lotes decodificados (≈ 2 MiB cada uno).
 
-Los lotes traen las 11 columnas del archivo y se decodifican una sola vez. El hilo que los
-lee los pasa por `L2Events.tap` (ADR-L3-16, ITSC-365): hashea las 11 (el `l2_events_content_hash`
-del linaje), anota la huella de las claves de cada row group (el esqueleto con que el
-escritor comprueba lo que el motor selló, sin releer el archivo) y entrega al motor solo las
-siete que usa, así que las otras cuatro no quedan retenidas.
+Los lotes traen las siete columnas que el motor usa más `theta` (`EVENT_FILE_COLUMNS`) y se
+decodifican una sola vez. El hilo que los lee los pasa por `L2Events.tap` (ADR-L3-16,
+ITSC-365): anota la huella de las claves de cada row group (el esqueleto con que el escritor
+comprueba lo que el motor selló, sin releer el archivo) y entrega al motor solo las siete que
+usa. El linaje ya no se calcula aquí: L2 publica el `content_hash` junto al archivo y la
+compuerta lo lee (ITSC-368); las otras cuatro columnas de L2 (tiempos y precios de la
+referencia) no se decodifican.
 """
 
 import hashlib
@@ -33,7 +35,6 @@ import pyarrow as pa
 import pyarrow.compute as pc
 from dc_frames import FramesInputError
 from dc_frames.lake import DECIMAL, EventFile, check_columns
-from pyutils import ContentHasher
 
 from l3_dc_descriptors.event import EVENT_COLUMNS
 from l3_dc_descriptors.timing import ReadMeter
@@ -44,6 +45,12 @@ from l3_dc_descriptors.timing import ReadMeter
 L2_LOT_BYTES = 8 << 20
 # Eventos por lote que se entrega al motor: ≈ 2 MiB decodificados (65 B por evento).
 L2_BATCH_ROWS = 32_768
+# Las columnas que se decodifican de `events.parquet`: las siete que usa el motor y `theta`,
+# que el esqueleto compara contra la partición. `EventFile` agrega por su cuenta las que
+# siempre lee (las tres fronteras y `confirm_time`, que ya están en `EVENT_COLUMNS`).
+EVENT_FILE_COLUMNS = (*EVENT_COLUMNS, "theta")
+# La escala de `theta` en L2 (`decimal128(9, 8)`): la de la partición.
+THETA_SCALE = 8
 # Los tipos de las columnas de L2 que el motor lee como bytes de Arrow sin convertirlas
 # (las cuatro de ids y tiempo, `int64`, las comprueba `EventFile`).
 L2_TYPES = MappingProxyType(
@@ -70,18 +77,15 @@ class L2Events:
     """Lo que L3 saca de `events.parquet` de un θ mientras lo lee, sin volver a él.
 
     Es el `tap` de su `BatchStream` y, a la vez, el esqueleto (`dc_frames.family.Skeleton`)
-    de su `FamilyWriter`:
+    de su `FamilyWriter`. Por cada row group no vacío guarda la huella (SHA-256) de sus
+    `confirm_agg_trade_id` y si su `theta` es el de la partición en todas las filas. El
+    escritor compara la huella de lo que el motor selló, que copió esos ids de L2, con la
+    del row group que L3 leyó, y su `theta` con el de la partición: mismas filas, mismo
+    orden y mismas claves, en 33 B por row group y sin un viaje a GCS. Las filas por row
+    group salen del pie del archivo.
 
-    - **Linaje.** `hexdigest()` es el `content_hash` lógico del archivo, el mismo que L2
-      publica en `events_summary` y que `file_hash` calculaba releyéndolo: un
-      `ContentHasher` sobre el esquema del archivo, alimentado con los lotes en orden y con
-      todas las columnas.
-    - **Esqueleto.** Por cada row group no vacío guarda la huella (SHA-256) de sus
-      `confirm_agg_trade_id` y si su `theta` es el de la partición en todas las filas. El
-      escritor compara la huella de lo que el motor selló, que copió esos ids de L2, con la
-      del row group que L3 leyó, y su `theta` con el de la partición: mismas filas, mismo
-      orden y mismas claves, en 33 B por row group y sin un viaje a GCS. Las filas por row
-      group salen del pie del archivo.
+    El `theta` se compara como bytes: los 16 del `decimal128` de la partición contra los de
+    cada fila (`_first_other`), sin pasar por los kernels de decimales de Arrow.
 
     Un lote no cruza row groups (`EventFile.batches`); aun así `tap` reparte por filas, así
     que un lote que los cruzara tampoco movería ninguna huella. Un solo hilo a la vez llama
@@ -91,11 +95,14 @@ class L2Events:
     def __init__(self, file: EventFile, theta: Decimal) -> None:
         if "theta" not in file.schema.names:
             raise FramesInputError(f"{file.path}: falta la columna 'theta'")
+        kind = file.schema.field("theta").type
+        if not (pa.types.is_decimal128(kind) and kind.scale == THETA_SCALE):
+            raise FramesInputError(
+                f"{file.path}: theta es {kind} y debería ser decimal128 con escala 8"
+            )
         self.path = file.path
         self.row_groups = [rows for rows in file.rows if rows]
-        self._order = file.schema.names
-        self._hasher = ContentHasher(file.schema)
-        self._theta = theta
+        self._theta = theta_bytes(theta)
         self._lock = threading.Lock()
         self._done: dict[int, tuple[bytes, bool]] = {}
         self._group = 0  # el row group que se está llenando
@@ -104,8 +111,9 @@ class L2Events:
         self._same_theta = True
 
     def tap(self, batch: pa.RecordBatch) -> pa.RecordBatch:
-        """Observa un lote con las 11 columnas y devuelve las siete que el motor usa."""
-        self._hasher.update(batch.select(self._order))
+        """Observa un lote con las columnas de `EVENT_FILE_COLUMNS` y devuelve las siete que
+        el motor usa.
+        """
         ids = _ids(batch.column("confirm_agg_trade_id"))
         theta = batch.column("theta")
         start = 0
@@ -126,10 +134,6 @@ class L2Events:
                 self._ids = hashlib.sha256()
                 self._same_theta = True
         return batch.select(EVENT_COLUMNS)
-
-    def hexdigest(self) -> str:
-        """El `content_hash` de lo que `tap` vio; completo cuando el archivo se leyó entero."""
-        return self._hasher.hexdigest()
 
     def differing_key(
         self, n: int, first_row: int, batch: pa.RecordBatch
@@ -173,14 +177,37 @@ def _ids(column: pa.Array) -> np.ndarray:
     return np.ascontiguousarray(column.to_numpy(zero_copy_only=False))
 
 
-def _first_other(column: pa.Array, theta: Decimal) -> int | None:
-    """La primera fila que no es `theta` (un nulo cuenta como distinto), o `None`."""
+def theta_bytes(theta: Decimal) -> bytes:
+    """Los 16 bytes con que un `decimal128(·, 8)` guarda a `theta`: el entero `θ × 10⁸`,
+    complemento a dos, little-endian.
+    """
+    return int(theta.scaleb(THETA_SCALE)).to_bytes(16, "little", signed=True)
+
+
+def _first_other(column: pa.Array, theta: bytes) -> int | None:
+    """La primera fila que no es `theta` (un nulo cuenta como distinto), o `None`.
+
+    Compara los bytes del buffer de valores contra los 16 de `theta`, dos palabras de 8 bytes
+    por fila con NumPy sobre el buffer, sin copiarlo; un `theta` de otro ancho o escala no
+    puede ser el de la partición y es distinto desde la fila 0.
+    """
     if not len(column):
         return None
-    same = pc.equal(column, pa.scalar(theta, column.type)).fill_null(False)
-    if pc.all(same).as_py():
+    if not (pa.types.is_decimal128(column.type) and column.type.scale == THETA_SCALE):
+        return 0
+    words = np.frombuffer(
+        column.buffers()[1],
+        dtype="<u8",
+        count=2 * len(column),
+        offset=16 * column.offset,
+    ).reshape(-1, 2)
+    low, high = np.frombuffer(theta, dtype="<u8")
+    same = (words[:, 0] == low) & (words[:, 1] == high)
+    if column.null_count:  # el buffer de un nulo no está definido
+        same &= column.is_valid().to_numpy(zero_copy_only=False)
+    if same.all():
         return None
-    return pc.index(same, False).as_py()
+    return int(np.argmin(same))
 
 
 class BatchStream:

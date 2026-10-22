@@ -33,6 +33,11 @@ def _is_raw(field: pa.Field) -> bool:
     return _is_fixed(field) and not field.nullable
 
 
+# Versión del algoritmo de `ContentHasher`. Se publica con cada huella (`content_hash.json`) y
+# sube solo si el mismo contenido pasara a dar otro hash: entonces las huellas publicadas con
+# la versión anterior ya no son comparables.
+HASHER_VERSION = "1"
+
 _LARGE = pa.large_string()
 _END = 2**31 - 1
 _NULL_CELL = pa.scalar("None\0", _LARGE)

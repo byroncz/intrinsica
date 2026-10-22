@@ -1,13 +1,14 @@
-"""Lo que la unidad deja de hacer dos veces (ITSC-365, ADR-L3-16): escritor sin relectura del
-esqueleto, linaje desde los bytes ya leídos, compuerta y apertura en una pasada y L1 leído una
-vez. Cada prueba fija una garantía que se conserva y la compara con la referencia de antes
-(`reference_gate`): el mismo valor, sin el viaje de más.
+"""Lo que la unidad deja de hacer dos veces (ITSC-365, ITSC-368, ADR-L3-16): escritor sin
+relectura del esqueleto, linaje leído de lo que L2 publicó (sin recalcularlo), compuerta y
+apertura en una pasada y L1 leído una vez. Cada prueba fija una garantía que se conserva y la
+compara con la referencia de antes (`reference_gate`): el mismo valor, sin el trabajo de más.
 """
 
 import threading
 from decimal import Decimal
 
 import pyarrow as pa
+import pyarrow.compute as pc
 import pyarrow.parquet as pq
 import pytest
 from dc_frames import FramesInputError
@@ -20,6 +21,7 @@ from l3_dc_descriptors.boundaries import L2Events
 from l3_dc_descriptors.reconcile import L1Month
 from l3_dc_descriptors.summarize import DEFAULT_KEY, DEFAULT_WRITERS, _engine_threads
 from l3_lake import M1, M2, build_lake, fixture_ticks, month_cuts
+from pyutils import ContentHasher
 from reference_gate import file_hash, lineage
 
 SMALL = 100_000
@@ -53,7 +55,7 @@ def theta_text(theta: int) -> str:
     return f"{Decimal(theta).scaleb(-8):.8f}"
 
 
-# --- Linaje desde los bytes ya leídos ------------------------------------------------------
+# --- Linaje leído de lo que L2 publicó ------------------------------------------------------
 
 
 @pytest.mark.parametrize("threads", [1, 4])
@@ -62,7 +64,8 @@ def test_the_lineage_is_what_rereading_the_files_gives(
     lake, monkeypatch, threads, small_lots
 ):
     """El hash de `events` y de `carry_over` de cada θ es el de `file_hash`, que relee el
-    archivo y es el que L2 publica; no cambia con los lotes ni con el pool.
+    archivo: el valor que L2 publicó en `content_hash.json` es el lógico de siempre y no
+    cambia con los lotes ni con el pool.
     """
     if small_lots:
         monkeypatch.setattr(boundaries, "L2_LOT_BYTES", 1)
@@ -88,26 +91,46 @@ def test_the_lineage_of_a_month_without_events_is_the_hash_of_an_empty_file(lake
             )
 
 
+def test_the_summarizer_never_hashes_anything_from_l2(lake, monkeypatch):
+    """L3 lee el linaje, no lo calcula: ni los lotes de L2 ni el carry-over pasan por un
+    `ContentHasher` (el de la salida de L3 lo calcula el escritor de la familia, en dc_frames).
+    """
+    seen = []
+    real = ContentHasher.update
+
+    def spy(self, batch):
+        seen.append(batch.schema.names)
+        return real(self, batch)
+
+    monkeypatch.setattr(ContentHasher, "update", spy)
+    run(lake, M2)
+    assert seen  # la salida de L3 sí se hashea
+    # Una columna que solo tienen los archivos de L2: las referencias y el estado.
+    assert not [n for n in seen if {"reference_agg_trade_id", "state_version"} & set(n)]
+
+
 def test_every_l2_batch_is_read_even_if_the_engine_never_asked_for_it(lake):
-    """El hash cubre el archivo entero aunque el motor no pida el final de las fronteras."""
+    """El esqueleto cubre todos los row groups aunque el motor no pida el final de las
+    fronteras, y el linaje sigue siendo el del archivo entero."""
     results = run(lake, M2, engine_threads=1, readers=1, inflight=1, writers=1)
     for text, result in zip(lake.theta_texts, results.values(), strict=True):
         path = next(lake.l2.rglob(f"theta={text}/year=2017/month=09/events.parquet"))
         assert result.l2_events_content_hash == file_hash(str(path))
 
 
-def test_l2_events_hash_matches_file_hash_for_each_column_order(lake):
-    """`L2Events.tap` hashea en el orden del archivo aunque el lote traiga las fronteras
-    primero.
+def test_l2_events_taps_the_columns_the_engine_uses_in_their_order(lake):
+    """`L2Events.tap` entrega las siete columnas del motor en su orden aunque el lote traiga
+    las fronteras primero, y el archivo se lee sin las cuatro que ya no se usan.
     """
     path = next(lake.l2.rglob("theta=0.00100000/year=2017/month=09/events.parquet"))
-    with EventFile(str(path), "L2", all_columns=True) as file:
+    with EventFile(str(path), "L2", boundaries.EVENT_FILE_COLUMNS) as file:
         events = L2Events(file, Decimal("0.001"))
+        assert set(file.columns) == set(boundaries.EVENT_FILE_COLUMNS)
+        assert len(file.columns) == 8 < len(file.schema.names)
         for lot in file.lots(1 << 20):
             for batch in file.batches(lot, 4, 1 << 20):
                 assert events.tap(batch).schema.names == list(boundaries.EVENT_COLUMNS)
         assert file.schema.names != file.columns  # el lote sale en otro orden
-        assert events.hexdigest() == file_hash(str(path))
 
 
 # --- Escritor sin relectura del esqueleto --------------------------------------------------
@@ -242,7 +265,7 @@ def test_a_theta_that_is_not_the_partitions_is_a_family_skeleton_mismatch(
 
 def test_l2_events_keeps_one_digest_per_row_group_and_pops_it(lake):
     path = next(lake.l2.rglob("theta=0.00100000/year=2017/month=09/events.parquet"))
-    with EventFile(str(path), "L2", all_columns=True) as file:
+    with EventFile(str(path), "L2", boundaries.EVENT_FILE_COLUMNS) as file:
         events = L2Events(file, Decimal("0.001"))
         groups = pq.ParquetFile(path)
         sealed = [
@@ -263,6 +286,77 @@ def test_l2_events_keeps_one_digest_per_row_group_and_pops_it(lake):
             first += batch.num_rows
         # La huella se entrega una vez: no queda un dict que crezca con el mes.
         assert not events._done
+
+
+# --- Comparación de claves por bytes -------------------------------------------------------
+
+
+def theta_array(values, kind=None):
+    return pa.array(values, kind or pa.decimal128(9, 8))
+
+
+THETA = Decimal("0.001")
+
+
+def test_first_other_compares_the_sixteen_bytes_of_theta():
+    same = theta_array([THETA] * 5)
+    assert boundaries._first_other(same, boundaries.theta_bytes(THETA)) is None
+    other = theta_array([THETA, THETA, Decimal("0.00100001"), THETA, Decimal("0.002")])
+    assert boundaries._first_other(other, boundaries.theta_bytes(THETA)) == 2
+    assert boundaries._first_other(same[:0], boundaries.theta_bytes(THETA)) is None
+
+
+def test_first_other_counts_a_null_as_different():
+    column = theta_array([THETA, THETA, None, Decimal("0.002")])
+    assert boundaries._first_other(column, boundaries.theta_bytes(THETA)) == 2
+
+
+def test_first_other_respects_the_offset_of_a_slice():
+    column = theta_array([Decimal("0.002"), THETA, THETA, Decimal("0.003"), THETA])
+    wanted = boundaries.theta_bytes(THETA)
+    assert boundaries._first_other(column.slice(1, 2), wanted) is None
+    assert boundaries._first_other(column.slice(1, 3), wanted) == 2
+    assert boundaries._first_other(column.slice(2), wanted) == 1
+
+
+def test_first_other_gives_the_same_row_as_arrow_equality():
+    values = [THETA] * 40 + [Decimal("0.00099999")] + [THETA] * 10
+    column = theta_array(values)
+    expected = pc.index(pc.equal(column, pa.scalar(THETA, column.type)), False).as_py()
+    assert boundaries._first_other(column, boundaries.theta_bytes(THETA)) == expected
+
+
+def test_first_other_accepts_any_precision_with_scale_eight_and_refuses_other_scales():
+    wide = theta_array([THETA, THETA], pa.decimal128(18, 8))
+    assert boundaries._first_other(wide, boundaries.theta_bytes(THETA)) is None
+    # Con otra escala los mismos bytes serían otro número: es distinto desde la fila 0.
+    assert (
+        boundaries._first_other(
+            theta_array([THETA, THETA], pa.decimal128(18, 6)),
+            boundaries.theta_bytes(THETA),
+        )
+        == 0
+    )
+
+
+def test_l2_events_refuses_a_theta_that_is_not_a_decimal_with_scale_eight(
+    lake, tmp_path
+):
+    path = next(lake.l2.rglob("theta=0.00100000/year=2017/month=09/events.parquet"))
+    table = pq.read_table(path)
+    index = table.schema.get_field_index("theta")
+    pq.write_table(
+        table.set_column(
+            index, "theta", pc.cast(table.column("theta"), pa.decimal128(18, 6))
+        ),
+        tmp_path / "events.parquet",
+    )
+    path = str(tmp_path / "events.parquet")
+    with (
+        EventFile(path, "L2", boundaries.EVENT_FILE_COLUMNS) as file,
+        pytest.raises(FramesInputError, match="escala 8"),
+    ):
+        L2Events(file, THETA)
 
 
 # --- Compuerta y apertura en una pasada; L1 leído una vez ----------------------------------

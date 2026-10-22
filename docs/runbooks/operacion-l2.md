@@ -189,7 +189,8 @@ termine, `l2-monthly` no avanza los nuevos y deja el hallazgo
 Una corrida del mes da los mismos archivos: la entrada es la misma y nada de la
 salida depende de la ejecución. La evidencia es el `content_hash` del hallazgo
 `events_summary` (uno por θ y mes, de `events.parquet` y de
-`carry_over.parquet`). Relanza un mes intermedio con `force` y compáralo con el
+`carry_over.parquet`), que L2 también deja en `content_hash.json` de la partición
+(ver la sección siguiente). Relanza un mes intermedio con `force` y compáralo con el
 de la primera corrida. La misma comparación existe como script del repo,
 [`ops-scripts/hashes_events_summary.py`](ops-scripts/hashes_events_summary.py),
 para correr con el job `ops-script` ([runbook](operacion-ops.md)) en lugar de
@@ -258,6 +259,57 @@ primera y la forzada) y termina en 0 si **los 50 θ** tienen el mismo par de
 hashes en todas ellas. Un θ con hashes distintos sale como `DISTINTO` y el
 código es 1: es un defecto de determinismo, no se compensa; abre una card con
 `task-create`.
+
+## Linaje publicado y su backfill (ITSC-368)
+
+Desde la 0.11.0, L2 deja en cada partición un tercer objeto,
+`content_hash.json`, con el `content_hash` de `events.parquet` y de
+`carry_over.parquet`: `{"events_content_hash", "carry_over_content_hash",
+"hasher_version", "written_at"}` ([TRD-L2 §7.5](../TRD/l2.md#75-content_hashjson--la-huella-publicada-contrato-hacia-l3)).
+L3 lo lee y lo registra como linaje; no lo recalcula. Se escribe al final, después
+de los dos Parquet, y se retira antes de reescribirlos: **una partición sin
+`content_hash.json` es una partición sin linaje publicado** (L3 falla con
+`l2_lineage_missing`). Comprobar una:
+
+```bash
+gcloud storage cat \
+  gs://<proyecto>-dc-events/l2/provider=binance/market=spot/asset=BTCUSDT/theta=0.00010000/year=2021/month=01/content_hash.json
+```
+
+Los meses publicados antes de la 0.11.0 no lo tienen. Se cubren una vez con
+`l2_backfill_lineage.py` (`layers/ops_tools/scripts/`), con el job `ops-script`
+([runbook](operacion-ops.md)), **antes del apply de L3** ([Cambios requeridos de
+L3](operacion-l3.md#cambios-requeridos)):
+
+1. Tras el apply de `ops` (que da el permiso de crear `content_hash.json`), sube el
+   script: `gcloud storage cp layers/ops_tools/scripts/l2_backfill_lineage.py
+   gs://<proyecto>-ops/scripts/`.
+2. Lánzalo primero en seco: *Run job*, `job` = `ops-script`, `script` =
+   `gs://<proyecto>-ops/scripts/l2_backfill_lineage.py`, `args` = `--dry-run`.
+   Verifica la muestra y cuenta, sin escribir.
+3. Sin discrepancias, lánzalo sin `args`.
+
+Qué hace: toma de los hallazgos `events_summary` el hash de la **última corrida**
+de cada (θ, mes) y escribe el `content_hash.json` de cada partición que tiene los
+dos Parquet y no tiene la huella. Antes de escribir nada recalcula con
+`ContentHasher` una muestra (≥ 5 %, con todos los θ del primer mes de la serie y de
+2021-01, y las particiones cuyas corridas no coinciden entre sí) y **aborta sin
+escribir** si alguna difiere. Las particiones sin hallazgo se recalculan enteras.
+No pisa lo que ya existe, así que relanzarlo es seguro y completa lo que falte.
+
+Última línea, siempre:
+
+```text
+particiones: N; escritas: W (hallazgo: H, recalculadas: R); ya existían: E; sin hallazgo: S; incompletas: 0; muestra: M; discrepancias: 0; errores: 0
+```
+
+Código de salida 0 con `discrepancias: 0` y `errores: 0`. Una línea `DISCREPANCIA`
+dice qué (θ, mes) difiere: el hallazgo no describe el archivo actual, y casi seguro
+es un mes que L2 reprocesó después sin dejar hallazgo; reprocésalo (`l2-backfill` con
+`force` y `from` = `to` = ese mes: deja huella y hallazgo nuevos) y repite. `INCOMPLETA`
+es una partición con un solo Parquet: no es del backfill, es de L2 ([Reanudar tras
+un fallo](#reanudar-tras-un-fallo)). Un `ERROR` de escritura con 403 en una
+partición nueva es el apply de `ops` que falta.
 
 ## Paso 3: seam-check de continuidad
 

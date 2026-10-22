@@ -3,7 +3,8 @@
 Carga el carry-over del mes anterior (o arranca en frío si es el primero de la
 serie), lee la landing y alimenta el fan-out lote a lote, escribe los eventos de
 cada θ a medida que cierran y, al final, publica `events.parquet` y
-`carry_over.parquet` de cada θ y emite los hallazgos de DQ.
+`carry_over.parquet` de cada θ, con la huella de ambos (`content_hash.json`), y emite los
+hallazgos de DQ.
 """
 
 import logging
@@ -15,6 +16,7 @@ from dataclasses import dataclass
 
 import dc_pyo3
 import pyarrow as pa
+from pyutils import lineage
 
 from l2_dc_events import cpu, findings
 from l2_dc_events.carry import (
@@ -35,7 +37,7 @@ from l2_dc_events.landing import (
 from l2_dc_events.parallel import ParallelWriters
 from l2_dc_events.thetas import load_thetas
 from l2_dc_events.timing import Phases, ThetaTiming, Timing
-from l2_dc_events.write import CARRY_OVER, EVENTS, partition_path
+from l2_dc_events.write import CARRY_OVER, EVENTS, LINEAGE, partition_path
 
 __all__ = [
     "FEED_TICKS",
@@ -162,8 +164,8 @@ def process_unit(
     columnas y los escritores de cada θ los codifican a `events.parquet` en paralelo
     (`parallel.py`), a medida que cierran. La RAM de la unidad es O(row group). Al final se cierra
     el grupo de empate abierto (RF-L2-12) y se publica todo: primero los
-    eventos de cada θ y luego su carry-over, así un carry-over presente
-    significa que el mes de ese θ quedó completo. Re-ejecutar el mes da los
+    eventos de cada θ, luego su carry-over y al final su huella: un carry-over presente
+    significa que el mes de ese θ quedó completo, y una huella, que describe los dos archivos. Re-ejecutar el mes da los
     mismos archivos (RF-L2-08): la entrada es la misma y nada de la salida
     depende de la ejecución.
 
@@ -240,12 +242,17 @@ def process_unit(
         carries = fanout.carry_overs()
 
         def publish(theta: int, writer: EventWriter, carry: dc_pyo3.CarryOver):
-            # Por θ, primero los eventos y luego su carry-over.
+            # Por θ, primero los eventos, luego su carry-over y al final su huella. La
+            # huella anterior se retira antes: si la corrida muere a medias, la partición
+            # queda sin linaje publicado y no con el de una versión que ya no está.
+            lineage_path = _path(ctx, unit, theta, LINEAGE)
+            lineage.retract(lineage_path)
             events_hash = writer.commit()
             carry_started = time.perf_counter()
             _, carry_hash = write_carry_over(
                 carry, where, _path(ctx, unit, theta, CARRY_OVER)
             )
+            lineage.write(lineage_path, lineage.document(events_hash, carry_hash))
             done = time.perf_counter()
             return events_hash, carry_hash, done - carry_started, done
 

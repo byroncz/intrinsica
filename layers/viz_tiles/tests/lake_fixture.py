@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
+from pyutils import content_hash, lineage
 from viz_helpers import FIXTURES
 from viz_tiles.lake import (
     CARRY_OVER,
@@ -294,6 +295,15 @@ def build_lake(base: Path) -> tuple[Roots, list[dict], dict[int, dict]]:
             direction=direction,
             extreme=top,
             pending=(last, last),
+        )
+        # La huella que L2 publica junto a los dos Parquet (ITSC-368); L3 la exige.
+        events = events_path(r, theta, MONTH, EVENTS)
+        carry = events_path(r, theta, MONTH, CARRY_OVER)
+        lineage.write(
+            str(events.with_name(lineage.LINEAGE)),
+            lineage.document(
+                content_hash(pq.read_table(events)), content_hash(pq.read_table(carry))
+            ),
         )
         pending[theta] = {"row": last, "extreme": top, "direction": direction}
     return r, ticks, pending

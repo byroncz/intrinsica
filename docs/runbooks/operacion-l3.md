@@ -11,6 +11,36 @@ cifras de dimensionamiento salieron de la sonda y del histórico de ITSC-335.
 Fechas calculadas al **2026-10-15**. Si lo ejecutas otro día, recalcula el
 rango con la sección siguiente.
 
+## Cambios requeridos
+
+**ITSC-368 (imagen de L3 ≥ 0.15.0): el backfill del linaje va antes del apply.**
+Desde esta imagen L3 no recalcula los `content_hash` de las entradas de L2 (le
+costaba ≈ 100 s de CPU por unidad): los lee de `content_hash.json`, que L2 deja
+junto a `events.parquet` y `carry_over.parquet` desde su 0.11.0
+([TRD-L2 §7.5](../TRD/l2.md#75-content_hashjson--la-huella-publicada-contrato-hacia-l3)).
+Las particiones publicadas antes no lo tienen. Orden obligatorio, todo lo
+dispara y aprueba el humano:
+
+1. **Merge** del PR de ITSC-368 (CI publica `l2_dc_events`, `l3_dc_descriptors` y
+   `ops_tools` con su `VERSION` nueva).
+2. **Apply de `ops` y de `l2`** (*Actions → Terraform*). El de `ops` da al job
+   `ops-script` el permiso de **crear** `content_hash.json` bajo `l2/` de
+   `dc-events` (nada más: no pisa ni borra); el de `l2`, la imagen que lo escribe
+   en los meses nuevos.
+3. **Backfill del linaje** con `ops-script`: sube y lanza
+   [`l2_backfill_lineage.py`](operacion-l2.md#linaje-publicado-y-su-backfill-itsc-368)
+   (la guía paso a paso está en el runbook de L2). Antes, con `--dry-run`, mira que
+   no haya discrepancias. La última línea dice cuántas particiones escribió y cuántas ya existían: su suma
+   debe ser la de L2 (50 θ por cada mes publicado), sin discrepancias, errores ni
+   particiones incompletas.
+4. **Apply de `l3`** con la imagen nueva.
+5. **T8** (2021-01, valores por defecto): `l3-backfill` con `from` = `to` =
+   `2021-01` y `force`. Metas y dónde se anota el resultado: TRD-L3 §10.2, fila T8.
+
+Si el paso 4 va antes que el 3, la unidad falla con `l2_lineage_missing`, sin
+publicar nada y sin avanzar la frontera: es lo previsto. Corre el backfill y
+relanza los mismos inputs.
+
 ## Rango
 
 - **Serie**: arranca en `2017-08` (`L3_SERIES_START` del stack `l3`), igual que
@@ -55,7 +85,10 @@ rango con la sección siguiente.
    **L1 completa** (`consolidated.parquet` de cada mes). Un θ al que le falta un
    mes de L2 sale del rango (`l2_input_missing`); un mes sin consolidado detiene
    todo (`input_missing`).
-5. Variables del environment `gcp` cargadas (`GCP_PROJECT_ID`, `GCP_REGION`,
+5. **Linaje de L2 publicado** (`content_hash.json` en cada partición de L2,
+   ITSC-368). L3 lo lee y falla con `l2_lineage_missing` si falta. Es lo primero
+   que hay que cubrir antes del apply de esta imagen: ver "Cambios requeridos".
+6. Variables del environment `gcp` cargadas (`GCP_PROJECT_ID`, `GCP_REGION`,
    `GCP_WIF_PROVIDER`, `GCP_DEPLOY_SERVICE_ACCOUNT`).
 
 ## Cómo funciona `run-job.yml` con L3
@@ -128,7 +161,7 @@ causa en el log de la ejecución:
   10 800 s (7,6 veces el mes más pesado).
 - **Un hallazgo `error`**: lee su `check_type` en la tabla siguiente.
 
-Los 14 `check_type` de [TRD-L3 §9.3](../TRD/l3.md#93-tipos-de-chequeo-check_type),
+Los 15 `check_type` de [TRD-L3 §9.3](../TRD/l3.md#93-tipos-de-chequeo-check_type),
 y qué hacer con cada uno. En todos los casos de `error`, **el mes no se publica y
 la frontera no avanza**: relanzar los mismos inputs retoma donde quedó. Nunca
 repares un archivo de `l3/` a mano.
@@ -139,6 +172,8 @@ repares un archivo de `l3/` a mano.
 | `family_skeleton_mismatch` | `error` | Un archivo de familia no repite filas, orden, claves o row groups del esqueleto | Compara `details` con `events.parquet` de L2 del mes. Si L2 cambió después, relanza el mes con `force` (ver "Relanzar un mes"). Si persiste, card |
 | `event_over_budget` | `warning` | Un evento supera el presupuesto de ticks (solo familias de serie completa) | `summaries` no tiene presupuesto y no lo emite. Informa; no falla la unidad |
 | `l2_input_missing` | `error` | Falta `events.parquet` o `carry_over.parquet` de `(θ, M)` | Completa L2 para ese θ y mes ([runbook de L2](operacion-l2.md)); luego relanza `l3-backfill` con los mismos inputs. Ese θ salió del rango y los demás siguieron (código 1) |
+| `l2_lineage_missing` | `error` | La partición de L2 de `(θ, M)` no tiene `content_hash.json` o no es válido; `details` trae θ, mes, archivo y `reason` | Corre el backfill del linaje ([L2](operacion-l2.md#linaje-publicado-y-su-backfill-itsc-368)), que escribe el de las particiones que no lo tienen; si el mes es nuevo (publicado por una imagen de L2 anterior a la 0.11.0), vuelve a correr
+el backfill. Luego relanza `l3-backfill` con los mismos inputs. L3 no recalcula el linaje por su cuenta, a propósito |
 | `l2_state_inconsistent` | `error` | L2 contradice a L1 o a un invariante de fila (TRD-L3 §9.2); `details` trae θ, mes, campo y los dos valores | Descarta primero L1: ids repetidos o marcas del proveedor (ver "Cascada"). Si L1 está sano, es un defecto de L2 o de L3: card con `details`. Es el hallazgo que detectó los duplicados de 2026-02 |
 | `phase_ticks_mismatch` | `error` | No cuadra la conciliación de ticks de §9.1; `details` trae `N_M`, `Σ_cerrados`, `P_M`, `Cola_M` y `U_M` | Corre el seam-check de [L1](operacion-l1.md) y el de [L2](operacion-l2.md#paso-3-seam-check-de-continuidad) sobre el mes. Si ambos pasan, card con `details` |
 | `input_missing` | `error` | El mes no tiene `consolidated.parquet` ni provisionales | Corre `l1-backfill` o `l1-monthly-close` del mes ([runbook de L1](operacion-l1.md)); luego relanza |

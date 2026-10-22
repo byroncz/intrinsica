@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
+from pyutils import content_hash, lineage
 
 FIXTURES = Path(__file__).resolve().parents[3] / "shared/dc_core/tests/fixtures"
 KEY = ("binance", "spot", "BTCUSDT")
@@ -149,7 +150,25 @@ def write_l2(
         path,
         row_group_size=row_group_size,
     )
+    publish_lineage(path.parent)
     return path
+
+
+def publish_lineage(directory: Path) -> None:
+    """La huella de `events.parquet` y `carry_over.parquet` de la partición, como la publica L2
+    (`content_hash.json`, ITSC-368), cuando ya están los dos.
+
+    Se calcula al escribir el archivo; si una prueba lo cambia después, la huella queda con
+    el valor de origen, igual que le pasaría a un archivo que L2 no reescribió.
+    """
+    events, carry = directory / "events.parquet", directory / "carry_over.parquet"
+    if events.exists() and carry.exists():
+        lineage.write(
+            str(directory / lineage.LINEAGE),
+            lineage.document(
+                content_hash(pq.read_table(events)), content_hash(pq.read_table(carry))
+            ),
+        )
 
 
 def _point(name: str, nullable: bool = False) -> list[pa.Field]:
@@ -229,6 +248,7 @@ def write_carry_over(
     )
     path.parent.mkdir(parents=True, exist_ok=True)
     pq.write_table(pa.Table.from_pylist([row], schema=CARRY_SCHEMA), path)
+    publish_lineage(path.parent)
     return path
 
 
