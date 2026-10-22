@@ -8,6 +8,7 @@ es la suma de los dos.
 """
 
 import json
+import os
 import subprocess
 import sys
 from decimal import Decimal
@@ -30,6 +31,11 @@ ROW_GROUP_BYTES = ROW_GROUP * 48
 GROUPS = 14
 LONG = 10  # row groups que abarca el evento largo
 THETAS = (100_000, 200_000)
+# El asignador de la imagen de L3 (ITSC-367): umbral de mmap de 32 MiB y sin recorte del heap.
+IMAGE_MALLOC = {
+    "MALLOC_MMAP_THRESHOLD_": "33554432",
+    "MALLOC_TRIM_THRESHOLD_": "1073741824",
+}
 
 PROBE = """
 import json, sys, tracemalloc
@@ -126,6 +132,9 @@ def peak(root, name: str) -> dict:
         capture_output=True,
         text=True,
         check=False,
+        # Con el asignador de la imagen de L3 (ITSC-367): glibc retiene lo liberado y el pico
+        # no puede crecer con los eventos ni con los ticks aun así.
+        env={**os.environ, **IMAGE_MALLOC},
     )
     assert out.returncode == 0, out.stderr
     return json.loads(out.stdout)

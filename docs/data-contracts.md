@@ -664,7 +664,8 @@ mismo que traen las excepciones del resumidor, de las que sale la mayoría de lo
   `involuntary_switches` (fallos de página y cambios de contexto del proceso en la unidad,
   también de `getrusage`), que separan la CPU de sistema en memoria, candados y red; y
   `mmap_threshold`, el umbral de `mmap` de glibc con que corrió (`MALLOC_MMAP_THRESHOLD_` o
-  16 384; `null` si quedó dinámico). No cuenta las lecturas de la conciliación (solo
+  33 554 432; `null` si quedó dinámico), y `trim_threshold`, el de recorte del heap
+  (`MALLOC_TRIM_THRESHOLD_`; `null` si no está fijada). No cuenta las lecturas de la conciliación (solo
   `agg_trade_id` de los row groups de las fronteras). Va aparte de `summaries_summary`
   porque sus tiempos cambian en cada corrida y el de `summaries_summary` no puede.
 - **`unit_profile`** (`info`, `pass`): uno por unidad (mes), solo si la corrida lleva

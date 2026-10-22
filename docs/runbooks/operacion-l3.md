@@ -397,7 +397,9 @@ W = 12 el tope son 36 row groups ≈ 290 MiB, igual que los 8 × 4 de antes; con
 96 ≈ 770 MiB y T4b midió `rss_peak_mib` 2 331 contra 1 864 de T4 (W = 4). Si cambias W,
 rehaz la cuenta: `3 × W × 8 MiB`. La cuenta completa está en
 [TRD-L3 ADR-L3-16, «Memoria del orquestador»](../TRD/l3.md#616-adr-l3-16--motor-de-agregación-nativo-ítems-por-row-group-y-θ-casillas-por-evento-fusión-asociativa).
-Se acepta una combinación si `rss_peak_mib` queda ≤ 2 048 a 4 vCPU.
+Se acepta una combinación si `rss_peak_mib` queda < 3 500 a 4 vCPU con el asignador de la imagen (la
+configuración por defecto mide 3 126 MiB); con el asignador de 16 KiB de L2 el criterio es ≤ 2 048.
+El límite y su regla de retroceso están en [«Asignador por defecto de L3»](#el-asignador-malloc_mmap_threshold_-y-malloc_trim_threshold_-itsc-366-itsc-367).
 
 **Cómo leer `unit_timing`** (todas las fases son pared; [TRD-L3 §9.3](../TRD/l3.md#93-tipos-de-chequeo-check_type)):
 
@@ -411,7 +413,8 @@ Se acepta una combinación si `rss_peak_mib` queda ≤ 2 048 a 4 vCPU.
 | `write_s` | Pared con algún escritor ocupado. Pegada a `aggregate_s` y con `engine_busy` bajo, los escritores son el cuello: sube `L3_WRITERS` |
 | `gate_s`, `setup_s`, `aggregate_s`, `publish_s`, `reconcile_s` | Tramos seguidos del hilo principal; `other_s` es lo que falta hasta `wall_s`. `gate_s` es abrir `events.parquet` de los θ y arrancar la lectura de sus fronteras (una tarea por θ) y `setup_s`, el motor, el pie de L1 y la compuerta de carry-over (los escritores se abren en el pool en ese tramo, sin que nadie los espere); `lineage_s` ya no existe |
 | `minor_faults`, `major_faults`, `voluntary_switches`, `involuntary_switches` | Contadores del kernel de la unidad. Con `cpu_system_s` alto: muchos fallos de página (millones) apuntan a memoria y asignador; muchos cambios de contexto voluntarios, a candados o red; ninguno de los dos, a otra causa |
-| `mmap_threshold` | Umbral de `mmap` de glibc con que corrió la unidad: `MALLOC_MMAP_THRESHOLD_` o 16384; `null` si quedó dinámico. Dice con qué corrió cada fila del cuadro de §10.2 |
+| `mmap_threshold` | Umbral de `mmap` de glibc con que corrió la unidad: `MALLOC_MMAP_THRESHOLD_` o 33554432; `null` si quedó dinámico. Dice con qué corrió cada fila del cuadro de §10.2 |
+| `trim_threshold` | Umbral de recorte del heap con que corrió la unidad: `MALLOC_TRIM_THRESHOLD_` (1073741824 en la imagen); `null` si no está fijada y glibc recorta con su umbral dinámico |
 | `boundaries_peak_mib` | Máximo de fronteras de L2 que el motor tuvo en mano |
 
 Para comparar dos corridas usa `wall_s`, `cpu_s` y `cpu_utilization`. `run-job.yml` no admite
@@ -448,53 +451,56 @@ nada se mide el ancho de banda de GCS al job con la descarga de un objeto grande
 se repite la corrida con `--update-env-vars` y se anota cada una como una fila más del cuadro.
 Un perfil con hilos (`L3_PROFILE=1`) ve todos los hilos y sus tiempos son de hilo, no de pared.
 
-## El umbral de `mmap`: `MALLOC_MMAP_THRESHOLD_` (ITSC-366)
+## El asignador: `MALLOC_MMAP_THRESHOLD_` y `MALLOC_TRIM_THRESHOLD_` (ITSC-366, ITSC-367)
 
-`unit_timing` de T5 (2021-01, imagen 0.12.0) contó 32,6 M de fallos de página menores y 102 s de
-`cpu_system_s`. La hipótesis 1 de
-[ADR-L3-16](../TRD/l3.md#616-adr-l3-16--motor-de-agregación-nativo-ítems-por-row-group-y-θ-casillas-por-evento-fusión-asociativa)
-es que el umbral de `mmap` de 16 KiB convierte cada buffer grande en un `mmap`/`munmap` que se vuelve a
-tocar página por página. Desde la imagen 0.13.0 `memory.tune_allocators()` respeta
-`MALLOC_MMAP_THRESHOLD_` si es un entero entre 0 y 33 554 432 (32 MiB, el máximo de glibc); un valor
-inválido deja un aviso en el log y rige 16 384. `unit_timing` dice con cuál corrió (`mmap_threshold`).
-El valor por defecto de la imagen sigue en 16 384 hasta tener la medición.
+**Qué corre por defecto.** La imagen de L3 (desde la 0.14.0) fija `MALLOC_MMAP_THRESHOLD_=33554432`
+(32 MiB, el máximo de glibc) y `MALLOC_TRIM_THRESHOLD_=1073741824` (sin recorte del heap). Con el
+umbral de 16 KiB que L3 heredó de L2, cada buffer grande era un `mmap`/`munmap` que se volvía a tocar
+página por página: 32,6 M de fallos de página y ≈ 100 s de `cpu_system_s` por unidad. Con la
+configuración nueva, en 2021-01 y a igual cuota de CPU, la unidad gasta **−31 % de CPU y −25 % de
+pared** (376 a 260 s y 126 a 94 s) a cambio de **+1,1 GiB de RSS** (2 011 a 3 126 MiB, 900 MiB bajo
+los 4 GiB del job). La decisión, las cifras de T5, T6 y T6b y la regla de retroceso están en
+[ADR-L3-16](../TRD/l3.md#616-adr-l3-16--motor-de-agregación-nativo-ítems-por-row-group-y-θ-casillas-por-evento-fusión-asociativa),
+«Asignador por defecto de L3».
 
-Las corridas las lanza el humano desde Cloud Shell, sobre 2021-01, con la imagen 0.13.0 y los
-`--args` de siempre; `--update-env-vars` vale solo para esa ejecución. No lances otra ejecución de
-`l3-backfill` a la vez, y anota cada una como comentario en ITSC-366 y como fila del cuadro de
-[§10.2](../TRD/l3.md#102-dimensionamiento--hipótesis-de-partida-y-primera-medición):
+`memory.tune_allocators()` respeta `MALLOC_MMAP_THRESHOLD_` si es un entero entre 0 y 33 554 432; un
+valor inválido deja un aviso en el log y rige 33 554 432. Sin la variable (en local y en pruebas)
+rige el mismo valor. `MALLOC_TRIM_THRESHOLD_` la lee glibc al arrancar y no pasa por
+`tune_allocators`. `unit_timing` dice con cuáles corrió la unidad (`mmap_threshold` y
+`trim_threshold`).
+
+**Qué mirar en una corrida.** `rss_peak_mib` ronda 3 100 y es lo esperado, no una fuga: glibc retiene
+en el heap lo que la unidad libera, para reutilizarlo. Lo que sí es una alarma es que crezca con el
+mes. Metas de la corrida T7 de ITSC-367 (valores por defecto, sin variables): `mmap_threshold`
+33554432, `trim_threshold` 1073741824, `minor_faults` < 2 M, `cpu_system_s` < 20 s,
+`rss_peak_mib` < 3 500 y los 50 `content_hash` idénticos a los de ITSC-335. Se lanza con *Actions →
+Run job*, `l3-backfill`, `from = to = 2021-01` y `force`, tras el merge y el `apply` del stack
+`l3`; el resultado va como comentario en ITSC-367 y como fila T7 del cuadro de
+[§10.2](../TRD/l3.md#102-dimensionamiento--hipótesis-de-partida-y-primera-medición).
+
+**Regla de retroceso.** Si la validación de 110 meses (ITSC-364) muestra un mes sobre 3 500 MiB de
+`rss_peak_mib`, se vuelve al umbral solo: se quita `MALLOC_TRIM_THRESHOLD_` del `ENV` del Dockerfile
+(T6 midió 2 922 MiB con 4,2× menos fallos que el umbral de 16 KiB). No se midieron valores
+intermedios de `MALLOC_TRIM_THRESHOLD_` y no se inventan.
+
+**Comparar con otro asignador.** `run-job.yml` no admite variables de entorno: una corrida suelta
+con otra configuración se lanza **desde Cloud Shell**, sobre 2021-01 y con los `--args` de siempre;
+`--update-env-vars` vale solo para esa ejecución. No lances otra ejecución de `l3-backfill` a la vez.
+Por ejemplo, el umbral de 16 KiB de antes, para reproducir T5:
 
 ```bash
-# T6: solo el umbral de mmap (la corrida que pide la card)
 gcloud run jobs execute l3-backfill \
   --project <proyecto> --region <región> \
-  --update-env-vars MALLOC_MMAP_THRESHOLD_=33554432 \
-  --args="--mode,backfill,--from=2021-01,--to=2021-01,--force" \
-  --wait
-
-# T6b: el umbral de mmap y el de trim (separa el efecto del trim, que T5b sí aplicó)
-gcloud run jobs execute l3-backfill \
-  --project <proyecto> --region <región> \
-  --update-env-vars MALLOC_MMAP_THRESHOLD_=33554432,MALLOC_TRIM_THRESHOLD_=1073741824 \
-  --args="--mode,backfill,--from=2021-01,--to=2021-01,--force" \
-  --wait
-
-# Perfil de la CPU de usuario de T5 (valores por defecto; ver "Perfilar una unidad")
-gcloud run jobs execute l3-backfill \
-  --project <proyecto> --region <región> \
-  --update-env-vars L3_PROFILE=1 \
+  --update-env-vars MALLOC_MMAP_THRESHOLD_=16384,MALLOC_TRIM_THRESHOLD_=131072 \
   --args="--mode,backfill,--from=2021-01,--to=2021-01,--force" \
   --wait
 ```
 
-Qué comparar contra T5: `minor_faults`, `cpu_system_s`, `cpu_user_s`, `wall_s`, `cpu_throttled_s` y
-`rss_peak_mib`; `mmap_threshold` debe decir 33554432 en T6 y T6b y 16384 en la de por defecto, y los
-50 `content_hash` deben ser idénticos a los de ITSC-335. Criterio de decisión: si los fallos caen al
-menos un orden de magnitud y `rss_peak_mib` queda bajo 2 048 (o acotado y bajo 4 096, con una
-explicación), el nuevo umbral pasa a ser el valor por defecto en `tune_allocators` y en el
-Dockerfile de L3; si no caen, la hipótesis 1 se descarta y se busca la fuente con `strace -c -f`
-(conteo de `mmap`, `munmap`, `madvise` y `brk`) y `/usr/bin/time -v` sobre el mes local 2020-01
-en el contenedor, comparando umbrales y `MALLOC_ARENA_MAX`.
+Compara `minor_faults`, `cpu_system_s`, `cpu_user_s`, `wall_s`, `cpu_throttled_s` y `rss_peak_mib`
+con la fila de T7 y compara solo corridas con la misma cuota de CPU (`cores` de `unit_timing`): T6
+corrió con 3,23 cores y su pared no se compara con la de T5. Si los fallos de página no bajan, la
+fuente se busca con `strace -c -f` (conteo de `mmap`, `munmap`, `madvise` y `brk`) y `/usr/bin/time
+-v` sobre el mes local 2020-01 en el contenedor.
 
 ## Lector de tramas: `DC_FRAMES_IO_THREADS` y `readers`
 

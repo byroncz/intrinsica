@@ -1,5 +1,5 @@
-"""El umbral de `mmap` de glibc es `MALLOC_MMAP_THRESHOLD_` si es válido y 16 KiB si no
-(ITSC-366); `unit_timing` lo registra (prueba en test_l3_timing).
+"""El umbral de `mmap` de glibc es `MALLOC_MMAP_THRESHOLD_` si es válido y 32 MiB si no
+(ITSC-366, ITSC-367); `unit_timing` lo registra (prueba en test_l3_timing).
 """
 
 import logging
@@ -10,6 +10,7 @@ from l3_dc_descriptors import memory
 from l3_dc_descriptors.memory import DEFAULT_MMAP_THRESHOLD, MAX_MMAP_THRESHOLD
 
 ENV = "MALLOC_MMAP_THRESHOLD_"
+TRIM_ENV = "MALLOC_TRIM_THRESHOLD_"
 
 
 class FakeLibc:
@@ -46,19 +47,19 @@ def test_forgetting_the_variable_restores_its_absence(monkeypatch):
     monkeypatch.delenv(ENV, raising=False)
     mp = pytest.MonkeyPatch()
     forget_env(mp)
-    os.environ[ENV] = "16384"  # lo que deja `tune_allocators`
+    os.environ[ENV] = "33554432"  # lo que deja `tune_allocators`
     mp.undo()
     assert ENV not in os.environ
 
 
-def test_without_the_variable_the_threshold_is_16_kib(libc):
+def test_without_the_variable_the_threshold_is_32_mib(libc):
     memory.tune_allocators()
-    assert libc.calls == [(memory._M_MMAP_THRESHOLD, 16384)]
-    assert DEFAULT_MMAP_THRESHOLD == 16384
-    assert memory.mmap_threshold() == 16384
+    assert libc.calls == [(memory._M_MMAP_THRESHOLD, 33554432)]
+    assert DEFAULT_MMAP_THRESHOLD == 33554432 == MAX_MMAP_THRESHOLD
+    assert memory.mmap_threshold() == 33554432
 
 
-@pytest.mark.parametrize("value", [0, 65536, 33554432])
+@pytest.mark.parametrize("value", [0, 16384, 65536, 33554432])
 def test_a_valid_variable_is_what_mallopt_receives(libc, monkeypatch, value):
     monkeypatch.setenv(ENV, str(value))
     memory.tune_allocators()
@@ -76,8 +77,8 @@ def test_an_invalid_variable_warns_and_falls_back_to_the_default(
     monkeypatch.setenv(ENV, text)
     with caplog.at_level(logging.WARNING, logger=memory.logger.name):
         memory.tune_allocators()
-    assert libc.calls == [(memory._M_MMAP_THRESHOLD, 16384)]
-    assert memory.mmap_threshold() == 16384
+    assert libc.calls == [(memory._M_MMAP_THRESHOLD, DEFAULT_MMAP_THRESHOLD)]
+    assert memory.mmap_threshold() == DEFAULT_MMAP_THRESHOLD
     assert any(ENV in record.getMessage() for record in caplog.records)
 
 
@@ -89,3 +90,23 @@ def test_a_rejected_threshold_stays_dynamic(monkeypatch, caplog):
         memory.tune_allocators()
     assert memory.mmap_threshold() is None
     assert any("rechazó" in record.getMessage() for record in caplog.records)
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        (None, None),
+        ("1073741824", 1073741824),
+        ("0", 0),
+        ("", None),
+        ("1G", None),
+        ("-1", None),
+    ],
+)
+def test_trim_threshold_is_what_the_environment_says_or_none(
+    monkeypatch, text, expected
+):
+    monkeypatch.delenv(TRIM_ENV, raising=False)
+    if text is not None:
+        monkeypatch.setenv(TRIM_ENV, text)
+    assert memory.trim_threshold() == expected

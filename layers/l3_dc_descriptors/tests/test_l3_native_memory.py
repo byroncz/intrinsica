@@ -14,6 +14,11 @@ import sys
 
 T = 100_000  # ticks por row group
 K = 3
+# El asignador de la imagen de L3 (ITSC-367): umbral de mmap de 32 MiB y sin recorte del heap.
+IMAGE_MALLOC = {
+    "MALLOC_MMAP_THRESHOLD_": "33554432",
+    "MALLOC_TRIM_THRESHOLD_": "1073741824",
+}
 # Bytes de un row group decodificado: tiempo, precio y cantidad (8 + 16 + 16 B) y el bit
 # de lado.
 ROW_GROUP_BYTES = T * 40 + T // 8
@@ -123,7 +128,7 @@ def probe(row_groups: int) -> dict:
         check=False,
         # Como en la imagen de L3 (ver `memory.py`): sin esto las fronteras de la memoria
         # del proceso dependen de la heurística del asignador.
-        env={**os.environ, "MALLOC_MMAP_THRESHOLD_": "16384"},
+        env={**os.environ, **IMAGE_MALLOC},
     )
     assert out.returncode == 0, out.stderr
     return json.loads(out.stdout)

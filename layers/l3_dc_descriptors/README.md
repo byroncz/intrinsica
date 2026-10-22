@@ -44,8 +44,8 @@ ninguna, así que los valores siguen a los vCPU del job; para sobrescribirlas en
 `PENDING_PER_WRITER × W` row groups de salida sellados sin escribir (3 × 12 = 36 por defecto);
 cada uno pesa ≈ 8 MiB (256 B por evento × ≈ 34 000 eventos), así que el tope son ≈ 290 MiB, lo
 mismo que 8 × 4 de antes. Con 8 y W = 12 serían 96 (≈ 770 MiB): es lo que T4b pagó de más
-(RSS 2 331 MiB). Si subes W o bajas el tamaño del row group, rehaz la cuenta y compárala con los
-2 048 MiB de la meta.
+(RSS 2 331 MiB). Si subes W o bajas el tamaño del row group, rehaz la cuenta y compárala con el
+margen del job: con el asignador de la imagen (ver «Memoria») el RSS medido es ≈ 3,1 GiB de 4.
 `L3_PREFETCH` ya no existe (ITSC-363). `CLOUD_RUN_TASK_INDEX` distinto de 0 es código 2. `IMAGE_VERSION` la fija la imagen.
 
 **Códigos de salida** ([§8.4](../../docs/TRD/l3.md#84-códigos-de-salida)): 0 éxito; 1 fallo
@@ -273,7 +273,16 @@ groups solo deja su acumulador parcial. La cuenta completa, y por qué la sonda 
 228 MiB y no los 95 previstos, está en TRD-L3 ADR-L3-16 («Memoria del orquestador»).
 `tests/test_l3_memory.py` lo mide en un proceso aparte (pool de Arrow más `tracemalloc`): el pico
 no crece con los eventos ni cuando el evento más grande pasa de 10 a 40 row groups.
-`rss_peak_mib` de `unit_timing` es la medida de la corrida (meta ≤ 2 048 a 4 vCPU).
+`rss_peak_mib` de `unit_timing` es la medida de la corrida.
+
+**Asignador.** La imagen corre con `MALLOC_MMAP_THRESHOLD_=33554432` (32 MiB) y
+`MALLOC_TRIM_THRESHOLD_=1073741824` (sin recorte del heap), no con los 16 KiB de L2: en 2021-01 y a
+igual cuota de CPU gasta −31 % de CPU y −25 % de pared, a cambio de un RSS de ≈ 3,1 GiB en vez de
+2,0 (900 MiB bajo los 4 GiB del job). glibc retiene lo liberado para reutilizarlo; el pico sigue
+acotado por K, R, W y los sellados pendientes, no por el mes. Sin la variable (en local y en pruebas)
+`memory.tune_allocators()` fija el mismo umbral de `mmap`. Las cifras, la regla de retroceso (un mes
+sobre 3 500 MiB quita el `trim`) y cómo comparar otra configuración están en TRD-L3 ADR-L3-16 y en
+el runbook, «El asignador». `unit_timing` registra `mmap_threshold` y `trim_threshold`.
 
 ## Pruebas
 

@@ -1,15 +1,18 @@
 """Ajuste de los allocators para que el RSS de la unidad sea O(lote).
 
-Es el de L2 (`l2_dc_events.memory`, medido en ITSC-275): el pool por defecto de Arrow
+Parte del de L2 (`l2_dc_events.memory`, medido en ITSC-275): el pool por defecto de Arrow
 (`mimalloc`) retiene páginas por hilo y el umbral dinámico de `mmap` de glibc fragmenta el
 heap de cada hilo; con el pool del sistema (`ARROW_DEFAULT_MEMORY_POOL=system`, que Arrow
-lee al importarse y por eso va en el `ENV` de la imagen) y el umbral fijo en 16 KiB, la
-memoria liberada vuelve al sistema.
-
-El umbral se puede cambiar por entorno con `MALLOC_MMAP_THRESHOLD_` (ITSC-366): con 16 KiB
-cada buffer grande es un `mmap`/`munmap` y se vuelve a tocar página por página, que son los
-≈ 32 M de fallos de página de la unidad; un umbral mayor deja a glibc reutilizar el heap a
-cambio de más RSS. `unit_timing` registra el que rigió (`mmap_threshold`).
+lee al importarse y por eso va en el `ENV` de la imagen) la memoria liberada vuelve al
+sistema. Eso sigue vigente en L3. Lo que L2 hace además, fijar el umbral de `mmap` en 16 KiB,
+L3 ya no lo usa (ITSC-367). Con ese umbral cada buffer grande es un
+`mmap`/`munmap` y se vuelve a tocar página por página: ≈ 32 M de fallos de página y ≈ 100 s
+de CPU de sistema por unidad (ITSC-366). Con el umbral en 32 MiB (el máximo de glibc) y sin
+recorte del heap (`MALLOC_TRIM_THRESHOLD_` en 1 GiB, que fija la imagen y glibc lee al
+arrancar) glibc reutiliza el heap: −31 % de CPU a cambio de ≈ 1,1 GiB más de RSS (de 2,0 a
+3,1 GiB), todavía acotado por K, R, W y los sellados pendientes. Decisión y cifras: TRD-L3
+ADR-L3-16. `MALLOC_MMAP_THRESHOLD_` se puede cambiar por entorno; `unit_timing` registra lo
+que rigió (`mmap_threshold` y `trim_threshold`).
 """
 
 import ctypes
@@ -23,9 +26,11 @@ logger = logging.getLogger(__name__)
 # `mallopt(M_MMAP_THRESHOLD, ...)` de glibc. Fijarlo es lo que apaga el ajuste dinámico.
 _M_MMAP_THRESHOLD = -3
 _ENV = "MALLOC_MMAP_THRESHOLD_"
-DEFAULT_MMAP_THRESHOLD = 16384
+_TRIM_ENV = "MALLOC_TRIM_THRESHOLD_"
 # Lo máximo que glibc acepta en 64 bits (`HEAP_MAX_SIZE / 2`): con más, `mallopt` falla.
 MAX_MMAP_THRESHOLD = 32 << 20
+# Lo que rige sin la variable (en local y en pruebas); la imagen fija el mismo en su `ENV`.
+DEFAULT_MMAP_THRESHOLD = MAX_MMAP_THRESHOLD
 
 
 def _valid(text: str | None) -> int | None:
@@ -45,6 +50,17 @@ def mmap_threshold() -> int | None:
     deja igual a lo que fijó (o la quita si no pudo fijar nada). Así no hay estado de módulo.
     """
     return _valid(os.environ.get(_ENV))
+
+
+def trim_threshold() -> int | None:
+    """El umbral de recorte del heap con que corre el proceso, o `None` si no está fijado.
+
+    `MALLOC_TRIM_THRESHOLD_` la fija la imagen y glibc la lee al arrancar: no hay `mallopt`
+    aquí, esto solo dice con cuál corrió la unidad. Sin ella, glibc recorta con su umbral
+    dinámico.
+    """
+    text = os.environ.get(_TRIM_ENV)
+    return int(text) if text is not None and text.isascii() and text.isdigit() else None
 
 
 def _requested() -> int:
@@ -67,7 +83,7 @@ def _requested() -> int:
 def tune_allocators() -> None:
     """Fija el umbral de `mmap` de glibc y avisa si el pool de Arrow no es el del sistema.
 
-    El umbral es `MALLOC_MMAP_THRESHOLD_` si está definida y es válida, y 16 KiB si no. Deja
+    El umbral es `MALLOC_MMAP_THRESHOLD_` si está definida y es válida, y 32 MiB si no. Deja
     la variable con el valor fijado, para que `mmap_threshold()` diga con cuál corrió.
     """
     if pa.default_memory_pool().backend_name != "system":
