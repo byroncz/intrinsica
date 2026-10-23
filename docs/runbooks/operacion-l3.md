@@ -1,4 +1,4 @@
-# Runbook: operación de L3 (backfill histórico, lectura de fallos, cascada, cadena mensual, volumen y costo, perfil de una unidad, hilos de la unidad, verificación cruzada)
+# Runbook: operación de L3 (backfill histórico, lectura de fallos, cascada, cadena mensual, volumen y costo, perfil de una unidad, hilos de la unidad, verificación cruzada, comparación de corridas)
 
 Lo ejecuta el humano desde *Actions → Run job* y Cloud Shell; ningún agente
 dispara `terraform.yml` ni `run-job.yml`. Dice cómo se opera L3 una vez construido
@@ -115,10 +115,14 @@ conciliación, esqueleto; o `monthly` sin ningún θ listo con rezagados) o **2*
 
 ## Backfill histórico por rangos
 
-La suma de los 110 meses son 11,5 h (41 256 s), más que las 6 h que espera el
-run de Actions. Cloud Run no corta la tarea (el timeout es el tope del módulo,
-86 400 s), pero el run fallaría. Por eso el histórico se lanza por rangos,
-**uno a la vez y cada uno con éxito antes del siguiente**. Los de ITSC-335:
+**Con el núcleo nuevo cabe en una sola ejecución.** La suma de los 110 meses son 4 828 s
+(1,34 h; ITSC-364), bajo las 6 h que espera el run de Actions: `from` = `2017-08`, `to`
+vacío y `force`, una vez. Sin `force`, o si una ejecución muere, se relanza y retoma donde
+quedó. Lo que sigue (rangos) es de **ITSC-335, con el núcleo original**, cuya suma eran 11,5 h
+(41 256 s), más que las 6 h que espera el run de Actions: Cloud Run no cortaba la tarea (el
+timeout es el tope del módulo, 86 400 s), pero el run fallaría. Por eso entonces el
+histórico se lanzaba por rangos, **uno a la vez y cada uno con éxito antes del siguiente**.
+Los de ITSC-335:
 
 | # | `from` | `to` | Resultado |
 | --- | --- | --- | --- |
@@ -133,12 +137,14 @@ run de Actions. Cloud Run no corta la tarea (el timeout es el tope del módulo,
 El detalle de cada run está en [infra/README.md](../../infra/README.md#stack-l3-descriptores-por-evento).
 
 **Regla para un backfill futuro de la serie completa** (por ejemplo, al agregar
-una familia): fija cada rango por su **pared estimada**, no por su número de
-meses. La suma de los `wall_s` esperados del rango debe quedar en **≈ 5 h
-(18 000 s) o menos**. Estima cada mes con el ajuste de
+una familia): si la suma de los `wall_s` esperados pasa de **≈ 5 h (18 000 s)**, fija cada
+rango por su **pared estimada**, no por su número de meses. Con el núcleo nuevo la serie
+suma 4 828 s para `summaries.parquet`, así que basta una ejecución mientras la familia no
+sea ≈ 4 veces más lenta. Estima cada mes con el ajuste de
 [TRD-L3 §10.2](../TRD/l3.md#102-dimensionamiento--hipótesis-de-partida-y-primera-medición)
-(`wall_s` ≈ 68 s + 0,038 s por millón de ticks + 24,9 s por millón de eventos) o
-con los `unit_timing` de `dq-findings/l3/`. La pared sigue a los **eventos**,
+(`wall_s` ≈ 68 s + 0,038 s por millón de ticks + 24,9 s por millón de eventos; es del
+**núcleo original** y sobrestima la suma unas 8,5 veces: no se reajustó con el nuevo) o con los
+`unit_timing` de `dq-findings/l3/` y el CSV de `l3_compare_runs.py --timing`. La pared sigue a los **eventos**,
 más que a los ticks: 2021-01 (46,0 M de eventos) tomó 1 419 s y 2023-03, el mes
 con más ticks, 873 s. Los 41 meses de 2017-08 a 2020-12 promediaron ≈ 7,2 min por
 mes; 2021 promedió ≈ 10,75 min. Lo más simple es repetir los rangos de la tabla.
@@ -149,16 +155,37 @@ de orden (como 2023-03 y 2026-09 en ITSC-335) se reconstruye al llegar a él, co
 mismo `content_hash`. Para no repetirlo, termina el rango un mes antes.
 Relanzar un rango interrumpido es seguro: la frontera retoma donde quedó.
 
+### Timeouts: la regla de TRD-L2 §10.2 sobre la pared del núcleo nuevo (ITSC-364)
+
+La regla ([TRD-L2 §10.2](../TRD/l2.md)): `monthly` ≥ 6 × la pared del mes más pesado, y
+`backfill` ≥ 1,5 × la suma de los meses y ≤ 86 400 s (el tope del módulo `layer`). Con la
+medición de ITSC-364 (mes más pesado 141,4 s en 2022-11; suma 4 828 s):
+
+| Job | Desplegado hoy (núcleo original) | Recalculado | Cuenta |
+| --- | --- | --- | --- |
+| `l3-monthly` | 10 800 s | **900 s** | 6 × 141,4 = 849 s, redondeado hacia arriba: 6,4 × |
+| `l3-backfill` | 86 400 s | **10 800 s** | 1,5 × 4 828 = 7 242 s, redondeado a 3 h: 2,2 × |
+
+Los valores nuevos **no están aplicados**: los cambia ITSC-352 en `infra/` junto con el tamaño
+(vCPU). Hasta entonces rigen los desplegados, que sobran. Son una cota, porque la suma corrió
+con el asignador de T5 y con el de la imagen cada mes denso es más rápido. Si un job termina
+por timeout con estos valores, mira primero `unit_timing` del mes: una unidad que pasa de
+3 × su pared habitual es un hallazgo, no una razón para subir el timeout.
+
 ## Leer un fallo
 
 Un fallo detiene el rango (los meses siguientes no se tocan) y deja un hallazgo
 en `gs://<proyecto>-dq-findings/l3/detected_date=<fecha>/`. Primero distingue la
 causa en el log de la ejecución:
 
-- **OOM** ("Memory limit exceeded"): no hay línea `unidad <mes>:` de ese mes. El pico
-  medido es 1 267 MiB de 4 GiB: sería un hallazgo nuevo; anótalo y avisa.
-- **Timeout**: la tarea se corta sin mensaje de memoria. El de `l3-monthly` es de
-  10 800 s (7,6 veces el mes más pesado).
+- **OOM** ("Memory limit exceeded" o `signal 9`): no hay línea `unidad <mes>:` de ese mes.
+  El pico medido con el núcleo nuevo es 3 545 MiB de 4 GiB, en 2017-12 (ITSC-364), por la
+  densidad de eventos y no por el asignador; es el caso que acota ITSC-372. Un OOM en un
+  mes más denso, o en uno chico tras varios meses, es el hallazgo: mira
+  `rss_before_trim_mib` y `rss_after_trim_mib` de los meses anteriores y la sección
+  «El asignador».
+- **Timeout**: la tarea se corta sin mensaje de memoria. El de `l3-monthly` desplegado es de
+  10 800 s (76 veces el mes más pesado con el núcleo nuevo, 141,4 s; ver «Timeouts»).
 - **Un hallazgo `error`**: lee su `check_type` en la tabla siguiente.
 
 Los 16 `check_type` de [TRD-L3 §9.3](../TRD/l3.md#93-tipos-de-chequeo-check_type),
@@ -338,16 +365,18 @@ schedulers, no ésta.
 
 ## Volumen y costo
 
-Medidos sobre el histórico completo (ITSC-335, 2026-10-15; detalle en
-[TRD-L3 §10.4 y §10.5](../TRD/l3.md#104-tamaño-de-l3--estimación-por-fila)).
+Medidos sobre el histórico completo: el volumen y el núcleo original, en ITSC-335
+(2026-10-15), y el núcleo nuevo, en ITSC-364 (2026-10-22). Detalle en
+[TRD-L3 §10.2, §10.4 y §10.5](../TRD/l3.md#104-tamaño-de-l3--estimación-por-fila).
 
 | Medida | Valor |
 | --- | --- |
 | `dc-descriptors/l3/` | 46 742 260 408 B (**43,5 GiB**) en 5 500 `summaries.parquet`; 2,06 veces L2; ≈ 45 B por evento (1 042 M de filas) |
-| Suma de `wall_s` de los 110 meses | 41 256 s (11,5 h); ≈ 165 000 vCPU-s y GiB-s |
-| Costo de lista (0,000018 USD por vCPU-s y 0,000002 por GiB-s) | ≈ 3,3 USD, un cálculo y no una cifra de Billing |
-| Mes más pesado | 2021-01: 1 419 s (46,0 M de eventos). 2023-03, el máximo por ticks: 873 s |
-| RSS pico máximo | 1 267 MiB (2018-01), 31 % de 4 GiB |
+| Suma de `wall_s` de los 110 meses | **Núcleo nuevo (ITSC-364): 4 828 s (1,34 h); 18 992 vCPU-s (19 312 con los 4 asignados).** Núcleo original (ITSC-335): 41 256 s (11,5 h); ≈ 165 000 vCPU-s y GiB-s |
+| Costo de lista (0,000018 USD por vCPU-s y 0,000002 por GiB-s) | **≈ 0,4 USD** con el núcleo nuevo; ≈ 3,3 USD con el original. Un cálculo sobre `wall_s`, no una cifra de Billing |
+| Mes más pesado | Núcleo nuevo: 2022-11, 141,4 s. Original: 2021-01, 1 419 s (46,0 M de eventos); 2023-03, el máximo por ticks, 873 s |
+| `cpu_utilization` (núcleo nuevo) | p10 0,312, p50 0,510, mínimo 0,116 (2017-08); ningún mes llega a 0,80 |
+| RSS pico máximo | Núcleo nuevo: 3 545 MiB (2017-12), 86 % de 4 GiB. Original: 1 267 MiB (2018-01), 31 % |
 | Cupo gratuito | Es de la cuenta de facturación, no de la capa: L3 fue el 41 % del CPU de octubre y los créditos cubrieron el costo (facturado 0) |
 | Estado estacionario (`l3-monthly`) | Como máximo lo que el mes más pesado: centavos |
 
@@ -670,9 +699,9 @@ se decodifican a lo sumo 2 row groups más que con 1, al final.
 
 ## Scripts de operación
 
-Dos scripts de `layers/ops_tools/scripts/`, para el job `ops-script`
+Tres scripts de `layers/ops_tools/scripts/`, para el job `ops-script`
 ([runbook de operación ad hoc](operacion-ops.md)). Se suben a
-`gs://<proyecto>-ops/scripts/` y se lanzan con `job` = `ops-script`. Ambos solo
+`gs://<proyecto>-ops/scripts/` y se lanzan con `job` = `ops-script`. Todos solo
 leen, toman las raíces del proyecto de `OPS_RESULTS_URI` y también aceptan rutas
 locales (`uv run`).
 
@@ -680,6 +709,7 @@ locales (`uv run`).
 | --- | --- | --- |
 | `l3_probe_reader.py` | Mide el lector de tramas (pared por fase, RSS, bytes, row groups) contra los umbrales de TRD-L3 §10.3 | `--theta all --from 2023-03`; con lectores, `--theta all --from 2021-01 --modo row-groups --readers 2 --sin-contar-io` |
 | `l3_check_month.py` | Verificación cruzada: agrega por su cuenta las tramas de cada evento del mes y compara fila a fila con `summaries.parquet` | `--month 2026-09` |
+| `l3_compare_runs.py` | Compara dos corridas por sus hallazgos (`content_hash` y `rows` de cada θ y mes) y, con `--timing`, mide la nueva | `--base-dates 2026-10-14:2026-10-15 --new-dates 2026-10-22 --timing` |
 
 ```bash
 gcloud storage cp layers/ops_tools/scripts/l3_check_month.py \
@@ -751,13 +781,96 @@ filas y pagan por tick: 6 a 10 s cada uno en 2026-09 y 60 a 75 s en 2023-03.
 Para un mes nuevo, extrapola de 2026-09 con la relación de ticks (7,3 × a
 2023-03) y de eventos (25 ×), y parte la corrida si la suma pasa de ≈ 3 000 s.
 
+### `l3_compare_runs.py`
+
+Prueba que dos corridas de L3 produjeron lo mismo **sin releer los Parquet**: compara, por
+`(θ, mes)`, el `content_hash` y las `rows` del hallazgo `summaries_summary` de una corrida
+**base** con los de una **nueva**. Mismo `content_hash` es mismo contenido lógico
+([RNF-L3-03](../TRD/l3.md)), así que 5 500 pares iguales (110 meses × 50 θ) son la prueba de
+que el núcleo nuevo no cambió ningún archivo. La referencia es la corrida de ITSC-335, que
+sigue en `dq-findings/l3/` aunque `force` reescriba L3: comparar es leer dos conjuntos de
+hallazgos.
+
+| `args` | Efecto |
+| --- | --- |
+| `--base-dates A:B --new-dates C:` | Cada lado por su `detected_date=` (UTC): `A`, `A:B`, `A:` o `:B`; los dos extremos entran |
+| `--base-run <run_id> --new-run <run_id>` | Cada lado por `run_id` (repetible); se combina con las fechas. Solo con `run_id` lee **todos** los días del lago: usa fechas |
+| `--from 2017-08 --to 2026-09` | Solo esos meses, en los dos lados |
+| `--timing` | Resume los `unit_timing` de la corrida nueva (abajo) |
+| `--baseline-vcpu-s 165000` | Con `--timing`: contra cuántos vCPU-s se compara |
+| `--dq-root`, `--provider`, `--market`, `--asset`, `--max-diffs 100` | Otra raíz (también local), otra serie, cuántas diferencias imprime |
+
+Un backfill se lanza por rangos y cada ejecución tiene su `run_id`, por eso el lado se elige
+por fechas. El día es el UTC de `detected_at`: una ejecución que cruza la medianoche UTC deja
+hallazgos en dos carpetas, y el rango debe incluir ambas. Si un `(θ, mes)` aparece en varias
+corridas de un lado, vale la última por `detected_at`; si esas corridas discrepan entre sí, el
+par sale `INCONSISTENTE` (una diferencia más): acota el lado con fechas o `run_id` hasta que
+solo quede la corrida que quieres comparar.
+
+Salida: una línea por diferencia (`DIFERENCIA θ=… 2021-01: content_hash base=… nueva=…`,
+`SOLO EN BASE`, `SOLO EN NUEVA`, `INCONSISTENTE`) y, al final, `compare runs: pares=… coinciden=…
+difieren=… solo_base=… solo_nueva=… inconsistentes=… veredicto=ok|diferencias`. Códigos: **0**
+si todo coincide, **1** si hay una sola diferencia, un lado sin hallazgos o el lago no se
+lee, **2** por uso. Una diferencia **nunca se tolera**: bloquea la épica hasta explicarla, y
+no se relanza el backfill esperando que desaparezca.
+
+Con `--timing` imprime después, de la corrida nueva y con el `unit_timing` más reciente de
+cada mes: la tabla por mes (`wall_s`, `cpu_utilization`, `rss_peak_mib`, `engine_busy`,
+`cores`), `cpu_utilization` p10, p50 y mínimo con el mes del mínimo, los meses bajo 0,80, la
+suma de `wall_s`, los vCPU-s (`Σ wall_s × cores`, contra `--baseline-vcpu-s`), el
+`rss_peak_mib` máximo y el `engine_busy` p50. La tabla queda en `results/` como
+`l3_compare_runs_timing_<fecha>.csv`. Es informativo: no cambia el código de salida. Los
+vCPU-s son el cómputo de las unidades; lo facturable es la pared de la ejecución, que incluye
+el arranque (`gcloud run jobs executions describe`).
+
+**Validar el núcleo nuevo (ITSC-364).** Todo lo dispara el humano; los agentes no lanzan
+jobs:
+
+1. Con el stack `l3` aplicado con la imagen vigente, *Actions → Run job*: `job` =
+   `l3-backfill`, `from` = `2017-08`, `to` vacío y `force` marcado. Rehace los 110 meses
+   (`force` exige `from`, y con `to` vacío llega al último mes con consolidado). Con la pared
+   nueva (≤ 120 s por mes esperados; medido: 4 828 s en total) cabe en una sola ejecución
+   y bajo las 6 h de Actions. Anota la fecha UTC de inicio y de fin.
+2. Sube el script y lanza `ops-script` (`gcloud storage cp
+   layers/ops_tools/scripts/l3_compare_runs.py gs://<proyecto>-ops/scripts/l3_compare_runs.py`),
+   con las fechas de ITSC-335 como base y las del paso 1 como nueva:
+
+   ```
+   --base-dates <primer día de ITSC-335>:<último día> --new-dates <día del paso 1>: --timing --baseline-vcpu-s 165000
+   ```
+
+   El `--new-dates` queda abierto por el final para cubrir la medianoche UTC; si ya hubo
+   otras corridas después, ciérralo con el último día del backfill.
+3. Pega la última línea de la comparación (debe ser `pares=5500 coinciden=5500 …
+   veredicto=ok`) y las líneas de `--timing` como comentario de ITSC-364. Con eso se
+   escriben [TRD-L3 §10.2](../TRD/l3.md#102-dimensionamiento--hipótesis-de-partida-y-primera-medición)
+   y la decisión «Núcleo de L3 al 95 %».
+
+**Resultado de ITSC-364 (ejecución `ops-script-pc4wp`, run de Actions 39877759318,
+2026-10-23 00:23 UTC; backfill `l3-backfill-jgfrj`, base ITSC-335):**
+`--base-dates 2026-10-14:2026-10-15 --new-dates 2026-10-22 --timing --baseline-vcpu-s 165000`.
+
+```
+compare runs: pares=5500 coinciden=5500 difieren=0 solo_base=0 solo_nueva=0 inconsistentes=0 veredicto=ok
+cpu_utilization: p10=0.312 p50=0.510 mínimo=0.116 (2017-08); meses bajo 0.80: 110
+wall_s: suma=4828 p50=37.9 máximo=141.4 (2022-11)
+vCPU-s (Σ wall_s × cores): 18992 contra 165000 (11.5 %)
+rss_peak_mib: máximo=3545.3 (2017-12). engine_busy: p50=0.525
+```
+
+La equivalencia se cumple; las metas de utilización (p50 ≥ 0,90, ningún mes bajo 0,80) no, y
+siguen en [TRD-L3 §14, ítem 10](../TRD/l3.md#14-ítems-abiertos-y-a-validar). Esa corrida
+usó el asignador de T5 (`MALLOC_MMAP_THRESHOLD_=16384` y `MALLOC_TRIM_THRESHOLD_=131072`)
+porque la imagen con sus valores por defecto murió por memoria en el quinto mes (ITSC-371,
+ITSC-372).
+
 ### La trampa del 403 por prefijo
 
 La service account de `ops-script` lee `l1/`, `l2/`, `l3/` y `viz/tiles/` con
 condiciones IAM por prefijo. `pyarrow.dataset.dataset("gs://<bucket>/l3")` (o
 `pq.read_table` sobre un prefijo) pide primero el **objeto** `l3` sin barra, y la
 condición `startsWith("…/l3/")` lo niega: 403, aunque los archivos de abajo sean
-legibles (run 38659287542 de `ops-script`). Los dos scripts evitan el problema:
+legibles (run 38659287542 de `ops-script`). Los tres scripts evitan el problema:
 **listan de forma recursiva** y **abren cada archivo por su ruta completa**. Un
 script nuevo hace lo mismo; desde Cloud Shell, con tus credenciales, el 403 no
 aparece.
