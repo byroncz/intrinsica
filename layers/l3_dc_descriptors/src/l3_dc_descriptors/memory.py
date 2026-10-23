@@ -10,12 +10,14 @@ L3 ya no lo usa (ITSC-367). Con ese umbral cada buffer grande es un
 de CPU de sistema por unidad (ITSC-366). Con el umbral en 32 MiB (el máximo de glibc) y sin
 recorte del heap (`MALLOC_TRIM_THRESHOLD_` en 1 GiB, que fija la imagen y glibc lee al
 arrancar) glibc reutiliza el heap: −31 % de CPU a cambio de ≈ 1,1 GiB más de RSS (de 2,0 a
-3,1 GiB), todavía acotado por K, R, W y los sellados pendientes. Decisión y cifras: TRD-L3
-ADR-L3-16. `MALLOC_MMAP_THRESHOLD_` se puede cambiar por entorno; `unit_timing` registra lo
+3,1 GiB), todavía acotado por K, R, W y los sellados pendientes dentro de una unidad; entre
+unidades no se cumplió y `release_to_kernel` lo corrige al cerrar cada una (ITSC-371).
+Decisión y cifras: TRD-L3 ADR-L3-16. `MALLOC_MMAP_THRESHOLD_` se puede cambiar por entorno; `unit_timing` registra lo
 que rigió (`mmap_threshold` y `trim_threshold`).
 """
 
 import ctypes
+import gc
 import logging
 import os
 
@@ -78,6 +80,47 @@ def _requested() -> int:
             DEFAULT_MMAP_THRESHOLD,
         )
     return DEFAULT_MMAP_THRESHOLD
+
+
+def rss_bytes() -> int | None:
+    """El RSS del proceso ahora (`VmRSS`), o `None` si no se puede leer.
+
+    No es `ru_maxrss`: ese es un pico y no baja, y lo que importa tras devolver memoria al
+    kernel es cuánto ocupa el proceso en este momento.
+    """
+    try:
+        with open("/proc/self/status") as status:
+            for line in status:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1]) * 1024
+    except OSError:
+        pass
+    return None
+
+
+def release_to_kernel() -> tuple[int | None, int | None]:
+    """Devuelve al kernel la memoria libre de la unidad y dice el RSS antes y después.
+
+    Con el umbral de recorte de la imagen glibc no devuelve al kernel lo liberado en sus
+    arenas y el RSS crece unidad a unidad hasta el OOM (ITSC-371). La causa exacta es una
+    hipótesis: glibc reutiliza las arenas de los hilos terminados, y el trim reduce la deriva
+    a la mitad, no la elimina (TRD-L3 ADR-L3-16, «El RSS crece entre unidades»).
+    `gc.collect()` suelta primero lo que solo retienen ciclos (buffers de Arrow anclados por
+    ellos) y `malloc_trim(0)` recorre todas las arenas y devuelve las páginas libres; cuesta
+    milisegundos y no toca datos. Sin `malloc_trim` (otro libc) avisa y sigue: el RSS no
+    baja.
+    """
+    before = rss_bytes()
+    gc.collect()
+    try:
+        malloc_trim = ctypes.CDLL(None).malloc_trim
+    except AttributeError, OSError:
+        logger.warning(
+            "sin malloc_trim: la memoria libre no vuelve al kernel entre unidades"
+        )
+    else:
+        malloc_trim(0)
+    return before, rss_bytes()
 
 
 def tune_allocators() -> None:

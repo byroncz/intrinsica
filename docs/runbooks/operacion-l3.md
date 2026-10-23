@@ -449,6 +449,7 @@ El límite y su regla de retroceso están en [«Asignador por defecto de L3»](#
 | `minor_faults`, `major_faults`, `voluntary_switches`, `involuntary_switches` | Contadores del kernel de la unidad. Con `cpu_system_s` alto: muchos fallos de página (millones) apuntan a memoria y asignador; muchos cambios de contexto voluntarios, a candados o red; ninguno de los dos, a otra causa |
 | `mmap_threshold` | Umbral de `mmap` de glibc con que corrió la unidad: `MALLOC_MMAP_THRESHOLD_` o 33554432; `null` si quedó dinámico. Dice con qué corrió cada fila del cuadro de §10.2 |
 | `trim_threshold` | Umbral de recorte del heap con que corrió la unidad: `MALLOC_TRIM_THRESHOLD_` (1073741824 en la imagen); `null` si no está fijada y glibc recorta con su umbral dinámico |
+| `rss_before_trim_mib`, `rss_after_trim_mib` | `VmRSS` (no el pico) justo antes y después de devolver la memoria al kernel al cerrar la unidad. La diferencia es lo que el trim devolvió; `rss_after_trim_mib` de mes a mes dice si el proceso acumula entre unidades |
 | `boundaries_peak_mib` | Máximo de fronteras de L2 que el motor tuvo en mano |
 
 Para comparar dos corridas usa `wall_s`, `cpu_s` y `cpu_utilization`. `run-job.yml` no admite
@@ -516,6 +517,43 @@ Run job*, `l3-backfill`, `from = to = 2021-01` y `force`, tras el merge y el `ap
 `rss_peak_mib`, se vuelve al umbral solo: se quita `MALLOC_TRIM_THRESHOLD_` del `ENV` del Dockerfile
 (T6 midió 2 922 MiB con 4,2× menos fallos que el umbral de 16 KiB). No se midieron valores
 intermedios de `MALLOC_TRIM_THRESHOLD_` y no se inventan.
+
+**Entre unidades: se devuelve la memoria al cerrar (ITSC-371).** Un `backfill` corre decenas de
+meses en un proceso y, sin recorte del heap, glibc no devuelve al kernel lo que cada mes libera (la
+causa exacta es una hipótesis: TRD-L3 ADR-L3-16, «El RSS crece entre unidades»). Con la
+imagen 0.15.0 el RSS crecía de 350 a 650 MiB por mes y el contenedor murió con signal 9 en el
+quinto mes. Desde la 0.15.1 `process_unit` llama a `gc.collect()` y a `malloc_trim(0)` al terminar
+cada unidad, con éxito o con error, y `unit_timing` registra el `VmRSS` de antes y de después
+(`rss_before_trim_mib`, `rss_after_trim_mib`). **Qué mirar:** `rss_after_trim_mib` de mes a mes. Sin
+alarma si queda casi plano (en local sube ≈ 2 MiB por unidad, por fragmentación); sí si crece
+decenas de MiB por mes. `rss_peak_mib` es un pico y no lo ve.
+
+**Si un backfill muere con signal 9 (OOM).** (1) Mira en `unit_timing` de los meses anteriores
+`rss_after_trim_mib` y `rss_peak_mib`: si el RSS al cerrar crece mes a mes, es retención entre
+unidades; si un solo mes pasa de 3 500 MiB, es la regla de retroceso de arriba. (2) Relanza **desde
+Cloud Shell** con el asignador de T5, que devuelve la memoria al kernel en cada `free`. Repite los
+`--args` del run que murió, tal como los imprime `run-job-args.sh` (con `--force` si lo llevaba, como
+el de ITSC-364), y empieza en el mes que murió: los meses anteriores ya quedaron publicados. Sin
+`--force` un mes ya publicado se salta, así que quita la bandera solo si el run original no la llevaba.
+
+```bash
+gcloud run jobs execute l3-backfill \
+  --project <proyecto> --region <región> \
+  --update-env-vars MALLOC_MMAP_THRESHOLD_=16384,MALLOC_TRIM_THRESHOLD_=131072 \
+  --args="--mode,backfill,--from=<AAAA-MM del mes que murió>,--to=<AAAA-MM>,--force" \
+  --wait
+```
+
+Cuesta ≈ 100 s de CPU de sistema en los meses pesados, y los `content_hash` no cambian: no dependen
+del asignador. (3) Abre una card con los `unit_timing` del run. Toda medición de memoria del
+asignador se hace con **varias unidades en un proceso** (`from` y `to` distintos), nunca con una
+sola: una unidad no muestra lo que se acumula entre meses.
+
+**La corrida de ITSC-371** (la lanza el humano tras el merge y el `apply` de `l3`): *Actions → Run
+job*, `l3-backfill`, `from = 2017-08`, `to = 2018-01` y `force`, con los valores por defecto de la
+imagen. Meta: `rss_peak_mib` de la última unidad ≤ 1,3 × el de la más grande del rango y
+`rss_after_trim_mib` sin tendencia. El resultado va como comentario en ITSC-371 y en
+[§10.2](../TRD/l3.md#102-dimensionamiento--hipótesis-de-partida-y-primera-medición).
 
 **Comparar con otro asignador.** `run-job.yml` no admite variables de entorno: una corrida suelta
 con otra configuración se lanza **desde Cloud Shell**, sobre 2021-01 y con los `--args` de siempre;

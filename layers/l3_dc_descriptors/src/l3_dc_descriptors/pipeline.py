@@ -24,7 +24,7 @@ from l3_dc_descriptors.cpu import cpu_limit, kernel_counts, process_cpu_s, throt
 from l3_dc_descriptors.errors import SummarizeError
 from l3_dc_descriptors.frontier import theta_text
 from l3_dc_descriptors.landing import missing_input
-from l3_dc_descriptors.memory import mmap_threshold, trim_threshold
+from l3_dc_descriptors.memory import mmap_threshold, release_to_kernel, trim_threshold
 from l3_dc_descriptors.profiling import top_functions
 from l3_dc_descriptors.summarize import ThetaResult, summarize_month
 from l3_dc_descriptors.timing import (
@@ -97,6 +97,7 @@ def _process_unit(unit: Unit, ctx: RunContext, thetas: list[int]) -> Result:
     )
     scope = "unit" if reset_rss_peak() else "process"
     throttled = throttled_s()
+    trimmed: tuple[int | None, int | None] = (None, None)
     try:
         with count_row_groups(counts):
             written = summarize_month(
@@ -123,6 +124,9 @@ def _process_unit(unit: Unit, ctx: RunContext, thetas: list[int]) -> Result:
         FramesError
     ) as error:  # L1 o L2 fuera de contrato: sin hallazgo propio (§9.3)
         return Result((), error=str(error))
+    finally:
+        # Con éxito o con error, y ya cerrados los pools de la unidad (ITSC-371).
+        trimmed = release_to_kernel()
 
     summaries, stats = [], []
     for value, result in written.items():
@@ -150,6 +154,8 @@ def _process_unit(unit: Unit, ctx: RunContext, thetas: list[int]) -> Result:
         kernel=kernel_counts().since(kernel_started),
         mmap_threshold=mmap_threshold(),
         trim_threshold=trim_threshold(),
+        rss_before_trim_bytes=trimmed[0],
+        rss_after_trim_bytes=trimmed[1],
     )
     return Result(
         (

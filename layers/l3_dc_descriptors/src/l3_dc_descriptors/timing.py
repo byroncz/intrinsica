@@ -329,6 +329,10 @@ def rss_peak_bytes() -> int:
     return peak if sys.platform == "darwin" else peak * 1024
 
 
+def _mib(size: int | None) -> float | None:
+    return None if size is None else round(size / MIB, 1)
+
+
 @dataclass(frozen=True)
 class Timing:
     """Lo que midió la unidad. `wall_s` corre desde que `process_unit` empieza hasta
@@ -348,6 +352,8 @@ class Timing:
     kernel: KernelCounts
     mmap_threshold: int | None = None
     trim_threshold: int | None = None
+    rss_before_trim_bytes: int | None = None
+    rss_after_trim_bytes: int | None = None
 
     @property
     def cpu_s(self) -> float:
@@ -399,7 +405,10 @@ class Timing:
         candados y red). `mmap_threshold` es el umbral de `mmap` de glibc con que corrió
         (`MALLOC_MMAP_THRESHOLD_` o 33 554 432; `None` si quedó dinámico) y `trim_threshold`, el
         de recorte del heap (`MALLOC_TRIM_THRESHOLD_`; `None` si no está fijado), para que
-        cada corrida diga con qué corrió.
+        cada corrida diga con qué corrió. `rss_before_trim_mib` y `rss_after_trim_mib` son el
+        RSS actual del proceso (`VmRSS`, no el pico) justo antes y después de que la unidad
+        devolviera al kernel lo libre con `malloc_trim(0)` (ITSC-371); el pico (`rss_peak_mib`)
+        no baja, y el que sube de unidad en unidad es este.
         """
         p = self.phases
         seconds = {
@@ -455,4 +464,6 @@ class Timing:
             "involuntary_switches": self.kernel.involuntary_switches,
             "mmap_threshold": self.mmap_threshold,
             "trim_threshold": self.trim_threshold,
+            "rss_before_trim_mib": _mib(self.rss_before_trim_bytes),
+            "rss_after_trim_mib": _mib(self.rss_after_trim_bytes),
         }

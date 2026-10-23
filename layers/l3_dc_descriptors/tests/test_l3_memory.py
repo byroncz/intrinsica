@@ -16,6 +16,7 @@ from decimal import Decimal
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pytest
 from frames_lake import (
     DEC,
     L1_SCHEMA,
@@ -37,6 +38,9 @@ IMAGE_MALLOC = {
     "MALLOC_TRIM_THRESHOLD_": "1073741824",
 }
 
+# Lo que fija la imagen y glibc lee al arrancar: el asignador de arriba y el pool del sistema.
+IMAGE_ENV = {**IMAGE_MALLOC, "ARROW_DEFAULT_MEMORY_POOL": "system"}
+
 PROBE = """
 import json, sys, tracemalloc
 import pyarrow as pa
@@ -56,7 +60,56 @@ print(json.dumps({
 """
 
 
-def write_flat_l1(root, ticks: int) -> None:
+# Varias unidades en un mismo proceso, como el backfill (ITSC-371). Cada una escribe en su
+# propia raíz de L3 y `process_unit` hace lo que hace en producción, trim incluido; con
+# `no-trim` el trim se reemplaza por una función que solo lee el RSS, para ver qué pasa sin él.
+UNITS = """
+import json, sys
+from l3_dc_descriptors import memory, pipeline
+from l3_dc_descriptors.context import RunContext, Unit
+
+l1, l2, l3, count, trim = sys.argv[1:6]
+if trim == "no-trim":
+    pipeline.release_to_kernel = lambda: (memory.rss_bytes(),) * 2
+thetas = [100_000 * k for k in range(1, 9)]
+out = []
+for i in range(int(count)):
+    ctx = RunContext(
+        mode="backfill", run_id="run", image_version="test", series_start=(2017, 8),
+        landing_root=l1, events_root=l2, summaries_root=f"{l3}/{i}", dq_root=f"{l3}/dq",
+        threads=16, readers=6, inflight=6, writers=6, engine_threads=8,
+    )
+    result = pipeline.process_unit(Unit(2017, 8), ctx, thetas)
+    assert result.ok, result.error
+    details = result.timing.details()
+    out.append({k: details[k] for k in ("rss_after_trim_mib", "rss_peak_mib")})
+print(json.dumps(out))
+"""
+
+UNIT_COUNT = 10
+# Row groups de 400 000 ticks (19,2 MB decodificados): con los de 100 000 de arriba el RSS de
+# la unidad es ≈ 30 MiB sobre los ≈ 120 MiB del intérprete y su ruido (± 15 MiB) tapa la deriva.
+UNITS_ROW_GROUP = 400_000
+UNITS_ROW_GROUP_BYTES = UNITS_ROW_GROUP * 48
+# glibc crea hasta 8 arenas por vCPU y el resultado depende de cuántas: se fijan las de los
+# 4 vCPU de Cloud Run (4 × 8) para que la prueba mida lo mismo en cualquier máquina.
+UNITS_ENV = {**IMAGE_ENV, "MALLOC_ARENA_MAX": "32"}
+# Techo de lo que queda retenido al cerrar una unidad: lo que tuvo en vuelo a la vez, R lectores
+# + K row groups en el motor (`readers=6, inflight=6` en `UNITS`), decodificados (≈ 220 MiB).
+# Es un techo y no lo que detecta la falta del trim: sin trim la deriva (158 a 214 MiB en 8
+# corridas) también cabe, y con él fue de 61 a 140. Solo vale para estas 10 unidades; con 60 el
+# RSS tras el trim sigue subiendo ≈ 2 MiB por unidad (ADR-L3-16) y aquí no se afirma lo contrario.
+UNITS_IN_FLIGHT_BYTES = (6 + 6) * UNITS_ROW_GROUP_BYTES
+# Lo que detecta la falta del trim es el nivel del RSS en las últimas unidades, con y sin trim
+# en la misma sesión: tres row groups (≈ 55 MiB) menos con el trim. En 16 corridas seguidas
+# (10 vCPU, 8 GiB) la diferencia fue de 100 a 133 MiB: el margen es de ≈ 45 MiB contra los
+# ± 15 MiB de ruido de una unidad, que al promediar cinco bajan a ≈ 7. Se comparan una contra
+# otra, en la misma máquina, y no contra un número absoluto.
+UNITS_TRIM_MIN_GAIN = 3 * UNITS_ROW_GROUP_BYTES
+MIB = 1 << 20
+
+
+def write_flat_l1(root, ticks: int, row_group: int = ROW_GROUP) -> None:
     """Precio y cantidad 1 en todos los ticks, tiempo = id: una fase suma lo que mide."""
     ids = pa.array(np.arange(ticks, dtype=np.int64))
     # El decimal 1 sin escalar es 10⁸ en la palabra baja y 0 en la alta.
@@ -78,7 +131,7 @@ def write_flat_l1(root, ticks: int) -> None:
     )
     path = partition(root, MONTH) / "consolidated.parquet"
     path.parent.mkdir(parents=True, exist_ok=True)
-    pq.write_table(table, path, row_group_size=ROW_GROUP)
+    pq.write_table(table, path, row_group_size=row_group)
 
 
 def event(reference: int, confirm: int, extreme: int) -> dict:
@@ -94,7 +147,9 @@ def event(reference: int, confirm: int, extreme: int) -> dict:
     return row
 
 
-def chain(start: int, small: int, long: int = LONG) -> list[dict]:
+def chain(
+    start: int, small: int, long: int = LONG, row_group: int = ROW_GROUP
+) -> list[dict]:
     """`small` eventos dentro de un row group y uno de `long` row groups, encadenados:
     la referencia de cada uno es el extremo del anterior (sin ticks sin dueño).
     """
@@ -103,7 +158,7 @@ def chain(start: int, small: int, long: int = LONG) -> list[dict]:
         rows.append(event(position, position + 50, position + 80))
         position += 80
     rows.append(
-        event(position, position + long * ROW_GROUP, position + long * ROW_GROUP + 5)
+        event(position, position + long * row_group, position + long * row_group + 5)
     )
     return rows
 
@@ -175,3 +230,77 @@ def test_peak_does_not_grow_with_the_ticks_of_the_largest_event(tmp_path):
     # pico se mueve unos MiB entre corridas; 30 row groups más en el evento sumarían ≈ 140 MB.
     assert longest["peak"] < long["peak"] + 2 * ROW_GROUP_BYTES
     assert longest["peak"] < 10 * ROW_GROUP_BYTES
+
+
+def units(root, trim: str) -> list[dict]:
+    out = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            UNITS,
+            str(root / "l1"),
+            str(root / "events"),
+            str(root / "l3"),
+            str(UNIT_COUNT),
+            trim,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**os.environ, **UNITS_ENV},
+    )
+    assert out.returncode == 0, out.stderr
+    return json.loads(out.stdout)
+
+
+def write_units_lake(root) -> None:
+    write_flat_l1(root / "l1", 8 * UNITS_ROW_GROUP, UNITS_ROW_GROUP)
+    for k in range(1, 9):
+        write_theta(
+            root / "events", 100_000 * k, chain(100 + 7 * k, 200, 5, UNITS_ROW_GROUP)
+        )
+
+
+@pytest.fixture(scope="module")
+def unit_runs(tmp_path_factory) -> dict[str, list[dict]]:
+    """Las mismas 10 unidades con el trim de producción y sin él, para compararlas."""
+    root = tmp_path_factory.mktemp("units")
+    write_units_lake(root)
+    return {mode: units(root, mode) for mode in ("trim", "no-trim")}
+
+
+def drift(runs: list[dict]) -> float:
+    """Bytes que el RSS al cerrar una unidad llegó a pasar del de la primera."""
+    after = [r["rss_after_trim_mib"] * MIB for r in runs]
+    return max(after) - after[0]
+
+
+def tail_level(runs: list[dict]) -> float:
+    """Promedio, en bytes, del RSS al cerrar la mitad final de las unidades."""
+    tail = [r["rss_after_trim_mib"] * MIB for r in runs[len(runs) // 2 :]]
+    return sum(tail) / len(tail)
+
+
+def test_rss_after_closing_each_unit_does_not_grow_with_the_units(unit_runs):
+    """ITSC-371: con el asignador de la imagen glibc no devuelve al kernel lo liberado y, sin
+    hacerlo al cerrar la unidad, el RSS crece unidad a unidad y un backfill largo muere por
+    memoria (la causa exacta es una hipótesis, ver TRD-L3 ADR-L3-16). Las pruebas de arriba
+    miden una unidad y no lo ven.
+    """
+    runs = unit_runs["trim"]
+    # Lo que queda retenido no pasa de lo que la unidad tuvo en vuelo; ver UNITS_IN_FLIGHT_BYTES.
+    assert drift(runs) <= UNITS_IN_FLIGHT_BYTES, runs
+    # Y el trim recupera de verdad: las últimas unidades quedan más abajo que sin él; ver
+    # UNITS_TRIM_MIN_GAIN. Esta comparación es la que falla cuando falta el trim.
+    gain = tail_level(unit_runs["no-trim"]) - tail_level(runs)
+    assert gain > UNITS_TRIM_MIN_GAIN, unit_runs
+    # El pico de la última unidad lo acota la unidad más grande, no la suma de las anteriores.
+    peaks = [r["rss_peak_mib"] for r in runs]
+    assert peaks[-1] <= 1.3 * max(peaks[:-1]), peaks
+
+
+def test_without_the_trim_the_rss_does_grow(unit_runs):
+    """Contraprueba de la anterior: sin el trim el RSS al cerrar sí sube, así que la
+    comparación de arriba no pasa en vacío.
+    """
+    assert drift(unit_runs["no-trim"]) > UNITS_TRIM_MIN_GAIN, unit_runs
