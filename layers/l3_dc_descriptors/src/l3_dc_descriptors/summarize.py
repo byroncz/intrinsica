@@ -20,10 +20,18 @@ motor nativo (`dc_pyo3.Engine`, crate `dc_descriptors`), que tiene sus propios h
 Un row group de L1 se empuja cuando hay lugar: a lo más `inflight` (K) row groups anclan sus
 ticks en el motor, los que esperan escribirse no pasan de un tope y los eventos entregados que
 aún no cerraron no pasan de `inflight_bytes` (ITSC-372: la memoria crece con los eventos en
-vuelo, no con los row groups); el lector trae `readers` (R) row groups por delante. Antes de cada `push`, `BoundaryFeed.cover(high)` entrega al motor
-las fronteras de L2 que ese row group toca, y no más: el motor suelta cada lote cuando sus
+vuelo, no con los row groups); el lector trae `readers` (R) row groups por delante.
+
+**El lote es un tramo, no un row group (ITSC-373).** El tope de bytes se mira antes de empujar
+y no acota lo que entra de a uno: un row group de un mes denso trae más eventos que el tope.
+Cada row group de L1 se parte en tramos contiguos de a lo más `lot_ticks` ticks, con
+`lot_ticks = L3_LOT_EVENTS / densidad` y la densidad del mes (eventos de los θ por tick de L1)
+sacada de los pies de L2 y de L1; el motor recibe cada tramo como un row group más, con
+`ids[a:b]` y `column.slice(a, b - a)` sobre los mismos buffers (sin copia). Un mes poco denso
+no se parte. Antes de cada `push`, `BoundaryFeed.cover(high)` entrega al motor
+las fronteras de L2 que ese tramo toca, y no más: el motor suelta cada lote cuando sus
 eventos cierran, así que lo retenido es O(lote + eventos abiertos), no O(mes). El orden de
-los θ y de los row groups no cambia un bit de la salida: el motor deja cada fila en la casilla
+los θ y de los tramos no cambia un bit de la salida: el motor deja cada fila en la casilla
 de su evento y sella los row groups de salida de cada θ en orden.
 
 **Entrada de los θ en dos tramos (ITSC-365).** El primer tramo, una tarea por θ en el pool de
@@ -53,6 +61,7 @@ van en serie en el hilo principal (los hilos del motor y del lector no se apagan
 import logging
 import math
 import time
+from collections import deque
 from collections.abc import Callable, Iterable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from contextlib import AbstractContextManager, ExitStack, closing, nullcontext
@@ -61,6 +70,8 @@ from decimal import Decimal
 from pathlib import Path
 
 import dc_pyo3
+import numpy as np
+import pyarrow as pa
 from dc_frames import (
     FamilySkeletonMismatch,
     FamilyWriter,
@@ -127,6 +138,17 @@ EVENT_BYTES = sum(width for _, width, _ in native.ENGINE_SCHEMA) + BOUNDARY_ROW_
 # ≈ 2,6 M de eventos de 305 B: cabe el row group de un mes normal (≈ 0,6 M de eventos) con
 # varios por delante, y un mes denso entra de a uno.
 DEFAULT_INFLIGHT_BYTES = 768 << 20
+# Eventos que cabe en un tramo (ITSC-373). El tope de arriba no acota lo que entra de a uno: un
+# row group de L1 de un mes denso (2017-12: 5,76 M de eventos en ≈ 0,94 M de ticks) pasa solo
+# del tope. Cada row group se parte en tramos de a lo más N ticks, con N = LOT_EVENTS / densidad
+# del mes (eventos por tick), así que un tramo trae ≈ LOT_EVENTS eventos con cualquier densidad.
+# 1 M de eventos son ≈ 305 MB de casillas abiertas y fronteras (EVENT_BYTES): tres tramos caben
+# bajo el tope por defecto y un mes normal (≈ 0,6 M de eventos por row group) no se parte.
+DEFAULT_LOT_EVENTS = 1_000_000
+
+type Lot = tuple[
+    np.ndarray, Sequence[pa.Array], int, bool
+]  # ids, columnas, high, before_month
 
 
 @dataclass(frozen=True, slots=True)
@@ -432,6 +454,43 @@ def _unclosed(engine: dc_pyo3.Engine, feeds: Sequence[native.BoundaryFeed]) -> i
     return sum(feed.delivered - engine.needed(feed.position) for feed in feeds)
 
 
+def _lot_ticks(lot_events: int, events: int, ticks: int) -> int | None:
+    """Ticks de un tramo: `lot_events` entre la densidad del mes (`events / ticks`), al menos 1.
+
+    `None` si el corte está desactivado (`lot_events` 0) o el mes no tiene eventos que
+    midan la densidad.
+    """
+    if lot_events <= 0 or events <= 0 or ticks <= 0:
+        return None
+    return max(1, lot_events * ticks // events)
+
+
+def _cut(rg, month: Month, lot_ticks: int | None) -> list[Lot]:
+    """Los tramos de un row group de L1, en orden y sin copiar: `ids[a:b]` es una vista de
+    NumPy y `column.slice(a, b - a)`, un array de Arrow sobre el mismo buffer.
+
+    Un row group de a lo más `lot_ticks` ticks es un solo tramo. Si no, se parte en
+    `ceil(ticks / lot_ticks)` tramos de tamaño casi igual (ninguno pasa de `lot_ticks` y no
+    queda una cola diminuta que pague ítems de los 50 θ por pocos ticks).
+    """
+    before_month = rg.month < month
+    ticks = None if lot_ticks is None else len(rg.ids)
+    if ticks is None or ticks <= lot_ticks:
+        return [(rg.ids, rg.columns, rg.high, before_month)]
+    count = -(-ticks // lot_ticks)
+    size = -(-ticks // count)
+    cuts = [(start, min(start + size, ticks)) for start in range(0, ticks, size)]
+    return [
+        (
+            rg.ids[start:stop],
+            tuple(column.slice(start, stop - start) for column in rg.columns),
+            int(rg.ids[stop - 1]),
+            before_month,
+        )
+        for start, stop in cuts
+    ]
+
+
 def _push_all(
     engine: dc_pyo3.Engine,
     row_groups,
@@ -443,20 +502,25 @@ def _push_all(
     phases: Phases,
     l1: L1Month,
 ) -> int:
-    """Empuja al motor los row groups de L1, cada uno con las fronteras que toca.
+    """Empuja al motor los tramos de los row groups de L1, cada uno con las fronteras que toca.
 
-    Un row group se pide al lector solo cuando hay menos de `inflight` en el motor, pocos
-    sellados sin escribir y menos de `inflight_bytes` de eventos abiertos (contrapresión): el
-    lector trae por delante a lo más `readers`, así que en RAM hay a lo más
-    `inflight + readers + 1` row groups de L1. Los bytes de eventos son lo que de verdad
-    crece con la densidad (ITSC-372): `_unclosed × EVENT_BYTES`. Con ningún row group en el
-    motor siempre avanza, y si ese solo row group pasa del tope avisa una vez y sigue. `read_s`
-    suma lo que este hilo esperó al lector y a las fronteras de L2. Cada row group del mes
-    pasa por `l1.observe` antes de empujarse: la conciliación cuenta de ahí los ticks hasta sus
-    extremos sin decodificar de nuevo. Devuelve cuántos empujó.
+    Un tramo es un row group de L1 o una parte contigua de uno (`phases.lot_ticks`, ITSC-373):
+    para el motor es un row group más, con su ordinal, su `cover(high)` y la bandera del row
+    group de origen. Un row group solo se pide al lector cuando no quedan tramos del anterior
+    y hay menos de `inflight` en el motor, pocos sellados sin escribir y menos de
+    `inflight_bytes` de eventos abiertos (contrapresión; cada tramo la espera): el lector trae
+    por delante a lo más `readers`, así que en RAM hay a lo más `inflight + readers + 1`
+    tramos o row groups de L1. Los bytes de eventos son lo que de verdad crece con la densidad
+    (ITSC-372): `_unclosed × EVENT_BYTES`, y el tramo acota lo que entra de a uno. Con ningún
+    tramo en el motor siempre avanza, y si ese solo tramo pasa del tope avisa una vez y sigue.
+    `read_s` suma lo que este hilo esperó al lector y a las fronteras de L2. Cada row group
+    del mes pasa por `l1.observe` una sola vez, entero y antes de partirse: la conciliación
+    cuenta de ahí los ticks hasta sus extremos sin decodificar de nuevo. Devuelve cuántos
+    tramos empujó.
     """
     limit = PENDING_PER_WRITER * phases.writers
     source = iter(row_groups)
+    lots: deque[Lot] = deque()
     pushed = 0
     warned = False
 
@@ -476,20 +540,24 @@ def _push_all(
             time.sleep(POLL_S)
         _check(collector, sink, inputs)
         started = time.perf_counter()
-        rg = next(source, None)
-        if rg is not None:
-            high = rg.high
-            for feed in feeds:
-                feed.cover(high)
+        if not lots:
+            rg = next(source, None)
+            if rg is None:
+                phases.read_s += time.perf_counter() - started
+                return pushed
+            if rg.month == month:
+                l1.observe(rg.ids)
+            lots.extend(_cut(rg, month, phases.lot_ticks))
+            del rg  # los tramos retienen sus buffers hasta que el motor los termine
+        ids, columns, high, before_month = lots.popleft()
+        for feed in feeds:
+            feed.cover(high)
         phases.read_s += time.perf_counter() - started
-        if rg is None:
-            return pushed
-        if rg.month == month:
-            l1.observe(rg.ids)
-        alone = engine.inflight() == 0  # el row group entra a un motor vacío
-        native.push(engine, pushed, rg.ids, rg.columns, rg.month < month)
-        del rg  # el motor retiene sus buffers hasta terminarlo
+        alone = engine.inflight() == 0  # el tramo entra a un motor vacío
+        native.push(engine, pushed, ids, columns, before_month)
+        del ids, columns  # el motor retiene sus buffers hasta terminarlo
         pushed += 1
+        phases.lots = pushed
         phases.inflight_max = max(phases.inflight_max, engine.inflight())
         events = _unclosed(engine, feeds)
         phases.inflight_events_max = max(phases.inflight_events_max, events)
@@ -501,14 +569,15 @@ def _push_all(
         if alone and events * EVENT_BYTES > phases.inflight_bytes and not warned:
             warned = True
             logger.warning(
-                "mes %s: el row group %d de L1 trae %d eventos abiertos (%d MiB) y pasa del "
-                "tope de %d MiB (L3_INFLIGHT_BYTES); avanza solo, dividir el row group de L1 "
-                "o subir la memoria del job",
+                "mes %s: el tramo %d trae %d eventos abiertos (%d MiB) y pasa del tope de %d "
+                "MiB (L3_INFLIGHT_BYTES); avanza solo. Baja L3_LOT_EVENTS (hoy %d; 0 desactiva "
+                "el corte), sube L3_INFLIGHT_BYTES o sube la memoria del job",
                 month_text(month),
                 pushed - 1,
                 events,
                 events * EVENT_BYTES >> 20,
                 phases.inflight_bytes >> 20,
+                phases.lot_events,
             )
 
 
@@ -530,6 +599,7 @@ def summarize_month(
     writers: int | None = None,
     engine_threads: int | None = None,
     inflight_bytes: int | None = None,
+    lot_events: int | None = None,
 ) -> dict[Decimal, ThetaResult]:
     """Escribe `summaries.parquet` del mes para cada θ y devuelve lo que dejó de cada uno.
 
@@ -543,7 +613,9 @@ def summarize_month(
     van en serie), `readers` los row groups de L1 que se leen a la vez (R), `inflight` los
     que pueden anclar sus ticks en el motor (K), `writers` los escritores (W) y
     `engine_threads` los hilos del motor (por defecto los vCPU efectivos) e `inflight_bytes`
-    el tope de bytes de eventos abiertos (`DEFAULT_INFLIGHT_BYTES`). Ver el módulo para la
+    el tope de bytes de eventos abiertos (`DEFAULT_INFLIGHT_BYTES`). `lot_events` es el lote
+    en eventos (`DEFAULT_LOT_EVENTS`): cada row group de L1 se parte en tramos que traen a lo
+    más esos eventos según la densidad del mes, y 0 desactiva el corte. Ver el módulo para la
     cuenta de memoria.
 
     Atómico por archivo: la unidad comprueba la entrada de L2, resume todos los θ y concilia
@@ -580,6 +652,8 @@ def summarize_month(
     ):
         if value is not None and value < 1:
             raise ValueError(f"{name} {value} debe ser al menos 1")
+    if lot_events is not None and lot_events < 0:
+        raise ValueError(f"lot_events {lot_events} debe ser al menos 0")
     threads = _workers(threads, len(values))
     phases.threads = threads
     phases.readers = DEFAULT_READERS if readers is None else readers
@@ -589,6 +663,7 @@ def summarize_month(
     phases.inflight_bytes = (
         DEFAULT_INFLIGHT_BYTES if inflight_bytes is None else inflight_bytes
     )
+    phases.lot_events = DEFAULT_LOT_EVENTS if lot_events is None else lot_events
     texts = [f"{theta:.8f}" for theta in values]
 
     with ExitStack() as stack:
@@ -648,6 +723,13 @@ def summarize_month(
         # Los ids hasta los que la conciliación cuenta ticks, con lo que se sabe antes de
         # leer L1; si el motor encuentra otros, `count_up_to` decodifica como siempre.
         l1.watch(_reconciliation_targets(inputs, references, extremes))
+        # La densidad del mes (eventos de los θ por tick de L1) fija el tramo: con los pies de
+        # L2 y de L1, sin leer datos.
+        phases.lot_ticks = _lot_ticks(
+            phases.lot_events,
+            sum(sum(item.events.row_groups) for item in inputs),
+            l1.rows,
+        )
         feeds = [
             native.BoundaryFeed(engine, position, item.stream, phases.retained)
             for position, item in enumerate(inputs)

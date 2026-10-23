@@ -35,11 +35,12 @@ memoria del mes muere con su proceso. Un mes que ningún θ necesita se salta si
 
 Entorno: `L3_LANDING_ROOT` (L1), `L3_EVENTS_ROOT` (L2), `L3_SUMMARIES_ROOT` (L3) y
 `L3_DQ_ROOT` (lago de hallazgos), además de `L3_SERIES_START` y `L3_THETAS_URI`. Opcionales,
-enteros ≥ 1 (otro valor es código 2): `L3_READERS` (lectores de L1, R; por defecto 2),
+enteros ≥ 1 (otro valor es código 2; `L3_LOT_EVENTS` admite 0): `L3_READERS` (lectores de L1, R; por defecto 2),
 `L3_INFLIGHT` (row groups en el motor, K; 4), `L3_WRITERS` (escritores, W; 12),
 `L3_ENGINE_THREADS` (hilos del motor; por defecto `round(vCPU efectivos)`), `L3_THREADS` (pool de
 E/S; por defecto `ceil(3 × vCPU)`, nunca más que θ) y `L3_INFLIGHT_BYTES` (tope de bytes de eventos
-abiertos; 805 306 368 = 768 MiB), más `L3_PROFILE=1` y `L3_UNIT_PROCESS` (`0` o `1`; por defecto 1:
+abiertos; 805 306 368 = 768 MiB), `L3_LOT_EVENTS` (eventos de un tramo; 1 000 000; 0 desactiva el
+corte), más `L3_PROFILE=1` y `L3_UNIT_PROCESS` (`0` o `1`; por defecto 1:
 un proceso hijo por unidad en `backfill`; `monthly` no lo usa). El stack `l3` no fija
 ninguna, así que los valores siguen a los vCPU del job; para sobrescribirlas en una corrida, ver el
 [runbook](../../docs/runbooks/operacion-l3.md#hilos-y-topes-de-la-unidad-l3_readers-l3_inflight-l3_writers-l3_engine_threads-y-l3_threads).
@@ -56,11 +57,24 @@ ya cerraron (`Engine.needed`), por θ. Los 305 B son 240 B de la fila de salida 
 `ENGINE_SCHEMA`) y 65 B de las fronteras de L2 que el motor retiene hasta cerrar el evento; 768 MiB
 son ≈ 2,6 M de eventos. Un row group de un mes normal trae ≈ 0,6 M de eventos y 2017-12 trae
 4,5 M: sin este tope, con K = 4 caben los tres row groups del mes y la unidad picó a 3 545 MiB. Un
-row group que por sí solo pasa del tope avanza igual (avisa una vez; `inflight_alone_bytes_max` >
-`inflight_bytes` en `unit_timing`): dividir el row group de L1 o subir la memoria del job. El tope
-se mira antes de empujar, así que `inflight_bytes_max` puede pasar de `inflight_bytes` hasta en un
-row group sin que sea esa señal. 2017-12 cae en este caso (≈ 4,5 M de eventos por row group): el
-aviso es lo esperado.
+tramo que por sí solo pasa del tope avanza igual (avisa una vez; `inflight_alone_bytes_max` >
+`inflight_bytes` en `unit_timing`): baja `L3_LOT_EVENTS` o sube la memoria del job. El tope se mira
+antes de empujar, así que `inflight_bytes_max` puede pasar de `inflight_bytes` hasta en un tramo sin
+que sea esa señal.
+**Lote acotado en eventos (ITSC-373):** el tope de bytes no puede acotar lo que entra de a uno, y un
+row group de L1 de 2017-12 (≈ 0,94 M de ticks) trae 5,76 M de eventos abiertos: 1,67 GiB de casillas,
+y el mes picó a 3 002 MiB aunque nunca convivieran dos row groups. Por eso `_push_all` parte cada
+row group en **tramos** contiguos de a lo más `N` ticks y empuja cada uno al motor como si fuera un
+row group (con su ordinal, su `cover(high)` y la bandera `before_month`). `N = floor(L3_LOT_EVENTS /
+densidad)`, con la densidad del mes = eventos de los θ (pies de L2) ÷ ticks (pie de L1), así que un
+tramo trae ≈ `L3_LOT_EVENTS` eventos con cualquier densidad. **La cuenta:** 1 M de eventos × 305 B
+(`EVENT_BYTES`) ≈ 305 MB de casillas y fronteras abiertas, tres tramos bajo el tope de 768 MiB. En
+2017-12 (6,1 eventos por tick) son ≈ 164 000 ticks y ≈ 6 tramos por row group; en 2021-01 (0,66)
+son ≈ 1,5 M de ticks, más que un row group, y no se parte. El corte no copia: `ids[a:b]` es una vista
+de NumPy y `column.slice(a, b - a)` un array de Arrow sobre el mismo buffer, y `Engine.push` honra el
+desfase (en bits para `is_buyer_maker`). Un evento que cruza tramos se fusiona como ya se fusiona
+entre row groups, y las tablas y los `content_hash` no cambian. Las fronteras de L2 que `cover` trae
+por delante (un lote de 32 768 eventos por θ) también cuentan como abiertas.
 `L3_PREFETCH` ya no existe (ITSC-363). `CLOUD_RUN_TASK_INDEX` distinto de 0 es código 2. `IMAGE_VERSION` la fija la imagen.
 
 **Códigos de salida** ([§8.4](../../docs/TRD/l3.md#84-códigos-de-salida)): 0 éxito; 1 fallo
@@ -89,7 +103,8 @@ ya no existe: el linaje lo publica L2 y se lee; `read_s` es lo que el hilo princ
 `read_wall_s` y `write_s` la pared con alguna lectura o algún escritor ocupado), la configuración
 (`threads`, `engine_threads`, `readers`, `inflight`, `writers`), lo que hizo el motor
 (`inflight_max`, `engine_busy`, `items`, `inflight_bytes`, `inflight_events_max`,
-`inflight_bytes_max`, `inflight_alone_bytes_max`), `spawn_s` (el arranque del proceso hijo de la unidad), `read_bytes`, `boundaries_peak_mib`,
+`inflight_bytes_max`, `inflight_alone_bytes_max`), el lote (`lot_events`, `lot_ticks` y `lots`, los
+tramos empujados), `spawn_s` (el arranque del proceso hijo de la unidad), `read_bytes`, `boundaries_peak_mib`,
 `rss_peak_mib` (`VmHWM`, reiniciado al empezar la unidad), `row_groups_month` y
 `row_groups_previous` (decodificaciones de L1 del mes y de meses anteriores, contadas con un
 gancho sobre `dc_frames.lake.open_parquet` como hace la sonda de `ops_tools`),
@@ -112,7 +127,7 @@ tiene sus propios hilos. Python orquesta, Arrow transporta, Rust calcula.
  L2 (50 events.parquet) ─ pool de E/S ─► BoundaryFeed ─┐ fronteras, por delante de cada row group
  L1 (consolidated) ─ L1.row_groups(readers = R) ─► push ┤
                                                         ▼
-                                          motor nativo (hilos, ítems (row group, θ))
+                                          motor nativo (hilos, ítems (tramo, θ))
                                                         │ pop_sealed
                                       Collector ────────┴─► SealedWriters (W hilos, cola por θ)
                                                                   ▼
@@ -131,9 +146,10 @@ tiene sus propios hilos. Python orquesta, Arrow transporta, Rust calcula.
 Qué sostiene la corrida:
 
 - **Cuatro topes, no cuatro colas sin fondo.** R lectores de L1 traen row groups por delante; el
-  orquestador no pide el siguiente mientras el motor tenga K en vuelo (`engine.inflight()`), haya
-  `3 × W` row groups sellados sin escribir ni, con alguno en el motor, más de `L3_INFLIGHT_BYTES` de
-  eventos abiertos. En RAM hay a lo más `K + R + 1` row groups de L1
+  orquestador no empuja el siguiente tramo mientras el motor tenga K en vuelo (`engine.inflight()`),
+  haya `3 × W` row groups sellados sin escribir ni, con alguno en el motor, más de
+  `L3_INFLIGHT_BYTES` de eventos abiertos (el tramo es el tope por lote: ver arriba). En RAM hay a
+  lo más `K + R + 1` row groups de L1
   (≈ 48 MB cada uno), las fronteras de L2 de los eventos de esos row groups, los buffers de salida
   abiertos y los sellados por escribir.
 - **Las fronteras de L2 van por delante, y no más.** Antes de cada `push`, `cover(high)` entrega
