@@ -640,9 +640,11 @@ tramo: es lo normal y no es una señal. La señal es `inflight_alone_bytes_max`,
 bytes abiertos tras empujar un tramo a un motor vacío: si pasa de `inflight_bytes`, un solo tramo
 trajo más eventos que el tope (la unidad avanza igual y avisa en el log): el pico de ese mes es ≈
 ese tramo, y se arregla bajando `L3_LOT_EVENTS` o subiendo la memoria del job. Con el valor por
-defecto (763 MB contra un tope de 805 MB) un tramo ocupa casi todo el tope: no debería pasar de él salvo
-que `L3_LOT_EVENTS` sea 0 o se haya subido, aunque las fronteras de L2 que `cover` trae por delante
-pueden empujarlo; si el aviso sale con el valor por defecto, anótalo en la card y baja `L3_LOT_EVENTS`. `lot_events`
+defecto (763 MB contra un tope de 805 MB) un tramo ocupa casi todo el tope, y las fronteras de L2
+que `cover` trae por delante (hasta ≈ 1,6 M de eventos con 50 θ, contados a 305 B aunque valen 65 B)
+bastan para pasarlo: **con 2,5 M el aviso es esperable en los meses densos (2017-12 y 2018-01) y no
+es razón para bajar `L3_LOT_EVENTS`**; anótalo en la card. La señal real de un tramo que no cabe es
+`inflight_alone_bytes_max` mayor que el tope + 1,6 M × 305 B ≈ 1,29 GB. `lot_events`
 es el lote con que corrió (0 si no hay corte), `lot_ticks` el tamaño de tramo en ticks (`null` sin
 corte) y `lots` los tramos empujados: en un mes normal `lots` es `row_groups_month` (más los de
 meses anteriores que el lector entrega) y en uno denso es mayor. Con `L3_PROFILE=1` el perfil es del
@@ -685,7 +687,10 @@ de 2017-12 sigue mayor que 3; `mem_peak_coverage` ≥ 0,9 en 2017-12 y 2018-01 (
 no más de un 3 % peor que 29,9 s. **Qué esperar:** con tramos de 2,5 M el pico puede subir ≈ 100 MiB
 sobre los 2 681 de 2017-12 (≈ 130 MiB por millón de eventos abiertos) y la CPU de los meses densos
 debería recuperar parte del +38 %; si 2018-01 pasa de 3 072 MiB se anota, el job tiene 4 GiB y la
-medición es el objetivo. Si muere por memoria (`exit_signal` 9), relanza **desde Cloud Shell** con
+medición es el objetivo. El aviso `L3_INFLIGHT_BYTES` es esperable en 2017-12 y 2018-01: las
+fronteras de L2 por delante del tramo (sobrestimadas a 305 B cuando valen 65 B) bastan para pasar el
+tope. No es razón para bajar `L3_LOT_EVENTS`; se anota en la card. Un tramo que no cabe de verdad
+sería `inflight_alone_bytes_max` mayor que el tope + 1,6 M × 305 B ≈ 1,29 GB. Si muere por memoria (`exit_signal` 9), relanza **desde Cloud Shell** con
 `L3_LOT_EVENTS=1000000` (`--update-env-vars`) para obtener la medición igual; que 2,5 M no cabe entra
 en la decisión. **Qué leer:** de `mem_peak` y `mem_close_before_trim` de 2017-12 y 2018-01, qué parte
 del `rss_mib` es `fordblks_mib` (libre que glibc retiene), qué parte `uordblks_mib` + `hblkhd_mib` (en
