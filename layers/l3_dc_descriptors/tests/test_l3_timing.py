@@ -209,6 +209,11 @@ def test_it_reports_the_cpu_of_each_unit_within_what_the_cores_allow(lake, tmp_p
         # (ITSC-368). Cada valor publicado se compara con el sin redondear del `Timing`: la
         # diferencia es el redondeo de ese único valor, a lo más 0,0005 (más margen de coma flotante).
         timing = result.timing
+        # Las definiciones se afirman sobre los valores sin redondear, que no tienen error.
+        assert timing.cpu_s == pytest.approx(timing.cpu_user_s + timing.cpu_system_s)
+        assert timing.cpu_utilization == pytest.approx(
+            timing.cpu_s / (timing.wall_s * timing.cpu.cores)
+        )
         rounding = 0.0005 + 1e-9
         assert details["cpu_user_s"] == pytest.approx(timing.cpu_user_s, abs=rounding)
         assert details["cpu_system_s"] == pytest.approx(
