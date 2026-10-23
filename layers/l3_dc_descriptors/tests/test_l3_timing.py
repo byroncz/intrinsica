@@ -204,12 +204,20 @@ def test_it_reports_the_cpu_of_each_unit_within_what_the_cores_allow(lake, tmp_p
         result = process_unit(unit_of(month), ctx, lake.thetas)
         details = result.timing.details()
         assert details["cpu_user_s"] >= 0 and details["cpu_system_s"] >= 0
-        assert details["cpu_s"] == pytest.approx(
-            details["cpu_user_s"] + details["cpu_system_s"], abs=0.002
+        # `details()` redondea a 3 decimales. Comparar un valor redondeado con la suma o el
+        # cociente de otros redondeados acumula errores y falló a veces con 0,002 fijo
+        # (ITSC-368). Cada valor publicado se compara con el sin redondear del `Timing`: la
+        # diferencia es el redondeo de ese único valor, a lo más 0,0005 (más margen de coma flotante).
+        timing = result.timing
+        rounding = 0.0005 + 1e-9
+        assert details["cpu_user_s"] == pytest.approx(timing.cpu_user_s, abs=rounding)
+        assert details["cpu_system_s"] == pytest.approx(
+            timing.cpu_system_s, abs=rounding
         )
+        assert details["cpu_s"] == pytest.approx(timing.cpu_s, abs=rounding)
         assert 0 < details["cpu_s"] <= details["wall_s"] * details["cores"] * 1.05
         assert details["cpu_utilization"] == pytest.approx(
-            details["cpu_s"] / (details["wall_s"] * details["cores"]), abs=0.002
+            timing.cpu_utilization, abs=rounding
         )
 
 

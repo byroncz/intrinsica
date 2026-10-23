@@ -11,6 +11,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import pyarrow as pa
+import pyarrow.fs as pafs
 import pyarrow.parquet as pq
 import pytest
 from l2_dc_events.cli import main as l2_main
@@ -322,3 +323,27 @@ def test_permisos_avisa_si_la_cuenta_puede_escribir_en_lo_de_l3(
     out = capsys.readouterr().out
     assert f"FALLO {falla}: esperado 403, obtenido ok" in out
     assert out.strip().endswith("permisos: 12 de 13 como se esperaba")
+
+
+def test_hashes_lista_los_hallazgos_sin_pedir_el_prefijo_sin_barra(
+    lake, monkeypatch, capsys
+):
+    """ITSC-370: `ds.dataset(prefijo)` pide el objeto sin barra y la condición IAM lo niega."""
+    from test_l2_backfill_lineage import IamLikeHandler
+
+    run_l2(lake, "--from", "2017-08", "--to", "2017-08", "--force")
+    hashes = load("hashes_events_summary")
+    real = hashes.resolve_fs
+    monkeypatch.setattr(
+        hashes,
+        "resolve_fs",
+        lambda root: (pafs.PyFileSystem(IamLikeHandler()), real(root)[1]),
+    )
+    with pytest.raises(PermissionError):
+        pafs.PyFileSystem(IamLikeHandler()).get_file_info(str(lake / "dq"))
+
+    assert hashes.main(["--dq-root", str(lake / "dq"), "--month", "2017-08"]) == 0
+    assert (
+        last_line(capsys)
+        == "θ: 50; unidades: 50 (con >= 2 corridas: 50; discrepancias: 0)"
+    )

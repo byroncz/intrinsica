@@ -43,6 +43,13 @@ def default_root(suffix: str) -> str:
     return f"gs://{match[1]}-{suffix}"
 
 
+def resolve_fs(root: str) -> tuple[pafs.FileSystem, str]:
+    """El sistema de archivos y la ruta base dentro de él (local si no trae esquema)."""
+    if "://" in root:
+        return pafs.FileSystem.from_uri(root)
+    return pafs.LocalFileSystem(), os.path.abspath(root)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--dq-root")
@@ -51,8 +58,26 @@ def main(argv: list[str] | None = None) -> int:
     ns = parser.parse_args(argv)
 
     root = (ns.dq_root or f"{default_root('dq-findings')}/l2").rstrip("/")
-    fs, base = pafs.FileSystem.from_uri(root)
-    dataset = ds.dataset(base, filesystem=fs, format="parquet", partitioning="hive")
+    fs, base = resolve_fs(root)
+    # Se lista con selector y no se abre el prefijo con `ds.dataset(base)`: para saber si `base`
+    # es archivo o carpeta, pyarrow pide los metadatos del objeto sin barra, y la condición IAM
+    # de ops-script solo da permiso bajo `l2/` (403, ITSC-370).
+    selector = pafs.FileSelector(f"{base}/", recursive=True, allow_not_found=True)
+    paths = sorted(
+        info.path
+        for info in fs.get_file_info(selector)
+        if info.type == pafs.FileType.File and info.path.endswith(".parquet")
+    )
+    if not paths:  # sin hallazgos no hay ni esquema contra el cual filtrar
+        print("θ: 0; unidades: 0 (con >= 2 corridas: 0; discrepancias: 0)")
+        return 1
+    dataset = ds.dataset(
+        paths,
+        filesystem=fs,
+        format="parquet",
+        partitioning="hive",
+        partition_base_dir=base,
+    )
     keep = (pc.field("check_type") == "events_summary") & (
         pc.field("asset") == ns.asset
     )
