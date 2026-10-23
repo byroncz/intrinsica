@@ -65,6 +65,9 @@ class RunContext:
     writers: int | None = None
     engine_threads: int | None = None
     inflight_bytes: int | None = None
+    # `L3_LOT_EVENTS`: eventos que cabe en un tramo, la parte de un row group de L1 que se empuja
+    # al motor (ITSC-373). `None` es el valor por defecto de `summarize` y 0 desactiva el corte.
+    lot_events: int | None = None
     # `L3_UNIT_PROCESS` (por defecto 1): en backfill cada unidad corre en un proceso hijo y su
     # memoria muere con ella (ITSC-372). `monthly` procesa una sola unidad y no lo usa.
     unit_process: bool = True

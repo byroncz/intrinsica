@@ -569,3 +569,43 @@ def test_without_the_knobs_the_defaults_apply(lake, tmp_path, catalog):
 def test_a_bad_l3_knob_is_a_usage_error(lake, tmp_path, catalog, name, value):
     assert run(lake, tmp_path, catalog, *BACKFILL, **{name: value}) == 2
     assert l3_files(lake) == []
+
+
+# L3_LOT_EVENTS (ITSC-373)
+
+
+def test_l3_lot_events_reaches_the_unit_and_zero_turns_the_cut_off(
+    lake, tmp_path, catalog
+):
+    force = [
+        "--force",
+        "--from",
+        "2017-08",
+    ]  # las corridas siguientes reprocesan el rango
+    assert (
+        run(lake, tmp_path / "cut", catalog, *BACKFILL, *force, L3_LOT_EVENTS="10") == 0
+    )
+    assert (
+        run(lake, tmp_path / "off", catalog, *BACKFILL, *force, L3_LOT_EVENTS="0") == 0
+    )
+    assert (
+        run(lake, tmp_path / "default", catalog, *BACKFILL, *force, L3_LOT_EVENTS="")
+        == 0
+    )
+    cut = emitted(tmp_path / "cut", "unit_timing")
+    off = emitted(tmp_path / "off", "unit_timing")
+    default = emitted(tmp_path / "default", "unit_timing")
+    assert all(row["details"]["lot_events"] == 10 for row in cut)
+    assert all(0 < row["details"]["lot_ticks"] for row in cut)
+    assert all(row["details"]["lot_events"] == 0 for row in off)
+    assert all(row["details"]["lot_ticks"] is None for row in off)
+    assert all(row["details"]["lot_events"] == 1_000_000 for row in default)
+    # Mes por mes: el corte parte row groups y el lote por defecto no parte ninguno.
+    for a, b, c in zip(cut, off, default, strict=True):
+        assert a["details"]["lots"] > b["details"]["lots"] == c["details"]["lots"]
+
+
+@pytest.mark.parametrize("value", ["-1", "1.5", "muchos"])
+def test_a_bad_l3_lot_events_is_a_usage_error(lake, tmp_path, catalog, value):
+    assert run(lake, tmp_path, catalog, *BACKFILL, L3_LOT_EVENTS=value) == 2
+    assert l3_files(lake) == []

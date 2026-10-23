@@ -700,10 +700,13 @@ mismo que traen las excepciones del resumidor, de las que sale la mayoría de lo
   al cerrar la unidad (desde la 2.5.0 del TRD-L3); `inflight_bytes` (el tope de bytes de eventos
   abiertos, `L3_INFLIGHT_BYTES`), `inflight_events_max`, `inflight_bytes_max` (el máximo de
   eventos entregados al motor que aún no cerraron y ese máximo por 305 B; puede pasar del tope hasta
-  en un row group, porque el tope se mira antes de empujar) e `inflight_alone_bytes_max` (lo mismo
-  para los row groups que entraron a un motor vacío: si pasa del tope, un solo row group lo superó)
+  en un tramo, porque el tope se mira antes de empujar) e `inflight_alone_bytes_max` (lo mismo
+  para los tramos que entraron a un motor vacío: si pasa del tope, un solo tramo lo superó)
   y `spawn_s` (lo que tardó en arrancar el proceso hijo de la unidad; `null`
-  si corrió en el proceso de la CLI), desde la 2.6.0. No cuenta las lecturas de la conciliación (solo
+  si corrió en el proceso de la CLI), desde la 2.6.0; `lot_events` (el lote en eventos con que
+  corrió, `L3_LOT_EVENTS`; 0 si el corte está desactivado), `lot_ticks` (el tamaño de tramo en
+  ticks que salió de la densidad del mes; `null` sin corte) y `lots` (los tramos empujados al
+  motor: row groups de L1 o partes de uno), desde la 2.8.0. No cuenta las lecturas de la conciliación (solo
   `agg_trade_id` de los row groups de las fronteras). Va aparte de `summaries_summary`
   porque sus tiempos cambian en cada corrida y el de `summaries_summary` no puede.
 - **`unit_process_died`** (`error`, `fail`, desde la 2.6.0 del TRD-L3): el proceso hijo de la

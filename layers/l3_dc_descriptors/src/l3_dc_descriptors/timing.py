@@ -155,6 +155,9 @@ class Phases:
         "inflight_events_max",
         "inflight_max",
         "items",
+        "lot_events",
+        "lot_ticks",
+        "lots",
         "publish_s",
         "read",
         "read_s",
@@ -180,6 +183,9 @@ class Phases:
         self.inflight_bytes_max = 0
         self.inflight_alone_bytes_max = 0
         self.items = 0
+        self.lot_events = 0
+        self.lot_ticks: int | None = None
+        self.lots = 0
         self.engine_busy = 0.0
         self.gate_s = 0.0
         self.setup_s = 0.0
@@ -403,10 +409,10 @@ class Timing:
         linaje de L2); `read_bytes`, los bytes comprimidos que leyó de las dos. `threads` es
         el pool de E/S (pasada de entrada, L2, conciliación y publicación); `engine_threads`,
         los hilos del motor; `readers`, los row groups de L1 que se leen a la vez; `inflight`,
-        el tope de row groups empujados al motor que aún anclan sus ticks e `inflight_max`,
+        el tope de tramos empujados al motor que aún anclan sus ticks (un tramo es un row group de L1 o una parte de uno) e `inflight_max`,
         el máximo que hubo; `boundaries_peak_mib`, el máximo de fronteras de L2 que el motor
         tuvo en mano; `writers`, los escritores; `engine_busy`, la fracción del tiempo del
-        bucle con ítems en la cola del motor; `items`, los ítems `(row group, θ)` que corrió.
+        bucle con ítems en la cola del motor; `items`, los ítems `(tramo, θ)` que corrió.
         `cpu_user_s` y `cpu_system_s` son la CPU del proceso (todos sus hilos) durante la
         unidad y `cpu_utilization`, `cpu_s / (wall_s × cores)`. `minor_faults`,
         `major_faults`, `voluntary_switches` e `involuntary_switches` son los contadores
@@ -422,10 +428,14 @@ class Timing:
         de eventos entregados al motor que aún no cerraron e `inflight_bytes_max`, lo mismo
         por los bytes de un evento (ITSC-372). El tope se mira antes de empujar, así que
         `inflight_bytes_max` puede pasar de `inflight_bytes` hasta en un row group sin que
-        ninguno lo pase solo: es lo normal, no una señal. El límite conocido es
-        `inflight_alone_bytes_max`, los bytes abiertos tras empujar un row group a un motor
-        vacío: si pasa de `inflight_bytes`, un solo row group trajo más eventos que el tope
-        (y salió el aviso `L3_INFLIGHT_BYTES`). `spawn_s` es lo que tardó en arrancar el proceso hijo
+        ninguno lo pase solo: es lo normal, no una señal. La señal es
+        `inflight_alone_bytes_max`, los bytes abiertos tras empujar un tramo a un motor
+        vacío: si pasa de `inflight_bytes`, un solo tramo trajo más eventos que el tope
+        (y salió el aviso `L3_INFLIGHT_BYTES`). `lot_events` es el lote en eventos con que
+        corrió (`L3_LOT_EVENTS`; 0 si el corte está desactivado), `lot_ticks` el tamaño de
+        tramo en ticks que salió de la densidad del mes (`null` sin corte) y `lots` los
+        tramos empujados (ITSC-373); un mes poco denso no se parte y `lots` son sus row
+        groups de L1. `spawn_s` es lo que tardó en arrancar el proceso hijo
         de la unidad (intérprete, importaciones y argumentos), `null` si corrió en el proceso
         de la CLI (`L3_UNIT_PROCESS=0` o `monthly`).
         """
@@ -458,6 +468,9 @@ class Timing:
             "writers": p.writers,
             "engine_busy": round(p.engine_busy, 3),
             "items": p.items,
+            "lot_events": p.lot_events,
+            "lot_ticks": p.lot_ticks,
+            "lots": p.lots,
             "read_bytes": p.read.bytes,
             "boundaries_peak_mib": round(p.retained.peak / MIB, 1),
             "rss_peak_mib": round(self.rss_peak_bytes / MIB, 1),

@@ -72,7 +72,7 @@ relanza los mismos inputs.
    86400`, `maxRetries: 1`, `cpu: '4'` y `memory: 4Gi` en `limits`. Las raíces
    (`L3_LANDING_ROOT`, `L3_EVENTS_ROOT`, `L3_SUMMARIES_ROOT`, `L3_DQ_ROOT`),
    `L3_SERIES_START` y `L3_THETAS_URI` van en `env`; `L3_THREADS`, `L3_READERS`, `L3_INFLIGHT`,
-   `L3_WRITERS`, `L3_ENGINE_THREADS`, `L3_INFLIGHT_BYTES` y `L3_UNIT_PROCESS` son opcionales (ver "Hilos y topes de la unidad" y "Memoria acotada").
+   `L3_WRITERS`, `L3_ENGINE_THREADS`, `L3_INFLIGHT_BYTES`, `L3_LOT_EVENTS` y `L3_UNIT_PROCESS` son opcionales (ver "Hilos y topes de la unidad" y "Memoria acotada").
 2. **Imagen `l3_dc_descriptors`** de `layers/l3_dc_descriptors/VERSION`. El stack
    `l3` deriva el tag de ese archivo: sin `apply` posterior al merge, el job
    sigue con la imagen vieja.
@@ -120,8 +120,8 @@ conciliación, esqueleto; o `monthly` sin ningún θ listo con rezagados) o **2*
 vacío y `force`, una vez. Sin `force`, o si una ejecución muere, se relanza y retoma donde
 quedó. Los 4 828 s se midieron con el asignador de T5 (rodeo de ITSC-364, que ya no hace falta):
 con la imagen 0.16.0 la corrida de 2017-08 a 2018-01 con los valores por defecto terminó (run
-39886368319), pero el backfill completo con ellos sigue pendiente (lo decide ITSC-373 o
-ITSC-352). Lo que sigue (rangos) es de **ITSC-335, con el núcleo original**, cuya suma eran 11,5 h
+39886368319), pero el backfill completo con ellos sigue pendiente (ITSC-352 o
+la siguiente). Lo que sigue (rangos) es de **ITSC-335, con el núcleo original**, cuya suma eran 11,5 h
 (41 256 s), más que las 6 h que espera el run de Actions: Cloud Run no cortaba la tarea (el
 timeout es el tope del módulo, 86 400 s), pero el run fallaría. Por eso entonces el
 histórico se lanzaba por rangos, **uno a la vez y cada uno con éxito antes del siguiente**.
@@ -566,11 +566,12 @@ proceso hijo y el tope de bytes acota los eventos abiertos (sección siguiente).
 sigue vivo y deja `unit_process_died` con `exit_signal` 9. Qué mirar, en orden: (1) el
 `unit_timing` del mes que murió no existe (el hijo murió antes de emitirlo), así que la señal sale
 de otros dos lados. En Cloud Logging, busca el aviso `L3_INFLIGHT_BYTES` del mes: el hijo lo emite
-al empujar un row group que por sí solo pasa del tope, antes de morir. Y mide la densidad del mes
+al empujar un tramo que por sí solo pasa del tope, antes de morir. Y mide la densidad del mes
 con lo que sí existe: suma `metric_value` de los `events_summary` de L2 de ese mes (los eventos de
-todos los θ, [`operacion-l2`](operacion-l2.md#paso-2-reproducibilidad)) y divídela por los row
-groups de `consolidated.parquet` de L1 de ese mes; más de ≈ 2,6 M de eventos por row group es el
-límite conocido del tope. (2) Si es un mes normal, lo que cambió es el job o el asignador: compara `rss_peak_mib` con el de
+todos los θ, [`operacion-l2`](operacion-l2.md#paso-2-reproducibilidad)) y divídela por los ticks de
+`consolidated.parquet` de L1 de ese mes: el tramo es `L3_LOT_EVENTS` ÷ esa densidad (ITSC-373), y si
+trae más eventos que el tope, baja `L3_LOT_EVENTS` (con 0 el corte no existe y el lote es el row
+group entero). (2) Si es un mes normal, lo que cambió es el job o el asignador: compara `rss_peak_mib` con el de
 los meses vecinos. (3) Relanza **desde Cloud Shell** con el asignador de T5, que devuelve la
 memoria al kernel en cada `free`, o con más memoria en el job. Repite los `--args` del run que
 murió, tal como los imprime `run-job-args.sh` (con `--force` si lo llevaba) y empieza en el mes
@@ -625,17 +626,22 @@ Dos mecanismos, los dos por construcción y no por ajuste del asignador
 |---|---|---|
 | `L3_UNIT_PROCESS` | `1`: cada unidad de `backfill` corre en un proceso hijo (`spawn`) y su memoria muere con ella; `0`: en el proceso de la CLI. `monthly` no la usa. Otro valor es código 2 | `1` |
 | `L3_INFLIGHT_BYTES` | Tope de bytes de eventos entregados al motor que aún no cerraron (305 B por evento). Entero ≥ 1 | 805 306 368 (768 MiB, ≈ 2,6 M de eventos) |
+| `L3_LOT_EVENTS` | Eventos de un tramo: cada row group de L1 se parte en tramos de a lo más `L3_LOT_EVENTS ÷ densidad del mes` ticks (ITSC-373). Entero ≥ 0; `0` desactiva el corte | 1 000 000 (≈ 305 MB de casillas y fronteras) |
 
 **Qué mirar en `unit_timing`.** `spawn_s` es el arranque del hijo (en local, 0,1 a 0,2 s; la
 estimación para Cloud Run es ≈ 1 s por mes); `null` si la unidad corrió en el proceso de la CLI.
 `rss_peak_mib` es el pico del hijo, de esa unidad sola: ya no hay deriva entre meses que mirar.
 `inflight_events_max` e `inflight_bytes_max` son el máximo de eventos abiertos y su costo; el tope
 se mira antes de empujar, así que `inflight_bytes_max` puede pasar de `inflight_bytes` hasta en un
-row group: es lo normal y no es una señal. La señal es `inflight_alone_bytes_max`, el máximo de
-bytes abiertos tras empujar un row group a un motor vacío: si pasa de `inflight_bytes`, un solo row
-group de L1 trajo más eventos que el tope (la unidad avanza igual y avisa en el log): el pico de ese
-mes es ≈ ese row group, y se arregla dividiendo el row group en L1 (card de L1) o subiendo la
-memoria del job. Con `L3_PROFILE=1` el perfil es del hijo.
+tramo: es lo normal y no es una señal. La señal es `inflight_alone_bytes_max`, el máximo de
+bytes abiertos tras empujar un tramo a un motor vacío: si pasa de `inflight_bytes`, un solo tramo
+trajo más eventos que el tope (la unidad avanza igual y avisa en el log): el pico de ese mes es ≈
+ese tramo, y se arregla bajando `L3_LOT_EVENTS` o subiendo la memoria del job. Con el valor por
+defecto (305 MB contra un tope de 768 MiB) solo pasa si `L3_LOT_EVENTS` es 0 o se subió. `lot_events`
+es el lote con que corrió (0 si no hay corte), `lot_ticks` el tamaño de tramo en ticks (`null` sin
+corte) y `lots` los tramos empujados: en un mes normal `lots` es `row_groups_month` (más los de
+meses anteriores que el lector entrega) y en uno denso es mayor. Con `L3_PROFILE=1` el perfil es del
+hijo.
 
 **El padre.** Su `VmRSS` es ≈ 80 MiB y no sube de un mes a otro: no importa lo que la unidad toca.
 La memoria del job es la del padre más la del hijo de la unidad.
@@ -648,15 +654,21 @@ el mismo hallazgo con `exit_code` 1 y el traceback en `error`.
 **La corrida de ITSC-372** (la lanza el humano tras el merge y el `apply` de `l3`): *Actions → Run
 job*, `l3-backfill`, `from = 2017-08`, `to = 2018-01` y `force`, con los valores por defecto de la
 imagen. Metas: termina; `rss_peak_mib` de 2017-12 ≤ 1 500; el `VmRSS` del padre, plano; los
-`content_hash` de los seis meses idénticos a los de ITSC-335 (`l3_compare_runs.py`). **Qué esperar
-de 2017-12:** sus row groups traen ≈ 4,5 M de eventos, sobre los ≈ 2,6 M del tope, así que cae en el
-límite conocido: el log trae el aviso `L3_INFLIGHT_BYTES` una vez por mes (no en cada row group; la corrida real dejó uno en 2017-12 y uno en 2018-01) e
-`inflight_alone_bytes_max` ronda 1 300 MiB. No es una falla; la meta de 1 500 MiB descansa en que
-ese row group cierre sus eventos dentro de él y en que el tope no deje convivir a los demás. Si el
-pico queda sobre la meta con el aviso presente, la causa es el row group de L1 y no el tope.
-Después, si
-ITSC-364 no terminó con el asignador de T5, el backfill completo con los valores por defecto. El
-resultado va como comentario en ITSC-372 y en
+`content_hash` de los seis meses idénticos a los de ITSC-335 (`l3_compare_runs.py`). **Resultado:** terminó los
+seis meses, pero 2017-12 picó a 3 002 MiB y 2018-01 a 3 400 MiB: un solo row group de 5,76 M de
+eventos pasa solo del tope (`inflight_alone_bytes_max`) y el tope de bytes no lo acota. El aviso
+`L3_INFLIGHT_BYTES` salió una vez por mes (uno en 2017-12 y uno en 2018-01), no en cada row group.
+Lo cierra la corrida siguiente.
+
+**La corrida de ITSC-373** (la lanza el humano tras el merge y el `apply` de `l3`): *Actions → Run
+job*, `l3-backfill`, `from = 2017-08`, `to = 2018-01` y `force`, con los valores por defecto de la
+imagen. Metas: termina; `rss_peak_mib` de 2017-12 y de 2018-01 ≤ 1 500; `lots` > `row_groups_month`
+en 2017-12 (el mes se parte); `wall_s` de 2017-12 y 2018-01 no más de un 20 % peor que 26,0 y 38,8 s;
+`l3_compare_runs.py` con `--from 2017-08 --to 2018-01` da 300 de 300. **Qué esperar de 2017-12:**
+`lot_ticks` ≈ 164 000, ≈ 6 tramos por row group e `inflight_events_max` en pocos millones, no en
+los 5,76 M de antes; sin aviso `L3_INFLIGHT_BYTES`. 2021-01 no se parte (`lots` = row groups).
+Después, el humano decide si el backfill completo se relanza con los valores por defecto (ITSC-352
+lo necesita para fijar el tamaño del job). El resultado va como comentario en ITSC-373 y en
 [§10.2](../TRD/l3.md#102-dimensionamiento--hipótesis-de-partida-y-primera-medición).
 
 ## Lector de tramas: `DC_FRAMES_IO_THREADS` y `readers`
@@ -839,7 +851,7 @@ jobs:
    2017-08 a 2018-01 con ellos terminó (run 39886368319). El `--update-env-vars` con el asignador
    de T5 (`MALLOC_MMAP_THRESHOLD_=16384`, `MALLOC_TRIM_THRESHOLD_=131072`) fue el rodeo de ITSC-364
    cuando la imagen anterior moría por memoria, y ya no hace falta. El backfill completo con los
-   valores por defecto sigue pendiente: lo decide ITSC-373 o ITSC-352.
+   valores por defecto sigue pendiente: ITSC-352 o la siguiente.
 2. Sube el script y lanza `ops-script` (`gcloud storage cp
    layers/ops_tools/scripts/l3_compare_runs.py gs://<proyecto>-ops/scripts/l3_compare_runs.py`),
    con las fechas de ITSC-335 como base y las del paso 1 como nueva:
