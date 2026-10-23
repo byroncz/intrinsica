@@ -908,7 +908,7 @@ def test_a_normal_month_is_not_cut(lake):
             lot_events=lot_events,
         )
     assert uncut.lot_events == 0 and uncut.lot_ticks is None
-    assert cut.lot_events == summarize.DEFAULT_LOT_EVENTS == 1_000_000
+    assert cut.lot_events == summarize.DEFAULT_LOT_EVENTS == 2_500_000
     assert cut.lot_ticks is not None and cut.lot_ticks > 150  # un row group de L1
     assert cut.lots == uncut.lots > 1
     assert cut.items == uncut.items

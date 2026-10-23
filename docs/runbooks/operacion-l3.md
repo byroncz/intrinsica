@@ -483,6 +483,8 @@ El límite y su regla de retroceso están en [«Asignador por defecto de L3»](#
 | `mmap_threshold` | Umbral de `mmap` de glibc con que corrió la unidad: `MALLOC_MMAP_THRESHOLD_` o 33554432; `null` si quedó dinámico. Dice con qué corrió cada fila del cuadro de §10.2 |
 | `trim_threshold` | Umbral de recorte del heap con que corrió la unidad: `MALLOC_TRIM_THRESHOLD_` (1073741824 en la imagen); `null` si no está fijada y glibc recorta con su umbral dinámico |
 | `rss_before_trim_mib`, `rss_after_trim_mib` | `VmRSS` (no el pico) justo antes y después de devolver la memoria al kernel al cerrar la unidad. La diferencia es lo que el trim devolvió; `rss_after_trim_mib` de mes a mes dice si el proceso acumula entre unidades |
+| `mem_peak`, `mem_close_before_trim`, `mem_close_after_trim` | De qué está hecho el RSS (ITSC-375): la muestra del RSS más alto que vio el hilo `l3-memory-sampler` y las del cierre, antes y después del trim. Cada una trae `rss_mib`, `arena_mib` (lo que las arenas piden al sistema), `hblkhd_mib` (regiones `mmap`), `uordblks_mib` (en uso), `fordblks_mib` (libre que glibc retiene), `keepcost_mib`, `arrow_mib`, `engine_inflight` (tramos anclados; `null` al cerrar) y `elapsed_s`. Si `fordblks_mib` es la mayor parte de `rss_mib` en `mem_peak`, el pico es memoria que el programa ya liberó y glibc no devolvió, no datos vivos. Sin `mallinfo2` los campos de glibc son `null` |
+| `mem_samples`, `mem_peak_coverage` | Ticks del muestreador y `rss_mib` de `mem_peak` ÷ `rss_peak_mib`. Bajo 0,9 el muestreador no vio el pico: baja `L3_MEMORY_SAMPLE_S` (ver «Variables») y repite; es un ajuste, no una falla |
 | `boundaries_peak_mib` | Máximo de fronteras de L2 que el motor tuvo en mano |
 
 Para comparar dos corridas usa `wall_s`, `cpu_s` y `cpu_utilization`. `run-job.yml` no admite
@@ -626,7 +628,8 @@ Dos mecanismos, los dos por construcción y no por ajuste del asignador
 |---|---|---|
 | `L3_UNIT_PROCESS` | `1`: cada unidad de `backfill` corre en un proceso hijo (`spawn`) y su memoria muere con ella; `0`: en el proceso de la CLI. `monthly` no la usa. Otro valor es código 2 | `1` |
 | `L3_INFLIGHT_BYTES` | Tope de bytes de eventos entregados al motor que aún no cerraron (305 B por evento). Entero ≥ 1 | 805 306 368 (768 MiB, ≈ 2,6 M de eventos) |
-| `L3_LOT_EVENTS` | Eventos de un tramo: cada row group de L1 se parte en tramos de a lo más `L3_LOT_EVENTS ÷ densidad del mes` ticks (ITSC-373). Entero ≥ 0; `0` desactiva el corte | 1 000 000 (≈ 305 MB de casillas y fronteras) |
+| `L3_LOT_EVENTS` | Eventos de un tramo: cada row group de L1 se parte en tramos de a lo más `L3_LOT_EVENTS ÷ densidad del mes` ticks (ITSC-373). Entero ≥ 0; `0` desactiva el corte | 2 500 000 (≈ 763 MB de casillas y fronteras; antes 1 000 000) |
+| `L3_MEMORY_SAMPLE_S` | Segundos entre ticks del hilo `l3-memory-sampler`, que lee `VmRSS` y, solo si supera su máximo, toma una muestra con `mallinfo2`. Número > 0; otro valor es código 2 (ITSC-375) | `0,25` |
 
 **Qué mirar en `unit_timing`.** `spawn_s` es el arranque del hijo (en local, 0,1 a 0,2 s; la
 estimación para Cloud Run es ≈ 1 s por mes); `null` si la unidad corrió en el proceso de la CLI.
@@ -637,7 +640,9 @@ tramo: es lo normal y no es una señal. La señal es `inflight_alone_bytes_max`,
 bytes abiertos tras empujar un tramo a un motor vacío: si pasa de `inflight_bytes`, un solo tramo
 trajo más eventos que el tope (la unidad avanza igual y avisa en el log): el pico de ese mes es ≈
 ese tramo, y se arregla bajando `L3_LOT_EVENTS` o subiendo la memoria del job. Con el valor por
-defecto (305 MB contra un tope de 768 MiB) solo pasa si `L3_LOT_EVENTS` es 0 o se subió. `lot_events`
+defecto (763 MB contra un tope de 805 MB) un tramo ocupa casi todo el tope: no debería pasar de él salvo
+que `L3_LOT_EVENTS` sea 0 o se haya subido, aunque las fronteras de L2 que `cover` trae por delante
+pueden empujarlo; si el aviso sale con el valor por defecto, anótalo en la card y baja `L3_LOT_EVENTS`. `lot_events`
 es el lote con que corrió (0 si no hay corte), `lot_ticks` el tamaño de tramo en ticks (`null` sin
 corte) y `lots` los tramos empujados: en un mes normal `lots` es `row_groups_month` (más los de
 meses anteriores que el lector entrega) y en uno denso es mayor. Con `L3_PROFILE=1` el perfil es del
@@ -670,6 +675,21 @@ los 5,76 M de antes; sin aviso `L3_INFLIGHT_BYTES`. 2021-01 no se parte (`lots` 
 Después, el humano decide si el backfill completo se relanza con los valores por defecto (ITSC-352
 lo necesita para fijar el tamaño del job). El resultado va como comentario en ITSC-373 y en
 [§10.2](../TRD/l3.md#102-dimensionamiento--hipótesis-de-partida-y-primera-medición).
+
+**La corrida de ITSC-375** (la lanza el humano tras el merge y el `apply` de `l3`): *Actions → Run
+job*, `l3-backfill`, `from = 2017-08`, `to = 2018-01` y `force`, con los valores por defecto de la
+imagen (lote de 2,5 M de eventos y `L3_MEMORY_SAMPLE_S` de 0,25). Metas: termina;
+`l3_compare_runs.py` con `--from 2017-08 --to 2018-01` da 300 de 300; `lots` de 2017-11 vuelve a 1 y el
+de 2017-12 sigue mayor que 3; `mem_peak_coverage` ≥ 0,9 en 2017-12 y 2018-01 (si no, baja
+`L3_MEMORY_SAMPLE_S`, por ejemplo a 0,1, y repite: es un ajuste del muestreador); `wall_s` de 2017-12
+no más de un 3 % peor que 29,9 s. **Qué esperar:** con tramos de 2,5 M el pico puede subir ≈ 100 MiB
+sobre los 2 681 de 2017-12 (≈ 130 MiB por millón de eventos abiertos) y la CPU de los meses densos
+debería recuperar parte del +38 %; si 2018-01 pasa de 3 072 MiB se anota, el job tiene 4 GiB y la
+medición es el objetivo. Si muere por memoria (`exit_signal` 9), relanza **desde Cloud Shell** con
+`L3_LOT_EVENTS=1000000` (`--update-env-vars`) para obtener la medición igual; que 2,5 M no cabe entra
+en la decisión. **Qué leer:** de `mem_peak` y `mem_close_before_trim` de 2017-12 y 2018-01, qué parte
+del `rss_mib` es `fordblks_mib` (libre que glibc retiene), qué parte `uordblks_mib` + `hblkhd_mib` (en
+uso) y qué parte `arrow_mib`. El resultado va como comentario en ITSC-375 y en la entrada de decisión.
 
 ## Lector de tramas: `DC_FRAMES_IO_THREADS` y `readers`
 

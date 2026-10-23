@@ -41,8 +41,8 @@ module "layer" {
   image      = "${local.data.artifact_registry}/l3_dc_descriptors:${trimspace(file("${path.module}/../../../../layers/l3_dc_descriptors/VERSION"))}"
 
   # Definitivo (ITSC-335, histórico de 110 meses, 2026-10-15; TRD-L3 §10.2). 4 vCPU
-  # y 4 GiB, el tamaño de L2: RSS pico máximo 1 267 MiB (2018-01, 31 % de 4 GiB),
-  # sin OOM. Una tarea y un hilo: la suma medida de los 110 meses (41 256 s) con
+  # y 4 GiB, el tamaño de L2. RSS pico máximo 2 942 MiB (2018-01, 72 % de 4 GiB, con la
+  # imagen 0.17.0; ITSC-375 mide su composición), sin OOM. Una tarea y un hilo: la suma medida de los 110 meses (41 256 s) con
   # margen 1,5 son 61 884 s, bajo 86 400 s, así que no hace falta paralelizar. El
   # job usa ≈ 15 % de los vCPU; usarlos (procesos por θ) o bajarlos es una
   # mejora aparte, no medida.

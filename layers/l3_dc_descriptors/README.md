@@ -39,8 +39,9 @@ enteros ≥ 1 (otro valor es código 2; `L3_LOT_EVENTS` admite 0): `L3_READERS` 
 `L3_INFLIGHT` (row groups en el motor, K; 4), `L3_WRITERS` (escritores, W; 12),
 `L3_ENGINE_THREADS` (hilos del motor; por defecto `round(vCPU efectivos)`), `L3_THREADS` (pool de
 E/S; por defecto `ceil(3 × vCPU)`, nunca más que θ) y `L3_INFLIGHT_BYTES` (tope de bytes de eventos
-abiertos; 805 306 368 = 768 MiB), `L3_LOT_EVENTS` (eventos de un tramo; 1 000 000; 0 desactiva el
-corte), más `L3_PROFILE=1` y `L3_UNIT_PROCESS` (`0` o `1`; por defecto 1:
+abiertos; 805 306 368 = 768 MiB), `L3_LOT_EVENTS` (eventos de un tramo; 2 500 000; 0 desactiva el
+corte), `L3_MEMORY_SAMPLE_S` (segundos entre ticks del muestreador de memoria; número > 0, por
+defecto 0,25), más `L3_PROFILE=1` y `L3_UNIT_PROCESS` (`0` o `1`; por defecto 1:
 un proceso hijo por unidad en `backfill`; `monthly` no lo usa). El stack `l3` no fija
 ninguna, así que los valores siguen a los vCPU del job; para sobrescribirlas en una corrida, ver el
 [runbook](../../docs/runbooks/operacion-l3.md#hilos-y-topes-de-la-unidad-l3_readers-l3_inflight-l3_writers-l3_engine_threads-y-l3_threads).
@@ -67,10 +68,13 @@ y el mes picó a 3 002 MiB aunque nunca convivieran dos row groups. Por eso `_pu
 row group en **tramos** contiguos de a lo más `N` ticks y empuja cada uno al motor como si fuera un
 row group (con su ordinal, su `cover(high)` y la bandera `before_month`). `N = floor(L3_LOT_EVENTS /
 densidad)`, con la densidad del mes = eventos de los θ (pies de L2) ÷ ticks (pie de L1), así que un
-tramo trae ≈ `L3_LOT_EVENTS` eventos con cualquier densidad. **La cuenta:** 1 M de eventos × 305 B
-(`EVENT_BYTES`) ≈ 305 MB de casillas y fronteras abiertas, tres tramos bajo el tope de 768 MiB. En
-2017-12 (6,1 eventos por tick) son ≈ 164 000 ticks y ≈ 6 tramos por row group; en 2021-01 (0,66)
-son ≈ 1,5 M de ticks, más que un row group, y no se parte. El corte no copia: `ids[a:b]` es una vista
+tramo trae ≈ `L3_LOT_EVENTS` eventos con cualquier densidad. **La cuenta:** 2,5 M de eventos × 305 B
+(`EVENT_BYTES`) ≈ 763 MB de casillas y fronteras abiertas, justo bajo los 2,64 M que caben en el
+tope de 768 MiB (805 306 368 ÷ 305). Un tramo ocupa casi todo el tope, así que en un mes denso vuelve
+a correr un tramo a la vez: el corte solo actúa cuando un row group por sí solo pasa del tope. En
+2017-12 (6,1 eventos por tick) son ≈ 410 000 ticks y ≈ 3 tramos por row group; en 2017-11 y en
+2021-01 (0,66) el tramo es más grande que un row group y no se parte. Con 1 M (ITSC-373) se partía
+hasta 2017-11 sin necesidad y la CPU de los meses densos subía 38 %. El corte no copia: `ids[a:b]` es una vista
 de NumPy y `column.slice(a, b - a)` un array de Arrow sobre el mismo buffer, y `Engine.push` honra el
 desfase (en bits para `is_buyer_maker`). Un evento que cruza tramos se fusiona como ya se fusiona
 entre row groups, y las tablas y los `content_hash` no cambian. Las fronteras de L2 que `cover` trae
@@ -105,7 +109,9 @@ ya no existe: el linaje lo publica L2 y se lee; `read_s` es lo que el hilo princ
 (`inflight_max`, `engine_busy`, `items`, `inflight_bytes`, `inflight_events_max`,
 `inflight_bytes_max`, `inflight_alone_bytes_max`), el lote (`lot_events`, `lot_ticks` y `lots`, los
 tramos empujados), `spawn_s` (el arranque del proceso hijo de la unidad), `read_bytes`, `boundaries_peak_mib`,
-`rss_peak_mib` (`VmHWM`, reiniciado al empezar la unidad), `row_groups_month` y
+`rss_peak_mib` (`VmHWM`, reiniciado al empezar la unidad), la composición de ese RSS
+(`mem_peak`, `mem_close_before_trim`, `mem_close_after_trim`, `mem_samples` y `mem_peak_coverage`:
+ver «Composición del RSS» abajo), `row_groups_month` y
 `row_groups_previous` (decodificaciones de L1 del mes y de meses anteriores, contadas con un
 gancho sobre `dc_frames.lake.open_parquet` como hace la sonda de `ops_tools`),
 `row_groups_repeated` (debe ser 0), eventos y ticks por θ y en total, el límite efectivo de
@@ -335,6 +341,19 @@ la memoria libre al kernel (`gc.collect()` y `malloc_trim(0)`), porque un `backf
 un proceso y con el asignador de la imagen glibc no devuelve al kernel lo liberado, así que el RSS sube
 unidad a unidad hasta el OOM (ITSC-371; la causa exacta es una hipótesis, ver ADR-L3-16); `unit_timing` registra
 `rss_before_trim_mib` y `rss_after_trim_mib`.
+
+**Composición del RSS (ITSC-375).** `rss_peak_mib` dice cuánto pesó la unidad, no de qué. El hilo
+`l3-memory-sampler` (uno por unidad, período `L3_MEMORY_SAMPLE_S`, 0,25 s) lee `VmRSS` en cada tick y,
+solo cuando supera su máximo, toma una muestra con `mallinfo2` de glibc (`arena`, `hblkhd`,
+`uordblks`, `fordblks`, `keepcost`), los bytes vivos de Arrow (`pa.total_allocated_bytes()`) y los
+tramos anclados en el motor (`engine.inflight()`). `unit_timing` publica la del RSS más alto
+(`mem_peak`) y dos del cierre, justo antes y después del trim (`mem_close_before_trim`,
+`mem_close_after_trim`). Cómo leerlas: `uordblks` es memoria en uso del heap y `fordblks`, memoria
+que el programa ya liberó y glibc retiene (`arena = uordblks + fordblks`; `hblkhd` son las regiones
+`mmap`, aparte). Si `fordblks` es la mayor parte del RSS del pico, el pico es retención del
+asignador y no datos vivos. `mem_peak_coverage` = RSS de `mem_peak` ÷ `rss_peak_mib`: bajo 0,9 el
+muestreador se perdió el pico y se baja `L3_MEMORY_SAMPLE_S`. Es medición: no cambia el pico.
+`mallinfo2` toma el candado de cada arena y recorre sus listas libres, por eso no corre en cada tick.
 
 ## Pruebas
 

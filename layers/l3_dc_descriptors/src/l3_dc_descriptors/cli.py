@@ -22,7 +22,7 @@ from pathlib import Path
 from dc_frames.lake import Month, month_ordinal
 from dq import configure_logging
 
-from l3_dc_descriptors import findings
+from l3_dc_descriptors import findings, memory
 from l3_dc_descriptors.context import RunContext, Unit
 from l3_dc_descriptors.frontier import (
     Listing,
@@ -124,6 +124,13 @@ def _flag(env: Mapping[str, str], name: str, *, default: bool) -> bool:
     return raw.strip() == "1"
 
 
+def _sample_period(env: Mapping[str, str]) -> float | None:
+    try:
+        return memory.sample_period(env)
+    except ValueError as error:
+        raise UsageError(str(error)) from None
+
+
 def _context(mode: str, series_start: Month, env: Mapping[str, str]) -> RunContext:
     missing = [name for name in ROOT_VARS if not env.get(name)]
     if missing:
@@ -146,6 +153,7 @@ def _context(mode: str, series_start: Month, env: Mapping[str, str]) -> RunConte
         inflight_bytes=_count(env, "L3_INFLIGHT_BYTES", minimum=1),
         lot_events=_count(env, "L3_LOT_EVENTS", minimum=0),
         unit_process=_flag(env, "L3_UNIT_PROCESS", default=True),
+        memory_sample_s=_sample_period(env),
     )
 
 

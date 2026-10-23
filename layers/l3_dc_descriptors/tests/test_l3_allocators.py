@@ -4,6 +4,7 @@
 
 import logging
 import os
+import time
 
 import pytest
 from l3_dc_descriptors import memory
@@ -141,3 +142,106 @@ def test_release_to_kernel_without_malloc_trim_warns_and_goes_on(monkeypatch, ca
 def test_rss_bytes_is_the_current_rss_not_the_peak():
     rss = memory.rss_bytes()
     assert rss is not None and rss > 1 << 20
+
+
+# ITSC-375: el muestreador de memoria y sus muestras.
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [(None, None), ("", None), (" ", None), ("0.05", 0.05), ("1", 1.0), (" 2 ", 2.0)],
+)
+def test_sample_period_is_the_environment_value_or_none(text, expected):
+    env = {} if text is None else {"L3_MEMORY_SAMPLE_S": text}
+    assert memory.sample_period(env) == expected
+
+
+@pytest.mark.parametrize("text", ["0", "-1", "nan", "inf", "mucho", "1s"])
+def test_a_bad_sample_period_raises_with_the_variable_name(text):
+    with pytest.raises(ValueError, match="L3_MEMORY_SAMPLE_S"):
+        memory.sample_period({"L3_MEMORY_SAMPLE_S": text})
+
+
+def test_a_sample_has_the_glibc_accounting_and_the_arrow_bytes():
+    sample = memory.take_sample(time.perf_counter(), lambda: 3)
+    assert sample.rss is not None and sample.rss > 0
+    # Las arenas piden al sistema lo que está en uso más lo libre que retienen.
+    assert sample.arena == sample.uordblks + sample.fordblks
+    assert sample.hblkhd is not None and sample.keepcost is not None
+    assert sample.engine_inflight == 3 and sample.elapsed_s >= 0
+    details = sample.details()
+    assert list(details) == [
+        "rss_mib",
+        "arena_mib",
+        "hblkhd_mib",
+        "uordblks_mib",
+        "fordblks_mib",
+        "keepcost_mib",
+        "arrow_mib",
+        "engine_inflight",
+        "elapsed_s",
+    ]
+    assert details["rss_mib"] == round(sample.rss / (1 << 20), 1)
+
+
+def test_a_sample_counts_the_arrow_buffers_alive():
+    import pyarrow as pa
+
+    before = memory.take_sample(time.perf_counter())
+    buffer = pa.allocate_buffer(64 << 20)
+    during = memory.take_sample(time.perf_counter())
+    assert during.arrow - before.arrow >= buffer.size
+    del buffer
+
+
+def test_a_sample_without_mallinfo2_has_no_glibc_fields_and_does_not_fail(
+    monkeypatch, caplog
+):
+    memory._mallinfo2_function.cache_clear()
+
+    class Libc:  # un libc sin mallinfo2: `getattr` lanza AttributeError
+        pass
+
+    monkeypatch.setattr(memory.ctypes, "CDLL", lambda _: Libc())
+    try:
+        sample = memory.take_sample(time.perf_counter())
+        with caplog.at_level(logging.WARNING, logger=memory.logger.name):
+            sampler = memory.MemorySampler(0.01)
+            sampler.start()
+            sampler.stop()
+    finally:
+        memory._mallinfo2_function.cache_clear()
+    assert sample.rss is not None and sample.arrow >= 0
+    glibc = ("arena", "hblkhd", "uordblks", "fordblks", "keepcost")
+    assert all(getattr(sample, name) is None for name in glibc)
+    assert sample.details()["arena_mib"] is None
+    assert sampler.peak is not None and sampler.peak.arena is None
+    assert any("mallinfo2" in record.getMessage() for record in caplog.records)
+
+
+def test_a_sample_survives_an_engine_that_already_closed():
+    def closed() -> int:
+        raise RuntimeError("el motor está cerrado")
+
+    assert memory.take_sample(time.perf_counter(), closed).engine_inflight is None
+
+
+def test_the_sampler_keeps_the_sample_of_the_highest_rss_and_stops_with_the_unit():
+    import pyarrow as pa
+
+    sampler = memory.MemorySampler(0.01)
+    sampler.inflight = lambda: 7
+    sampler.start()
+    held = [pa.allocate_buffer(32 << 20) for _ in range(4)]
+    for buffer in held:  # toca las páginas para que cuenten en el RSS
+        buffer.to_pybytes()
+    time.sleep(0.15)
+    sampler.stop()
+    ticks = sampler.ticks
+    assert not sampler._thread.is_alive()
+    assert ticks >= 2
+    assert sampler.peak is not None and sampler.peak.engine_inflight == 7
+    assert sampler.peak.arrow >= 4 * (32 << 20)
+    time.sleep(0.05)
+    assert sampler.ticks == ticks  # parado: no sigue muestreando
+    del held

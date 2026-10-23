@@ -2,6 +2,7 @@
 
 import cProfile
 import pstats
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 
@@ -436,3 +437,41 @@ def test_the_unit_trims_also_when_it_fails(lake, tmp_path, monkeypatch):
     broken = replace(ctx, events_root=str(tmp_path / "nothing"))
     assert not process_unit(unit_of(M2), broken, lake.thetas).ok
     assert calls == [1, 1]
+
+
+def test_unit_timing_records_the_memory_samples(lake, tmp_path):
+    # ITSC-375: el pico y el cierre (antes y después del trim) con la contabilidad de glibc.
+    ctx = replace(context(lake, tmp_path), memory_sample_s=0.005)
+    result = process_unit(unit_of(M2), ctx, lake.thetas)
+    details = result.timing.details()
+    assert details["mem_samples"] >= 1
+    keys = {
+        "rss_mib",
+        "arena_mib",
+        "hblkhd_mib",
+        "uordblks_mib",
+        "fordblks_mib",
+        "keepcost_mib",
+        "arrow_mib",
+        "engine_inflight",
+        "elapsed_s",
+    }
+    for name in ("mem_peak", "mem_close_before_trim", "mem_close_after_trim"):
+        assert set(details[name]) == keys, name
+    # El cierre ya no tiene motor: sin tramos anclados.
+    assert details["mem_close_before_trim"]["engine_inflight"] is None
+    assert (
+        details["mem_peak"]["elapsed_s"]
+        <= details["mem_close_before_trim"]["elapsed_s"]
+    )
+    assert details["mem_close_before_trim"]["elapsed_s"] <= details["wall_s"]
+    assert 0 < details["mem_peak_coverage"] <= 1.05
+    (row,) = (f for f in result.findings if f.check_type == "unit_timing")
+    assert row.details["mem_peak"] == details["mem_peak"]
+    assert row.details["mem_samples"] == details["mem_samples"]
+
+
+def test_the_memory_sampler_stops_with_the_unit_also_when_it_fails(lake, tmp_path):
+    ctx = replace(context(lake, tmp_path), events_root=str(tmp_path / "nothing"))
+    assert not process_unit(unit_of(M2), ctx, lake.thetas).ok
+    assert not [t for t in threading.enumerate() if t.name == "l3-memory-sampler"]

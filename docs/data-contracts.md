@@ -706,7 +706,12 @@ mismo que traen las excepciones del resumidor, de las que sale la mayoría de lo
   si corrió en el proceso de la CLI), desde la 2.6.0; `lot_events` (el lote en eventos con que
   corrió, `L3_LOT_EVENTS`; 0 si el corte está desactivado), `lot_ticks` (el tamaño de tramo en
   ticks que salió de la densidad del mes; `null` sin corte) y `lots` (los tramos empujados al
-  motor: row groups de L1 o partes de uno), desde la 2.8.0. No cuenta las lecturas de la conciliación (solo
+  motor: row groups de L1 o partes de uno), desde la 2.8.0; y `mem_peak`,
+  `mem_close_before_trim` y `mem_close_after_trim` (objetos con `rss_mib`, `arena_mib`, `hblkhd_mib`,
+  `uordblks_mib`, `fordblks_mib`, `keepcost_mib`, `arrow_mib`, `engine_inflight` y `elapsed_s`: el
+  RSS más alto que vio el muestreador de la unidad y el cierre antes y después del trim; los campos de
+  glibc son `null` sin `mallinfo2`), `mem_samples` (ticks del muestreador) y `mem_peak_coverage`
+  (`rss_mib` de `mem_peak` ÷ `rss_peak_mib`), desde la 2.9.0. No cuenta las lecturas de la conciliación (solo
   `agg_trade_id` de los row groups de las fronteras). Va aparte de `summaries_summary`
   porque sus tiempos cambian en cada corrida y el de `summaries_summary` no puede.
 - **`unit_process_died`** (`error`, `fail`, desde la 2.6.0 del TRD-L3): el proceso hijo de la
