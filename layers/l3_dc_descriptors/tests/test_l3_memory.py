@@ -384,9 +384,14 @@ DENSE_TICKS_PER_EVENT = 3
 SLOT_BYTES = 240
 # Menos que un row group (2,4 M de eventos × 305 B): cada uno avanza solo.
 DENSE_CAP = 120 * (1 << 20)
-# El pico baja al menos esta fracción de lo que un row group de salida ocupa (un row group de L1:
-# 2,4 M de eventos × 240 B). Medido en 8 corridas, entre 0,3 y 0,7: sin el tope el motor empuja el
-# siguiente row group antes de haber sellado nada del anterior, y los dos esperan al escritor.
+# Un solo hilo del motor, más lento que el lector: con K = 4 solo, el lector empuja los row groups
+# uno tras otro y sus casillas se acumulan (4,35 M de eventos abiertos medidos, 1,8 row groups);
+# con el tope cada uno espera a que cierre el anterior (2,40 M, un row group). Con 4 hilos el motor
+# cierra tan rápido como se empuja y la unidad sin tope también llega a un row group: no prueba nada.
+DENSE_ENGINE_THREADS = 1
+# El pico baja al menos esta fracción de lo que cuestan las casillas de más. Medido (3 corridas, hilos
+# del motor = 1): baja entre 0,50 y 0,56 de esa cuenta (225 a 260 MiB de 446 MiB), así que 0,3 deja
+# un margen de casi la mitad bajo el mínimo medido.
 DENSE_MIN_GAIN = 0.3
 
 DENSE_UNIT = """
@@ -394,11 +399,12 @@ import json, sys
 from l3_dc_descriptors import pipeline
 from l3_dc_descriptors.context import RunContext, Unit
 
-l1, l2, l3, cap, count = sys.argv[1:6]
+l1, l2, l3, cap, count, engine_threads = sys.argv[1:7]
 ctx = RunContext(
     mode="backfill", run_id="run", image_version="test", series_start=(2017, 8),
     landing_root=l1, events_root=l2, summaries_root=l3, dq_root=f"{l3}/dq",
-    threads=8, readers=2, inflight=4, writers=1, engine_threads=4, inflight_bytes=int(cap),
+    threads=8, readers=2, inflight=4, writers=1, engine_threads=int(engine_threads),
+    inflight_bytes=int(cap),
 )
 result = pipeline.process_unit(Unit(2017, 8), ctx, [100_000 * k for k in range(1, int(count) + 1)])
 assert result.ok, result.error
@@ -462,6 +468,7 @@ def dense_runs(tmp_path_factory) -> dict[str, dict]:
                 str(root / "l3" / name),
                 str(cap),
                 str(DENSE_THETAS),
+                str(DENSE_ENGINE_THREADS),
             ],
             capture_output=True,
             text=True,
@@ -479,12 +486,13 @@ def test_the_byte_cap_bounds_the_open_events_and_the_peak_rss(dense_runs):
     one_group = k_only["events"] // DENSE_GROUPS
     # Con el tope, lo abierto es un row group (más lo que `cover` trae por delante), no el mes.
     assert capped["inflight_events_max"] <= 1.2 * one_group, dense_runs
-    # Con K = 4 solo la unidad también llega a ese máximo, pero no espera: empuja el siguiente
-    # row group antes de que el motor selle algo del anterior, y la contrapresión de lo sellado
-    # (que mira el hilo principal) no ve nada que contener. Con el tope espera a que cierre, y
-    # entonces sí lo ve: el RSS del pico baja lo que ocupaba el segundo row group de salida.
+    # Sin él, con un motor más lento que el lector, se acumulan los row groups: es el problema 2
+    # tal como lo describe la ADR (O(row groups en vuelo)), y el tope lo evita.
+    assert k_only["inflight_events_max"] >= 1.5 * one_group, dense_runs
+    # El RSS del pico baja lo que cuestan las casillas de más (SLOT_BYTES por evento).
+    extra = k_only["inflight_events_max"] - capped["inflight_events_max"]
     gain = (k_only["rss_peak_mib"] - capped["rss_peak_mib"]) * MIB
-    assert gain >= DENSE_MIN_GAIN * one_group * SLOT_BYTES, dense_runs
+    assert gain >= DENSE_MIN_GAIN * extra * SLOT_BYTES, dense_runs
 
 
 def test_a_row_group_over_the_cap_is_recorded_and_the_unit_goes_on(dense_runs):
