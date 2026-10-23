@@ -59,7 +59,10 @@ ya cerraron (`Engine.needed`), por θ. Los 305 B son 240 B de la fila de salida 
 son ≈ 2,6 M de eventos. Un row group de un mes normal trae ≈ 0,6 M de eventos y 2017-12 trae
 4,5 M: sin este tope, con K = 4 caben los tres row groups del mes y la unidad picó a 3 545 MiB. Un
 tramo que por sí solo pasa del tope avanza igual (avisa una vez; `inflight_alone_bytes_max` >
-`inflight_bytes` en `unit_timing`): baja `L3_LOT_EVENTS` o sube la memoria del job. El tope se mira
+`inflight_bytes` en `unit_timing`): baja `L3_LOT_EVENTS` o sube la memoria del job. Con el lote por
+defecto el aviso es esperable en 2017-12 y 2018-01: las fronteras de L2 por delante del tramo
+bastan para pasar el tope, y no es razón para bajar `L3_LOT_EVENTS`. La señal de un tramo que no cabe
+es `inflight_alone_bytes_max` > tope + 1,6 M × 305 B ≈ 1,29 GB. El tope se mira
 antes de empujar, así que `inflight_bytes_max` puede pasar de `inflight_bytes` hasta en un tramo sin
 que sea esa señal.
 **Lote acotado en eventos (ITSC-373):** el tope de bytes no puede acotar lo que entra de a uno, y un
