@@ -24,7 +24,15 @@ from l3_dc_descriptors.cpu import cpu_limit, kernel_counts, process_cpu_s, throt
 from l3_dc_descriptors.errors import SummarizeError
 from l3_dc_descriptors.frontier import theta_text
 from l3_dc_descriptors.landing import missing_input
-from l3_dc_descriptors.memory import mmap_threshold, release_to_kernel, trim_threshold
+from l3_dc_descriptors.memory import (
+    DEFAULT_SAMPLE_S,
+    MemorySampler,
+    MemSample,
+    mmap_threshold,
+    release_to_kernel,
+    take_sample,
+    trim_threshold,
+)
 from l3_dc_descriptors.profiling import top_functions
 from l3_dc_descriptors.summarize import ThetaResult, summarize_month
 from l3_dc_descriptors.timing import (
@@ -103,6 +111,13 @@ def _process_unit(
     scope = "unit" if reset_rss_peak() else "process"
     throttled = throttled_s()
     trimmed: tuple[int | None, int | None] = (None, None)
+    close_samples: tuple[MemSample | None, MemSample | None] = (None, None)
+    # Arranca antes del primer empuje y para al cerrar la unidad (ITSC-375).
+    phases.sampler = MemorySampler(
+        DEFAULT_SAMPLE_S if ctx.memory_sample_s is None else ctx.memory_sample_s,
+        started,
+    )
+    phases.sampler.start()
     try:
         with count_row_groups(counts):
             written = summarize_month(
@@ -132,8 +147,13 @@ def _process_unit(
     ) as error:  # L1 o L2 fuera de contrato: sin hallazgo propio (§9.3)
         return Result((), error=str(error))
     finally:
-        # Con éxito o con error, y ya cerrados los pools de la unidad (ITSC-371).
+        # Con éxito o con error, y ya cerrados los pools de la unidad (ITSC-371). Las dos
+        # muestras del cierre (ITSC-375) rodean al trim: lo que baja entre ellas es lo que
+        # glibc retenía y el programa ya había liberado.
+        phases.sampler.stop()
+        before_trim = take_sample(started)
         trimmed = release_to_kernel()
+        close_samples = (before_trim, take_sample(started))
 
     summaries, stats = [], []
     for value, result in written.items():
@@ -164,6 +184,10 @@ def _process_unit(
         rss_before_trim_bytes=trimmed[0],
         rss_after_trim_bytes=trimmed[1],
         spawn_s=spawn_s,
+        mem_peak=phases.sampler.peak,
+        mem_close_before_trim=close_samples[0],
+        mem_close_after_trim=close_samples[1],
+        mem_samples=phases.sampler.ticks,
     )
     return Result(
         (

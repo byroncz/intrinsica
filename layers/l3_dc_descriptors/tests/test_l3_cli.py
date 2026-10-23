@@ -599,7 +599,7 @@ def test_l3_lot_events_reaches_the_unit_and_zero_turns_the_cut_off(
     assert all(0 < row["details"]["lot_ticks"] for row in cut)
     assert all(row["details"]["lot_events"] == 0 for row in off)
     assert all(row["details"]["lot_ticks"] is None for row in off)
-    assert all(row["details"]["lot_events"] == 1_000_000 for row in default)
+    assert all(row["details"]["lot_events"] == 2_500_000 for row in default)
     # Mes por mes: el corte parte row groups y el lote por defecto no parte ninguno.
     for a, b, c in zip(cut, off, default, strict=True):
         assert a["details"]["lots"] > b["details"]["lots"] == c["details"]["lots"]
@@ -609,3 +609,21 @@ def test_l3_lot_events_reaches_the_unit_and_zero_turns_the_cut_off(
 def test_a_bad_l3_lot_events_is_a_usage_error(lake, tmp_path, catalog, value):
     assert run(lake, tmp_path, catalog, *BACKFILL, L3_LOT_EVENTS=value) == 2
     assert l3_files(lake) == []
+
+
+# L3_MEMORY_SAMPLE_S (ITSC-375)
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "nan", "rápido"])
+def test_a_bad_l3_memory_sample_s_is_a_usage_error(lake, tmp_path, catalog, value):
+    assert run(lake, tmp_path, catalog, *BACKFILL, L3_MEMORY_SAMPLE_S=value) == 2
+    assert l3_files(lake) == []
+
+
+def test_l3_memory_sample_s_reaches_the_unit_and_the_timing_carries_the_samples(
+    lake, tmp_path, catalog
+):
+    assert run(lake, tmp_path, catalog, *BACKFILL, L3_MEMORY_SAMPLE_S="0.01") == 0
+    for row in emitted(tmp_path, "unit_timing"):
+        assert row["details"]["mem_samples"] >= 1
+        assert row["details"]["mem_peak"]["rss_mib"] > 0

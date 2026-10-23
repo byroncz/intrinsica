@@ -43,6 +43,7 @@ import pyarrow.parquet as pq
 from dc_frames import lake
 
 from l3_dc_descriptors.cpu import CpuLimit, KernelCounts
+from l3_dc_descriptors.memory import MemorySampler, MemSample
 
 MIB = 1 << 20
 
@@ -164,6 +165,7 @@ class Phases:
         "readers",
         "reconcile_s",
         "retained",
+        "sampler",
         "setup_s",
         "threads",
         "write",
@@ -197,6 +199,8 @@ class Phases:
         self.read = ReadMeter()
         self.write = BusyClock()
         self.retained = Retained()
+        # El muestreador de memoria de la unidad (ITSC-375); `summarize_month` le da el motor.
+        self.sampler: MemorySampler | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -347,6 +351,10 @@ def _mib(size: int | None) -> float | None:
     return None if size is None else round(size / MIB, 1)
 
 
+def _sample(sample: MemSample | None) -> dict | None:
+    return None if sample is None else sample.details()
+
+
 @dataclass(frozen=True)
 class Timing:
     """Lo que midió la unidad. `wall_s` corre desde que `process_unit` empieza hasta
@@ -369,6 +377,10 @@ class Timing:
     rss_before_trim_bytes: int | None = None
     rss_after_trim_bytes: int | None = None
     spawn_s: float | None = None
+    mem_peak: MemSample | None = None
+    mem_close_before_trim: MemSample | None = None
+    mem_close_after_trim: MemSample | None = None
+    mem_samples: int = 0
 
     @property
     def cpu_s(self) -> float:
@@ -437,7 +449,15 @@ class Timing:
         tramos empujados (ITSC-373); un mes poco denso no se parte y `lots` son sus row
         groups de L1. `spawn_s` es lo que tardó en arrancar el proceso hijo
         de la unidad (intérprete, importaciones y argumentos), `null` si corrió en el proceso
-        de la CLI (`L3_UNIT_PROCESS=0` o `monthly`).
+        de la CLI (`L3_UNIT_PROCESS=0` o `monthly`). `mem_peak` es la muestra del RSS más alto
+        que vio el hilo `l3-memory-sampler`; `mem_close_before_trim` y `mem_close_after_trim`,
+        las del cierre, justo antes y después de devolver lo libre al kernel (ITSC-375). Cada
+        una trae `rss_mib`, la contabilidad de glibc (`arena_mib`, `hblkhd_mib`, `uordblks_mib`,
+        `fordblks_mib`, `keepcost_mib`), `arrow_mib` (buffers vivos de Arrow),
+        `engine_inflight` (tramos anclados en el motor) y `elapsed_s` (desde que empezó la
+        unidad). `mem_samples` son los ticks del muestreador y `mem_peak_coverage`, el RSS de
+        `mem_peak` sobre `rss_peak_mib`: cerca de 1 si el muestreador vio el pico; si es menor
+        que 0,9 se baja `L3_MEMORY_SAMPLE_S`. Sin `mallinfo2`, los campos de glibc van en `null`.
         """
         p = self.phases
         seconds = {
@@ -503,4 +523,15 @@ class Timing:
             "rss_before_trim_mib": _mib(self.rss_before_trim_bytes),
             "rss_after_trim_mib": _mib(self.rss_after_trim_bytes),
             "spawn_s": None if self.spawn_s is None else round(self.spawn_s, 3),
+            "mem_peak": _sample(self.mem_peak),
+            "mem_close_before_trim": _sample(self.mem_close_before_trim),
+            "mem_close_after_trim": _sample(self.mem_close_after_trim),
+            "mem_samples": self.mem_samples,
+            "mem_peak_coverage": self._mem_peak_coverage(),
         }
+
+    def _mem_peak_coverage(self) -> float | None:
+        peak = self.mem_peak
+        if peak is None or peak.rss is None or self.rss_peak_bytes <= 0:
+            return None
+        return round(peak.rss / self.rss_peak_bytes, 3)

@@ -414,7 +414,7 @@ ctx = RunContext(
     landing_root=l1, events_root=l2, summaries_root=l3, dq_root=f"{l3}/dq",
     threads=8, readers=2, inflight=options.get("inflight", 4), writers=1,
     engine_threads=int(engine_threads), inflight_bytes=int(cap),
-    lot_events=options.get("lot_events", 0),
+    lot_events=options.get("lot_events", 0), memory_sample_s=0.02,
 )
 result = pipeline.process_unit(Unit(2017, 8), ctx, [100_000 * k for k in range(1, int(count) + 1)])
 assert result.ok, result.error
@@ -422,6 +422,8 @@ details = result.timing.details()
 keys = (
     "rss_peak_mib", "inflight_events_max", "inflight_bytes_max", "inflight_alone_bytes_max",
     "inflight_bytes", "events", "lot_events", "lot_ticks", "lots", "inflight_max",
+    "mem_peak", "mem_close_before_trim", "mem_close_after_trim", "mem_samples",
+    "mem_peak_coverage",
 )
 print(json.dumps({k: details[k] for k in keys}))
 """
@@ -555,3 +557,52 @@ def test_the_lot_lowers_the_peak_rss_by_what_the_open_slots_cost(dense_runs):
     assert extra > 0, dense_runs
     gain = (uncut["rss_peak_mib"] - cut["rss_peak_mib"]) * MIB
     assert gain >= DENSE_MIN_GAIN * extra * SLOT_BYTES, dense_runs
+
+
+# ITSC-375. La composición del RSS en el pico y al cierre. Ninguna aserción es un MiB absoluto
+# (la lección de ITSC-374): son relaciones que valen en cualquier máquina.
+MIN_COVERAGE = 0.9
+# Tolerancia (MiB) de la invariante del trim: los MiB van redondeados a un decimal.
+TRIM_TOLERANCE_MIB = 0.2
+
+
+def test_the_memory_sampler_sees_the_peak_of_the_dense_unit(dense_runs):
+    for name, run in dense_runs.items():
+        peak = run["mem_peak"]
+        assert peak is not None and run["mem_samples"] > 1, name
+        assert run["mem_peak_coverage"] >= MIN_COVERAGE, (name, run)
+        assert peak["engine_inflight"] is not None and peak["arrow_mib"] is not None
+
+
+def test_the_glibc_accounting_adds_up_in_the_three_samples(dense_runs):
+    for name, run in dense_runs.items():
+        for key in ("mem_peak", "mem_close_before_trim", "mem_close_after_trim"):
+            sample = run[key]
+            # Las arenas piden al sistema lo que está en uso más lo libre que retienen. Los
+            # MiB van redondeados a un decimal: de ahí la tolerancia de 0,1 por término.
+            assert sample["arena_mib"] == pytest.approx(
+                sample["uordblks_mib"] + sample["fordblks_mib"], abs=0.2
+            ), (name, key, sample)
+            assert sample["hblkhd_mib"] >= 0 and sample["keepcost_mib"] >= 0
+
+
+def test_the_trim_returns_pages_to_the_kernel_and_the_free_list_drops_at_most_the_top(
+    dense_runs,
+):
+    """`malloc_trim(0)` llama a `mtrim` por arena, que hace dos cosas: `madvise(MADV_DONTNEED)`
+    sobre las páginas interiores de los chunks libres, en todas las arenas (baja el RSS y no toca
+    `fordblks`), y, solo en la arena principal, `systrim` sobre su top (baja `arena` y `fordblks`
+    en ≈ `keepcost`, que `mallinfo2` reporta solo para ella). Entre las dos muestras del cierre
+    corre además `gc.collect()`, que puede subir `fordblks`: la subida se permite y la caída no
+    puede pasar de la cima. Lo retenido al cierre queda acotado: Δ`rss_mib` es cota inferior y
+    `before.fordblks_mib` cota superior.
+    """
+    for name, run in dense_runs.items():
+        before, after = run["mem_close_before_trim"], run["mem_close_after_trim"]
+        assert after["rss_mib"] < before["rss_mib"], (name, before, after)
+        dropped = before["fordblks_mib"] - after["fordblks_mib"]
+        assert dropped <= before["keepcost_mib"] + TRIM_TOLERANCE_MIB, (
+            name,
+            before,
+            after,
+        )

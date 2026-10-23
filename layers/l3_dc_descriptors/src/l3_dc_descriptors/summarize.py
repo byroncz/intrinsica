@@ -142,9 +142,12 @@ DEFAULT_INFLIGHT_BYTES = 768 << 20
 # row group de L1 de un mes denso (2017-12: 5,76 M de eventos en ≈ 0,94 M de ticks) pasa solo
 # del tope. Cada row group se parte en tramos de a lo más N ticks, con N = LOT_EVENTS / densidad
 # del mes (eventos por tick), así que un tramo trae ≈ LOT_EVENTS eventos con cualquier densidad.
-# 1 M de eventos son ≈ 305 MB de casillas abiertas y fronteras (EVENT_BYTES): tres tramos caben
-# bajo el tope por defecto y un mes normal (≈ 0,6 M de eventos por row group) no se parte.
-DEFAULT_LOT_EVENTS = 1_000_000
+# 2,5 M de eventos son ≈ 763 MB de casillas abiertas y fronteras (EVENT_BYTES): justo bajo los
+# 2,64 M que caben en el tope por defecto (805 306 368 ÷ 305), así que un tramo ocupa casi todo
+# el tope y en un mes denso corre un tramo a la vez. El corte solo actúa cuando un row group por
+# sí solo pasa del tope; un mes normal (≈ 0,6 M de eventos por row group) no se parte. Con 1 M
+# (ITSC-373) partía hasta 2017-11 sin necesidad y costó +38 % de CPU en los meses densos (ITSC-375).
+DEFAULT_LOT_EVENTS = 2_500_000
 
 type Lot = tuple[
     np.ndarray, Sequence[pa.Array], int, bool
@@ -706,6 +709,10 @@ def summarize_month(
             values, [item.events.row_groups for item in inputs], phases.engine_threads
         )
         stack.callback(engine.close)
+        if phases.sampler is not None:
+            # Se registra después de cerrar el motor, así que al salir se suelta antes.
+            phases.sampler.inflight = engine.inflight
+            stack.callback(setattr, phases.sampler, "inflight", None)
         # La compuerta de carry-over se espera antes que el pie de L1: con L1 ilegible y un
         # carry-over ausente sale el `l2_input_missing` de la compuerta, no el error de L1.
         _await_gates(inputs)

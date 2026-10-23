@@ -17,9 +17,15 @@ que rigió (`mmap_threshold` y `trim_threshold`).
 """
 
 import ctypes
+import functools
 import gc
 import logging
+import math
 import os
+import threading
+import time
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 
 import pyarrow as pa
 
@@ -147,3 +153,177 @@ def tune_allocators() -> None:
         os.environ.pop(_ENV, None)
         return
     os.environ[_ENV] = str(threshold)
+
+
+# ITSC-375: qué hay dentro del RSS en el pico y al cierre de la unidad.
+_SAMPLE_ENV = "L3_MEMORY_SAMPLE_S"
+DEFAULT_SAMPLE_S = 0.25
+_MIB = 1 << 20
+
+
+class _Mallinfo2(ctypes.Structure):
+    """`struct mallinfo2` de glibc ≥ 2.33: diez `size_t`, en este orden."""
+
+    _fields_ = [
+        (name, ctypes.c_size_t)
+        for name in (
+            "arena",
+            "ordblks",
+            "smblks",
+            "hblks",
+            "hblkhd",
+            "usmblks",
+            "fsmblks",
+            "uordblks",
+            "fordblks",
+            "keepcost",
+        )
+    ]
+
+
+@functools.cache
+def _mallinfo2_function() -> Callable[[], _Mallinfo2] | None:
+    try:
+        function = ctypes.CDLL(None).mallinfo2
+    except AttributeError, OSError:
+        return None
+    function.restype = _Mallinfo2
+    return function
+
+
+def _mallinfo2() -> _Mallinfo2 | None:
+    """La contabilidad de glibc de todas las arenas, o `None` sin `mallinfo2` en el libc."""
+    function = _mallinfo2_function()
+    return None if function is None else function()
+
+
+def sample_period(env: Mapping[str, str]) -> float | None:
+    """`L3_MEMORY_SAMPLE_S` como segundos (> 0), o `None` si falta o está vacía.
+
+    Un valor que no es un número finito mayor que 0 lanza `ValueError` con el motivo: la CLI
+    lo convierte en código 2.
+    """
+    raw = env.get(_SAMPLE_ENV)
+    if raw is None or not raw.strip():
+        return None
+    try:
+        value = float(raw)
+    except ValueError:
+        raise ValueError(f"{_SAMPLE_ENV}={raw!r} no es un número") from None
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError(f"{_SAMPLE_ENV}={raw!r} debe ser un número mayor que 0")
+    return value
+
+
+@dataclass(frozen=True)
+class MemSample:
+    """Una foto del proceso: su RSS y cómo lo cuenta glibc en ese instante.
+
+    `uordblks` es la memoria en uso del heap (sin las regiones `mmap`, que van en `hblkhd`) y
+    `fordblks`, la que el programa ya liberó y glibc retiene; `arena` es su suma, lo que las
+    arenas piden al sistema. `arrow` son los bytes vivos de buffers de Arrow, `engine_inflight`
+    los tramos que el motor tiene anclados (`None` si no hay motor) y `elapsed_s` los segundos
+    desde el inicio de la unidad. Los campos de glibc son `None` sin `mallinfo2`.
+    """
+
+    rss: int | None
+    arena: int | None
+    hblkhd: int | None
+    uordblks: int | None
+    fordblks: int | None
+    keepcost: int | None
+    arrow: int
+    engine_inflight: int | None
+    elapsed_s: float
+
+    def details(self) -> dict:
+        def mib(size: int | None) -> float | None:
+            return None if size is None else round(size / _MIB, 1)
+
+        return {
+            "rss_mib": mib(self.rss),
+            "arena_mib": mib(self.arena),
+            "hblkhd_mib": mib(self.hblkhd),
+            "uordblks_mib": mib(self.uordblks),
+            "fordblks_mib": mib(self.fordblks),
+            "keepcost_mib": mib(self.keepcost),
+            "arrow_mib": mib(self.arrow),
+            "engine_inflight": self.engine_inflight,
+            "elapsed_s": round(self.elapsed_s, 3),
+        }
+
+
+def take_sample(
+    started: float,
+    inflight: Callable[[], int] | None = None,
+    rss: int | None = None,
+) -> MemSample:
+    """Toma una muestra ahora. `started` es el `perf_counter` del inicio de la unidad; `rss`,
+    el RSS ya leído (el del tick del muestreador), y si falta se lee aquí.
+
+    Sin `mallinfo2` deja en `None` los campos de glibc (el aviso lo da `MemorySampler.start`);
+    nunca lanza.
+    """
+    info = _mallinfo2()
+    engine = None
+    if inflight is not None:
+        try:
+            engine = inflight()
+        except Exception:  # noqa: BLE001 - el motor ya cerró: sin dato, no un error
+            engine = None
+    return MemSample(
+        rss=rss_bytes() if rss is None else rss,
+        arena=None if info is None else info.arena,
+        hblkhd=None if info is None else info.hblkhd,
+        uordblks=None if info is None else info.uordblks,
+        fordblks=None if info is None else info.fordblks,
+        keepcost=None if info is None else info.keepcost,
+        arrow=pa.total_allocated_bytes(),
+        engine_inflight=engine,
+        elapsed_s=time.perf_counter() - started,
+    )
+
+
+class MemorySampler:
+    """Hilo `l3-memory-sampler`: guarda la muestra del RSS más alto que vio la unidad.
+
+    En cada tick (`period_s`) lee `VmRSS`, que es barato; solo si supera el máximo visto toma
+    una muestra completa, porque `mallinfo2` recorre las listas libres con el candado de cada
+    arena. Así son a lo más unas pocas llamadas por segundo mientras el RSS crece y ninguna
+    cuando ya no sube. `inflight` lo asigna quien crea el motor (y lo quita al cerrarlo).
+    """
+
+    def __init__(self, period_s: float, started: float | None = None) -> None:
+        self.period_s = period_s
+        self.started = time.perf_counter() if started is None else started
+        self.inflight: Callable[[], int] | None = None
+        self.peak: MemSample | None = None
+        self.ticks = 0
+        self._stop = threading.Event()
+        self._thread = threading.Thread(
+            target=self._run, name="l3-memory-sampler", daemon=True
+        )
+
+    def start(self) -> None:
+        if _mallinfo2_function() is None:
+            logger.warning(
+                "sin mallinfo2: las muestras de memoria no traen la contabilidad de glibc"
+            )
+        self._thread.start()
+
+    def stop(self) -> None:
+        """Para el hilo y espera a que termine; las muestras quedan en `peak` y `ticks`."""
+        self._stop.set()
+        if self._thread.is_alive():
+            self._thread.join()
+
+    def _run(self) -> None:
+        top = 0
+        while True:
+            rss = rss_bytes()
+            self.ticks += 1
+            if rss is not None and rss > top:
+                top = rss
+                self.peak = take_sample(self.started, self.inflight, rss)
+            if self._stop.wait(self.period_s):
+                return

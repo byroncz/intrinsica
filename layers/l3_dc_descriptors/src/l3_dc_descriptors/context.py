@@ -71,3 +71,6 @@ class RunContext:
     # `L3_UNIT_PROCESS` (por defecto 1): en backfill cada unidad corre en un proceso hijo y su
     # memoria muere con ella (ITSC-372). `monthly` procesa una sola unidad y no lo usa.
     unit_process: bool = True
+    # `L3_MEMORY_SAMPLE_S`: período del hilo que muestrea el RSS y guarda la muestra del pico
+    # (ITSC-375). `None` es `memory.DEFAULT_SAMPLE_S`.
+    memory_sample_s: float | None = None
