@@ -118,7 +118,10 @@ conciliación, esqueleto; o `monthly` sin ningún θ listo con rezagados) o **2*
 **Con el núcleo nuevo cabe en una sola ejecución.** La suma de los 110 meses son 4 828 s
 (1,34 h; ITSC-364), bajo las 6 h que espera el run de Actions: `from` = `2017-08`, `to`
 vacío y `force`, una vez. Sin `force`, o si una ejecución muere, se relanza y retoma donde
-quedó. Lo que sigue (rangos) es de **ITSC-335, con el núcleo original**, cuya suma eran 11,5 h
+quedó. Los 4 828 s se midieron con el asignador de T5 (rodeo de ITSC-364, que ya no hace falta):
+con la imagen 0.16.0 la corrida de 2017-08 a 2018-01 con los valores por defecto terminó (run
+39886368319), pero el backfill completo con ellos sigue pendiente (ITSC-352 o
+la siguiente). Lo que sigue (rangos) es de **ITSC-335, con el núcleo original**, cuya suma eran 11,5 h
 (41 256 s), más que las 6 h que espera el run de Actions: Cloud Run no cortaba la tarea (el
 timeout es el tope del módulo, 86 400 s), pero el run fallaría. Por eso entonces el
 histórico se lanzaba por rangos, **uno a la vez y cada uno con éxito antes del siguiente**.
@@ -653,8 +656,9 @@ job*, `l3-backfill`, `from = 2017-08`, `to = 2018-01` y `force`, con los valores
 imagen. Metas: termina; `rss_peak_mib` de 2017-12 ≤ 1 500; el `VmRSS` del padre, plano; los
 `content_hash` de los seis meses idénticos a los de ITSC-335 (`l3_compare_runs.py`). **Resultado:** terminó los
 seis meses, pero 2017-12 picó a 3 002 MiB y 2018-01 a 3 400 MiB: un solo row group de 5,76 M de
-eventos pasa solo del tope (`inflight_alone_bytes_max`) y el tope de bytes no lo acota. Lo cierra
-la corrida siguiente.
+eventos pasa solo del tope (`inflight_alone_bytes_max`) y el tope de bytes no lo acota. El aviso
+`L3_INFLIGHT_BYTES` salió una vez por mes (uno en 2017-12 y uno en 2018-01), no en cada row group.
+Lo cierra la corrida siguiente.
 
 **La corrida de ITSC-373** (la lanza el humano tras el merge y el `apply` de `l3`): *Actions → Run
 job*, `l3-backfill`, `from = 2017-08`, `to = 2018-01` y `force`, con los valores por defecto de la
@@ -842,6 +846,12 @@ jobs:
    (`force` exige `from`, y con `to` vacío llega al último mes con consolidado). Con la pared
    nueva (≤ 120 s por mes esperados; medido: 4 828 s en total) cabe en una sola ejecución
    y bajo las 6 h de Actions. Anota la fecha UTC de inicio y de fin.
+
+   **Con la imagen 0.16.0 (ITSC-372) basta con los valores por defecto.** La corrida de
+   2017-08 a 2018-01 con ellos terminó (run 39886368319). El `--update-env-vars` con el asignador
+   de T5 (`MALLOC_MMAP_THRESHOLD_=16384`, `MALLOC_TRIM_THRESHOLD_=131072`) fue el rodeo de ITSC-364
+   cuando la imagen anterior moría por memoria, y ya no hace falta. El backfill completo con los
+   valores por defecto sigue pendiente: ITSC-352 o la siguiente.
 2. Sube el script y lanza `ops-script` (`gcloud storage cp
    layers/ops_tools/scripts/l3_compare_runs.py gs://<proyecto>-ops/scripts/l3_compare_runs.py`),
    con las fechas de ITSC-335 como base y las del paso 1 como nueva:
