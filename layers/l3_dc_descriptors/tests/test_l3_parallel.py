@@ -13,9 +13,11 @@ import ast
 import importlib
 import inspect
 import itertools
+import logging
 import pkgutil
 import threading
 import time
+import types
 from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
 
@@ -162,7 +164,8 @@ def test_the_defaults_give_the_same_result_too(lake, reference):
 
 
 @pytest.mark.parametrize(
-    "option", ["threads", "readers", "inflight", "writers", "engine_threads"]
+    "option",
+    ["threads", "readers", "inflight", "writers", "engine_threads", "inflight_bytes"],
 )
 def test_it_rejects_a_knob_out_of_range(lake, option):
     with pytest.raises(ValueError, match=option):
@@ -563,6 +566,140 @@ def test_slow_writers_hold_back_the_pushes(lake, monkeypatch, tmp_path):
     )
     assert hashes[1] == hashes[10**6] == {t: r.content_hash for t, r in wanted.items()}
     assert peaks[1] < peaks[10**6]
+
+
+@pytest.mark.parametrize("cap", [1, 40_000, summarize.DEFAULT_INFLIGHT_BYTES])
+def test_the_byte_cap_gives_the_same_table_and_hash(lake, reference, cap):
+    """ITSC-372: el tope de bytes de eventos abiertos solo decide cuándo se empuja, no qué se
+    escribe: con 1 B cada row group avanza solo y el resultado es el de la referencia.
+    """
+    got = run_all(
+        lake,
+        threads=4,
+        engine_threads=4,
+        readers=2,
+        inflight=4,
+        writers=4,
+        inflight_bytes=cap,
+    )
+    assert_same(got, reference)
+
+
+def test_the_unit_reports_the_open_events_it_held(lake):
+    phases = Phases()
+    summarize_month(
+        lake.l1,
+        lake.l2,
+        lake.l3,
+        M1,
+        lake.theta_texts,
+        series_start=M1,
+        phases=phases,
+        inflight_bytes=10**9,
+    )
+    assert phases.inflight_bytes == 10**9
+    assert phases.inflight_events_max > 0
+    assert phases.inflight_bytes_max == (
+        phases.inflight_events_max * summarize.EVENT_BYTES
+    )
+
+
+def test_an_event_costs_its_output_row_and_its_boundaries():
+    """240 B de las 18 columnas de salida más 65 B de las siete de fronteras de L2."""
+    assert summarize.EVENT_BYTES == 240 + 65
+
+
+class ClosingEngine:
+    """Un motor que cierra cada row group, y los eventos que entregó, `work` s después de
+    empujarlo. Anota cuántos row groups tuvo abiertos a la vez.
+    """
+
+    def __init__(self, work: float) -> None:
+        self.work = work
+        self.open = 0
+        self.most = 0
+        self.closed = 0
+        self.lock = threading.Lock()
+
+    def start(self, events: int) -> None:
+        with self.lock:
+            self.open += 1
+            self.most = max(self.most, self.open)
+        threading.Timer(self.work, self.close, (events,)).start()
+
+    def close(self, events: int) -> None:
+        with self.lock:
+            self.open -= 1
+            self.closed += events
+
+    def inflight(self) -> int:
+        with self.lock:
+            return self.open
+
+    def needed(self, position: int) -> int:
+        with self.lock:
+            return self.closed
+
+
+class FakeFeed:
+    """Las fronteras de un θ: cada row group trae `per_group` eventos nuevos."""
+
+    position = 0
+
+    def __init__(self, per_group: int) -> None:
+        self.per_group = per_group
+        self.delivered = 0
+
+    def cover(self, high: int) -> None:
+        self.delivered += self.per_group
+
+
+def push_fake_row_groups(monkeypatch, cap: int, per_group: int = 1000, groups: int = 6):
+    """`_push_all` con 6 row groups de `per_group` eventos y un motor que tarda 30 ms en
+    cerrar cada uno. Devuelve el motor y las `Phases`.
+    """
+    engine, feed, phases = ClosingEngine(0.03), FakeFeed(per_group), Phases()
+    phases.inflight, phases.writers, phases.inflight_bytes = 4, 1, cap
+
+    def push(engine, row_group_id, ids, columns, before_month):
+        engine.start(feed.per_group)
+
+    monkeypatch.setattr(summarize.native, "push", push)
+    row_groups = [
+        types.SimpleNamespace(high=i, month=M1, ids=None, columns=None)
+        for i in range(groups)
+    ]
+    idle = types.SimpleNamespace(error=None, pending=0)
+    observed = types.SimpleNamespace(observe=lambda ids: None)
+    pushed = summarize._push_all(
+        engine, row_groups, [feed], idle, idle, [], M1, phases, observed
+    )
+    assert pushed == groups
+    while engine.inflight():
+        time.sleep(0.01)
+    return engine, phases
+
+
+def test_the_byte_cap_holds_back_a_row_group_while_the_open_events_pass_it(
+    monkeypatch, caplog
+):
+    each = 1000 * summarize.EVENT_BYTES
+    # Sin tope de bytes, K = 4 deja entrar cuatro row groups a la vez.
+    engine, phases = push_fake_row_groups(monkeypatch, 10**12)
+    assert engine.most == 4
+    # Con 1,5 row groups el segundo entra (el tope se mira antes de empujar) y el tercero espera.
+    engine, phases = push_fake_row_groups(monkeypatch, 3 * each // 2)
+    assert engine.most == 2
+    assert phases.inflight_events_max == 2000
+    assert phases.inflight_bytes_max == 2 * each
+    assert caplog.records == []
+    # Con medio row group, cada uno avanza solo: pasa del tope, avisa una vez y sigue.
+    caplog.set_level(logging.WARNING, logger="l3_dc_descriptors.summarize")
+    engine, phases = push_fake_row_groups(monkeypatch, each // 2)
+    assert engine.most == 1
+    assert phases.inflight_bytes_max == each > phases.inflight_bytes
+    assert [r.levelno for r in caplog.records] == [logging.WARNING]
+    assert "L3_INFLIGHT_BYTES" in caplog.records[0].getMessage()
 
 
 # Escritores: cola por θ con «siguiente esperado»

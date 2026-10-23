@@ -149,6 +149,9 @@ class Phases:
         "engine_threads",
         "gate_s",
         "inflight",
+        "inflight_bytes",
+        "inflight_bytes_max",
+        "inflight_events_max",
         "inflight_max",
         "items",
         "publish_s",
@@ -171,6 +174,9 @@ class Phases:
         self.writers = 1
         self.engine_threads = 1
         self.inflight_max = 0
+        self.inflight_bytes = 0
+        self.inflight_events_max = 0
+        self.inflight_bytes_max = 0
         self.items = 0
         self.engine_busy = 0.0
         self.gate_s = 0.0
@@ -354,6 +360,7 @@ class Timing:
     trim_threshold: int | None = None
     rss_before_trim_bytes: int | None = None
     rss_after_trim_bytes: int | None = None
+    spawn_s: float | None = None
 
     @property
     def cpu_s(self) -> float:
@@ -408,7 +415,13 @@ class Timing:
         cada corrida diga con qué corrió. `rss_before_trim_mib` y `rss_after_trim_mib` son el
         RSS actual del proceso (`VmRSS`, no el pico) justo antes y después de que la unidad
         devolviera al kernel lo libre con `malloc_trim(0)` (ITSC-371); el pico (`rss_peak_mib`)
-        no baja, y el que sube de unidad en unidad es este.
+        no baja, y el que sube de unidad en unidad es este. `inflight_bytes` es el tope de
+        bytes de eventos abiertos (`L3_INFLIGHT_BYTES`); `inflight_events_max` es el máximo
+        de eventos entregados al motor que aún no cerraron e `inflight_bytes_max`, lo mismo
+        por los bytes de un evento (ITSC-372): si pasa de `inflight_bytes`, un solo row group
+        trajo más eventos que el tope. `spawn_s` es lo que tardó en arrancar el proceso hijo
+        de la unidad (intérprete, importaciones y argumentos), `null` si corrió en el proceso
+        de la CLI (`L3_UNIT_PROCESS=0` o `monthly`).
         """
         p = self.phases
         seconds = {
@@ -432,6 +445,9 @@ class Timing:
             "readers": p.readers,
             "inflight": p.inflight,
             "inflight_max": p.inflight_max,
+            "inflight_bytes": p.inflight_bytes,
+            "inflight_events_max": p.inflight_events_max,
+            "inflight_bytes_max": p.inflight_bytes_max,
             "writers": p.writers,
             "engine_busy": round(p.engine_busy, 3),
             "items": p.items,
@@ -466,4 +482,5 @@ class Timing:
             "trim_threshold": self.trim_threshold,
             "rss_before_trim_mib": _mib(self.rss_before_trim_bytes),
             "rss_after_trim_mib": _mib(self.rss_after_trim_bytes),
+            "spawn_s": None if self.spawn_s is None else round(self.spawn_s, 3),
         }

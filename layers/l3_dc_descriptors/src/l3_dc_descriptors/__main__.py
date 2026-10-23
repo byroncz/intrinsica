@@ -4,4 +4,5 @@ import sys
 
 from l3_dc_descriptors.cli import main
 
-sys.exit(main())
+if __name__ == "__main__":  # el hijo de una unidad (`spawn`) importa este módulo
+    sys.exit(main())

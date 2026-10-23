@@ -18,8 +18,9 @@ motor nativo (`dc_pyo3.Engine`, crate `dc_descriptors`), que tiene sus propios h
 ```
 
 Un row group de L1 se empuja cuando hay lugar: a lo más `inflight` (K) row groups anclan sus
-ticks en el motor, y los que esperan escribirse no pasan de un tope; el lector trae `readers`
-(R) row groups por delante. Antes de cada `push`, `BoundaryFeed.cover(high)` entrega al motor
+ticks en el motor, los que esperan escribirse no pasan de un tope y los eventos entregados que
+aún no cerraron no pasan de `inflight_bytes` (ITSC-372: la memoria crece con los eventos en
+vuelo, no con los row groups); el lector trae `readers` (R) row groups por delante. Antes de cada `push`, `BoundaryFeed.cover(high)` entrega al motor
 las fronteras de L2 que ese row group toca, y no más: el motor suelta cada lote cuando sus
 eventos cierran, así que lo retenido es O(lote + eventos abiertos), no O(mes). El orden de
 los θ y de los row groups no cambia un bit de la salida: el motor deja cada fila en la casilla
@@ -49,6 +50,7 @@ Atómico por archivo: nada se publica hasta que todo el mes se resumió y concil
 van en serie en el hilo principal (los hilos del motor y del lector no se apagan).
 """
 
+import logging
 import math
 import time
 from collections.abc import Callable, Iterable, Sequence
@@ -71,6 +73,7 @@ from dc_frames.lake import L1, EventFile, Month, month_of, month_ordinal
 
 from l3_dc_descriptors import native
 from l3_dc_descriptors.boundaries import (
+    BOUNDARY_ROW_BYTES,
     EVENT_FILE_COLUMNS,
     BatchStream,
     L2Events,
@@ -94,6 +97,8 @@ from l3_dc_descriptors.reconcile import (
 from l3_dc_descriptors.schema import FAMILY, STATE_VERSION, SUMMARIES_SCHEMA
 from l3_dc_descriptors.timing import Phases
 
+logger = logging.getLogger(__name__)
+
 DEFAULT_KEY = ("binance", "spot", "BTCUSDT")
 _THETA_SCALE = Decimal("1e-8")
 # Hilos del pool de E/S por vCPU efectivo: la espera de red de cada θ (compuerta y apertura,
@@ -113,6 +118,15 @@ DEFAULT_WRITERS = 12
 # 260 MiB). Con 8 y W = 12 serían 96 ≈ 770 MiB, y T4b (W = 12) ya pagó +467 MiB sobre T4
 # (2 331 contra 1 864).
 PENDING_PER_WRITER = 3
+# Bytes que cuesta un evento abierto: su fila de salida (las 18 columnas de `ENGINE_SCHEMA`, 240 B)
+# más sus siete columnas de fronteras de L2, que el motor retiene hasta cerrarlo (65 B).
+EVENT_BYTES = sum(width for _, width, _ in native.ENGINE_SCHEMA) + BOUNDARY_ROW_BYTES
+# Tope de bytes de eventos entregados al motor que aún no cerraron (ITSC-372): lo que la unidad
+# retiene crece con los eventos en vuelo, no con los row groups, y un mes denso (2017-12:
+# 4,5 M de eventos por row group) llena el motor con K = 4 aunque solo haya tres. 768 MiB son
+# ≈ 2,6 M de eventos de 305 B: cabe el row group de un mes normal (≈ 0,6 M de eventos) con
+# varios por delante, y un mes denso entra de a uno.
+DEFAULT_INFLIGHT_BYTES = 768 << 20
 
 
 @dataclass(frozen=True, slots=True)
@@ -410,6 +424,14 @@ def _check(collector: Collector, sink: SealedWriters, inputs: Sequence[_Input]) 
             raise error
 
 
+def _unclosed(engine: dc_pyo3.Engine, feeds: Sequence[native.BoundaryFeed]) -> int:
+    """Eventos cuyas fronteras el motor tiene y que aún no cerraron: entregados menos el
+    índice del primero que no cerró (`Engine.needed`), por θ. Cota superior de lo abierto:
+    incluye lo que `cover` entregó por delante del último row group empujado.
+    """
+    return sum(feed.delivered - engine.needed(feed.position) for feed in feeds)
+
+
 def _push_all(
     engine: dc_pyo3.Engine,
     row_groups,
@@ -423,21 +445,37 @@ def _push_all(
 ) -> int:
     """Empuja al motor los row groups de L1, cada uno con las fronteras que toca.
 
-    Un row group se pide al lector solo cuando hay menos de `inflight` en el motor y pocos
-    sellados sin escribir (contrapresión): el lector trae por delante a lo más `readers`,
-    así que en RAM hay a lo más `inflight + readers + 1` row groups de L1. `read_s` suma lo
-    que este hilo esperó al lector y a las fronteras de L2. Cada row group del mes pasa por
-    `l1.observe` antes de empujarse: la conciliación cuenta de ahí los ticks hasta sus extremos
-    sin decodificar de nuevo. Devuelve cuántos empujó.
+    Un row group se pide al lector solo cuando hay menos de `inflight` en el motor, pocos
+    sellados sin escribir y menos de `inflight_bytes` de eventos abiertos (contrapresión): el
+    lector trae por delante a lo más `readers`, así que en RAM hay a lo más
+    `inflight + readers + 1` row groups de L1. Los bytes de eventos son lo que de verdad
+    crece con la densidad (ITSC-372): `_unclosed × EVENT_BYTES`. Con ningún row group en el
+    motor siempre avanza, y si ese solo row group pasa del tope avisa una vez y sigue. `read_s`
+    suma lo que este hilo esperó al lector y a las fronteras de L2. Cada row group del mes
+    pasa por `l1.observe` antes de empujarse: la conciliación cuenta de ahí los ticks hasta sus
+    extremos sin decodificar de nuevo. Devuelve cuántos empujó.
     """
     limit = PENDING_PER_WRITER * phases.writers
     source = iter(row_groups)
     pushed = 0
+    warned = False
+
+    def held(open_groups: int) -> bool:
+        return (
+            open_groups >= phases.inflight
+            or sink.pending >= limit
+            or (
+                open_groups > 0
+                and _unclosed(engine, feeds) * EVENT_BYTES > phases.inflight_bytes
+            )
+        )
+
     while True:
-        while engine.inflight() >= phases.inflight or sink.pending >= limit:
+        while held(open_groups := engine.inflight()):
             _check(collector, sink, inputs)
             time.sleep(POLL_S)
         _check(collector, sink, inputs)
+        alone = open_groups == 0
         started = time.perf_counter()
         rg = next(source, None)
         if rg is not None:
@@ -453,6 +491,21 @@ def _push_all(
         del rg  # el motor retiene sus buffers hasta terminarlo
         pushed += 1
         phases.inflight_max = max(phases.inflight_max, engine.inflight())
+        events = _unclosed(engine, feeds)
+        phases.inflight_events_max = max(phases.inflight_events_max, events)
+        phases.inflight_bytes_max = max(phases.inflight_bytes_max, events * EVENT_BYTES)
+        if alone and events * EVENT_BYTES > phases.inflight_bytes and not warned:
+            warned = True
+            logger.warning(
+                "mes %s: el row group %d de L1 trae %d eventos abiertos (%d MiB) y pasa del "
+                "tope de %d MiB (L3_INFLIGHT_BYTES); avanza solo, dividir el row group de L1 "
+                "o subir la memoria del job",
+                month_text(month),
+                pushed - 1,
+                events,
+                events * EVENT_BYTES >> 20,
+                phases.inflight_bytes >> 20,
+            )
 
 
 def summarize_month(
@@ -472,6 +525,7 @@ def summarize_month(
     inflight: int | None = None,
     writers: int | None = None,
     engine_threads: int | None = None,
+    inflight_bytes: int | None = None,
 ) -> dict[Decimal, ThetaResult]:
     """Escribe `summaries.parquet` del mes para cada θ y devuelve lo que dejó de cada uno.
 
@@ -484,8 +538,9 @@ def summarize_month(
     `THREADS_PER_CORE` × vCPU efectivos, nunca más que θ; con 1 no hay pool y esos pasos
     van en serie), `readers` los row groups de L1 que se leen a la vez (R), `inflight` los
     que pueden anclar sus ticks en el motor (K), `writers` los escritores (W) y
-    `engine_threads` los hilos del motor (por defecto los vCPU efectivos). Ver el módulo
-    para la cuenta de memoria.
+    `engine_threads` los hilos del motor (por defecto los vCPU efectivos) e `inflight_bytes`
+    el tope de bytes de eventos abiertos (`DEFAULT_INFLIGHT_BYTES`). Ver el módulo para la
+    cuenta de memoria.
 
     Atómico por archivo: la unidad comprueba la entrada de L2, resume todos los θ y concilia
     los ticks de cada uno antes de publicar el primero; un error de entrada, de resumen o de
@@ -517,6 +572,7 @@ def summarize_month(
         ("inflight", inflight),
         ("writers", writers),
         ("engine_threads", engine_threads),
+        ("inflight_bytes", inflight_bytes),
     ):
         if value is not None and value < 1:
             raise ValueError(f"{name} {value} debe ser al menos 1")
@@ -526,6 +582,9 @@ def summarize_month(
     phases.inflight = DEFAULT_INFLIGHT if inflight is None else inflight
     phases.writers = DEFAULT_WRITERS if writers is None else writers
     phases.engine_threads = _engine_threads(engine_threads)
+    phases.inflight_bytes = (
+        DEFAULT_INFLIGHT_BYTES if inflight_bytes is None else inflight_bytes
+    )
     texts = [f"{theta:.8f}" for theta in values]
 
     with ExitStack() as stack:

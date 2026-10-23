@@ -1,7 +1,8 @@
 """Punto de entrada de la imagen: `python -m l3_dc_descriptors --mode ... --from ...`.
 
-Un solo proceso, un mes a la vez, y en cada mes el fan-out de los θ que lo necesitan
-(TRD-L3 §8.2 a §8.4). Esta CLI solo decide **qué** meses y θ procesa; cada mes lo hace
+Un mes a la vez, y en cada mes el fan-out de los θ que lo necesitan (TRD-L3 §8.2 a §8.4).
+En backfill cada mes corre en un proceso hijo (`L3_UNIT_PROCESS`, ITSC-372): el padre solo
+recorre el rango y emite los hallazgos. Esta CLI solo decide **qué** meses y θ procesa; cada mes lo hace
 `pipeline.process_unit`, una función sin estado entre meses. Nada aquí guarda estado fuera
 de las variables de `main` y de las funciones que reciben lo que necesitan: ni siquiera los
 hallazgos, que viajan en el `Result` de la unidad hasta que se emiten.
@@ -37,6 +38,7 @@ from l3_dc_descriptors.memory import tune_allocators
 from l3_dc_descriptors.pipeline import process_unit
 from l3_dc_descriptors.schema import FAMILY
 from l3_dc_descriptors.thetas import ThetasError, load_thetas
+from l3_dc_descriptors.unit_process import run_unit
 
 MODES = ("backfill", "monthly")
 FAMILIES = (FAMILY,)
@@ -112,6 +114,16 @@ def _count(env: Mapping[str, str], name: str, *, minimum: int) -> int | None:
     return value
 
 
+def _flag(env: Mapping[str, str], name: str, *, default: bool) -> bool:
+    """Un interruptor de entorno (`L3_UNIT_PROCESS`): `0` o `1`, o `default` si falta o está vacío."""
+    raw = env.get(name)
+    if raw is None or not raw.strip():
+        return default
+    if raw.strip() not in ("0", "1"):
+        raise UsageError(f"{name}={raw!r} debe ser 0 o 1")
+    return raw.strip() == "1"
+
+
 def _context(mode: str, series_start: Month, env: Mapping[str, str]) -> RunContext:
     missing = [name for name in ROOT_VARS if not env.get(name)]
     if missing:
@@ -131,6 +143,8 @@ def _context(mode: str, series_start: Month, env: Mapping[str, str]) -> RunConte
         inflight=_count(env, "L3_INFLIGHT", minimum=1),
         writers=_count(env, "L3_WRITERS", minimum=1),
         engine_threads=_count(env, "L3_ENGINE_THREADS", minimum=1),
+        inflight_bytes=_count(env, "L3_INFLIGHT_BYTES", minimum=1),
+        unit_process=_flag(env, "L3_UNIT_PROCESS", default=True),
     )
 
 
@@ -235,29 +249,35 @@ def _report_drift(
     )
 
 
-def _run_unit(unit: Unit, ctx: RunContext, thetas: list[int]) -> bool:
+def _run_unit(
+    unit: Unit, ctx: RunContext, thetas: list[int], *, isolated: bool = False
+) -> bool:
     """Procesa un mes para `thetas`, emite sus hallazgos y dice si se escribió.
 
-    Los hallazgos se emiten al terminar la unidad, aunque haya fallado: es la única
+    Con `isolated` la unidad corre en un proceso hijo (`unit_process`) y su memoria muere con
+    ella. Los hallazgos se emiten al terminar la unidad, aunque haya fallado: es la única
     evidencia de por qué.
     """
-    result = process_unit(unit, ctx, thetas)
+    result = (run_unit if isolated else process_unit)(unit, ctx, thetas)
     findings.emit(ctx, list(result.findings))
     if not result.ok:
         print(f"l3_dc_descriptors: {result.error}", file=sys.stderr)
         return False
-    timing = result.timing
+    # Las medidas de la unidad salen del hallazgo `unit_timing`, que viaja igual desde el
+    # proceso hijo (el `Timing` no se serializa).
+    timing = next(f for f in result.findings if f.check_type == "unit_timing").details
     logger.info(
         "unidad %s: θ=%d eventos=%d ticks=%d wall_s=%.1f rss_peak_mib=%.0f "
-        "row_groups_month=%d row_groups_previous=%d",
+        "row_groups_month=%d row_groups_previous=%d spawn_s=%s",
         unit,
         len(thetas),
-        timing.events,
-        timing.ticks,
-        timing.wall_s,
-        timing.rss_peak_bytes / (1 << 20),
-        timing.row_groups.month,
-        timing.row_groups.previous,
+        timing["events"],
+        timing["ticks"],
+        timing["wall_s"],
+        timing["rss_peak_mib"],
+        timing["row_groups_month"],
+        timing["row_groups_previous"],
+        timing["spawn_s"],
     )
     return True
 
@@ -321,7 +341,7 @@ def _backfill(
             )
         if not ready:
             continue
-        if not _run_unit(unit, ctx, ready):
+        if not _run_unit(unit, ctx, ready, isolated=ctx.unit_process):
             return 1
         frontier.update(dict.fromkeys(ready, n))
         processed += 1
