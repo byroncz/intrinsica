@@ -351,13 +351,15 @@ tramos anclados en el motor (`engine.inflight()`). `unit_timing` publica la del 
 `mem_close_after_trim`). Cómo leerlas: `uordblks` es memoria en uso del heap y `fordblks`, memoria
 que el programa ya liberó y glibc retiene (`arena = uordblks + fordblks`; `hblkhd` son las regiones
 `mmap`, aparte). Si `fordblks` es la mayor parte del RSS del pico, el pico es retención del
-asignador y no datos vivos. El trim hace dos cosas: devuelve al kernel las páginas interiores de
-los chunks libres (baja el RSS y no toca `fordblks`) y encoge el top de cada arena (baja `arena` y
-`fordblks` en ≈ `keepcost`); entre las dos muestras del cierre corre además `gc.collect()`, que
-puede subir `fordblks`. Por eso lo que glibc retenía al cierre es
-`mem_close_before_trim.rss_mib − mem_close_after_trim.rss_mib`, `fordblks_mib` antes del trim es su
-cota superior, y `before.fordblks_mib − after.fordblks_mib` es la cima devuelta, no retención que
-«desapareció». `mem_peak_coverage` = RSS de `mem_peak` ÷ `rss_peak_mib`: bajo 0,9 el
+asignador y no datos vivos. El trim recorre cada arena y hace dos cosas: devuelve al kernel las
+páginas interiores de los chunks libres de todas las arenas (baja el RSS y no toca `fordblks`) y
+recorta solo el top de la arena principal (baja `arena` y `fordblks` en ≈ `keepcost`, que `mallinfo2`
+también reporta solo para ella); los tops de las arenas secundarias siguen residentes. Entre las dos
+muestras del cierre corre además `gc.collect()`, que puede subir `fordblks`. Por eso lo que glibc
+retenía al cierre queda acotado: `mem_close_before_trim.rss_mib − mem_close_after_trim.rss_mib` es
+una **cota inferior** (incluye lo que soltó `gc.collect()`), `fordblks_mib` antes del trim es la
+**cota superior**, y `before.fordblks_mib − after.fordblks_mib` es la cima devuelta, no retención
+que «desapareció». `mem_peak_coverage` = RSS de `mem_peak` ÷ `rss_peak_mib`: bajo 0,9 el
 muestreador se perdió el pico y se baja `L3_MEMORY_SAMPLE_S`. Es medición: no cambia el pico.
 `mallinfo2` toma el candado de cada arena y recorre sus listas libres, por eso no corre en cada tick.
 

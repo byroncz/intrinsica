@@ -589,11 +589,13 @@ def test_the_glibc_accounting_adds_up_in_the_three_samples(dense_runs):
 def test_the_trim_returns_pages_to_the_kernel_and_the_free_list_drops_at_most_the_top(
     dense_runs,
 ):
-    """`malloc_trim(0)` hace dos cosas: `madvise(MADV_DONTNEED)` sobre las páginas interiores de
-    los chunks libres (baja el RSS y no toca `fordblks`) y `systrim`/`heap_trim` sobre el top de
-    cada arena (baja `arena` y `fordblks` en ≈ `keepcost`). Entre las dos muestras del cierre
+    """`malloc_trim(0)` llama a `mtrim` por arena, que hace dos cosas: `madvise(MADV_DONTNEED)`
+    sobre las páginas interiores de los chunks libres, en todas las arenas (baja el RSS y no toca
+    `fordblks`), y, solo en la arena principal, `systrim` sobre su top (baja `arena` y `fordblks`
+    en ≈ `keepcost`, que `mallinfo2` reporta solo para ella). Entre las dos muestras del cierre
     corre además `gc.collect()`, que puede subir `fordblks`: la subida se permite y la caída no
-    puede pasar de la cima.
+    puede pasar de la cima. Lo retenido al cierre queda acotado: Δ`rss_mib` es cota inferior y
+    `before.fordblks_mib` cota superior.
     """
     for name, run in dense_runs.items():
         before, after = run["mem_close_before_trim"], run["mem_close_after_trim"]

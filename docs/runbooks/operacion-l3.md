@@ -694,11 +694,13 @@ sería `inflight_alone_bytes_max` mayor que el tope + 1,6 M × 305 B ≈ 1,29 GB
 `L3_LOT_EVENTS=1000000` (`--update-env-vars`) para obtener la medición igual; que 2,5 M no cabe entra
 en la decisión. **Qué leer:** de `mem_peak` y `mem_close_before_trim` de 2017-12 y 2018-01, qué parte
 del `rss_mib` es `fordblks_mib` (libre que glibc retiene), qué parte `uordblks_mib` + `hblkhd_mib` (en
-uso) y qué parte `arrow_mib`. Lo que glibc retenía al cierre es
-`mem_close_before_trim.rss_mib − mem_close_after_trim.rss_mib`; `fordblks_mib` antes del trim es su
-cota superior. Entre las dos muestras del cierre `fordblks_mib` cae en ≈ `keepcost_mib` (el trim
-encoge el top de cada arena) y puede subir por lo que libera `gc.collect()`: esa diferencia es la
-cima devuelta, no retención que «desapareció». El resultado va como comentario en ITSC-375 y en la entrada de decisión.
+uso) y qué parte `arrow_mib`. Lo que glibc retenía al cierre queda acotado:
+`mem_close_before_trim.rss_mib − mem_close_after_trim.rss_mib` es una cota inferior (incluye lo que
+soltó `gc.collect()`) y `fordblks_mib` antes del trim es la cota superior. Entre las dos muestras del
+cierre `fordblks_mib` cae en ≈ `keepcost_mib` (el trim recorta solo el top de la arena principal; los
+tops de las secundarias siguen residentes, y las páginas interiores de los chunks libres de todas las
+arenas se devuelven sin tocar `fordblks`) y puede subir por lo que libera `gc.collect()`: esa
+diferencia es la cima devuelta, no retención que «desapareció». El resultado va como comentario en ITSC-375 y en la entrada de decisión.
 
 ## Lector de tramas: `DC_FRAMES_IO_THREADS` y `readers`
 
