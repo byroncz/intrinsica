@@ -122,6 +122,7 @@ def _process_unit(
                 writers=ctx.writers,
                 engine_threads=ctx.engine_threads,
                 inflight_bytes=ctx.inflight_bytes,
+                lot_events=ctx.lot_events,
             )
     except SummarizeError as error:
         found = findings.from_error(ctx, unit, error)

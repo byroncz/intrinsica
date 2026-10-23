@@ -22,6 +22,7 @@ from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
 
 import l3_dc_descriptors
+import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pyref
@@ -33,6 +34,7 @@ from l3_dc_descriptors import (
     L2InputMissing,
     SkeletonMismatch,
     boundaries,
+    native,
     outputs,
     summarize,
     summarize_month,
@@ -706,7 +708,263 @@ def test_the_byte_cap_holds_back_a_row_group_while_the_open_events_pass_it(
     assert phases.inflight_bytes_max == each > phases.inflight_bytes
     assert phases.inflight_alone_bytes_max == each > phases.inflight_bytes
     assert [r.levelno for r in caplog.records] == [logging.WARNING]
-    assert "L3_INFLIGHT_BYTES" in caplog.records[0].getMessage()
+    message = caplog.records[0].getMessage()
+    assert "L3_INFLIGHT_BYTES" in message
+    # ITSC-373: el remedio ya no es dividir el row group de L1 sino bajar el lote.
+    assert "L3_LOT_EVENTS" in message
+    assert "dividir el row group" not in message
+
+
+# Lote acotado en eventos (ITSC-373): cada row group de L1 se parte en tramos al empujarlo
+
+
+def an_l1_row_group(ticks: int, first: int = 100, month=M1) -> types.SimpleNamespace:
+    """Un row group de L1 de `ticks` ticks con ids `first`, `first + 1`, ... y cuatro
+    columnas de Arrow como las del lector (la última, booleana: su offset es en bits).
+    """
+    ids = np.arange(first, first + ticks, dtype=np.int64)
+    columns = (
+        pa.array(ids * 10),
+        pa.array(ids * 100),
+        pa.array(ids * 1000),
+        pa.array(ids % 2 == 0),
+    )
+    return types.SimpleNamespace(
+        ids=ids, columns=columns, month=month, high=int(ids[-1])
+    )
+
+
+def test_the_lot_ticks_come_from_the_density_of_the_month():
+    # 1 000 000 de eventos de lote y 6,1 eventos por tick (2017-12): ≈ 164 000 ticks.
+    assert summarize._lot_ticks(1_000_000, 6_100_000, 1_000_000) == 163_934
+    # 0,66 eventos por tick (2021-01): 1,5 M de ticks, más que un row group de L1.
+    assert summarize._lot_ticks(1_000_000, 660_000, 1_000_000) == 1_515_151
+    assert summarize._lot_ticks(1, 10**9, 10) == 1  # nunca menos de un tick
+    # Desactivado (0) o sin eventos que midan la densidad: no hay corte.
+    assert summarize._lot_ticks(0, 100, 100) is None
+    assert summarize._lot_ticks(1_000, 0, 100) is None
+
+
+def test_a_row_group_is_cut_in_contiguous_lots_without_copying():
+    rg = an_l1_row_group(100)
+    lots = summarize._cut(rg, M1, 33)
+    # ceil(100 / 33) = 4 tramos de tamaño casi igual, ninguno pasa de 33.
+    assert [len(ids) for ids, *_ in lots] == [25, 25, 25, 25]
+    assert np.concatenate([ids for ids, *_ in lots]).tolist() == rg.ids.tolist()
+    start = 0
+    for ids, columns, high, before_month in lots:
+        assert high == int(ids[-1]) and before_month is False
+        assert np.shares_memory(ids, rg.ids)
+        for column, whole in zip(columns, rg.columns, strict=True):
+            assert column.to_pylist() == whole.slice(start, len(ids)).to_pylist()
+            # El mismo buffer de Arrow, con el desfase del tramo: `Engine.push` lo honra.
+            assert column.buffers()[1].address == whole.buffers()[1].address
+            assert native._bytes(column)[1] == start
+        start += len(ids)
+
+
+def test_a_row_group_that_fits_in_a_lot_is_pushed_whole():
+    rg = an_l1_row_group(100)
+    for lot_ticks in (None, 100, 1_000):
+        ((ids, columns, high, before_month),) = summarize._cut(rg, M1, lot_ticks)
+        assert ids is rg.ids and columns is rg.columns
+        assert high == rg.high and before_month is False
+    # El tramo de un mes anterior lleva la bandera de su row group.
+    assert all(lot[3] for lot in summarize._cut(rg, (2017, 9), 10))
+
+
+def push_lots(monkeypatch, row_groups, lot_ticks: int | None):
+    """`_push_all` con un motor simulado que anota lo que recibe: los `cover(high)` de cada
+    θ, cada `push` y cada `l1.observe`.
+    """
+    pushes, observed = [], []
+
+    class Feed:
+        position = 0
+        delivered = 0
+
+        def cover(self, high):
+            pushes.append(("cover", high))
+
+    class Engine:
+        def inflight(self):
+            return 0
+
+        def needed(self, position):
+            return 0
+
+    monkeypatch.setattr(
+        summarize.native,
+        "push",
+        lambda engine, ordinal, ids, columns, before: pushes.append(
+            ("push", ordinal, len(ids), before)
+        ),
+    )
+    phases = Phases()
+    phases.inflight, phases.writers, phases.inflight_bytes = 4, 1, 10**12
+    phases.lot_ticks = lot_ticks
+    idle = types.SimpleNamespace(error=None, pending=0)
+    watcher = types.SimpleNamespace(observe=lambda ids: observed.append(len(ids)))
+    pushed = summarize._push_all(
+        Engine(), row_groups, [Feed()], idle, idle, [], M1, phases, watcher
+    )
+    assert phases.lots == pushed
+    return pushed, pushes, observed
+
+
+def test_each_lot_is_a_row_group_for_the_engine_with_its_own_ordinal_and_cover(
+    monkeypatch,
+):
+    groups = [an_l1_row_group(100, 100), an_l1_row_group(60, 200, month=(2017, 7))]
+    pushed, calls, observed = push_lots(monkeypatch, groups, 30)
+    assert pushed == 4 + 2
+    # `cover` va antes de cada `push` y con el último id del tramo; los ordinales siguen.
+    assert calls == [
+        ("cover", 124), ("push", 0, 25, False),
+        ("cover", 149), ("push", 1, 25, False),
+        ("cover", 174), ("push", 2, 25, False),
+        ("cover", 199), ("push", 3, 25, False),
+        ("cover", 229), ("push", 4, 30, True),
+        ("cover", 259), ("push", 5, 30, True),
+    ]  # fmt: skip
+    # `l1.observe` ve el row group entero, una vez, y solo los del mes.
+    assert observed == [100]
+
+
+def test_without_a_cut_the_lots_are_the_row_groups(monkeypatch):
+    groups = [an_l1_row_group(100, 100), an_l1_row_group(60, 200)]
+    pushed, calls, observed = push_lots(monkeypatch, groups, None)
+    assert pushed == 2 and observed == [100, 60]
+    assert [c[2] for c in calls if c[0] == "push"] == [100, 60]
+
+
+def test_the_engine_receives_the_offset_of_each_lot(lake, reference, monkeypatch):
+    """Lo que `native.push` entrega al motor: el mismo buffer con el desfase del tramo, en
+    elementos y en bits (la columna booleana). El resultado es el de la referencia, así que
+    el motor lo honra.
+    """
+    real = summarize.native.push
+    seen = []
+
+    def spying(engine, ordinal, ids, columns, before_month):
+        seen.append((ordinal, [native._bytes(column)[1] for column in columns]))
+        real(engine, ordinal, ids, columns, before_month)
+
+    monkeypatch.setattr(summarize.native, "push", spying)
+    # Tramos de ≈ 33 ticks sobre row groups de 150: los desfases no son múltiplos de 8.
+    got = run_all(lake, engine_threads=2, readers=2, lot_events=10)
+    assert_same(got, reference)
+    offsets = {column[3] for _, column in seen}
+    assert any(offset % 8 for offset in offsets)
+    assert all(
+        len(set(column)) == 1 for _, column in seen
+    )  # los 4 con el mismo desfase
+
+
+@pytest.mark.parametrize("lot_events", [1, 5, 10, 25, 100])
+@pytest.mark.parametrize(
+    ("engine_threads", "readers", "inflight", "writers"), [(1, 1, 1, 1), (4, 2, 4, 4)]
+)
+def test_the_lots_give_the_same_table_and_hash(
+    lake, reference, lot_events, engine_threads, readers, inflight, writers
+):
+    """Con tramos de pocos ticks, hay eventos que cruzan tramos y row groups (en el lago de
+    pruebas son ≈ 0,3 eventos por tick): las tablas y los `content_hash` son los de sin corte,
+    porque la frontera que un evento cruza entre tramos se fusiona como entre row groups
+    (ADR-L3-14/16).
+    """
+    got = run_all(
+        lake,
+        threads=4,
+        engine_threads=engine_threads,
+        readers=readers,
+        inflight=inflight,
+        writers=writers,
+        lot_events=lot_events,
+    )
+    assert_same(got, reference)
+
+
+def test_the_lots_and_the_small_boundary_batches_give_the_same_result(
+    lake, reference, tiny_l2
+):
+    assert_same(run_all(lake, engine_threads=4, inflight=4, lot_events=3), reference)
+
+
+def test_a_normal_month_is_not_cut(lake):
+    """Con la densidad del lago de pruebas el lote por defecto (1 M de eventos) es mucho mayor
+    que un row group: los tramos son los row groups.
+    """
+    uncut, cut = Phases(), Phases()
+    for phases, lot_events in ((uncut, 0), (cut, None)):
+        summarize_month(
+            lake.l1,
+            lake.l2,
+            lake.l3,
+            M1,
+            lake.theta_texts,
+            series_start=M1,
+            phases=phases,
+            lot_events=lot_events,
+        )
+    assert uncut.lot_events == 0 and uncut.lot_ticks is None
+    assert cut.lot_events == summarize.DEFAULT_LOT_EVENTS == 1_000_000
+    assert cut.lot_ticks is not None and cut.lot_ticks > 150  # un row group de L1
+    assert cut.lots == uncut.lots > 1
+    assert cut.items == uncut.items
+
+
+def test_a_dense_month_is_cut_and_the_unit_says_so(lake):
+    uncut, cut = Phases(), Phases()
+    for phases, lot_events in ((uncut, 0), (cut, 10)):
+        summarize_month(
+            lake.l1,
+            lake.l2,
+            lake.l3,
+            M1,
+            lake.theta_texts,
+            series_start=M1,
+            phases=phases,
+            lot_events=lot_events,
+        )
+    assert cut.lot_events == 10
+    assert 0 < cut.lot_ticks < 150
+    assert cut.lots > 3 * uncut.lots
+    # Los ítems son (tramo, θ).
+    assert cut.items == cut.lots * (uncut.items // uncut.lots)
+
+
+def test_the_lot_is_in_the_unit_timing(lake, tmp_path):
+    ctx = RunContext(
+        mode="monthly",
+        run_id="run",
+        image_version="test",
+        series_start=M1,
+        landing_root=str(lake.l1),
+        events_root=str(lake.l2),
+        summaries_root=str(lake.l3),
+        dq_root=str(tmp_path / "dq"),
+        lot_events=10,
+    )
+    result = process_unit(Unit(*M1), ctx, lake.thetas)
+    assert result.ok, result.error
+    details = result.timing.details()
+    assert details["lot_events"] == 10
+    assert 0 < details["lot_ticks"] < 150
+    assert details["lots"] > details["row_groups_month"]
+
+
+def test_it_rejects_a_negative_lot(lake):
+    with pytest.raises(ValueError, match="lot_events"):
+        summarize_month(
+            lake.l1,
+            lake.l2,
+            lake.l3,
+            M1,
+            lake.theta_texts,
+            series_start=M1,
+            lot_events=-1,
+        )
 
 
 # Escritores: cola por θ con «siguiente esperado»

@@ -144,6 +144,7 @@ def _context(mode: str, series_start: Month, env: Mapping[str, str]) -> RunConte
         writers=_count(env, "L3_WRITERS", minimum=1),
         engine_threads=_count(env, "L3_ENGINE_THREADS", minimum=1),
         inflight_bytes=_count(env, "L3_INFLIGHT_BYTES", minimum=1),
+        lot_events=_count(env, "L3_LOT_EVENTS", minimum=0),
         unit_process=_flag(env, "L3_UNIT_PROCESS", default=True),
     )
 

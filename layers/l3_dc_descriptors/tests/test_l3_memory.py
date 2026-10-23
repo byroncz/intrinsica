@@ -393,25 +393,35 @@ DENSE_ENGINE_THREADS = 1
 # del motor = 1): baja entre 0,50 y 0,56 de esa cuenta (225 a 260 MiB de 446 MiB), así que 0,3 deja
 # un margen de casi la mitad bajo el mínimo medido.
 DENSE_MIN_GAIN = 0.3
+# ITSC-373: el lote en eventos de las corridas con corte (un tramo de 100 000 eventos son ≈ 18 750
+# ticks y 24 tramos por row group; ≈ 30 MiB de casillas y fronteras, bajo los 120 MiB del tope) y el
+# lote de las fronteras de L2: `BoundaryFeed` entrega lotes enteros por delante del tramo, hasta uno
+# por θ, y esos eventos cuentan como abiertos. Con los 32 768 de producción taparían el lote.
+LOT_EVENTS = 100_000
+LOT_BATCH_ROWS = 4096
 
 DENSE_UNIT = """
 import json, sys
-from l3_dc_descriptors import pipeline
+from l3_dc_descriptors import boundaries, pipeline
 from l3_dc_descriptors.context import RunContext, Unit
 
-l1, l2, l3, cap, count, engine_threads = sys.argv[1:7]
+l1, l2, l3, cap, count, engine_threads, options = sys.argv[1:8]
+options = json.loads(options)
+if "batch_rows" in options:
+    boundaries.L2_BATCH_ROWS = options["batch_rows"]
 ctx = RunContext(
     mode="backfill", run_id="run", image_version="test", series_start=(2017, 8),
     landing_root=l1, events_root=l2, summaries_root=l3, dq_root=f"{l3}/dq",
-    threads=8, readers=2, inflight=4, writers=1, engine_threads=int(engine_threads),
-    inflight_bytes=int(cap),
+    threads=8, readers=2, inflight=options.get("inflight", 4), writers=1,
+    engine_threads=int(engine_threads), inflight_bytes=int(cap),
+    lot_events=options.get("lot_events", 0),
 )
 result = pipeline.process_unit(Unit(2017, 8), ctx, [100_000 * k for k in range(1, int(count) + 1)])
 assert result.ok, result.error
 details = result.timing.details()
 keys = (
     "rss_peak_mib", "inflight_events_max", "inflight_bytes_max", "inflight_alone_bytes_max",
-    "inflight_bytes", "events",
+    "inflight_bytes", "events", "lot_events", "lot_ticks", "lots", "inflight_max",
 )
 print(json.dumps({k: details[k] for k in keys}))
 """
@@ -453,14 +463,22 @@ def write_dense_theta(root, theta: int, ticks: int, start: int) -> None:
 
 @pytest.fixture(scope="module")
 def dense_runs(tmp_path_factory) -> dict[str, dict]:
-    """La misma unidad densa con K = 4 solo (sin tope de bytes) y con el tope de bytes."""
+    """La misma unidad densa con K = 4 solo (sin tope de bytes), con el tope de bytes y, con el
+    tope, partiendo cada row group en tramos (ITSC-373) con K = 4 y con K = 1.
+    """
     root = tmp_path_factory.mktemp("dense")
     ticks = DENSE_GROUPS * DENSE_GROUP_TICKS
     write_flat_l1(root / "l1", ticks, DENSE_GROUP_TICKS)
     for k in range(1, DENSE_THETAS + 1):
         write_dense_theta(root / "events", 100_000 * k, ticks, 100 + 7 * k)
+    cut = {"lot_events": LOT_EVENTS, "batch_rows": LOT_BATCH_ROWS}
     runs = {}
-    for name, cap in (("k_only", 1 << 40), ("bytes", DENSE_CAP)):
+    for name, cap, options in (
+        ("k_only", 1 << 40, {}),
+        ("bytes", DENSE_CAP, {}),
+        ("lots", DENSE_CAP, cut),
+        ("lots_one", DENSE_CAP, {**cut, "inflight": 1}),
+    ):
         out = subprocess.run(
             [
                 sys.executable,
@@ -472,6 +490,7 @@ def dense_runs(tmp_path_factory) -> dict[str, dict]:
                 str(cap),
                 str(DENSE_THETAS),
                 str(DENSE_ENGINE_THREADS),
+                json.dumps(options),
             ],
             capture_output=True,
             text=True,
@@ -504,3 +523,35 @@ def test_a_row_group_over_the_cap_is_recorded_and_the_unit_goes_on(dense_runs):
     """
     capped = dense_runs["bytes"]
     assert capped["inflight_alone_bytes_max"] > capped["inflight_bytes"] == DENSE_CAP
+
+
+# ITSC-373. El lote es un tramo de a lo más LOT_EVENTS eventos, no un row group de L1.
+def test_a_lot_bounds_the_open_events_to_the_lot_not_to_the_row_group(dense_runs):
+    one_group = dense_runs["k_only"]["events"] // DENSE_GROUPS
+    ahead = DENSE_THETAS * LOT_BATCH_ROWS  # fronteras que `cover` entrega por delante
+    for name in ("lots", "lots_one"):
+        run = dense_runs[name]
+        assert run["events"] == dense_runs["bytes"]["events"], run
+        assert run["lot_events"] == LOT_EVENTS and run["lot_ticks"] > 0, run
+        # Cada row group se parte en ≈ 24 tramos.
+        assert run["lots"] > 10 * DENSE_GROUPS, run
+        # Y la unidad nunca empuja a un motor vacío más de lo que el tope admite.
+        assert run["inflight_alone_bytes_max"] <= run["inflight_bytes"], run
+    # Un tramo a la vez: los eventos abiertos son el lote, más los que `cover` trajo por delante
+    # y los que cruzan el borde del tramo (a lo más uno por θ y por borde).
+    lot = dense_runs["lots_one"]["inflight_events_max"]
+    assert lot <= LOT_EVENTS + ahead + 10 * DENSE_THETAS, dense_runs["lots_one"]
+    assert lot < one_group / 3, dense_runs
+    # Con K = 4 y el tope de bytes caben varios tramos, pero no más que el tope y un tramo.
+    cap_events = DENSE_CAP // (SLOT_BYTES + 65)
+    assert dense_runs["lots"]["inflight_events_max"] <= (
+        cap_events + LOT_EVENTS + ahead + 10 * DENSE_THETAS
+    ), dense_runs["lots"]
+
+
+def test_the_lot_lowers_the_peak_rss_by_what_the_open_slots_cost(dense_runs):
+    uncut, cut = dense_runs["bytes"], dense_runs["lots"]
+    extra = uncut["inflight_events_max"] - cut["inflight_events_max"]
+    assert extra > 0, dense_runs
+    gain = (uncut["rss_peak_mib"] - cut["rss_peak_mib"]) * MIB
+    assert gain >= DENSE_MIN_GAIN * extra * SLOT_BYTES, dense_runs
