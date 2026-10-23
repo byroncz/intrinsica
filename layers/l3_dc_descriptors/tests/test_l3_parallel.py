@@ -892,7 +892,7 @@ def test_the_lots_and_the_small_boundary_batches_give_the_same_result(
 
 
 def test_a_normal_month_is_not_cut(lake):
-    """Con la densidad del lago de pruebas el lote por defecto (1 M de eventos) es mucho mayor
+    """Con la densidad del lago de pruebas el lote por defecto (2,5 M de eventos) es mucho mayor
     que un row group: los tramos son los row groups.
     """
     uncut, cut = Phases(), Phases()
