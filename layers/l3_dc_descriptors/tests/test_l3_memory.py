@@ -562,8 +562,8 @@ def test_the_lot_lowers_the_peak_rss_by_what_the_open_slots_cost(dense_runs):
 # ITSC-375. La composición del RSS en el pico y al cierre. Ninguna aserción es un MiB absoluto
 # (la lección de ITSC-374): son relaciones que valen en cualquier máquina.
 MIN_COVERAGE = 0.9
-# El trim devuelve páginas al kernel y no cambia lo que glibc cuenta como libre.
-MAX_FREE_CHANGE = 0.05
+# Tolerancia (MiB) de la invariante del trim: los MiB van redondeados a un decimal.
+TRIM_TOLERANCE_MIB = 0.2
 
 
 def test_the_memory_sampler_sees_the_peak_of_the_dense_unit(dense_runs):
@@ -586,11 +586,21 @@ def test_the_glibc_accounting_adds_up_in_the_three_samples(dense_runs):
             assert sample["hblkhd_mib"] >= 0 and sample["keepcost_mib"] >= 0
 
 
-def test_the_trim_returns_pages_to_the_kernel_and_leaves_glibc_accounting_alone(
+def test_the_trim_returns_pages_to_the_kernel_and_the_free_list_drops_at_most_the_top(
     dense_runs,
 ):
+    """`malloc_trim(0)` hace dos cosas: `madvise(MADV_DONTNEED)` sobre las páginas interiores de
+    los chunks libres (baja el RSS y no toca `fordblks`) y `systrim`/`heap_trim` sobre el top de
+    cada arena (baja `arena` y `fordblks` en ≈ `keepcost`). Entre las dos muestras del cierre
+    corre además `gc.collect()`, que puede subir `fordblks`: la subida se permite y la caída no
+    puede pasar de la cima.
+    """
     for name, run in dense_runs.items():
         before, after = run["mem_close_before_trim"], run["mem_close_after_trim"]
         assert after["rss_mib"] < before["rss_mib"], (name, before, after)
-        change = abs(after["fordblks_mib"] - before["fordblks_mib"])
-        assert change <= MAX_FREE_CHANGE * before["fordblks_mib"], (name, before, after)
+        dropped = before["fordblks_mib"] - after["fordblks_mib"]
+        assert dropped <= before["keepcost_mib"] + TRIM_TOLERANCE_MIB, (
+            name,
+            before,
+            after,
+        )
