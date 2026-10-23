@@ -409,7 +409,10 @@ ctx = RunContext(
 result = pipeline.process_unit(Unit(2017, 8), ctx, [100_000 * k for k in range(1, int(count) + 1)])
 assert result.ok, result.error
 details = result.timing.details()
-keys = ("rss_peak_mib", "inflight_events_max", "inflight_bytes_max", "inflight_bytes", "events")
+keys = (
+    "rss_peak_mib", "inflight_events_max", "inflight_bytes_max", "inflight_alone_bytes_max",
+    "inflight_bytes", "events",
+)
 print(json.dumps({k: details[k] for k in keys}))
 """
 
@@ -496,8 +499,8 @@ def test_the_byte_cap_bounds_the_open_events_and_the_peak_rss(dense_runs):
 
 
 def test_a_row_group_over_the_cap_is_recorded_and_the_unit_goes_on(dense_runs):
-    """Con 120 MiB un solo row group denso pasa del tope: `inflight_bytes_max` lo dice y la
-    unidad terminó (límite conocido, TRD-L3 ADR-L3-16).
+    """Con 120 MiB un solo row group denso pasa del tope: `inflight_alone_bytes_max` lo dice y
+    la unidad terminó (límite conocido, TRD-L3 ADR-L3-16).
     """
     capped = dense_runs["bytes"]
-    assert capped["inflight_bytes_max"] > capped["inflight_bytes"] == DENSE_CAP
+    assert capped["inflight_alone_bytes_max"] > capped["inflight_bytes"] == DENSE_CAP

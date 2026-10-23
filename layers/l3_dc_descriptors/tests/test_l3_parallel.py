@@ -602,6 +602,8 @@ def test_the_unit_reports_the_open_events_it_held(lake):
     assert phases.inflight_bytes_max == (
         phases.inflight_events_max * summarize.EVENT_BYTES
     )
+    # El primer row group siempre entra a un motor vacío.
+    assert 0 < phases.inflight_alone_bytes_max <= phases.inflight_bytes_max
 
 
 def test_an_event_costs_its_output_row_and_its_boundaries():
@@ -692,12 +694,17 @@ def test_the_byte_cap_holds_back_a_row_group_while_the_open_events_pass_it(
     assert engine.most == 2
     assert phases.inflight_events_max == 2000
     assert phases.inflight_bytes_max == 2 * each
+    # Pasar del tope en hasta un row group es lo normal: ninguno lo pasó solo, así que
+    # `inflight_alone_bytes_max` (el límite conocido) queda bajo el tope y no hay aviso.
+    assert phases.inflight_bytes_max > phases.inflight_bytes
+    assert phases.inflight_alone_bytes_max == each < phases.inflight_bytes
     assert caplog.records == []
     # Con medio row group, cada uno avanza solo: pasa del tope, avisa una vez y sigue.
     caplog.set_level(logging.WARNING, logger="l3_dc_descriptors.summarize")
     engine, phases = push_fake_row_groups(monkeypatch, each // 2)
     assert engine.most == 1
     assert phases.inflight_bytes_max == each > phases.inflight_bytes
+    assert phases.inflight_alone_bytes_max == each > phases.inflight_bytes
     assert [r.levelno for r in caplog.records] == [logging.WARNING]
     assert "L3_INFLIGHT_BYTES" in caplog.records[0].getMessage()
 

@@ -471,11 +471,10 @@ def _push_all(
         )
 
     while True:
-        while held(open_groups := engine.inflight()):
+        while held(engine.inflight()):
             _check(collector, sink, inputs)
             time.sleep(POLL_S)
         _check(collector, sink, inputs)
-        alone = open_groups == 0
         started = time.perf_counter()
         rg = next(source, None)
         if rg is not None:
@@ -487,6 +486,7 @@ def _push_all(
             return pushed
         if rg.month == month:
             l1.observe(rg.ids)
+        alone = engine.inflight() == 0  # el row group entra a un motor vacío
         native.push(engine, pushed, rg.ids, rg.columns, rg.month < month)
         del rg  # el motor retiene sus buffers hasta terminarlo
         pushed += 1
@@ -494,6 +494,10 @@ def _push_all(
         events = _unclosed(engine, feeds)
         phases.inflight_events_max = max(phases.inflight_events_max, events)
         phases.inflight_bytes_max = max(phases.inflight_bytes_max, events * EVENT_BYTES)
+        if alone:
+            phases.inflight_alone_bytes_max = max(
+                phases.inflight_alone_bytes_max, events * EVENT_BYTES
+            )
         if alone and events * EVENT_BYTES > phases.inflight_bytes and not warned:
             warned = True
             logger.warning(

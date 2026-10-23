@@ -532,10 +532,13 @@ decenas de MiB por mes. `rss_peak_mib` es un pico y no lo ve.
 **Si un backfill muere con signal 9 (OOM).** Desde la 0.16.0 no debería: cada unidad corre en un
 proceso hijo y el tope de bytes acota los eventos abiertos (sección siguiente). Si pasa, el padre
 sigue vivo y deja `unit_process_died` con `exit_signal` 9. Qué mirar, en orden: (1) el
-`unit_timing` del mes que murió no existe (el hijo murió antes de emitirlo): lee el del mes
-anterior y compara `events` por `row_groups_month_total`; un mes denso (más de ≈ 2,6 M de eventos
-por row group) tiene `inflight_bytes_max` sobre `inflight_bytes` y es el límite conocido del tope.
-(2) Si es un mes normal, lo que cambió es el job o el asignador: compara `rss_peak_mib` con el de
+`unit_timing` del mes que murió no existe (el hijo murió antes de emitirlo), así que la señal sale
+de otros dos lados. En Cloud Logging, busca el aviso `L3_INFLIGHT_BYTES` del mes: el hijo lo emite
+al empujar un row group que por sí solo pasa del tope, antes de morir. Y mide la densidad del mes
+con lo que sí existe: suma `metric_value` de los `events_summary` de L2 de ese mes (los eventos de
+todos los θ, [`operacion-l2`](operacion-l2.md#paso-2-reproducibilidad)) y divídela por los row
+groups de `consolidated.parquet` de L1 de ese mes; más de ≈ 2,6 M de eventos por row group es el
+límite conocido del tope. (2) Si es un mes normal, lo que cambió es el job o el asignador: compara `rss_peak_mib` con el de
 los meses vecinos. (3) Relanza **desde Cloud Shell** con el asignador de T5, que devuelve la
 memoria al kernel en cada `free`, o con más memoria en el job. Repite los `--args` del run que
 murió, tal como los imprime `run-job-args.sh` (con `--force` si lo llevaba) y empieza en el mes
@@ -594,11 +597,13 @@ Dos mecanismos, los dos por construcción y no por ajuste del asignador
 **Qué mirar en `unit_timing`.** `spawn_s` es el arranque del hijo (en local, 0,1 a 0,2 s; la
 estimación para Cloud Run es ≈ 1 s por mes); `null` si la unidad corrió en el proceso de la CLI.
 `rss_peak_mib` es el pico del hijo, de esa unidad sola: ya no hay deriva entre meses que mirar.
-`inflight_events_max` e `inflight_bytes_max` son el máximo de eventos abiertos y su costo; si
-`inflight_bytes_max` pasa de `inflight_bytes`, un solo row group de L1 trajo más eventos que el tope
-(la unidad avanza igual y avisa en el log): el pico de ese mes es ≈ ese row group, y se arregla
-dividiendo el row group en L1 (card de L1) o subiendo la memoria del job. Con `L3_PROFILE=1` el perfil
-es del hijo.
+`inflight_events_max` e `inflight_bytes_max` son el máximo de eventos abiertos y su costo; el tope
+se mira antes de empujar, así que `inflight_bytes_max` puede pasar de `inflight_bytes` hasta en un
+row group: es lo normal y no es una señal. La señal es `inflight_alone_bytes_max`, el máximo de
+bytes abiertos tras empujar un row group a un motor vacío: si pasa de `inflight_bytes`, un solo row
+group de L1 trajo más eventos que el tope (la unidad avanza igual y avisa en el log): el pico de ese
+mes es ≈ ese row group, y se arregla dividiendo el row group en L1 (card de L1) o subiendo la
+memoria del job. Con `L3_PROFILE=1` el perfil es del hijo.
 
 **El padre.** Su `VmRSS` es ≈ 80 MiB y no sube de un mes a otro: no importa lo que la unidad toca.
 La memoria del job es la del padre más la del hijo de la unidad.
@@ -611,7 +616,13 @@ el mismo hallazgo con `exit_code` 1 y el traceback en `error`.
 **La corrida de ITSC-372** (la lanza el humano tras el merge y el `apply` de `l3`): *Actions → Run
 job*, `l3-backfill`, `from = 2017-08`, `to = 2018-01` y `force`, con los valores por defecto de la
 imagen. Metas: termina; `rss_peak_mib` de 2017-12 ≤ 1 500; el `VmRSS` del padre, plano; los
-`content_hash` de los seis meses idénticos a los de ITSC-335 (`l3_compare_runs.py`). Después, si
+`content_hash` de los seis meses idénticos a los de ITSC-335 (`l3_compare_runs.py`). **Qué esperar
+de 2017-12:** sus row groups traen ≈ 4,5 M de eventos, sobre los ≈ 2,6 M del tope, así que cae en el
+límite conocido: el log trae el aviso `L3_INFLIGHT_BYTES` en cada row group e
+`inflight_alone_bytes_max` ronda 1 300 MiB. No es una falla; la meta de 1 500 MiB descansa en que
+ese row group cierre sus eventos dentro de él y en que el tope no deje convivir a los demás. Si el
+pico queda sobre la meta con el aviso presente, la causa es el row group de L1 y no el tope.
+Después, si
 ITSC-364 no terminó con el asignador de T5, el backfill completo con los valores por defecto. El
 resultado va como comentario en ITSC-372 y en
 [§10.2](../TRD/l3.md#102-dimensionamiento--hipótesis-de-partida-y-primera-medición).

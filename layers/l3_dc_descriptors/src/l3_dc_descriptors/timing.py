@@ -149,6 +149,7 @@ class Phases:
         "engine_threads",
         "gate_s",
         "inflight",
+        "inflight_alone_bytes_max",
         "inflight_bytes",
         "inflight_bytes_max",
         "inflight_events_max",
@@ -177,6 +178,7 @@ class Phases:
         self.inflight_bytes = 0
         self.inflight_events_max = 0
         self.inflight_bytes_max = 0
+        self.inflight_alone_bytes_max = 0
         self.items = 0
         self.engine_busy = 0.0
         self.gate_s = 0.0
@@ -418,8 +420,12 @@ class Timing:
         no baja, y el que sube de unidad en unidad es este. `inflight_bytes` es el tope de
         bytes de eventos abiertos (`L3_INFLIGHT_BYTES`); `inflight_events_max` es el máximo
         de eventos entregados al motor que aún no cerraron e `inflight_bytes_max`, lo mismo
-        por los bytes de un evento (ITSC-372): si pasa de `inflight_bytes`, un solo row group
-        trajo más eventos que el tope. `spawn_s` es lo que tardó en arrancar el proceso hijo
+        por los bytes de un evento (ITSC-372). El tope se mira antes de empujar, así que
+        `inflight_bytes_max` puede pasar de `inflight_bytes` hasta en un row group sin que
+        ninguno lo pase solo: es lo normal, no una señal. El límite conocido es
+        `inflight_alone_bytes_max`, los bytes abiertos tras empujar un row group a un motor
+        vacío: si pasa de `inflight_bytes`, un solo row group trajo más eventos que el tope
+        (y salió el aviso `L3_INFLIGHT_BYTES`). `spawn_s` es lo que tardó en arrancar el proceso hijo
         de la unidad (intérprete, importaciones y argumentos), `null` si corrió en el proceso
         de la CLI (`L3_UNIT_PROCESS=0` o `monthly`).
         """
@@ -448,6 +454,7 @@ class Timing:
             "inflight_bytes": p.inflight_bytes,
             "inflight_events_max": p.inflight_events_max,
             "inflight_bytes_max": p.inflight_bytes_max,
+            "inflight_alone_bytes_max": p.inflight_alone_bytes_max,
             "writers": p.writers,
             "engine_busy": round(p.engine_busy, 3),
             "items": p.items,

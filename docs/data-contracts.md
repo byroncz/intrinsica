@@ -698,9 +698,11 @@ mismo que traen las excepciones del resumidor, de las que sale la mayoría de lo
   (`MALLOC_TRIM_THRESHOLD_`; `null` si no está fijada); y `rss_before_trim_mib` y
   `rss_after_trim_mib`, el `VmRSS` del proceso justo antes y después de devolver la memoria al kernel
   al cerrar la unidad (desde la 2.5.0 del TRD-L3); `inflight_bytes` (el tope de bytes de eventos
-  abiertos, `L3_INFLIGHT_BYTES`), `inflight_events_max` e `inflight_bytes_max` (el máximo de
-  eventos entregados al motor que aún no cerraron y ese máximo por 305 B: si pasa del tope, un solo
-  row group lo superó) y `spawn_s` (lo que tardó en arrancar el proceso hijo de la unidad; `null`
+  abiertos, `L3_INFLIGHT_BYTES`), `inflight_events_max`, `inflight_bytes_max` (el máximo de
+  eventos entregados al motor que aún no cerraron y ese máximo por 305 B; puede pasar del tope hasta
+  en un row group, porque el tope se mira antes de empujar) e `inflight_alone_bytes_max` (lo mismo
+  para los row groups que entraron a un motor vacío: si pasa del tope, un solo row group lo superó)
+  y `spawn_s` (lo que tardó en arrancar el proceso hijo de la unidad; `null`
   si corrió en el proceso de la CLI), desde la 2.6.0. No cuenta las lecturas de la conciliación (solo
   `agg_trade_id` de los row groups de las fronteras). Va aparte de `summaries_summary`
   porque sus tiempos cambian en cada corrida y el de `summaries_summary` no puede.

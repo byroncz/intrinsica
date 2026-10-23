@@ -56,8 +56,11 @@ ya cerraron (`Engine.needed`), por θ. Los 305 B son 240 B de la fila de salida 
 `ENGINE_SCHEMA`) y 65 B de las fronteras de L2 que el motor retiene hasta cerrar el evento; 768 MiB
 son ≈ 2,6 M de eventos. Un row group de un mes normal trae ≈ 0,6 M de eventos y 2017-12 trae
 4,5 M: sin este tope, con K = 4 caben los tres row groups del mes y la unidad picó a 3 545 MiB. Un
-row group que por sí solo pasa del tope avanza igual (avisa una vez; `inflight_bytes_max` >
-`inflight_bytes` en `unit_timing`): dividir el row group de L1 o subir la memoria del job.
+row group que por sí solo pasa del tope avanza igual (avisa una vez; `inflight_alone_bytes_max` >
+`inflight_bytes` en `unit_timing`): dividir el row group de L1 o subir la memoria del job. El tope
+se mira antes de empujar, así que `inflight_bytes_max` puede pasar de `inflight_bytes` hasta en un
+row group sin que sea esa señal. 2017-12 cae en este caso (≈ 4,5 M de eventos por row group): el
+aviso es lo esperado.
 `L3_PREFETCH` ya no existe (ITSC-363). `CLOUD_RUN_TASK_INDEX` distinto de 0 es código 2. `IMAGE_VERSION` la fija la imagen.
 
 **Códigos de salida** ([§8.4](../../docs/TRD/l3.md#84-códigos-de-salida)): 0 éxito; 1 fallo
@@ -86,7 +89,7 @@ ya no existe: el linaje lo publica L2 y se lee; `read_s` es lo que el hilo princ
 `read_wall_s` y `write_s` la pared con alguna lectura o algún escritor ocupado), la configuración
 (`threads`, `engine_threads`, `readers`, `inflight`, `writers`), lo que hizo el motor
 (`inflight_max`, `engine_busy`, `items`, `inflight_bytes`, `inflight_events_max`,
-`inflight_bytes_max`), `spawn_s` (el arranque del proceso hijo de la unidad), `read_bytes`, `boundaries_peak_mib`,
+`inflight_bytes_max`, `inflight_alone_bytes_max`), `spawn_s` (el arranque del proceso hijo de la unidad), `read_bytes`, `boundaries_peak_mib`,
 `rss_peak_mib` (`VmHWM`, reiniciado al empezar la unidad), `row_groups_month` y
 `row_groups_previous` (decodificaciones de L1 del mes y de meses anteriores, contadas con un
 gancho sobre `dc_frames.lake.open_parquet` como hace la sonda de `ops_tools`),
