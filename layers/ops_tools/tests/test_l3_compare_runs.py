@@ -182,8 +182,10 @@ def test_run_id_acota_el_lado_dentro_de_un_mismo_dia(compare, lake, capsys):
     assert "pares=4 coinciden=4" in out
 
 
-def test_una_corrida_repetida_gana_la_ultima_por_detected_at(compare, lake, capsys):
-    """Un mes que se reconstruye con otro contenido cuenta con lo último que quedó."""
+def test_una_corrida_anterior_fuera_del_rango_de_fechas_no_cuenta(
+    compare, lake, capsys
+):
+    """La corrida «old» (del 09, otro contenido) queda fuera de `--base-dates 2026-10-10:`."""
     old = run_of("old", "2026-10-09", {("0.00100000", 2021, 1): {"content_hash": "x"}})
     lake(*old, *run_of("base", "2026-10-10"), *run_of("new", "2026-10-22"))
     code, out = run(
