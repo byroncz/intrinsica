@@ -474,7 +474,8 @@ del humano, 2026-10-14 (revierte la del 2026-10-13); detalle en
 
 **Cómputo, definitivo (ITSC-335, 2026-10-15).** 4 vCPU, 4 GiB, `max_retries = 1`
 y una sola tarea en un solo hilo. Medido sobre los 110 meses (2017-08 a 2026-09):
-RSS pico máximo 1 267 MiB (2018-01, 31 % de 4 GiB), sin OOM; mes más pesado
+RSS pico máximo 2 942 MiB (2018-01, 72 % de 4 GiB, imagen 0.17.0; ITSC-375 mide su
+composición; el 1 267 MiB de ITSC-335 es del núcleo original), sin OOM; mes más pesado
 2021-01 con 1 419 s (no 2023-03, 873 s: la pared sigue a los eventos más que a los
 ticks); suma de `wall_s` 41 256 s (11,5 h). Timeouts con la regla de TRD-L2 §10.2:
 `l3-monthly` 10 800 s (7,6 veces 1 419 s; el mínimo son 8 514 s) y `l3-backfill`
