@@ -28,6 +28,9 @@ def env_for(
         "L3_SUMMARIES_ROOT": str(lake.l3),
         "L3_DQ_ROOT": str(base / "dq"),
         "IMAGE_VERSION": "0.4.0+test",
+        # En proceso por defecto: un hijo por unidad (ITSC-372) cuesta ≈ 1 s de arranque y las
+        # pruebas lo piden donde lo prueban (`test_l3_unit_process.py`).
+        "L3_UNIT_PROCESS": "0",
         **extra,
     }
     if catalog is not None:

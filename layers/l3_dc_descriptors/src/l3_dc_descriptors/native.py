@@ -116,6 +116,8 @@ class BoundaryFeed:
         self._retained = retained
         self._batches = iter(batches)
         self._last: int | None = None  # referencia del último evento entregado
+        self.position = position
+        self.delivered = 0  # eventos entregados al motor: no baja
 
     def cover(self, high: int) -> None:
         """Entrega lo que falta para un row group cuyo último id es `high`."""
@@ -126,6 +128,7 @@ class BoundaryFeed:
             if batch.num_rows == 0:
                 continue
             push_boundaries(self._engine, self._position, batch, self._retained)
+            self.delivered += batch.num_rows
             self._last = batch.column("reference_agg_trade_id")[-1].as_py()
 
 

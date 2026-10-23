@@ -130,8 +130,9 @@ def throttled_s(
 def process_cpu_s() -> tuple[float, float]:
     """Segundos de CPU de usuario y de sistema que lleva el proceso, todos sus hilos.
 
-    `getrusage` es acumulado del proceso, no de la unidad (`backfill` corre varias en el
-    mismo proceso): la unidad usa la diferencia entre su inicio y su final.
+    `getrusage` es acumulado del proceso, no de la unidad (con `L3_UNIT_PROCESS=0`,
+    `backfill` corre varias en el mismo proceso; con el hijo por unidad, el acumulado es el de
+    la unidad): la unidad usa la diferencia entre su inicio y su final.
     """
     usage = resource.getrusage(resource.RUSAGE_SELF)
     return usage.ru_utime, usage.ru_stime

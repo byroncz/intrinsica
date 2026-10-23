@@ -55,12 +55,16 @@ class RunContext:
     family: str = FAMILY
     # `L3_PROFILE=1`: la unidad corre bajo cProfile y emite `unit_profile`.
     profile: bool = False
-    # `L3_THREADS`, `L3_READERS`, `L3_INFLIGHT`, `L3_WRITERS` y `L3_ENGINE_THREADS`: pool de
-    # E/S (`None`: `ceil(3 × vCPU)`), lectores de L1 (R), row groups en vuelo en el motor
-    # (K), escritores (W) e hilos del motor (`None`: los vCPU). `None` es el valor por
-    # defecto de `summarize`.
+    # `L3_THREADS`, `L3_READERS`, `L3_INFLIGHT`, `L3_WRITERS`, `L3_ENGINE_THREADS` y
+    # `L3_INFLIGHT_BYTES`: pool de E/S (`None`: `ceil(3 × vCPU)`), lectores de L1 (R), row
+    # groups en vuelo en el motor (K), escritores (W), hilos del motor (`None`: los vCPU) y
+    # tope de bytes de eventos abiertos. `None` es el valor por defecto de `summarize`.
     threads: int | None = None
     readers: int | None = None
     inflight: int | None = None
     writers: int | None = None
     engine_threads: int | None = None
+    inflight_bytes: int | None = None
+    # `L3_UNIT_PROCESS` (por defecto 1): en backfill cada unidad corre en un proceso hijo y su
+    # memoria muere con ella (ITSC-372). `monthly` procesa una sola unidad y no lo usa.
+    unit_process: bool = True

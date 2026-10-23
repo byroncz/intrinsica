@@ -72,7 +72,7 @@ relanza los mismos inputs.
    86400`, `maxRetries: 1`, `cpu: '4'` y `memory: 4Gi` en `limits`. Las raíces
    (`L3_LANDING_ROOT`, `L3_EVENTS_ROOT`, `L3_SUMMARIES_ROOT`, `L3_DQ_ROOT`),
    `L3_SERIES_START` y `L3_THETAS_URI` van en `env`; `L3_THREADS`, `L3_READERS`, `L3_INFLIGHT`,
-   `L3_WRITERS` y `L3_ENGINE_THREADS` son opcionales (ver "Hilos y topes de la unidad").
+   `L3_WRITERS`, `L3_ENGINE_THREADS`, `L3_INFLIGHT_BYTES` y `L3_UNIT_PROCESS` son opcionales (ver "Hilos y topes de la unidad" y "Memoria acotada").
 2. **Imagen `l3_dc_descriptors`** de `layers/l3_dc_descriptors/VERSION`. El stack
    `l3` deriva el tag de ese archivo: sin `apply` posterior al merge, el job
    sigue con la imagen vieja.
@@ -161,7 +161,7 @@ causa en el log de la ejecución:
   10 800 s (7,6 veces el mes más pesado).
 - **Un hallazgo `error`**: lee su `check_type` en la tabla siguiente.
 
-Los 15 `check_type` de [TRD-L3 §9.3](../TRD/l3.md#93-tipos-de-chequeo-check_type),
+Los 16 `check_type` de [TRD-L3 §9.3](../TRD/l3.md#93-tipos-de-chequeo-check_type),
 y qué hacer con cada uno. En todos los casos de `error`, **el mes no se publica y
 la frontera no avanza**: relanzar los mismos inputs retoma donde quedó. Nunca
 repares un archivo de `l3/` a mano.
@@ -182,6 +182,7 @@ repares un archivo de `l3/` a mano.
 | `theta_config_drift` | `info` | L3 tiene particiones de un θ que ya no está en el catálogo | Informa. Quitar un θ del catálogo no borra nada; si fue un error, restáuralo |
 | `summaries_summary` | `info` | Uno por θ y mes: filas, `content_hash` del archivo y de las entradas de L2 que usó | Es el linaje contra L2: sirve para comparar corridas y para detectar un mes obsoleto |
 | `unit_timing` | `info` | Uno por unidad (mes): pared, tiempo por fase, CPU efectiva y consumida (`cpu_s`, `cpu_utilization`) y bytes leídos | Es la fuente de las cifras de "Volumen y costo" |
+| `unit_process_died` | `error` | El proceso hijo de la unidad terminó sin resultado (`exit_signal` 9 es el OOM del cgroup, `signal_name` `SIGKILL`) | La unidad no se publicó y el rango se detuvo. Ver "Memoria acotada: un proceso por unidad y `L3_INFLIGHT_BYTES`" |
 | `unit_profile` | `info` | Solo con `L3_PROFILE=1`, uno por unidad: las 40 funciones más caras por tiempo propio y acumulado | Es para proporciones, no para absolutos. Ver "Perfilar una unidad" |
 
 Para leer los hallazgos de una corrida desde Cloud Shell, **baja primero solo las
@@ -528,13 +529,21 @@ cada unidad, con éxito o con error, y `unit_timing` registra el `VmRSS` de ante
 alarma si queda casi plano (en local sube ≈ 2 MiB por unidad, por fragmentación); sí si crece
 decenas de MiB por mes. `rss_peak_mib` es un pico y no lo ve.
 
-**Si un backfill muere con signal 9 (OOM).** (1) Mira en `unit_timing` de los meses anteriores
-`rss_after_trim_mib` y `rss_peak_mib`: si el RSS al cerrar crece mes a mes, es retención entre
-unidades; si un solo mes pasa de 3 500 MiB, es la regla de retroceso de arriba. (2) Relanza **desde
-Cloud Shell** con el asignador de T5, que devuelve la memoria al kernel en cada `free`. Repite los
-`--args` del run que murió, tal como los imprime `run-job-args.sh` (con `--force` si lo llevaba, como
-el de ITSC-364), y empieza en el mes que murió: los meses anteriores ya quedaron publicados. Sin
-`--force` un mes ya publicado se salta, así que quita la bandera solo si el run original no la llevaba.
+**Si un backfill muere con signal 9 (OOM).** Desde la 0.16.0 no debería: cada unidad corre en un
+proceso hijo y el tope de bytes acota los eventos abiertos (sección siguiente). Si pasa, el padre
+sigue vivo y deja `unit_process_died` con `exit_signal` 9. Qué mirar, en orden: (1) el
+`unit_timing` del mes que murió no existe (el hijo murió antes de emitirlo), así que la señal sale
+de otros dos lados. En Cloud Logging, busca el aviso `L3_INFLIGHT_BYTES` del mes: el hijo lo emite
+al empujar un row group que por sí solo pasa del tope, antes de morir. Y mide la densidad del mes
+con lo que sí existe: suma `metric_value` de los `events_summary` de L2 de ese mes (los eventos de
+todos los θ, [`operacion-l2`](operacion-l2.md#paso-2-reproducibilidad)) y divídela por los row
+groups de `consolidated.parquet` de L1 de ese mes; más de ≈ 2,6 M de eventos por row group es el
+límite conocido del tope. (2) Si es un mes normal, lo que cambió es el job o el asignador: compara `rss_peak_mib` con el de
+los meses vecinos. (3) Relanza **desde Cloud Shell** con el asignador de T5, que devuelve la
+memoria al kernel en cada `free`, o con más memoria en el job. Repite los `--args` del run que
+murió, tal como los imprime `run-job-args.sh` (con `--force` si lo llevaba) y empieza en el mes
+que murió: los meses anteriores ya quedaron publicados. Sin `--force` un mes ya publicado se
+salta, así que quita la bandera solo si el run original no la llevaba.
 
 ```bash
 gcloud run jobs execute l3-backfill \
@@ -545,9 +554,9 @@ gcloud run jobs execute l3-backfill \
 ```
 
 Cuesta ≈ 100 s de CPU de sistema en los meses pesados, y los `content_hash` no cambian: no dependen
-del asignador. (3) Abre una card con los `unit_timing` del run. Toda medición de memoria del
-asignador se hace con **varias unidades en un proceso** (`from` y `to` distintos), nunca con una
-sola: una unidad no muestra lo que se acumula entre meses.
+del asignador. (4) Abre una card con los `unit_timing` del run. Toda medición de memoria del
+asignador se hace con **varias unidades** (`from` y `to` distintos), nunca con una sola: una
+unidad no muestra lo que se acumula entre meses.
 
 **La corrida de ITSC-371** (la lanza el humano tras el merge y el `apply` de `l3`): *Actions → Run
 job*, `l3-backfill`, `from = 2017-08`, `to = 2018-01` y `force`, con los valores por defecto de la
@@ -573,6 +582,50 @@ con la fila de T7 y compara solo corridas con la misma cuota de CPU (`cores` de 
 corrió con 3,23 cores y su pared no se compara con la de T5. Si los fallos de página no bajan, la
 fuente se busca con `strace -c -f` (conteo de `mmap`, `munmap`, `madvise` y `brk`) y `/usr/bin/time
 -v` sobre el mes local 2020-01 en el contenedor.
+
+## Memoria acotada: un proceso por unidad y `L3_INFLIGHT_BYTES` (ITSC-372)
+
+Dos mecanismos, los dos por construcción y no por ajuste del asignador
+([ADR-L3-16](../TRD/l3.md#616-adr-l3-16--motor-de-agregación-nativo-ítems-por-row-group-y-θ-casillas-por-evento-fusión-asociativa),
+«Memoria acotada por construcción»):
+
+| Variable | Qué fija | Por defecto |
+|---|---|---|
+| `L3_UNIT_PROCESS` | `1`: cada unidad de `backfill` corre en un proceso hijo (`spawn`) y su memoria muere con ella; `0`: en el proceso de la CLI. `monthly` no la usa. Otro valor es código 2 | `1` |
+| `L3_INFLIGHT_BYTES` | Tope de bytes de eventos entregados al motor que aún no cerraron (305 B por evento). Entero ≥ 1 | 805 306 368 (768 MiB, ≈ 2,6 M de eventos) |
+
+**Qué mirar en `unit_timing`.** `spawn_s` es el arranque del hijo (en local, 0,1 a 0,2 s; la
+estimación para Cloud Run es ≈ 1 s por mes); `null` si la unidad corrió en el proceso de la CLI.
+`rss_peak_mib` es el pico del hijo, de esa unidad sola: ya no hay deriva entre meses que mirar.
+`inflight_events_max` e `inflight_bytes_max` son el máximo de eventos abiertos y su costo; el tope
+se mira antes de empujar, así que `inflight_bytes_max` puede pasar de `inflight_bytes` hasta en un
+row group: es lo normal y no es una señal. La señal es `inflight_alone_bytes_max`, el máximo de
+bytes abiertos tras empujar un row group a un motor vacío: si pasa de `inflight_bytes`, un solo row
+group de L1 trajo más eventos que el tope (la unidad avanza igual y avisa en el log): el pico de ese
+mes es ≈ ese row group, y se arregla dividiendo el row group en L1 (card de L1) o subiendo la
+memoria del job. Con `L3_PROFILE=1` el perfil es del hijo.
+
+**El padre.** Su `VmRSS` es ≈ 80 MiB y no sube de un mes a otro: no importa lo que la unidad toca.
+La memoria del job es la del padre más la del hijo de la unidad.
+
+**Cuando un hijo muere.** El padre queda vivo, emite `unit_process_died` (`exit_signal` 9, `signal_name`
+`SIGKILL`: el OOM del cgroup; `exit_code` -9) y termina con código 1 como con cualquier unidad
+fallida: el mes no se publicó y los siguientes no se tocan. Una excepción que la unidad no tipó deja
+el mismo hallazgo con `exit_code` 1 y el traceback en `error`.
+
+**La corrida de ITSC-372** (la lanza el humano tras el merge y el `apply` de `l3`): *Actions → Run
+job*, `l3-backfill`, `from = 2017-08`, `to = 2018-01` y `force`, con los valores por defecto de la
+imagen. Metas: termina; `rss_peak_mib` de 2017-12 ≤ 1 500; el `VmRSS` del padre, plano; los
+`content_hash` de los seis meses idénticos a los de ITSC-335 (`l3_compare_runs.py`). **Qué esperar
+de 2017-12:** sus row groups traen ≈ 4,5 M de eventos, sobre los ≈ 2,6 M del tope, así que cae en el
+límite conocido: el log trae el aviso `L3_INFLIGHT_BYTES` en cada row group e
+`inflight_alone_bytes_max` ronda 1 300 MiB. No es una falla; la meta de 1 500 MiB descansa en que
+ese row group cierre sus eventos dentro de él y en que el tope no deje convivir a los demás. Si el
+pico queda sobre la meta con el aviso presente, la causa es el row group de L1 y no el tope.
+Después, si
+ITSC-364 no terminó con el asignador de T5, el backfill completo con los valores por defecto. El
+resultado va como comentario en ITSC-372 y en
+[§10.2](../TRD/l3.md#102-dimensionamiento--hipótesis-de-partida-y-primera-medición).
 
 ## Lector de tramas: `DC_FRAMES_IO_THREADS` y `readers`
 

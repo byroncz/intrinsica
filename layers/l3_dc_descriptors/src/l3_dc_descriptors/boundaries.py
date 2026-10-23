@@ -60,6 +60,9 @@ L2_TYPES = MappingProxyType(
         "extreme_price": DECIMAL,
     }
 )
+# Bytes de las siete columnas de fronteras de un evento, que el motor retiene hasta cerrarlo: cuatro
+# `int64`, un `int8` y dos `decimal128`.
+BOUNDARY_ROW_BYTES = 4 * 8 + 1 + 2 * 16
 # Lotes que `BatchStream` trae por delante de quien los consume, por θ.
 L2_AHEAD = 2
 

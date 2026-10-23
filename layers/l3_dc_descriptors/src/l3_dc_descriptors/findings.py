@@ -6,6 +6,7 @@ resumidor, de las que sale la mayoría de los `details`.
 """
 
 import logging
+import signal
 
 from dq import Finding, Severity, Stage, Status, emit_findings
 
@@ -185,6 +186,38 @@ def unit_timing(ctx: RunContext, unit: Unit, timing: Timing) -> Finding:
         status=Status.PASS,
         metric_value=round(timing.wall_s, 3),
         details=timing.details(),
+    )
+
+
+def unit_process_died(
+    ctx: RunContext,
+    unit: Unit,
+    *,
+    exit_signal: int | None,
+    exit_code: int | None,
+    error: str | None = None,
+) -> Finding:
+    """El proceso hijo de la unidad terminó sin devolver su resultado (ITSC-372).
+
+    `exit_signal` es la señal que lo mató (9 es el OOM del cgroup); `exit_code`, su código de
+    salida si terminó solo (una excepción que no es de la unidad), con `error` como motivo.
+    La unidad queda fallida y no deja archivos publicados.
+    """
+    try:
+        name = signal.Signals(exit_signal).name if exit_signal else None
+    except ValueError:  # señal de tiempo real: sin nombre en `signal.Signals`
+        name = None
+    return failure(
+        ctx,
+        unit,
+        "unit_process_died",
+        {
+            "month": f"{unit.year:04d}-{unit.month:02d}",
+            "exit_signal": exit_signal,
+            "signal_name": name,
+            "exit_code": exit_code,
+            "error": error,
+        },
     )
 
 
