@@ -50,12 +50,16 @@ def finding(run, day, check, year, month, details, asset="BTCUSDT", hour=12) -> 
     )
 
 
-def summary(run, day, theta, year, month, content_hash=None, rows=10, **extra):
+def summary(
+    run, day, theta, year, month, content_hash=None, rows=10, family=None, **extra
+):
     details = {
         "theta": theta,
         "rows": rows,
         "content_hash": content_hash or f"h-{theta}-{year}-{month}",
     }
+    if family is not None:
+        details["family"] = family
     return finding(run, day, "summaries_summary", year, month, details, **extra)
 
 
@@ -192,6 +196,33 @@ def test_una_corrida_repetida_gana_la_ultima_por_detected_at(compare, lake, caps
         "2026-10-22",
     )
     assert code == 0, out
+
+
+def test_solo_se_compara_la_familia_pedida(compare, lake, capsys):
+    """Los `summaries_summary` de otra familia no se mezclan con los de `summaries`."""
+    other = [
+        summary("base", "2026-10-10", t, y, m, "otra", family="otra")
+        for t in THETAS
+        for y, m in MONTHS
+    ]
+    lake(*run_of("base", "2026-10-10"), *other, *run_of("new", "2026-10-22"))
+    code, out = run(compare, lake, capsys, *BOTH)
+    assert code == 0, out
+    assert "INCONSISTENTE" not in out
+    # Una corrida cuyos `summaries_summary` traen `family` es de esa familia.
+    tagged = [
+        summary("new2", "2026-10-23", t, y, m, family="summaries")
+        for t in THETAS
+        for y, m in MONTHS
+    ]
+    lake(*tagged)
+    code, out = run(
+        compare, lake, capsys, "--base-dates", "2026-10-10", "--new-dates", "2026-10-23"
+    )
+    assert code == 0, out
+    code, out = run(compare, lake, capsys, *BOTH, "--family", "otra")
+    assert code == 1
+    assert "FALLO sin_hallazgos" in out
 
 
 def test_el_rango_de_fechas_es_cerrado_y_puede_quedar_abierto(compare, lake, capsys):

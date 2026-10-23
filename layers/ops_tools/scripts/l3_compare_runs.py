@@ -24,6 +24,7 @@ Args (todos opcionales salvo el par de lados):
   --dq-root gs://<proyecto>-dq-findings/l3   (por defecto, el del proyecto según
                                               OPS_RESULTS_URI; también una ruta local)
   --provider binance --market spot --asset BTCUSDT
+  --family summaries                 (la familia de descriptores que se compara)
   --timing                           (resume los `unit_timing` de la corrida nueva)
   --baseline-vcpu-s 165000           (con --timing: los vCPU-s del backfill original)
   --max-diffs 100                    (cuántas diferencias se imprimen; las cuentas las cuentan todas)
@@ -61,6 +62,7 @@ from pyutils import resolve_fs
 
 SUMMARY = "summaries_summary"
 TIMING = "unit_timing"
+FAMILY = "summaries"  # la única familia de L3 hoy; un `summaries_summary` sin `family` es de ella
 FILE = re.compile(r"/detected_date=(\d{4}-\d{2}-\d{2})/[^/]+\.parquet$")
 MONTH = re.compile(r"(\d{4})-(0[1-9]|1[0-2])")
 UTILIZATION_P50_GOAL = 0.90
@@ -172,7 +174,9 @@ class Cell:
 
 
 def cells(
-    rows: list[dict], months: tuple[tuple[int, int], tuple[int, int]]
+    rows: list[dict],
+    months: tuple[tuple[int, int], tuple[int, int]],
+    family: str = FAMILY,
 ) -> dict[Key, Cell]:
     first, last = months
     latest: dict[Key, tuple[tuple, dict]] = {}
@@ -184,6 +188,8 @@ def cells(
         ):
             continue
         details = row["details"]
+        if details.get("family", FAMILY) != family:
+            continue
         key = (details["theta"], row["year"], row["month"])
         seen[key].add((details["content_hash"], details["rows"]))
         order = (row["detected_at"], row["run_id"])
@@ -431,6 +437,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--provider", default="binance")
     parser.add_argument("--market", default="spot")
     parser.add_argument("--asset", default="BTCUSDT")
+    parser.add_argument("--family", default=FAMILY)
     parser.add_argument("--timing", action="store_true")
     parser.add_argument("--baseline-vcpu-s", type=float)
     parser.add_argument("--max-diffs", type=int, default=100)
@@ -458,7 +465,8 @@ def main(argv: list[str] | None = None) -> int:
         log(f"FALLO lectura: {type(exc).__name__}: {exc}")
         return 1
 
-    base_cells, new_cells = cells(base_rows, months), cells(new_rows, months)
+    base_cells = cells(base_rows, months, ns.family)
+    new_cells = cells(new_rows, months, ns.family)
     log(f"base: {len(base_cells)} pares; nueva: {len(new_cells)} pares")
     result, lines = compare(base_cells, new_cells)
     for line in lines[: ns.max_diffs]:
