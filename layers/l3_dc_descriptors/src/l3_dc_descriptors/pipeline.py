@@ -60,16 +60,19 @@ def _theta(value: Decimal) -> int:
     return int(value.scaleb(8))
 
 
-def process_unit(unit: Unit, ctx: RunContext, thetas: list[int]) -> Result:
+def process_unit(
+    unit: Unit, ctx: RunContext, thetas: list[int], spawn_s: float | None = None
+) -> Result:
     """Escribe el mes de `unit` para `thetas` (θ × 10⁸) y devuelve sus hallazgos.
 
     Con `ctx.profile` la unidad corre bajo `cProfile` y suma el hallazgo `unit_profile`;
-    sin él no se crea ningún perfilador.
+    sin él no se crea ningún perfilador. `spawn_s` es lo que tardó en arrancar el proceso
+    hijo que la corre (`unit_process`), si lo hay.
     """
     if not ctx.profile:
-        return _process_unit(unit, ctx, thetas)
+        return _process_unit(unit, ctx, thetas, spawn_s)
     profiler = cProfile.Profile()
-    result = profiler.runcall(_process_unit, unit, ctx, thetas)
+    result = profiler.runcall(_process_unit, unit, ctx, thetas, spawn_s)
     if result.timing is None:
         return result
     profile = findings.unit_profile(
@@ -78,7 +81,9 @@ def process_unit(unit: Unit, ctx: RunContext, thetas: list[int]) -> Result:
     return replace(result, findings=(*result.findings, profile))
 
 
-def _process_unit(unit: Unit, ctx: RunContext, thetas: list[int]) -> Result:
+def _process_unit(
+    unit: Unit, ctx: RunContext, thetas: list[int], spawn_s: float | None
+) -> Result:
     started = time.perf_counter()
     cpu_started = process_cpu_s()
     kernel_started = kernel_counts()
@@ -116,6 +121,7 @@ def _process_unit(unit: Unit, ctx: RunContext, thetas: list[int]) -> Result:
                 inflight=ctx.inflight,
                 writers=ctx.writers,
                 engine_threads=ctx.engine_threads,
+                inflight_bytes=ctx.inflight_bytes,
             )
     except SummarizeError as error:
         found = findings.from_error(ctx, unit, error)
@@ -156,6 +162,7 @@ def _process_unit(unit: Unit, ctx: RunContext, thetas: list[int]) -> Result:
         trim_threshold=trim_threshold(),
         rss_before_trim_bytes=trimmed[0],
         rss_after_trim_bytes=trimmed[1],
+        spawn_s=spawn_s,
     )
     return Result(
         (

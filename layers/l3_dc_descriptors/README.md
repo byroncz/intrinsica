@@ -18,8 +18,9 @@ python -m l3_dc_descriptors --mode backfill --force --from 2023-03     # reproce
 python -m l3_dc_descriptors --mode monthly --series-start 2020-01      # el mes anterior
 ```
 
-Un solo proceso, un mes a la vez, y en cada mes el fan-out de los θ que lo necesitan. Un mes
-que ningún θ necesita se salta sin leer L1.
+Un mes a la vez, y en cada mes el fan-out de los θ que lo necesitan. En `backfill` cada mes corre en
+un proceso hijo (`L3_UNIT_PROCESS`, ITSC-372): el padre recorre el rango y emite los hallazgos, y la
+memoria del mes muere con su proceso. Un mes que ningún θ necesita se salta sin leer L1.
 
 | Opción | Qué hace |
 |---|---|
@@ -36,8 +37,10 @@ Entorno: `L3_LANDING_ROOT` (L1), `L3_EVENTS_ROOT` (L2), `L3_SUMMARIES_ROOT` (L3)
 `L3_DQ_ROOT` (lago de hallazgos), además de `L3_SERIES_START` y `L3_THETAS_URI`. Opcionales,
 enteros ≥ 1 (otro valor es código 2): `L3_READERS` (lectores de L1, R; por defecto 2),
 `L3_INFLIGHT` (row groups en el motor, K; 4), `L3_WRITERS` (escritores, W; 12),
-`L3_ENGINE_THREADS` (hilos del motor; por defecto `round(vCPU efectivos)`) y `L3_THREADS` (pool de
-E/S; por defecto `ceil(3 × vCPU)`, nunca más que θ), más `L3_PROFILE=1`. El stack `l3` no fija
+`L3_ENGINE_THREADS` (hilos del motor; por defecto `round(vCPU efectivos)`), `L3_THREADS` (pool de
+E/S; por defecto `ceil(3 × vCPU)`, nunca más que θ) y `L3_INFLIGHT_BYTES` (tope de bytes de eventos
+abiertos; 805 306 368 = 768 MiB), más `L3_PROFILE=1` y `L3_UNIT_PROCESS` (`0` o `1`; por defecto 1:
+un proceso hijo por unidad en `backfill`; `monthly` no lo usa). El stack `l3` no fija
 ninguna, así que los valores siguen a los vCPU del job; para sobrescribirlas en una corrida, ver el
 [runbook](../../docs/runbooks/operacion-l3.md#hilos-y-topes-de-la-unidad-l3_readers-l3_inflight-l3_writers-l3_engine_threads-y-l3_threads).
 **Memoria de los escritores (ITSC-365):** el orquestador no empuja más row groups mientras haya
@@ -46,6 +49,18 @@ cada uno pesa ≈ 8 MiB (256 B por evento × ≈ 34 000 eventos), así que el to
 mismo que 8 × 4 de antes. Con 8 y W = 12 serían 96 (≈ 770 MiB): es lo que T4b pagó de más
 (RSS 2 331 MiB). Si subes W o bajas el tamaño del row group, rehaz la cuenta y compárala con el
 margen del job: con el asignador de la imagen (ver «Memoria») el RSS medido es ≈ 3,1 GiB de 4.
+**Memoria acotada por los eventos en vuelo (ITSC-372):** el orquestador tampoco empuja un row group
+nuevo mientras haya algún row group en el motor y `eventos abiertos × 305 B` pase de
+`L3_INFLIGHT_BYTES`. Los eventos abiertos son los que `BoundaryFeed` entregó al motor menos los que
+ya cerraron (`Engine.needed`), por θ. Los 305 B son 240 B de la fila de salida (las 18 columnas de
+`ENGINE_SCHEMA`) y 65 B de las fronteras de L2 que el motor retiene hasta cerrar el evento; 768 MiB
+son ≈ 2,6 M de eventos. Un row group de un mes normal trae ≈ 0,6 M de eventos y 2017-12 trae
+4,5 M: sin este tope, con K = 4 caben los tres row groups del mes y la unidad picó a 3 545 MiB. Un
+row group que por sí solo pasa del tope avanza igual (avisa una vez; `inflight_alone_bytes_max` >
+`inflight_bytes` en `unit_timing`): dividir el row group de L1 o subir la memoria del job. El tope
+se mira antes de empujar, así que `inflight_bytes_max` puede pasar de `inflight_bytes` hasta en un
+row group sin que sea esa señal. 2017-12 cae en este caso (≈ 4,5 M de eventos por row group): el
+aviso es lo esperado.
 `L3_PREFETCH` ya no existe (ITSC-363). `CLOUD_RUN_TASK_INDEX` distinto de 0 es código 2. `IMAGE_VERSION` la fija la imagen.
 
 **Códigos de salida** ([§8.4](../../docs/TRD/l3.md#84-códigos-de-salida)): 0 éxito; 1 fallo
@@ -73,7 +88,8 @@ el motor, el pie de L1 y la compuerta de carry-over; `aggregate_s` del motor, `p
 ya no existe: el linaje lo publica L2 y se lee; `read_s` es lo que el hilo principal esperó a las lecturas y
 `read_wall_s` y `write_s` la pared con alguna lectura o algún escritor ocupado), la configuración
 (`threads`, `engine_threads`, `readers`, `inflight`, `writers`), lo que hizo el motor
-(`inflight_max`, `engine_busy`, `items`), `read_bytes`, `boundaries_peak_mib`,
+(`inflight_max`, `engine_busy`, `items`, `inflight_bytes`, `inflight_events_max`,
+`inflight_bytes_max`, `inflight_alone_bytes_max`), `spawn_s` (el arranque del proceso hijo de la unidad), `read_bytes`, `boundaries_peak_mib`,
 `rss_peak_mib` (`VmHWM`, reiniciado al empezar la unidad), `row_groups_month` y
 `row_groups_previous` (decodificaciones de L1 del mes y de meses anteriores, contadas con un
 gancho sobre `dc_frames.lake.open_parquet` como hace la sonda de `ops_tools`),
@@ -110,12 +126,14 @@ tiene sus propios hilos. Python orquesta, Arrow transporta, Rust calcula.
 | `outputs.py` | `Collector` (vacía `pop_sealed`) y `SealedWriters` (pool de W escritores con una cola por θ y su «siguiente esperado») |
 | `native.py` | El adaptador del motor: `BoundaryFeed`, `push`, `to_batch`, `to_summarize_error` |
 | `timing.py` | `Phases`, `BusyClock` (pared de una fase concurrente), `ReadMeter`, `Retained` |
+| `unit_process.py` | `run_unit`: la unidad en un proceso hijo `spawn`; si el hijo muere sin resultado, deja `unit_process_died` (ITSC-372) |
 
 Qué sostiene la corrida:
 
 - **Cuatro topes, no cuatro colas sin fondo.** R lectores de L1 traen row groups por delante; el
-  orquestador no pide el siguiente mientras el motor tenga K en vuelo (`engine.inflight()`) ni
-  haya `8 × W` row groups sellados sin escribir. En RAM hay a lo más `K + R + 1` row groups de L1
+  orquestador no pide el siguiente mientras el motor tenga K en vuelo (`engine.inflight()`), haya
+  `3 × W` row groups sellados sin escribir ni, con alguno en el motor, más de `L3_INFLIGHT_BYTES` de
+  eventos abiertos. En RAM hay a lo más `K + R + 1` row groups de L1
   (≈ 48 MB cada uno), las fronteras de L2 de los eventos de esos row groups, los buffers de salida
   abiertos y los sellados por escribir.
 - **Las fronteras de L2 van por delante, y no más.** Antes de cada `push`, `cover(high)` entrega
@@ -273,11 +291,19 @@ El pico es O(lote), no O(mes) ni O(eventos) ni O(ticks del evento más grande): 
 groups de L1 (siete con los valores por defecto, ≈ 48 MB cada uno anclado o ≈ 1,8 × mientras se
 decodifica), las fronteras de L2 de los eventos de esos row groups (`boundaries_peak_mib`; el motor
 suelta cada lote al cerrarse sus eventos) más un tramo comprimido en curso por θ, los buffers de
-salida abiertos y los sellados sin escribir (acotados por `8 × W`). Un evento que abarca muchos row
+salida abiertos y los sellados sin escribir (acotados por `3 × W`). Un evento que abarca muchos row
 groups solo deja su acumulador parcial. La cuenta completa, y por qué la sonda de ITSC-362 medía
 228 MiB y no los 95 previstos, está en TRD-L3 ADR-L3-16 («Memoria del orquestador»).
 `tests/test_l3_memory.py` lo mide en un proceso aparte (pool de Arrow más `tracemalloc`): el pico
 no crece con los eventos ni cuando el evento más grande pasa de 10 a 40 row groups.
+
+**La variable que faltaba (ITSC-372): la densidad de eventos por tick.** Los buffers de salida
+abiertos cuestan ≈ 240 B por evento y los eventos de un row group dependen del mes: ≈ 0,6 M en los
+meses medidos, 4,5 M en 2017-12 (4,8 eventos por tick con los 50 θ). Por eso el orquestador acota
+también los eventos abiertos (`L3_INFLIGHT_BYTES`, arriba) y, en `backfill`, cada unidad corre en un
+proceso hijo: el RSS que una unidad deja en el proceso (fragmentación de arenas, que `malloc_trim`
+no recupera) sube de mes en mes y en 110 meses mata el job. `test_l3_memory.py` mide las dos
+cosas: el `VmRSS` del padre entre seis unidades en hijos y un lago denso con y sin el tope.
 `rss_peak_mib` de `unit_timing` es la medida de la corrida.
 
 **Asignador.** La imagen corre con `MALLOC_MMAP_THRESHOLD_=33554432` (32 MiB) y
