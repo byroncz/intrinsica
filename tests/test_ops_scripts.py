@@ -347,3 +347,17 @@ def test_hashes_lista_los_hallazgos_sin_pedir_el_prefijo_sin_barra(
         last_line(capsys)
         == "θ: 50; unidades: 50 (con >= 2 corridas: 50; discrepancias: 0)"
     )
+
+
+@pytest.mark.parametrize("exists", [False, True])
+def test_hashes_sin_hallazgos_imprime_cero_y_sale_con_1(tmp_path, capsys, exists):
+    """Raíz inexistente o vacía: no hay esquema contra el cual filtrar, y no lanza."""
+    root = tmp_path / "dq"
+    if exists:
+        root.mkdir()
+    hashes = load("hashes_events_summary")
+    assert hashes.main(["--dq-root", str(root)]) == 1
+    assert (
+        last_line(capsys)
+        == "θ: 0; unidades: 0 (con >= 2 corridas: 0; discrepancias: 0)"
+    )
