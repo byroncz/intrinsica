@@ -101,7 +101,9 @@ class BoundaryFeed:
     `batches` son los lotes de L2 del θ en orden. Antes de empujar un row group cuyo último
     id es `high`, `cover(high)` entrega lotes hasta que el último entregado empieza después
     de `high` (ningún evento que falte toca el row group) o se acaban: lo que `Engine.push`
-    exige. Los lotes se leen a medida que hacen falta y no se conservan aquí.
+    exige. Los lotes se leen a medida que hacen falta y no se conservan aquí, salvo la vista de
+    las referencias del último (≤ `L2_BATCH_ROWS` × 8 B por θ), que retiene su buffer hasta el
+    lote siguiente o el fin de la unidad; el motor retiene esos eventos mientras estén abiertos.
     """
 
     def __init__(
