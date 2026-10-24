@@ -512,8 +512,8 @@ Cualquier otro cambio es una sorpresa y se revisa antes de aprobar.
 
 **Backfill histórico por rangos (núcleo original).** Con el núcleo original la
 suma de los 110 meses eran 11,5 h, más que las 6 h que espera el run de Actions
-(un rango de 41 meses tomó 4 h 57 min); con el núcleo nuevo son ≈ 1,3 h y caben
-en una sola ejecución (ITSC-364). Cloud Run no corta la tarea, pero el run
+(un rango de 41 meses tomó 4 h 57 min); con el núcleo nuevo son ≈ 1,3 h a 4 vCPU
+(ITSC-364) y ≈ 1,6 h estimadas a 2 vCPU (ITSC-352): caben en una sola ejecución. Cloud Run no corta la tarea, pero el run
 fallaría. Por eso el histórico se lanzó
 con *Run job* → `l3-backfill`, uno a la vez, cada uno con éxito antes del
 siguiente:

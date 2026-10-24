@@ -121,8 +121,8 @@ conciliación, esqueleto; o `monthly` sin ningún θ listo con rezagados) o **2*
 vacío y `force`, una vez. Sin `force`, o si una ejecución muere, se relanza y retoma donde
 quedó. Los 4 828 s se midieron con el asignador de T5 (rodeo de ITSC-364, que ya no hace falta):
 con la imagen 0.16.0 la corrida de 2017-08 a 2018-01 con los valores por defecto terminó (run
-39886368319), pero el backfill completo con ellos sigue pendiente (ITSC-352 o
-la siguiente). Lo que sigue (rangos) es de **ITSC-335, con el núcleo original**, cuya suma eran 11,5 h
+39886368319), pero el backfill completo con ellos sigue pendiente: lo lanza el humano
+tras el apply del stack `l3` con 2 vCPU (ITSC-352). Lo que sigue (rangos) es de **ITSC-335, con el núcleo original**, cuya suma eran 11,5 h
 (41 256 s), más que las 6 h que espera el run de Actions: Cloud Run no cortaba la tarea (el
 timeout es el tope del módulo, 86 400 s), pero el run fallaría. Por eso entonces el
 histórico se lanzaba por rangos, **uno a la vez y cada uno con éxito antes del siguiente**.
@@ -921,14 +921,16 @@ jobs:
 1. Con el stack `l3` aplicado con la imagen vigente, *Actions → Run job*: `job` =
    `l3-backfill`, `from` = `2017-08`, `to` vacío y `force` marcado. Rehace los 110 meses
    (`force` exige `from`, y con `to` vacío llega al último mes con consolidado). Con la pared
-   nueva (≤ 120 s por mes esperados; medido: 4 828 s en total) cabe en una sola ejecución
+   nueva (a 2 vCPU se esperan ≈ 164 s el mes más pesado, 2022-11, y ≈ 5 600 s en total,
+   estimados desde los 141,4 s y 4 828 s medidos a 4 vCPU) cabe en una sola ejecución
    y bajo las 6 h de Actions. Anota la fecha UTC de inicio y de fin.
 
    **Con la imagen 0.16.0 (ITSC-372) basta con los valores por defecto.** La corrida de
    2017-08 a 2018-01 con ellos terminó (run 39886368319). El `--update-env-vars` con el asignador
    de T5 (`MALLOC_MMAP_THRESHOLD_=16384`, `MALLOC_TRIM_THRESHOLD_=131072`) fue el rodeo de ITSC-364
    cuando la imagen anterior moría por memoria, y ya no hace falta. El backfill completo con los
-   valores por defecto sigue pendiente: ITSC-352 o la siguiente.
+   valores por defecto sigue pendiente: lo lanza el humano tras el apply del stack `l3` con
+   2 vCPU (ITSC-352).
 2. Sube el script y lanza `ops-script` (`gcloud storage cp
    layers/ops_tools/scripts/l3_compare_runs.py gs://<proyecto>-ops/scripts/l3_compare_runs.py`),
    con las fechas de ITSC-335 como base y las del paso 1 como nueva:
