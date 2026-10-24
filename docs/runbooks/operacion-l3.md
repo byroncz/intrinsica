@@ -452,7 +452,7 @@ Python lee, escribe y mide; los hilos nativos del motor calculan. Son opcionales
 | `L3_INFLIGHT` | K: row groups empujados al motor que aún anclan sus ticks; el orquestador no pide el K + 1 hasta que uno termina. Entero ≥ 1 | 4 |
 | `L3_WRITERS` | W: escritores de row groups de salida (cada θ en orden, uno a la vez por θ). Entero ≥ 1. 12 es el techo medido: con 24 la pared empeoró 17 % (T4c) | 12 |
 | `L3_ENGINE_THREADS` | Hilos nativos del motor. Entero ≥ 1 | los vCPU efectivos redondeados (`round(cores)` de `unit_timing`): 2 en `l3-backfill` |
-| `L3_THREADS` | Pool de E/S: pasada de entrada de cada θ (compuerta y apertura), lectura de las fronteras de L2, conciliación y publicación. Entero ≥ 1; nunca se usan más que θ | `ceil(3 × cores)`, nunca más que θ: 7 a 2 vCPU, 12 a 4 y 24 a 8 |
+| `L3_THREADS` | Pool de E/S: pasada de entrada de cada θ (compuerta y apertura), lectura de las fronteras de L2, conciliación y publicación. Entero ≥ 1; nunca se usan más que θ | `ceil(3 × cores)`, nunca más que θ: 7 a 2 vCPU, 12 a 4 y 26 a 8 (con los `cores` medidos en T5: 2,086, 3,945 y 8,342) |
 
 El stack `l3` no fija ninguna: los valores siguen a los vCPU y el resultado (tablas y
 `content_hash`) es el mismo en cualquier combinación. Un valor que no sea un entero ≥ 1 termina
