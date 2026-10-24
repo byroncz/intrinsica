@@ -580,8 +580,9 @@ al empujar un tramo que por sí solo pasa del tope, antes de morir. Y mide la de
 con lo que sí existe: suma `metric_value` de los `events_summary` de L2 de ese mes (los eventos de
 todos los θ, [`operacion-l2`](operacion-l2.md#paso-2-reproducibilidad)) y divídela por los ticks de
 `consolidated.parquet` de L1 de ese mes: el tramo es `L3_LOT_EVENTS` ÷ esa densidad (ITSC-373), y si
-trae más eventos que el tope, ese tramo no cabe y hace falta más memoria en el job (con `L3_LOT_EVENTS=0`
-el corte no existe y el lote es el row group entero, peor). (2) Si es un mes normal, lo que cambió es el job o el asignador: compara `rss_peak_mib` con el de
+trae más eventos que el tope, ese tramo no cabe: baja `L3_LOT_EVENTS` (el tramo sale de la densidad
+media del mes y uno localmente denso puede pasar del tope) o sube la memoria del job (con
+`L3_LOT_EVENTS=0` el corte no existe y el lote es el row group entero, peor). (2) Si es un mes normal, lo que cambió es el job o el asignador: compara `rss_peak_mib` con el de
 los meses vecinos. (3) Relanza **desde Cloud Shell** con el asignador de T5, que devuelve la
 memoria al kernel en cada `free`, o con más memoria en el job. Repite los `--args` del run que
 murió, tal como los imprime `run-job-args.sh` (con `--force` si lo llevaba) y empieza en el mes
@@ -649,7 +650,8 @@ se mira antes de empujar, así que `inflight_bytes_max` puede pasar de `inflight
 tramo: es lo normal y no es una señal. La señal es `inflight_alone_bytes_max`, el máximo de
 bytes abiertos tras empujar un tramo a un motor vacío: si pasa de `inflight_bytes`, un solo tramo
 trajo más eventos que el tope (la unidad avanza igual y avisa en el log, con el tramo y los eventos
-que trajo): el pico de ese mes es ≈ ese tramo, y se arregla subiendo la memoria del job. Con el valor
+que trajo): el pico de ese mes es ≈ ese tramo, y se arregla con un lote más chico (`L3_LOT_EVENTS`) o
+subiendo la memoria del job. Con el valor
 por defecto (1 M de eventos ≈ 305 MB contra un tope de 805 MB) un tramo cabe con holgura, y las
 fronteras de L2 que `cover` trae por delante (hasta ≈ 1,6 M de eventos con 50 θ) se cuentan a 65 B,
 lo que valen (ITSC-376; antes se contaban a 305 B e inflaban `inflight_alone_bytes_max`): el aviso

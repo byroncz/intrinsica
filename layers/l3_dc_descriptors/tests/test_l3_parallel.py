@@ -746,8 +746,8 @@ def test_the_byte_cap_holds_back_a_row_group_while_the_open_events_pass_it(
     assert [r.levelno for r in caplog.records] == [logging.WARNING]
     message = caplog.records[0].getMessage()
     assert "L3_INFLIGHT_BYTES" in message
-    # ITSC-376: dice qué tramo trajo cuántos eventos y que la unidad avanza; no manda bajar el
-    # lote, que no arregla un tramo que ya es del tamaño del tope.
+    # ITSC-376: dice qué tramo trajo cuántos eventos y que la unidad avanza; no nombra
+    # variables: las salidas (lote más chico o más memoria) las dicen las docs.
     assert "el tramo 0 trajo 1000 eventos" in message
     assert "la unidad avanza" in message
     assert "L3_LOT_EVENTS" not in message

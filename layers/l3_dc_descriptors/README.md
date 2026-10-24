@@ -65,7 +65,8 @@ así se cuentan, y antes se contaban a 305 B. 768 MiB son ≈ 2,6 M de eventos d
 tramo que por sí solo pasa del tope avanza igual (avisa una vez; `inflight_alone_bytes_max` >
 `inflight_bytes` en `unit_timing`); el aviso dice qué tramo trajo cuántos eventos y que la unidad
 avanza. Con el lote por defecto (1 M ≈ 305 MB) y el tope por defecto no debe salir en ningún mes: si sale,
-un tramo solo pasa de 768 MiB y la memoria del job es lo que falta. El tope se mira
+un tramo solo pasa de 768 MiB, y se arregla con un lote más chico (`L3_LOT_EVENTS`: el tramo sale de
+la densidad media del mes y uno localmente denso puede pasar del tope) o con más memoria en el job. El tope se mira
 antes de empujar, así que `inflight_bytes_max` puede pasar de `inflight_bytes` hasta en un tramo sin
 que sea esa señal.
 **Lote acotado en eventos (ITSC-373):** el tope de bytes no puede acotar lo que entra de a uno, y un
