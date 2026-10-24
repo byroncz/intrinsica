@@ -569,11 +569,9 @@ proceso hijo y el tope de bytes acota los eventos abiertos (sección siguiente).
 sigue vivo y deja `unit_process_died` con `exit_signal` 9. Qué mirar, en orden: (0) los `trims` y el
 `mem_peak` de los meses vecinos que sí terminaron (ITSC-376): si `trims` es 0 con un `rss_peak_mib`
 sobre `trim_rss_mib`, el trim está desactivado (`L3_TRIM_RSS_MIB=0`) o el muestreador no lo vio
-(`mem_peak_coverage` bajo); si hay trims y lo residente sin uso de `mem_peak`
-(`rss_mib − (uordblks_mib + hblkhd_mib)`; no `fordblks_mib`, que el trim no baja) sigue siendo la
-mayor parte del `rss_mib`, la retención es de las arenas que el trim no recorta y lo que sigue es otro
-asignador (T5, abajo) o más memoria; si es chico, lo que pesa es memoria viva (casillas del motor y
-salida sellada de Arrow) y se baja con el diseño, no con el asignador. (1) el
+(`mem_peak_coverage` bajo); si `rss_peak_mib` queda sobre 2 000 con `trims` > 0, el resto es memoria
+viva: mira `uordblks_mib` y `arrow_mib` de `mem_peak` (casillas del motor y salida sellada de Arrow)
+y se baja con el diseño, no con el asignador. (1) el
 `unit_timing` del mes que murió no existe (el hijo murió antes de emitirlo), así que la señal sale
 de otros dos lados. En Cloud Logging, busca el aviso `L3_INFLIGHT_BYTES` del mes: el hijo lo emite
 al empujar un tramo que por sí solo pasa del tope, antes de morir. Y mide la densidad del mes
@@ -733,10 +731,11 @@ no hay nada que quitar al terminar; si alguien la fijó con `gcloud run jobs upd
 
 Metas sobre (a): termina; `l3_compare_runs.py --from 2017-08 --to 2018-01` da 300 de 300;
 `rss_peak_mib` de 2017-12 y 2018-01 ≤ 2 000; `cpu_s` de 2017-12 y 2018-01 no más de un 5 % sobre 55,9
-y 103,6 s; lo residente sin uso de `mem_peak` (`rss_mib − (uordblks_mib + hblkhd_mib)`) < 30 % de
-`mem_peak.rss_mib`. La card decía `fordblks_mib` < 30 %, pero `malloc_trim(0)` no baja `fordblks_mib`
-(ADR-L3-16, fila «Trim por marca de agua»), así que esa meta puede fallar con el trim funcionando.
-Sobre (a) contra (b): si `cpu_s`
+y 103,6 s. Son las tres metas bloqueantes. Lo residente sin uso de `mem_peak`
+(`rss_mib − (uordblks_mib + hblkhd_mib)`) es dato informativo, no meta: `mem_peak` se toma cuando el
+RSS acaba de subir, justo antes del siguiente trim, así que lo retenido ahí está siempre en su máximo
+(la card decía `fordblks_mib` < 30 %, que `malloc_trim(0)` no baja; ADR-L3-16, fila «Trim por marca
+de agua»). Sobre (a) contra (b): si `cpu_s`
 por mes difiere menos de 5 %, el corte en tramos no cuesta CPU y el +38 % de ITSC-373 se atribuye al
 host o a otro cambio de 0.17.0 (se anota, sin card); si difiere más, se abre una card para encontrar
 dónde paga el corte. Si 2018-01 queda sobre 2 000 MiB, la card siguiente (salida sellada de Arrow

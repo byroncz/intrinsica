@@ -623,7 +623,8 @@ def test_the_trim_returns_pages_to_the_kernel_and_the_free_list_drops_at_most_th
 # bajar del pico es, como mucho, lo libre que había en él (`fordblks_mib` de `mem_peak`) menos lo que
 # la unidad tiene vivo en su pico verdadero: en este lago, ≈ 450 MiB de salida sellada de Arrow que
 # espera a un solo escritor. Medido (11 corridas, un escritor): el pico baja entre 0,24 y 0,30 de lo
-# libre. La card pedía 0,3; ese era el techo y no el piso medido, así que el piso es 0,2.
+# libre. El 0,3 de la card venía de la técnica de ITSC-372 sin medición; las 11 corridas fijan el
+# piso en 0,2, con margen contra la intermitencia.
 TRIM_MIN_GAIN = 0.2
 
 
