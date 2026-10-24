@@ -372,8 +372,11 @@ tramos anclados en el motor (`engine.inflight()`). `unit_timing` publica la del 
 (`mem_peak`) y dos del cierre, justo antes y después del trim (`mem_close_before_trim`,
 `mem_close_after_trim`). Cómo leerlas: `uordblks` es memoria en uso del heap y `fordblks`, memoria
 que el programa ya liberó y glibc retiene (`arena = uordblks + fordblks`; `hblkhd` son las regiones
-`mmap`, aparte). Si `fordblks` es la mayor parte del RSS del pico, el pico es retención del
-asignador y no datos vivos. El trim recorre cada arena y hace dos cosas: devuelve al kernel las
+`mmap`, aparte). Con `trims` = 0, si `fordblks_mib` es la mayor parte de `rss_mib` el pico es
+retención del asignador y no datos vivos. Con `trims` > 0 esa lectura engaña (`fordblks` cuenta
+páginas que el trim ya devolvió y puede pasar de `rss_mib`): se mira lo residente sin uso,
+`rss_mib − (uordblks_mib + hblkhd_mib)`, y la memoria viva en `uordblks_mib` y `arrow_mib`. El trim
+recorre cada arena y hace dos cosas: devuelve al kernel las
 páginas interiores de los chunks libres de todas las arenas (baja el RSS y no toca `fordblks`) y
 recorta solo el top de la arena principal (baja `arena` y `fordblks` en ≈ `keepcost`, que `mallinfo2`
 también reporta solo para ella); los tops de las arenas secundarias siguen residentes. Entre las dos
