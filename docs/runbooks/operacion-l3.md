@@ -69,7 +69,8 @@ relanza los mismos inputs.
    ```
 
    Deben existir `l3-backfill` y `l3-monthly`; el primero con `timeoutSeconds:
-   86400`, `maxRetries: 1`, `cpu: '4'` y `memory: 4Gi` en `limits`. Las raíces
+   10800`, `maxRetries: 1`, `cpu: '2'` y `memory: 4Gi` en `limits` (desde el apply de ITSC-352;
+   antes 86400 y `'4'`). Las raíces
    (`L3_LANDING_ROOT`, `L3_EVENTS_ROOT`, `L3_SUMMARIES_ROOT`, `L3_DQ_ROOT`),
    `L3_SERIES_START` y `L3_THETAS_URI` van en `env`; `L3_THREADS`, `L3_READERS`, `L3_INFLIGHT`,
    `L3_WRITERS`, `L3_ENGINE_THREADS`, `L3_INFLIGHT_BYTES`, `L3_LOT_EVENTS`, `L3_TRIM_RSS_MIB`, `L3_TRIM_MIN_S` y `L3_UNIT_PROCESS` son opcionales (ver "Hilos y topes de la unidad" y "Memoria acotada").
@@ -158,22 +159,25 @@ de orden (como 2023-03 y 2026-09 en ITSC-335) se reconstruye al llegar a él, co
 mismo `content_hash`. Para no repetirlo, termina el rango un mes antes.
 Relanzar un rango interrumpido es seguro: la frontera retoma donde quedó.
 
-### Timeouts: la regla de TRD-L2 §10.2 sobre la pared del núcleo nuevo (ITSC-364)
+### Timeouts: la regla de TRD-L2 §10.2 con 2 vCPU (ITSC-352)
 
 La regla ([TRD-L2 §10.2](../TRD/l2.md)): `monthly` ≥ 6 × la pared del mes más pesado, y
-`backfill` ≥ 1,5 × la suma de los meses y ≤ 86 400 s (el tope del módulo `layer`). Con la
-medición de ITSC-364 (mes más pesado 141,4 s en 2022-11; suma 4 828 s):
+`backfill` ≥ 1,5 × la suma de los meses y ≤ 86 400 s (el tope del módulo `layer`). ITSC-364
+midió a 4 vCPU el mes más pesado (141,4 s en 2022-11) y la suma (4 828 s); ITSC-352 midió que
+2 vCPU alarga 2021-01 en 1,16 (111,5 s contra 95,9 s) y fijó el tamaño en 2 vCPU. Las paredes de
+2 vCPU de abajo son esas cifras por 1,16: estimaciones, no mediciones.
 
-| Job | Desplegado hoy (núcleo original) | Recalculado | Cuenta |
+| Job | Desplegado hasta el apply de ITSC-352 | Definitivo | Cuenta |
 | --- | --- | --- | --- |
-| `l3-monthly` | 10 800 s | **900 s** | 6 × 141,4 = 849 s, redondeado hacia arriba: 6,4 × |
-| `l3-backfill` | 86 400 s | **10 800 s** | 1,5 × 4 828 = 7 242 s, redondeado a 3 h: 2,2 × |
+| `l3-monthly` | 10 800 s | **1 200 s** | 6 × 164 = 984 s: 7,3 × (los 900 s de ITSC-364 eran para 4 vCPU y ya no cumplen) |
+| `l3-backfill` | 86 400 s | **10 800 s** | 1,5 × 5 600 = 8 400 s: 1,9 × |
 
-Los valores nuevos **no están aplicados**: los cambia ITSC-352 en `infra/` junto con el tamaño
-(vCPU). Hasta entonces rigen los desplegados, que sobran. Son una cota, porque la suma corrió
-con el asignador de T5 y con el de la imagen cada mes denso es más rápido. Si un job termina
-por timeout con estos valores, mira primero `unit_timing` del mes: una unidad que pasa de
-3 × su pared habitual es un hallazgo, no una razón para subir el timeout.
+Los valores nuevos **los aplica el humano** con el `apply` del stack `l3`; hasta entonces rigen
+los desplegados, que sobran. Son una cota, porque la suma de ITSC-364 corrió con el asignador de
+T5 y con el de la imagen cada mes denso es más rápido. El backfill de 110 meses con 2 vCPU da la
+pared real de 2022-11 y la suma: si 2022-11 pasa de 200 s o la suma de 7 200 s, se suben. Si un
+job termina por timeout con estos valores, mira primero `unit_timing` del mes: una unidad que
+pasa de 3 × su pared habitual es un hallazgo, no una razón para subir el timeout.
 
 ## Leer un fallo
 
@@ -187,8 +191,9 @@ causa en el log de la ejecución:
   mes más denso, o en uno chico tras varios meses, es el hallazgo: mira
   `rss_before_trim_mib` y `rss_after_trim_mib` de los meses anteriores y la sección
   «El asignador».
-- **Timeout**: la tarea se corta sin mensaje de memoria. El de `l3-monthly` desplegado es de
-  10 800 s (76 veces el mes más pesado con el núcleo nuevo, 141,4 s; ver «Timeouts»).
+- **Timeout**: la tarea se corta sin mensaje de memoria. El de `l3-monthly` es de
+  1 200 s desde el apply de ITSC-352 (10 800 s antes; 7,3 veces la pared estimada del mes más
+  pesado a 2 vCPU; ver «Timeouts»).
 - **Un hallazgo `error`**: lee su `check_type` en la tabla siguiente.
 
 Los 16 `check_type` de [TRD-L3 §9.3](../TRD/l3.md#93-tipos-de-chequeo-check_type),
@@ -446,8 +451,8 @@ Python lee, escribe y mide; los hilos nativos del motor calculan. Son opcionales
 | `L3_READERS` | R: row groups de L1 que se leen y decodifican a la vez. Entero ≥ 1 | 2 |
 | `L3_INFLIGHT` | K: row groups empujados al motor que aún anclan sus ticks; el orquestador no pide el K + 1 hasta que uno termina. Entero ≥ 1 | 4 |
 | `L3_WRITERS` | W: escritores de row groups de salida (cada θ en orden, uno a la vez por θ). Entero ≥ 1. 12 es el techo medido: con 24 la pared empeoró 17 % (T4c) | 12 |
-| `L3_ENGINE_THREADS` | Hilos nativos del motor. Entero ≥ 1 | los vCPU efectivos redondeados (`round(cores)` de `unit_timing`): 4 en `l3-backfill` |
-| `L3_THREADS` | Pool de E/S: pasada de entrada de cada θ (compuerta y apertura), lectura de las fronteras de L2, conciliación y publicación. Entero ≥ 1; nunca se usan más que θ | `ceil(3 × cores)`, nunca más que θ: 12 a 4 vCPU y 24 a 8 |
+| `L3_ENGINE_THREADS` | Hilos nativos del motor. Entero ≥ 1 | los vCPU efectivos redondeados (`round(cores)` de `unit_timing`): 2 en `l3-backfill` |
+| `L3_THREADS` | Pool de E/S: pasada de entrada de cada θ (compuerta y apertura), lectura de las fronteras de L2, conciliación y publicación. Entero ≥ 1; nunca se usan más que θ | `ceil(3 × cores)`, nunca más que θ: 7 a 2 vCPU, 12 a 4 y 24 a 8 |
 
 El stack `l3` no fija ninguna: los valores siguen a los vCPU y el resultado (tablas y
 `content_hash`) es el mismo en cualquier combinación. Un valor que no sea un entero ≥ 1 termina
