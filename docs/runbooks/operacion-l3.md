@@ -485,7 +485,7 @@ El límite y su regla de retroceso están en [«Asignador por defecto de L3»](#
 | `rss_before_trim_mib`, `rss_after_trim_mib` | `VmRSS` (no el pico) justo antes y después de devolver la memoria al kernel al cerrar la unidad. La diferencia es lo que el trim devolvió; `rss_after_trim_mib` de mes a mes dice si el proceso acumula entre unidades |
 | `mem_peak`, `mem_close_before_trim`, `mem_close_after_trim` | De qué está hecho el RSS (ITSC-375): la muestra del RSS más alto que vio el hilo `l3-memory-sampler` y las del cierre, antes y después del trim. Cada una trae `rss_mib`, `arena_mib` (lo que las arenas piden al sistema), `hblkhd_mib` (regiones `mmap`), `uordblks_mib` (en uso), `fordblks_mib` (libre que glibc retiene), `keepcost_mib`, `arrow_mib`, `engine_inflight` (tramos anclados; `null` al cerrar) y `elapsed_s`. Si `fordblks_mib` es la mayor parte de `rss_mib` en `mem_peak`, el pico es memoria que el programa ya liberó y glibc no devolvió, no datos vivos. Sin `mallinfo2` los campos de glibc son `null` |
 | `mem_samples`, `mem_peak_coverage` | Ticks del muestreador y `rss_mib` de `mem_peak` ÷ `rss_peak_mib`. Bajo 0,9 el muestreador no vio el pico: baja `L3_MEMORY_SAMPLE_S` (ver «Variables») y repite; es un ajuste, no una falla |
-| `trims`, `trim_s`, `trim_rss_mib` | El trim por marca de agua (ITSC-376): cuántos `malloc_trim(0)` hizo el muestreador durante la unidad, la suma de lo que tardaron (s) y la marca con que corrió (`L3_TRIM_RSS_MIB`; 0 si estaba desactivado). `trims` = 0 en los meses chicos es lo esperado: no llegan a la marca. En los densos, `trim_s` ÷ `wall_s` es lo que cuesta el trim; si estorba al motor (`trim_s` o `cpu_s` suben), sube `L3_TRIM_MIN_S`. Con trims, `mem_peak.fordblks_mib` debe ser una fracción chica de `mem_peak.rss_mib` |
+| `trims`, `trim_s`, `trim_rss_mib` | El trim por marca de agua (ITSC-376): cuántos `malloc_trim(0)` hizo el muestreador durante la unidad, la suma de lo que tardaron (s) y la marca con que corrió (`L3_TRIM_RSS_MIB`; 0 si estaba desactivado). `trims` = 0 en los meses chicos es lo esperado: no llegan a la marca. En los densos, `trim_s` ÷ `wall_s` es lo que cuesta el trim; si estorba al motor (`trim_s` o `cpu_s` suben), sube `L3_TRIM_MIN_S`. `fordblks_mib` no mide lo que el trim devolvió: `malloc_trim(0)` entrega páginas con `madvise(MADV_DONTNEED)` sin sacar los chunks de las listas libres, así que con el trim funcionando `fordblks_mib` puede seguir alto. Lo que el trim sí mueve es lo residente sin uso, `mem_peak.rss_mib − (mem_peak.uordblks_mib + mem_peak.hblkhd_mib)`, y `rss_peak_mib` contra el de la misma unidad sin trim |
 | `boundaries_peak_mib` | Máximo de fronteras de L2 que el motor tuvo en mano |
 
 Para comparar dos corridas usa `wall_s`, `cpu_s` y `cpu_utilization`. `run-job.yml` no admite
@@ -569,9 +569,10 @@ proceso hijo y el tope de bytes acota los eventos abiertos (sección siguiente).
 sigue vivo y deja `unit_process_died` con `exit_signal` 9. Qué mirar, en orden: (0) los `trims` y el
 `mem_peak` de los meses vecinos que sí terminaron (ITSC-376): si `trims` es 0 con un `rss_peak_mib`
 sobre `trim_rss_mib`, el trim está desactivado (`L3_TRIM_RSS_MIB=0`) o el muestreador no lo vio
-(`mem_peak_coverage` bajo); si hay trims y `mem_peak.fordblks_mib` sigue siendo la mayor parte del
-`rss_mib`, la retención es de las arenas que el trim no recorta y lo que sigue es otro asignador (T5,
-abajo) o más memoria; si `fordblks_mib` es chico, lo que pesa es memoria viva (casillas del motor y
+(`mem_peak_coverage` bajo); si hay trims y lo residente sin uso de `mem_peak`
+(`rss_mib − (uordblks_mib + hblkhd_mib)`; no `fordblks_mib`, que el trim no baja) sigue siendo la
+mayor parte del `rss_mib`, la retención es de las arenas que el trim no recorta y lo que sigue es otro
+asignador (T5, abajo) o más memoria; si es chico, lo que pesa es memoria viva (casillas del motor y
 salida sellada de Arrow) y se baja con el diseño, no con el asignador. (1) el
 `unit_timing` del mes que murió no existe (el hijo murió antes de emitirlo), así que la señal sale
 de otros dos lados. En Cloud Logging, busca el aviso `L3_INFLIGHT_BYTES` del mes: el hijo lo emite
@@ -730,7 +731,10 @@ no hay nada que quitar al terminar; si alguien la fijó con `gcloud run jobs upd
 
 Metas sobre (a): termina; `l3_compare_runs.py --from 2017-08 --to 2018-01` da 300 de 300;
 `rss_peak_mib` de 2017-12 y 2018-01 ≤ 2 000; `cpu_s` de 2017-12 y 2018-01 no más de un 5 % sobre 55,9
-y 103,6 s; `mem_peak.fordblks_mib` < 30 % de `mem_peak.rss_mib`. Sobre (a) contra (b): si `cpu_s`
+y 103,6 s; lo residente sin uso de `mem_peak` (`rss_mib − (uordblks_mib + hblkhd_mib)`) < 30 % de
+`mem_peak.rss_mib`. La card decía `fordblks_mib` < 30 %, pero `malloc_trim(0)` no baja `fordblks_mib`
+(ADR-L3-16, fila «Trim por marca de agua»), así que esa meta puede fallar con el trim funcionando.
+Sobre (a) contra (b): si `cpu_s`
 por mes difiere menos de 5 %, el corte en tramos no cuesta CPU y el +38 % de ITSC-373 se atribuye al
 host o a otro cambio de 0.17.0 (se anota, sin card); si difiere más, se abre una card para encontrar
 dónde paga el corte. Si 2018-01 queda sobre 2 000 MiB, la card siguiente (salida sellada de Arrow
