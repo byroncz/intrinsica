@@ -508,7 +508,10 @@ el cupo es de la cuenta de facturación y lo comparten L1, L2, viz y L3
 **Aplicar este cambio.** El plan del `apply` de `l3` debe mostrar `cpu` (4 a 2)
 en los dos jobs, `timeout` en `l3-monthly` (10 800 s a 1 200 s) y en
 `l3-backfill` (86 400 s a 10 800 s). Memoria, reintentos y env no cambian.
-Cualquier otro cambio es una sorpresa y se revisa antes de aprobar.
+Cualquier otro cambio es una sorpresa y se revisa antes de aprobar, salvo la deriva
+que dejaron los `gcloud run jobs update` de T5 (el humano cambió `cpu` a mano y lo
+devolvió a 4): el plan puede traer `client`, `client_version` o anotaciones que puso
+`gcloud`. Es esperada y no bloquea el apply.
 
 **Backfill histórico por rangos (núcleo original).** Con el núcleo original la
 suma de los 110 meses eran 11,5 h, más que las 6 h que espera el run de Actions
