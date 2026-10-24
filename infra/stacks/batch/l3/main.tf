@@ -48,7 +48,9 @@ module "layer" {
   # ITSC-335 en los cuatro tamaños. Memoria: dos medidas distintas, como en
   # infra/README.md. Sobre los 110 meses (ITSC-335, núcleo original) el RSS pico
   # máximo fue 1 267 MiB; la cifra vigente es la de la corrida de seis meses
-  # 2017-08 a 2018-01 con la imagen 0.19.0, 2 347 MiB (2018-01, 57 % de 4 GiB), y
+  # 2017-08 a 2018-01 con la imagen 0.19.0, 2 347 MiB (2018-01, 57 % de 4 GiB;
+  # corrida (a) de ITSC-376, run 40059849133, run_id
+  # 62ed6bcc-d8cd-47cd-80d3-5c9928622e52, 300 de 300 en el run 40061351593), y
   # 2021-01 pica a 2 141 MiB con 2 vCPU y a 2 654 con 8. Sin OOM. Una tarea.
   cpu    = "2"
   memory = "4Gi"

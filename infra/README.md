@@ -490,9 +490,9 @@ escritores y 2 lectores fijos. 2 vCPU es el mínimo de vCPU-s y cuesta 16 % más
 pared que 4; con 1 vCPU la pared se triplica y el job se estrangula 745 s.
 Memoria: dos medidas distintas. Sobre los 110 meses (ITSC-335) el RSS pico
 máximo fue 1 267 MiB (núcleo original). Cifra vigente, corrida de seis meses
-2017-08 a 2018-01 con la imagen 0.19.0: 2 347 MiB en 2018-01 (57 % de 4 GiB; dato del
-humano en un comentario de la card ITSC-352, 2026-10-24, sin id de run: las corridas del
-criterio 26 de TRD-L3 §13 siguen sin registrarse).
+2017-08 a 2018-01 con la imagen 0.19.0: 2 347 MiB en 2018-01 (57 % de 4 GiB; corrida
+(a) de ITSC-376, run 40059849133, `run_id` 62ed6bcc-d8cd-47cd-80d3-5c9928622e52, 300 de
+300 en el run 40061351593; registrada en el criterio 26 (e) de TRD-L3 §13).
 Sin OOM. Timeouts con la regla de TRD-L2 §10.2: `l3-monthly` 1 200 s (7,3 veces la
 pared estimada del mes más pesado a 2 vCPU, ≈ 164 s; el mínimo son 984 s) y
 `l3-backfill` 10 800 s (1,9 veces la suma estimada, ≈ 5 600 s; el mínimo son
