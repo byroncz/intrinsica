@@ -39,9 +39,11 @@ enteros ≥ 1 (otro valor es código 2; `L3_LOT_EVENTS` admite 0): `L3_READERS` 
 `L3_INFLIGHT` (row groups en el motor, K; 4), `L3_WRITERS` (escritores, W; 12),
 `L3_ENGINE_THREADS` (hilos del motor; por defecto `round(vCPU efectivos)`), `L3_THREADS` (pool de
 E/S; por defecto `ceil(3 × vCPU)`, nunca más que θ) y `L3_INFLIGHT_BYTES` (tope de bytes de eventos
-abiertos; 805 306 368 = 768 MiB), `L3_LOT_EVENTS` (eventos de un tramo; 2 500 000; 0 desactiva el
+abiertos; 805 306 368 = 768 MiB), `L3_LOT_EVENTS` (eventos de un tramo; 1 000 000; 0 desactiva el
 corte), `L3_MEMORY_SAMPLE_S` (segundos entre ticks del muestreador de memoria; número > 0, por
-defecto 0,25), más `L3_PROFILE=1` y `L3_UNIT_PROCESS` (`0` o `1`; por defecto 1:
+defecto 0,25), `L3_TRIM_RSS_MIB` (marca de agua del trim periódico, en MiB; entero ≥ 0, por
+defecto 1 024; 0 lo desactiva) y `L3_TRIM_MIN_S` (segundos mínimos entre dos trims; número ≥ 0, por
+defecto 0,5), más `L3_PROFILE=1` y `L3_UNIT_PROCESS` (`0` o `1`; por defecto 1:
 un proceso hijo por unidad en `backfill`; `monthly` no lo usa). El stack `l3` no fija
 ninguna, así que los valores siguen a los vCPU del job; para sobrescribirlas en una corrida, ver el
 [runbook](../../docs/runbooks/operacion-l3.md#hilos-y-topes-de-la-unidad-l3_readers-l3_inflight-l3_writers-l3_engine_threads-y-l3_threads).
@@ -52,17 +54,19 @@ mismo que 8 × 4 de antes. Con 8 y W = 12 serían 96 (≈ 770 MiB): es lo que T4
 (RSS 2 331 MiB). Si subes W o bajas el tamaño del row group, rehaz la cuenta y compárala con el
 margen del job: con el asignador de la imagen (ver «Memoria») el RSS medido es ≈ 3,1 GiB de 4.
 **Memoria acotada por los eventos en vuelo (ITSC-372):** el orquestador tampoco empuja un row group
-nuevo mientras haya algún row group en el motor y `eventos abiertos × 305 B` pase de
+nuevo mientras haya algún row group en el motor y los bytes de eventos abiertos pasen de
 `L3_INFLIGHT_BYTES`. Los eventos abiertos son los que `BoundaryFeed` entregó al motor menos los que
-ya cerraron (`Engine.needed`), por θ. Los 305 B son 240 B de la fila de salida (las 18 columnas de
-`ENGINE_SCHEMA`) y 65 B de las fronteras de L2 que el motor retiene hasta cerrar el evento; 768 MiB
-son ≈ 2,6 M de eventos. Un row group de un mes normal trae ≈ 0,6 M de eventos y 2017-12 trae
+ya cerraron (`Engine.needed`), por θ. Un evento cuesta 305 B: 240 B de la fila de salida (las 18
+columnas de `ENGINE_SCHEMA`) y 65 B de las fronteras de L2 que el motor retiene hasta cerrarlo. Los
+que `cover` trajo por delante del último tramo empujado (`BoundaryFeed.ahead`, eventos cuya
+referencia pasa del último id cubierto) aún no tienen casilla y cuestan solo los 65 B; desde ITSC-376
+así se cuentan, y antes se contaban a 305 B. 768 MiB son ≈ 2,6 M de eventos de 305 B. Un row group de un mes normal trae ≈ 0,6 M de eventos y 2017-12 trae
 4,5 M: sin este tope, con K = 4 caben los tres row groups del mes y la unidad picó a 3 545 MiB. Un
 tramo que por sí solo pasa del tope avanza igual (avisa una vez; `inflight_alone_bytes_max` >
-`inflight_bytes` en `unit_timing`): baja `L3_LOT_EVENTS` o sube la memoria del job. Con el lote por
-defecto el aviso es esperable en 2017-12 y 2018-01: las fronteras de L2 por delante del tramo
-bastan para pasar el tope, y no es razón para bajar `L3_LOT_EVENTS`. La señal de un tramo que no cabe
-es `inflight_alone_bytes_max` > tope + 1,6 M × 305 B ≈ 1,29 GB. El tope se mira
+`inflight_bytes` en `unit_timing`); el aviso dice qué tramo trajo cuántos eventos y que la unidad
+avanza. Con el lote por defecto (1 M ≈ 305 MB) y el tope por defecto no debe salir en ningún mes: si sale,
+un tramo solo pasa de 768 MiB, y se arregla con un lote más chico (`L3_LOT_EVENTS`: el tramo sale de
+la densidad media del mes y uno localmente denso puede pasar del tope) o con más memoria en el job. El tope se mira
 antes de empujar, así que `inflight_bytes_max` puede pasar de `inflight_bytes` hasta en un tramo sin
 que sea esa señal.
 **Lote acotado en eventos (ITSC-373):** el tope de bytes no puede acotar lo que entra de a uno, y un
@@ -71,13 +75,14 @@ y el mes picó a 3 002 MiB aunque nunca convivieran dos row groups. Por eso `_pu
 row group en **tramos** contiguos de a lo más `N` ticks y empuja cada uno al motor como si fuera un
 row group (con su ordinal, su `cover(high)` y la bandera `before_month`). `N = floor(L3_LOT_EVENTS /
 densidad)`, con la densidad del mes = eventos de los θ (pies de L2) ÷ ticks (pie de L1), así que un
-tramo trae ≈ `L3_LOT_EVENTS` eventos con cualquier densidad. **La cuenta:** 2,5 M de eventos × 305 B
-(`EVENT_BYTES`) ≈ 763 MB de casillas y fronteras abiertas, justo bajo los 2,64 M que caben en el
-tope de 768 MiB (805 306 368 ÷ 305). Un tramo ocupa casi todo el tope, así que en un mes denso vuelve
-a correr un tramo a la vez: el corte solo actúa cuando un row group por sí solo pasa del tope. En
-2017-12 (6,1 eventos por tick) son ≈ 410 000 ticks y ≈ 3 tramos por row group; en 2017-11 y en
-2021-01 (0,66) el tramo es más grande que un row group y no se parte. Con 1 M (ITSC-373) se partía
-hasta 2017-11 sin necesidad y la CPU de los meses densos subía 38 %. El corte no copia: `ids[a:b]` es una vista
+tramo trae ≈ `L3_LOT_EVENTS` eventos con cualquier densidad. **La cuenta:** 1 M de eventos × 305 B
+(`EVENT_BYTES`) ≈ 305 MB de casillas y fronteras abiertas, bajo el tope de 768 MiB con holgura. En
+2017-12 (6,1 eventos por tick) son ≈ 164 000 ticks y ≈ 6 tramos por row group. **Lo que se probó
+y qué dio:** ITSC-373 fijó 1 M y midió +38 % de CPU en los meses densos (sin aislar la causa);
+ITSC-375 subió el lote a 2,5 M para ahorrarla y midió lo contrario: 2017-12 subió de 2 681 a
+2 802 MiB y 2018-01 de 2 987 a 3 272 MiB con la misma CPU (55,9 contra 56,5 s; 103,6 contra
+104,3 s) y la misma pared (± 2 %), porque con 2,5 M conviven dos tramos en el motor
+(`inflight_max` 2) y los eventos abiertos suben de 3,3 M a 4,4 M. ITSC-376 vuelve a 1 M. El corte no copia: `ids[a:b]` es una vista
 de NumPy y `column.slice(a, b - a)` un array de Arrow sobre el mismo buffer, y `Engine.push` honra el
 desfase (en bits para `is_buyer_maker`). Un evento que cruza tramos se fusiona como ya se fusiona
 entre row groups, y las tablas y los `content_hash` no cambian. Las fronteras de L2 que `cover` trae
@@ -345,6 +350,20 @@ un proceso y con el asignador de la imagen glibc no devuelve al kernel lo libera
 unidad a unidad hasta el OOM (ITSC-371; la causa exacta es una hipótesis, ver ADR-L3-16); `unit_timing` registra
 `rss_before_trim_mib` y `rss_after_trim_mib`.
 
+**Trim por marca de agua (ITSC-376).** El trim del cierre no baja el pico: llega cuando la unidad ya
+terminó. La medición de ITSC-375 (imagen 0.18.0) mostró que más de la mitad del pico de los meses
+densos era memoria libre que glibc retenía (`fordblks`). Por eso el mismo hilo `l3-memory-sampler`
+llama a `malloc_trim(0)` durante la unidad: en cada tick, si `VmRSS` ≥ `L3_TRIM_RSS_MIB` (1 024 MiB)
+y pasaron al menos `L3_TRIM_MIN_S` (0,5 s) desde el último trim. Marca de agua y no «tras cada
+sellado» ni «cada N segundos»: `malloc_trim` recorre todas las arenas con sus candados y con ≈ 2 GiB
+libres fragmentados cada llamada puede costar decenas de ms; con marca de agua el costo es cero bajo
+la marca (los meses chicos no pagan nada) y el pico queda acotado por la marca más lo que crece en
+`L3_TRIM_MIN_S`. `L3_TRIM_RSS_MIB=0` lo desactiva (queda el del cierre). `unit_timing` suma `trims`
+(cuántos), `trim_s` (cuánto tardaron en total) y `trim_rss_mib` (la marca con que corrió). Si el
+trim estorba al motor (`trim_s` o la CPU suben), el ajuste es subir `L3_TRIM_MIN_S`, no quitarlo.
+Lo que no baja es la memoria viva: casillas abiertas del motor y la salida sellada de Arrow que
+espera a los escritores.
+
 **Composición del RSS (ITSC-375).** `rss_peak_mib` dice cuánto pesó la unidad, no de qué. El hilo
 `l3-memory-sampler` (uno por unidad, período `L3_MEMORY_SAMPLE_S`, 0,25 s) lee `VmRSS` en cada tick y,
 solo cuando supera su máximo, toma una muestra con `mallinfo2` de glibc (`arena`, `hblkhd`,
@@ -353,8 +372,11 @@ tramos anclados en el motor (`engine.inflight()`). `unit_timing` publica la del 
 (`mem_peak`) y dos del cierre, justo antes y después del trim (`mem_close_before_trim`,
 `mem_close_after_trim`). Cómo leerlas: `uordblks` es memoria en uso del heap y `fordblks`, memoria
 que el programa ya liberó y glibc retiene (`arena = uordblks + fordblks`; `hblkhd` son las regiones
-`mmap`, aparte). Si `fordblks` es la mayor parte del RSS del pico, el pico es retención del
-asignador y no datos vivos. El trim recorre cada arena y hace dos cosas: devuelve al kernel las
+`mmap`, aparte). Con `trims` = 0, si `fordblks_mib` es la mayor parte de `rss_mib` el pico es
+retención del asignador y no datos vivos. Con `trims` > 0 esa lectura engaña (`fordblks` cuenta
+páginas que el trim ya devolvió y puede pasar de `rss_mib`): se mira lo residente sin uso,
+`rss_mib − (uordblks_mib + hblkhd_mib)`, y la memoria viva en `uordblks_mib` y `arrow_mib`. El trim
+recorre cada arena y hace dos cosas: devuelve al kernel las
 páginas interiores de los chunks libres de todas las arenas (baja el RSS y no toca `fordblks`) y
 recorta solo el top de la arena principal (baja `arena` y `fordblks` en ≈ `keepcost`, que `mallinfo2`
 también reporta solo para ella); los tops de las arenas secundarias siguen residentes. Entre las dos
@@ -363,7 +385,8 @@ retenía al cierre queda acotado: `mem_close_before_trim.rss_mib − mem_close_a
 una **cota inferior** (incluye lo que soltó `gc.collect()`), `fordblks_mib` antes del trim es la
 **cota superior**, y `before.fordblks_mib − after.fordblks_mib` es la cima devuelta, no retención
 que «desapareció». `mem_peak_coverage` = RSS de `mem_peak` ÷ `rss_peak_mib`: bajo 0,9 el
-muestreador se perdió el pico y se baja `L3_MEMORY_SAMPLE_S`. Es medición: no cambia el pico.
+muestreador se perdió el pico y se baja `L3_MEMORY_SAMPLE_S`. El muestreo no cambia el pico; el trim
+que hace el mismo hilo sí (arriba). La muestra del pico se toma antes del trim del tick.
 `mallinfo2` toma el candado de cada arena y recorre sus listas libres, por eso no corre en cada tick.
 
 ## Pruebas

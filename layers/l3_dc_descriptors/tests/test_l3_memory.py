@@ -399,6 +399,9 @@ DENSE_MIN_GAIN = 0.3
 # por θ, y esos eventos cuentan como abiertos. Con los 32 768 de producción taparían el lote.
 LOT_EVENTS = 100_000
 LOT_BATCH_ROWS = 4096
+# ITSC-376: el trim por marca de agua de las corridas con trim. 64 MiB está muy bajo el pico de la
+# unidad densa (cientos de MiB) y 0,05 s deja varios trims en su pared.
+TRIM = {"trim_rss_mib": 64, "trim_min_s": 0.05}
 
 DENSE_UNIT = """
 import json, sys
@@ -413,8 +416,9 @@ ctx = RunContext(
     mode="backfill", run_id="run", image_version="test", series_start=(2017, 8),
     landing_root=l1, events_root=l2, summaries_root=l3, dq_root=f"{l3}/dq",
     threads=8, readers=2, inflight=options.get("inflight", 4), writers=1,
-    engine_threads=int(engine_threads), inflight_bytes=int(cap),
+    engine_threads=int(engine_threads), inflight_bytes=int(cap) or None,
     lot_events=options.get("lot_events", 0), memory_sample_s=0.02,
+    trim_rss_mib=options.get("trim_rss_mib", 0), trim_min_s=options.get("trim_min_s"),
 )
 result = pipeline.process_unit(Unit(2017, 8), ctx, [100_000 * k for k in range(1, int(count) + 1)])
 assert result.ok, result.error
@@ -423,7 +427,7 @@ keys = (
     "rss_peak_mib", "inflight_events_max", "inflight_bytes_max", "inflight_alone_bytes_max",
     "inflight_bytes", "events", "lot_events", "lot_ticks", "lots", "inflight_max",
     "mem_peak", "mem_close_before_trim", "mem_close_after_trim", "mem_samples",
-    "mem_peak_coverage",
+    "mem_peak_coverage", "trims", "trim_s", "trim_rss_mib",
 )
 print(json.dumps({k: details[k] for k in keys}))
 """
@@ -480,6 +484,9 @@ def dense_runs(tmp_path_factory) -> dict[str, dict]:
         ("bytes", DENSE_CAP, {}),
         ("lots", DENSE_CAP, cut),
         ("lots_one", DENSE_CAP, {**cut, "inflight": 1}),
+        ("lots_trim", DENSE_CAP, {**cut, **TRIM}),
+        # Los valores por defecto de producción: tope de 768 MiB y lote de 1 M de eventos.
+        ("defaults", 0, {"lot_events": None, "batch_rows": LOT_BATCH_ROWS}),
     ):
         out = subprocess.run(
             [
@@ -500,7 +507,10 @@ def dense_runs(tmp_path_factory) -> dict[str, dict]:
             env={**os.environ, **UNITS_ENV},
         )
         assert out.returncode == 0, out.stderr
-        runs[name] = json.loads(out.stdout)
+        runs[name] = {
+            **json.loads(out.stdout),
+            "warned": "L3_INFLIGHT_BYTES" in out.stderr,
+        }
     return runs
 
 
@@ -606,3 +616,40 @@ def test_the_trim_returns_pages_to_the_kernel_and_the_free_list_drops_at_most_th
             before,
             after,
         )
+
+
+# ITSC-376. El trim por marca de agua devuelve al kernel, durante la unidad, la memoria libre que
+# glibc retiene. Relaciones y no MiB absolutos (la lección de ITSC-374): lo que el trim puede
+# bajar del pico es, como mucho, lo libre que había en él (`fordblks_mib` de `mem_peak`) menos lo que
+# la unidad tiene vivo en su pico verdadero: en este lago, ≈ 450 MiB de salida sellada de Arrow que
+# espera a un solo escritor. Medido (11 corridas, un escritor): el pico baja entre 0,24 y 0,30 de lo
+# libre. El 0,3 de la card venía de la técnica de ITSC-372 sin medición; las 11 corridas fijan el
+# piso en 0,2, con margen contra la intermitencia.
+TRIM_MIN_GAIN = 0.2
+
+
+def test_the_periodic_trim_runs_and_costs_what_it_says(dense_runs):
+    trimmed, untrimmed = dense_runs["lots_trim"], dense_runs["lots"]
+    assert trimmed["trim_rss_mib"] == 64 and untrimmed["trim_rss_mib"] == 0
+    assert trimmed["trims"] >= 1 and trimmed["trim_s"] > 0, trimmed
+    assert (untrimmed["trims"], untrimmed["trim_s"]) == (0, 0.0)
+    assert trimmed["events"] == untrimmed["events"]
+
+
+def test_the_periodic_trim_lowers_the_peak_by_part_of_the_free_memory_glibc_held(
+    dense_runs,
+):
+    trimmed, untrimmed = dense_runs["lots_trim"], dense_runs["lots"]
+    held = untrimmed["mem_peak"]["fordblks_mib"]
+    assert held > 0, untrimmed
+    gain = untrimmed["rss_peak_mib"] - trimmed["rss_peak_mib"]
+    assert gain >= TRIM_MIN_GAIN * held, (gain, held, untrimmed, trimmed)
+
+
+# ITSC-376. Con el lote por defecto (1 M) y el tope por defecto (768 MiB) un tramo cabe solo
+# bajo el tope: el estimador ya no cuenta las fronteras que `cover` trae por delante a 305 B.
+def test_the_default_lot_fits_under_the_default_cap_and_does_not_warn(dense_runs):
+    run = dense_runs["defaults"]
+    assert run["lot_events"] == 1_000_000 and run["lots"] > DENSE_GROUPS, run
+    assert 0 < run["inflight_alone_bytes_max"] <= run["inflight_bytes"], run
+    assert run["warned"] is False, run

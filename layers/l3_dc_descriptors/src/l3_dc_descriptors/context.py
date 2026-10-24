@@ -74,3 +74,8 @@ class RunContext:
     # `L3_MEMORY_SAMPLE_S`: período del hilo que muestrea el RSS y guarda la muestra del pico
     # (ITSC-375). `None` es `memory.DEFAULT_SAMPLE_S`.
     memory_sample_s: float | None = None
+    # `L3_TRIM_RSS_MIB` y `L3_TRIM_MIN_S`: marca de agua del `malloc_trim(0)` periódico del
+    # muestreador (0 lo desactiva) y segundos mínimos entre dos trims (ITSC-376). `None` es
+    # `memory.DEFAULT_TRIM_RSS_MIB` y `memory.DEFAULT_TRIM_MIN_S`.
+    trim_rss_mib: int | None = None
+    trim_min_s: float | None = None

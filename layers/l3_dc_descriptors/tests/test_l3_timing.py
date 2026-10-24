@@ -10,7 +10,7 @@ import pyarrow.parquet as pq
 import pytest
 from dc_frames import lake as frames_lake
 from dq import Severity, Status
-from l3_dc_descriptors import pipeline, timing
+from l3_dc_descriptors import memory, pipeline, timing
 from l3_dc_descriptors.context import RunContext, Unit
 from l3_dc_descriptors.pipeline import process_unit
 from l3_lake import KEY, M1, M2, M3, build_lake, fixture_ticks, month_cuts
@@ -475,3 +475,23 @@ def test_the_memory_sampler_stops_with_the_unit_also_when_it_fails(lake, tmp_pat
     ctx = replace(context(lake, tmp_path), events_root=str(tmp_path / "nothing"))
     assert not process_unit(unit_of(M2), ctx, lake.thetas).ok
     assert not [t for t in threading.enumerate() if t.name == "l3-memory-sampler"]
+
+
+def test_unit_timing_records_the_periodic_trim(lake, tmp_path):
+    # ITSC-376: cuántos trims hizo el muestreador, cuánto tardaron y con qué marca.
+    base = replace(context(lake, tmp_path), memory_sample_s=0.005)
+    on = process_unit(
+        unit_of(M2), replace(base, trim_rss_mib=1, trim_min_s=0.0), lake.thetas
+    )
+    details = on.timing.details()
+    assert details["trim_rss_mib"] == 1
+    assert details["trims"] >= 1 and details["trim_s"] > 0
+    (row,) = (f for f in on.findings if f.check_type == "unit_timing")
+    for key in ("trims", "trim_s", "trim_rss_mib"):
+        assert row.details[key] == details[key]
+    # Sin la variable rige la marca por defecto, que un mes chico no alcanza.
+    default = process_unit(unit_of(M2), base, lake.thetas).timing.details()
+    assert default["trim_rss_mib"] == memory.DEFAULT_TRIM_RSS_MIB == 1024
+    assert (default["trims"], default["trim_s"]) == (0, 0.0)
+    off = process_unit(unit_of(M2), replace(base, trim_rss_mib=0), lake.thetas)
+    assert off.timing.details()["trim_rss_mib"] == 0 and off.timing.trims == 0

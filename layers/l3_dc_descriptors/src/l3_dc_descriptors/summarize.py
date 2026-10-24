@@ -142,12 +142,13 @@ DEFAULT_INFLIGHT_BYTES = 768 << 20
 # row group de L1 de un mes denso (2017-12: 5,76 M de eventos en ≈ 0,94 M de ticks) pasa solo
 # del tope. Cada row group se parte en tramos de a lo más N ticks, con N = LOT_EVENTS / densidad
 # del mes (eventos por tick), así que un tramo trae ≈ LOT_EVENTS eventos con cualquier densidad.
-# 2,5 M de eventos son ≈ 763 MB de casillas abiertas y fronteras (EVENT_BYTES): justo bajo los
-# 2,64 M que caben en el tope por defecto (805 306 368 ÷ 305), así que un tramo ocupa casi todo
-# el tope y en un mes denso corre un tramo a la vez. El corte solo actúa cuando un row group por
-# sí solo pasa del tope; un mes normal (≈ 0,6 M de eventos por row group) no se parte. Con 1 M
-# (ITSC-373) partía hasta 2017-11 sin necesidad y costó +38 % de CPU en los meses densos (ITSC-375).
-DEFAULT_LOT_EVENTS = 2_500_000
+# 1 M de eventos son ≈ 305 MB de casillas abiertas y fronteras (EVENT_BYTES), bajo el tope por
+# defecto con holgura. ITSC-375 probó 2,5 M para ahorrar CPU y midió lo contrario: 2017-12 subió de
+# 2 681 a 2 802 MiB de pico y 2018-01 de 2 987 a 3 272 MiB con la misma CPU (55,9 contra 56,5 s;
+# 103,6 contra 104,3 s), porque con 2,5 M conviven dos tramos en el motor y los eventos abiertos
+# suben de 3,3 M a 4,4 M. Vuelve a 1 M (ITSC-376). Si el corte en tramos cuesta CPU lo dice el A/B
+# de ITSC-376 (misma corrida con `L3_LOT_EVENTS=0`); el +38 % de ITSC-373 no está atribuido.
+DEFAULT_LOT_EVENTS = 1_000_000
 
 type Lot = tuple[
     np.ndarray, Sequence[pa.Array], int, bool
@@ -449,12 +450,22 @@ def _check(collector: Collector, sink: SealedWriters, inputs: Sequence[_Input]) 
             raise error
 
 
-def _unclosed(engine: dc_pyo3.Engine, feeds: Sequence[native.BoundaryFeed]) -> int:
-    """Eventos cuyas fronteras el motor tiene y que aún no cerraron: entregados menos el
-    índice del primero que no cerró (`Engine.needed`), por θ. Cota superior de lo abierto:
-    incluye lo que `cover` entregó por delante del último row group empujado.
+def _unclosed(
+    engine: dc_pyo3.Engine, feeds: Sequence[native.BoundaryFeed]
+) -> tuple[int, int]:
+    """Eventos cuyas fronteras el motor tiene y que aún no cerraron, y los bytes que cuestan.
+
+    Los eventos son los entregados menos el índice del primero que no cerró
+    (`Engine.needed`), por θ. Los que `cover` entregó por delante del último row group
+    empujado (`BoundaryFeed.ahead`) no tienen casilla todavía y cuestan solo sus fronteras
+    (`BOUNDARY_ROW_BYTES`, 65 B); el resto, `EVENT_BYTES` (305 B). Cota superior de lo abierto.
     """
-    return sum(feed.delivered - engine.needed(feed.position) for feed in feeds)
+    events = ahead = 0
+    for feed in feeds:
+        events += feed.delivered - engine.needed(feed.position)
+        ahead += feed.ahead
+    ahead = min(ahead, events)
+    return events, (events - ahead) * EVENT_BYTES + ahead * BOUNDARY_ROW_BYTES
 
 
 def _lot_ticks(lot_events: int, events: int, ticks: int) -> int | None:
@@ -514,8 +525,9 @@ def _push_all(
     `inflight_bytes` de eventos abiertos (contrapresión; cada tramo la espera): el lector trae
     por delante a lo más `readers`, así que en RAM hay a lo más `inflight + readers + 1`
     tramos o row groups de L1. Los bytes de eventos son lo que de verdad crece con la densidad
-    (ITSC-372): `_unclosed × EVENT_BYTES`, y el tramo acota lo que entra de a uno. Con ningún
-    tramo en el motor siempre avanza, y si ese solo tramo pasa del tope avisa una vez y sigue.
+    (ITSC-372): `_unclosed`, con las fronteras que `cover` trae por delante a 65 B (ITSC-376), y
+    el tramo acota lo que entra de a uno. Con ningún tramo en el motor siempre avanza, y si ese
+    solo tramo pasa del tope avisa una vez y sigue.
     `read_s` suma lo que este hilo esperó al lector y a las fronteras de L2. Cada row group
     del mes pasa por `l1.observe` una sola vez, entero y antes de partirse: la conciliación
     cuenta de ahí los ticks hasta sus extremos sin decodificar de nuevo. Devuelve cuántos
@@ -531,10 +543,7 @@ def _push_all(
         return (
             open_groups >= phases.inflight
             or sink.pending >= limit
-            or (
-                open_groups > 0
-                and _unclosed(engine, feeds) * EVENT_BYTES > phases.inflight_bytes
-            )
+            or (open_groups > 0 and _unclosed(engine, feeds)[1] > phases.inflight_bytes)
         )
 
     while True:
@@ -562,25 +571,23 @@ def _push_all(
         pushed += 1
         phases.lots = pushed
         phases.inflight_max = max(phases.inflight_max, engine.inflight())
-        events = _unclosed(engine, feeds)
+        events, held_bytes = _unclosed(engine, feeds)
         phases.inflight_events_max = max(phases.inflight_events_max, events)
-        phases.inflight_bytes_max = max(phases.inflight_bytes_max, events * EVENT_BYTES)
+        phases.inflight_bytes_max = max(phases.inflight_bytes_max, held_bytes)
         if alone:
             phases.inflight_alone_bytes_max = max(
-                phases.inflight_alone_bytes_max, events * EVENT_BYTES
+                phases.inflight_alone_bytes_max, held_bytes
             )
-        if alone and events * EVENT_BYTES > phases.inflight_bytes and not warned:
+        if alone and held_bytes > phases.inflight_bytes and not warned:
             warned = True
             logger.warning(
-                "mes %s: el tramo %d trae %d eventos abiertos (%d MiB) y pasa del tope de %d "
-                "MiB (L3_INFLIGHT_BYTES); avanza solo. Baja L3_LOT_EVENTS (hoy %d; 0 desactiva "
-                "el corte), sube L3_INFLIGHT_BYTES o sube la memoria del job",
+                "mes %s: el tramo %d trajo %d eventos abiertos (%d MiB) y pasa solo del tope de "
+                "%d MiB (L3_INFLIGHT_BYTES); la unidad avanza",
                 month_text(month),
                 pushed - 1,
                 events,
-                events * EVENT_BYTES >> 20,
+                held_bytes >> 20,
                 phases.inflight_bytes >> 20,
-                phases.lot_events,
             )
 
 

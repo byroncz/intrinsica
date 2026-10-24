@@ -245,3 +245,106 @@ def test_the_sampler_keeps_the_sample_of_the_highest_rss_and_stops_with_the_unit
     time.sleep(0.05)
     assert sampler.ticks == ticks  # parado: no sigue muestreando
     del held
+
+
+# ITSC-376: el trim por marca de agua del muestreador.
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [(None, None), ("", None), (" ", None), ("0", 0), ("64", 64), (" 1024 ", 1024)],
+)
+def test_trim_rss_mib_is_the_environment_value_or_none(text, expected):
+    env = {} if text is None else {"L3_TRIM_RSS_MIB": text}
+    assert memory.trim_rss_mib(env) == expected
+
+
+@pytest.mark.parametrize("text", ["-1", "1.5", "1e3", "mucho", "1 GiB", "٣"])
+def test_a_bad_trim_mark_raises_with_the_variable_name(text):
+    with pytest.raises(ValueError, match="L3_TRIM_RSS_MIB"):
+        memory.trim_rss_mib({"L3_TRIM_RSS_MIB": text})
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [(None, None), ("", None), ("0", 0.0), ("0.5", 0.5), (" 2 ", 2.0)],
+)
+def test_trim_min_s_is_the_environment_value_or_none(text, expected):
+    env = {} if text is None else {"L3_TRIM_MIN_S": text}
+    assert memory.trim_min_s(env) == expected
+
+
+@pytest.mark.parametrize("text", ["-1", "nan", "inf", "pronto", "1s"])
+def test_a_bad_trim_interval_raises_with_the_variable_name(text):
+    with pytest.raises(ValueError, match="L3_TRIM_MIN_S"):
+        memory.trim_min_s({"L3_TRIM_MIN_S": text})
+
+
+def test_the_defaults_leave_the_small_months_without_trims():
+    assert memory.DEFAULT_TRIM_RSS_MIB == 1024
+    assert memory.DEFAULT_TRIM_MIN_S == 0.5
+
+
+class TrimLibc:
+    """Un `ctypes.CDLL(None)` con `malloc_trim` que cuenta sus llamadas y tarda `cost` s."""
+
+    def __init__(self, cost: float = 0.0) -> None:
+        self.cost = cost
+        self.calls: list[int] = []
+
+    def malloc_trim(self, pad: int) -> int:
+        self.calls.append(pad)
+        time.sleep(self.cost)
+        return 1
+
+
+def run_sampler(monkeypatch, libc, seconds: float, **options) -> memory.MemorySampler:
+    monkeypatch.setattr(memory.ctypes, "CDLL", lambda _: libc)
+    sampler = memory.MemorySampler(0.005, **options)
+    sampler.start()
+    time.sleep(seconds)
+    sampler.stop()
+    return sampler
+
+
+def test_the_sampler_trims_once_the_rss_reaches_the_mark(monkeypatch):
+    libc = TrimLibc(cost=0.01)
+    sampler = run_sampler(monkeypatch, libc, 0.2, trim_rss_mib=1, trim_min_s=0.05)
+    # Con el RSS sobre la marca, un trim cada ≥ 0,05 s: unos pocos y no uno por tick.
+    assert 2 <= sampler.trims == len(libc.calls) < sampler.ticks
+    assert set(libc.calls) == {0}
+    assert sampler.trim_s >= sampler.trims * 0.01
+
+
+def test_the_sampler_never_trims_below_the_mark_or_when_the_mark_is_zero(monkeypatch):
+    below = run_sampler(monkeypatch, TrimLibc(), 0.1, trim_rss_mib=1 << 40)
+    off = run_sampler(monkeypatch, TrimLibc(), 0.1, trim_rss_mib=0, trim_min_s=0.0)
+    for sampler in (below, off):
+        assert sampler.ticks >= 2
+        assert (sampler.trims, sampler.trim_s) == (0, 0.0)
+
+
+def test_the_sampler_without_malloc_trim_warns_and_goes_on(monkeypatch, caplog):
+    class Libc:  # un libc sin malloc_trim: `getattr` lanza AttributeError
+        pass
+
+    with caplog.at_level(logging.WARNING, logger=memory.logger.name):
+        sampler = run_sampler(monkeypatch, Libc(), 0.05, trim_rss_mib=1)
+    assert sampler.trims == 0 and sampler.peak is not None
+    assert any("malloc_trim" in record.getMessage() for record in caplog.records)
+
+
+def test_the_sampler_takes_the_peak_sample_before_it_trims(monkeypatch):
+    """La muestra del pico dice cuánto retenía glibc cuando el RSS subió, no tras devolverlo."""
+    order: list[str] = []
+    libc = TrimLibc()
+    real = libc.malloc_trim
+    libc.malloc_trim = lambda pad: order.append("trim") or real(pad)
+    take = memory.take_sample
+    monkeypatch.setattr(
+        memory,
+        "take_sample",
+        lambda *args, **kwargs: order.append("sample") or take(*args, **kwargs),
+    )
+    run_sampler(monkeypatch, libc, 0.05, trim_rss_mib=1, trim_min_s=0.0)
+    assert order[:2] == ["sample", "trim"]

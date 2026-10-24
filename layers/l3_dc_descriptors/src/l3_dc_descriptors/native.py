@@ -101,7 +101,9 @@ class BoundaryFeed:
     `batches` son los lotes de L2 del θ en orden. Antes de empujar un row group cuyo último
     id es `high`, `cover(high)` entrega lotes hasta que el último entregado empieza después
     de `high` (ningún evento que falte toca el row group) o se acaban: lo que `Engine.push`
-    exige. Los lotes se leen a medida que hacen falta y no se conservan aquí.
+    exige. Los lotes se leen a medida que hacen falta y no se conservan aquí, salvo la vista de
+    las referencias del último (≤ `L2_BATCH_ROWS` × 8 B por θ), que retiene su buffer hasta el
+    lote siguiente o el fin de la unidad; el motor retiene esos eventos mientras estén abiertos.
     """
 
     def __init__(
@@ -116,11 +118,14 @@ class BoundaryFeed:
         self._retained = retained
         self._batches = iter(batches)
         self._last: int | None = None  # referencia del último evento entregado
+        self._references = np.empty(0, "<i8")  # las del último lote entregado
+        self._high = -1  # último id del row group que `cover` cubrió
         self.position = position
         self.delivered = 0  # eventos entregados al motor: no baja
 
     def cover(self, high: int) -> None:
         """Entrega lo que falta para un row group cuyo último id es `high`."""
+        self._high = high
         while self._last is None or self._last <= high:
             batch = next(self._batches, None)
             if batch is None:
@@ -129,7 +134,23 @@ class BoundaryFeed:
                 continue
             push_boundaries(self._engine, self._position, batch, self._retained)
             self.delivered += batch.num_rows
-            self._last = batch.column("reference_agg_trade_id")[-1].as_py()
+            # Sin copia (la columna no tiene nulos): solo la de este lote, ya ordenada.
+            self._references = batch.column("reference_agg_trade_id").to_numpy(
+                zero_copy_only=False
+            )
+            self._last = int(self._references[-1])
+
+    @property
+    def ahead(self) -> int:
+        """Eventos entregados cuya referencia está después del último id cubierto: `cover`
+        los trajo por delante y ningún tick empujado los toca aún.
+
+        Solo el último lote puede traer alguno: `cover` sigue entregando mientras el último
+        lote termina en un id ≤ `high`, así que todos los anteriores quedaron atrás.
+        """
+        return len(self._references) - int(
+            np.searchsorted(self._references, self._high, side="right")
+        )
 
 
 def push(

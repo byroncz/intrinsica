@@ -699,8 +699,9 @@ mismo que traen las excepciones del resumidor, de las que sale la mayoría de lo
   `rss_after_trim_mib`, el `VmRSS` del proceso justo antes y después de devolver la memoria al kernel
   al cerrar la unidad (desde la 2.5.0 del TRD-L3); `inflight_bytes` (el tope de bytes de eventos
   abiertos, `L3_INFLIGHT_BYTES`), `inflight_events_max`, `inflight_bytes_max` (el máximo de
-  eventos entregados al motor que aún no cerraron y ese máximo por 305 B; puede pasar del tope hasta
-  en un tramo, porque el tope se mira antes de empujar) e `inflight_alone_bytes_max` (lo mismo
+  eventos entregados al motor que aún no cerraron y ese máximo en bytes, a 305 B por evento y a 65 B
+  los que `cover` trajo por delante del último tramo; puede pasar del tope hasta en un tramo, porque
+  el tope se mira antes de empujar) e `inflight_alone_bytes_max` (lo mismo
   para los tramos que entraron a un motor vacío: si pasa del tope, un solo tramo lo superó)
   y `spawn_s` (lo que tardó en arrancar el proceso hijo de la unidad; `null`
   si corrió en el proceso de la CLI), desde la 2.6.0; `lot_events` (el lote en eventos con que
@@ -711,7 +712,10 @@ mismo que traen las excepciones del resumidor, de las que sale la mayoría de lo
   `uordblks_mib`, `fordblks_mib`, `keepcost_mib`, `arrow_mib`, `engine_inflight` y `elapsed_s`: el
   RSS más alto que vio el muestreador de la unidad y el cierre antes y después del trim; los campos de
   glibc son `null` sin `mallinfo2`), `mem_samples` (ticks del muestreador) y `mem_peak_coverage`
-  (`rss_mib` de `mem_peak` ÷ `rss_peak_mib`), desde la 2.9.0. No cuenta las lecturas de la conciliación (solo
+  (`rss_mib` de `mem_peak` ÷ `rss_peak_mib`), desde la 2.9.0; y `trims` (los `malloc_trim(0)` que
+  hizo el muestreador durante la unidad), `trim_s` (la suma de lo que tardaron, tres decimales) y
+  `trim_rss_mib` (la marca de agua con que corrió, `L3_TRIM_RSS_MIB`; 0 si estaba desactivado), desde
+  la 2.10.0. No cuenta las lecturas de la conciliación (solo
   `agg_trade_id` de los row groups de las fronteras). Va aparte de `summaries_summary`
   porque sus tiempos cambian en cada corrida y el de `summaries_summary` no puede.
 - **`unit_process_died`** (`error`, `fail`, desde la 2.6.0 del TRD-L3): el proceso hijo de la

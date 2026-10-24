@@ -26,6 +26,8 @@ from l3_dc_descriptors.frontier import theta_text
 from l3_dc_descriptors.landing import missing_input
 from l3_dc_descriptors.memory import (
     DEFAULT_SAMPLE_S,
+    DEFAULT_TRIM_MIN_S,
+    DEFAULT_TRIM_RSS_MIB,
     MemorySampler,
     MemSample,
     mmap_threshold,
@@ -116,6 +118,8 @@ def _process_unit(
     phases.sampler = MemorySampler(
         DEFAULT_SAMPLE_S if ctx.memory_sample_s is None else ctx.memory_sample_s,
         started,
+        DEFAULT_TRIM_RSS_MIB if ctx.trim_rss_mib is None else ctx.trim_rss_mib,
+        DEFAULT_TRIM_MIN_S if ctx.trim_min_s is None else ctx.trim_min_s,
     )
     phases.sampler.start()
     try:
@@ -188,6 +192,9 @@ def _process_unit(
         mem_close_before_trim=close_samples[0],
         mem_close_after_trim=close_samples[1],
         mem_samples=phases.sampler.ticks,
+        trims=phases.sampler.trims,
+        trim_s=phases.sampler.trim_s,
+        trim_rss_mib=phases.sampler.trim_rss_mib,
     )
     return Result(
         (

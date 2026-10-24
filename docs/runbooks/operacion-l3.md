@@ -72,7 +72,7 @@ relanza los mismos inputs.
    86400`, `maxRetries: 1`, `cpu: '4'` y `memory: 4Gi` en `limits`. Las raíces
    (`L3_LANDING_ROOT`, `L3_EVENTS_ROOT`, `L3_SUMMARIES_ROOT`, `L3_DQ_ROOT`),
    `L3_SERIES_START` y `L3_THETAS_URI` van en `env`; `L3_THREADS`, `L3_READERS`, `L3_INFLIGHT`,
-   `L3_WRITERS`, `L3_ENGINE_THREADS`, `L3_INFLIGHT_BYTES`, `L3_LOT_EVENTS` y `L3_UNIT_PROCESS` son opcionales (ver "Hilos y topes de la unidad" y "Memoria acotada").
+   `L3_WRITERS`, `L3_ENGINE_THREADS`, `L3_INFLIGHT_BYTES`, `L3_LOT_EVENTS`, `L3_TRIM_RSS_MIB`, `L3_TRIM_MIN_S` y `L3_UNIT_PROCESS` son opcionales (ver "Hilos y topes de la unidad" y "Memoria acotada").
 2. **Imagen `l3_dc_descriptors`** de `layers/l3_dc_descriptors/VERSION`. El stack
    `l3` deriva el tag de ese archivo: sin `apply` posterior al merge, el job
    sigue con la imagen vieja.
@@ -483,8 +483,9 @@ El límite y su regla de retroceso están en [«Asignador por defecto de L3»](#
 | `mmap_threshold` | Umbral de `mmap` de glibc con que corrió la unidad: `MALLOC_MMAP_THRESHOLD_` o 33554432; `null` si quedó dinámico. Dice con qué corrió cada fila del cuadro de §10.2 |
 | `trim_threshold` | Umbral de recorte del heap con que corrió la unidad: `MALLOC_TRIM_THRESHOLD_` (1073741824 en la imagen); `null` si no está fijada y glibc recorta con su umbral dinámico |
 | `rss_before_trim_mib`, `rss_after_trim_mib` | `VmRSS` (no el pico) justo antes y después de devolver la memoria al kernel al cerrar la unidad. La diferencia es lo que el trim devolvió; `rss_after_trim_mib` de mes a mes dice si el proceso acumula entre unidades |
-| `mem_peak`, `mem_close_before_trim`, `mem_close_after_trim` | De qué está hecho el RSS (ITSC-375): la muestra del RSS más alto que vio el hilo `l3-memory-sampler` y las del cierre, antes y después del trim. Cada una trae `rss_mib`, `arena_mib` (lo que las arenas piden al sistema), `hblkhd_mib` (regiones `mmap`), `uordblks_mib` (en uso), `fordblks_mib` (libre que glibc retiene), `keepcost_mib`, `arrow_mib`, `engine_inflight` (tramos anclados; `null` al cerrar) y `elapsed_s`. Si `fordblks_mib` es la mayor parte de `rss_mib` en `mem_peak`, el pico es memoria que el programa ya liberó y glibc no devolvió, no datos vivos. Sin `mallinfo2` los campos de glibc son `null` |
+| `mem_peak`, `mem_close_before_trim`, `mem_close_after_trim` | De qué está hecho el RSS (ITSC-375): la muestra del RSS más alto que vio el hilo `l3-memory-sampler` y las del cierre, antes y después del trim. Cada una trae `rss_mib`, `arena_mib` (lo que las arenas piden al sistema), `hblkhd_mib` (regiones `mmap`), `uordblks_mib` (en uso), `fordblks_mib` (libre que glibc retiene), `keepcost_mib`, `arrow_mib`, `engine_inflight` (tramos anclados; `null` al cerrar) y `elapsed_s`. Con `trims` = 0, si `fordblks_mib` es la mayor parte de `rss_mib` en `mem_peak` el pico es retención del asignador y no datos vivos. Con `trims` > 0 esa lectura engaña (`fordblks` cuenta páginas que el trim ya devolvió y puede pasar de `rss_mib`): se mira lo residente sin uso, `rss_mib − (uordblks_mib + hblkhd_mib)`, y la memoria viva en `uordblks_mib` y `arrow_mib`. Sin `mallinfo2` los campos de glibc son `null` |
 | `mem_samples`, `mem_peak_coverage` | Ticks del muestreador y `rss_mib` de `mem_peak` ÷ `rss_peak_mib`. Bajo 0,9 el muestreador no vio el pico: baja `L3_MEMORY_SAMPLE_S` (ver «Variables») y repite; es un ajuste, no una falla |
+| `trims`, `trim_s`, `trim_rss_mib` | El trim por marca de agua (ITSC-376): cuántos `malloc_trim(0)` hizo el muestreador durante la unidad, la suma de lo que tardaron (s) y la marca con que corrió (`L3_TRIM_RSS_MIB`; 0 si estaba desactivado). `trims` = 0 en los meses chicos es lo esperado: no llegan a la marca. En los densos, `trim_s` ÷ `wall_s` es lo que cuesta el trim; si estorba al motor (`trim_s` o `cpu_s` suben), sube `L3_TRIM_MIN_S`. `fordblks_mib` no mide lo que el trim devolvió: `malloc_trim(0)` entrega páginas con `madvise(MADV_DONTNEED)` sin sacar los chunks de las listas libres, así que con el trim funcionando `fordblks_mib` puede seguir alto. Lo que el trim sí mueve es lo residente sin uso, `mem_peak.rss_mib − (mem_peak.uordblks_mib + mem_peak.hblkhd_mib)`, y `rss_peak_mib` contra el de la misma unidad sin trim |
 | `boundaries_peak_mib` | Máximo de fronteras de L2 que el motor tuvo en mano |
 
 Para comparar dos corridas usa `wall_s`, `cpu_s` y `cpu_utilization`. `run-job.yml` no admite
@@ -565,15 +566,21 @@ decenas de MiB por mes. `rss_peak_mib` es un pico y no lo ve.
 
 **Si un backfill muere con signal 9 (OOM).** Desde la 0.16.0 no debería: cada unidad corre en un
 proceso hijo y el tope de bytes acota los eventos abiertos (sección siguiente). Si pasa, el padre
-sigue vivo y deja `unit_process_died` con `exit_signal` 9. Qué mirar, en orden: (1) el
+sigue vivo y deja `unit_process_died` con `exit_signal` 9. Qué mirar, en orden: (0) los `trims` y el
+`mem_peak` de los meses vecinos que sí terminaron (ITSC-376): si `trims` es 0 con un `rss_peak_mib`
+sobre `trim_rss_mib`, el trim está desactivado (`L3_TRIM_RSS_MIB=0`) o el muestreador no lo vio
+(`mem_peak_coverage` bajo); si `rss_peak_mib` queda sobre 2 000 con `trims` > 0, el resto es memoria
+viva: mira `uordblks_mib` y `arrow_mib` de `mem_peak` (casillas del motor y salida sellada de Arrow)
+y se baja con el diseño, no con el asignador. (1) el
 `unit_timing` del mes que murió no existe (el hijo murió antes de emitirlo), así que la señal sale
 de otros dos lados. En Cloud Logging, busca el aviso `L3_INFLIGHT_BYTES` del mes: el hijo lo emite
 al empujar un tramo que por sí solo pasa del tope, antes de morir. Y mide la densidad del mes
 con lo que sí existe: suma `metric_value` de los `events_summary` de L2 de ese mes (los eventos de
 todos los θ, [`operacion-l2`](operacion-l2.md#paso-2-reproducibilidad)) y divídela por los ticks de
 `consolidated.parquet` de L1 de ese mes: el tramo es `L3_LOT_EVENTS` ÷ esa densidad (ITSC-373), y si
-trae más eventos que el tope, baja `L3_LOT_EVENTS` (con 0 el corte no existe y el lote es el row
-group entero). (2) Si es un mes normal, lo que cambió es el job o el asignador: compara `rss_peak_mib` con el de
+trae más eventos que el tope, ese tramo no cabe: baja `L3_LOT_EVENTS` (el tramo sale de la densidad
+media del mes y uno localmente denso puede pasar del tope) o sube la memoria del job (con
+`L3_LOT_EVENTS=0` el corte no existe y el lote es el row group entero, peor). (2) Si es un mes normal, lo que cambió es el job o el asignador: compara `rss_peak_mib` con el de
 los meses vecinos. (3) Relanza **desde Cloud Shell** con el asignador de T5, que devuelve la
 memoria al kernel en cada `free`, o con más memoria en el job. Repite los `--args` del run que
 murió, tal como los imprime `run-job-args.sh` (con `--force` si lo llevaba) y empieza en el mes
@@ -628,8 +635,10 @@ Dos mecanismos, los dos por construcción y no por ajuste del asignador
 |---|---|---|
 | `L3_UNIT_PROCESS` | `1`: cada unidad de `backfill` corre en un proceso hijo (`spawn`) y su memoria muere con ella; `0`: en el proceso de la CLI. `monthly` no la usa. Otro valor es código 2 | `1` |
 | `L3_INFLIGHT_BYTES` | Tope de bytes de eventos entregados al motor que aún no cerraron (305 B por evento). Entero ≥ 1 | 805 306 368 (768 MiB, ≈ 2,6 M de eventos) |
-| `L3_LOT_EVENTS` | Eventos de un tramo: cada row group de L1 se parte en tramos de a lo más `L3_LOT_EVENTS ÷ densidad del mes` ticks (ITSC-373). Entero ≥ 0; `0` desactiva el corte | 2 500 000 (≈ 763 MB de casillas y fronteras; antes 1 000 000) |
+| `L3_LOT_EVENTS` | Eventos de un tramo: cada row group de L1 se parte en tramos de a lo más `L3_LOT_EVENTS ÷ densidad del mes` ticks (ITSC-373). Entero ≥ 0; `0` desactiva el corte | 1 000 000 (≈ 305 MB de casillas y fronteras; ITSC-375 probó 2 500 000 y no ganó nada, ITSC-376 lo revirtió) |
 | `L3_MEMORY_SAMPLE_S` | Segundos entre ticks del hilo `l3-memory-sampler`, que lee `VmRSS` y, solo si supera su máximo, toma una muestra con `mallinfo2`. Número > 0; otro valor es código 2 (ITSC-375) | `0,25` |
+| `L3_TRIM_RSS_MIB` | Marca de agua del trim periódico (ITSC-376): en cada tick, si `VmRSS` llega a estos MiB y pasó `L3_TRIM_MIN_S`, el hilo `l3-memory-sampler` llama a `malloc_trim(0)`. Entero ≥ 0; `0` lo desactiva (queda el del cierre); otro valor es código 2 | `1024` |
+| `L3_TRIM_MIN_S` | Segundos mínimos entre dos trims periódicos. Número ≥ 0; otro valor es código 2 | `0,5` |
 
 **Qué mirar en `unit_timing`.** `spawn_s` es el arranque del hijo (en local, 0,1 a 0,2 s; la
 estimación para Cloud Run es ≈ 1 s por mes); `null` si la unidad corrió en el proceso de la CLI.
@@ -638,13 +647,13 @@ estimación para Cloud Run es ≈ 1 s por mes); `null` si la unidad corrió en e
 se mira antes de empujar, así que `inflight_bytes_max` puede pasar de `inflight_bytes` hasta en un
 tramo: es lo normal y no es una señal. La señal es `inflight_alone_bytes_max`, el máximo de
 bytes abiertos tras empujar un tramo a un motor vacío: si pasa de `inflight_bytes`, un solo tramo
-trajo más eventos que el tope (la unidad avanza igual y avisa en el log): el pico de ese mes es ≈
-ese tramo, y se arregla bajando `L3_LOT_EVENTS` o subiendo la memoria del job. Con el valor por
-defecto (763 MB contra un tope de 805 MB) un tramo ocupa casi todo el tope, y las fronteras de L2
-que `cover` trae por delante (hasta ≈ 1,6 M de eventos con 50 θ, contados a 305 B aunque valen 65 B)
-bastan para pasarlo: **con 2,5 M el aviso es esperable en los meses densos (2017-12 y 2018-01) y no
-es razón para bajar `L3_LOT_EVENTS`**; anótalo en la card. La señal real de un tramo que no cabe es
-`inflight_alone_bytes_max` mayor que el tope + 1,6 M × 305 B ≈ 1,29 GB. `lot_events`
+trajo más eventos que el tope (la unidad avanza igual y avisa en el log, con el tramo y los eventos
+que trajo): el pico de ese mes es ≈ ese tramo, y se arregla con un lote más chico (`L3_LOT_EVENTS`) o
+subiendo la memoria del job. Con el valor
+por defecto (1 M de eventos ≈ 305 MB contra un tope de 805 MB) un tramo cabe con holgura, y las
+fronteras de L2 que `cover` trae por delante (hasta ≈ 1,6 M de eventos con 50 θ) se cuentan a 65 B,
+lo que valen (ITSC-376; antes se contaban a 305 B e inflaban `inflight_alone_bytes_max`): el aviso
+no debe salir en ningún mes, y si sale es una señal real. `lot_events`
 es el lote con que corrió (0 si no hay corte), `lot_ticks` el tamaño de tramo en ticks (`null` sin
 corte) y `lots` los tramos empujados: en un mes normal `lots` es `row_groups_month` (más los de
 meses anteriores que el lector entrega) y en uno denso es mayor. Con `L3_PROFILE=1` el perfil es del
@@ -701,6 +710,38 @@ cierre `fordblks_mib` cae en ≈ `keepcost_mib` (el trim recorta solo el top de 
 tops de las secundarias siguen residentes, y las páginas interiores de los chunks libres de todas las
 arenas se devuelven sin tocar `fordblks`) y puede subir por lo que libera `gc.collect()`: esa
 diferencia es la cima devuelta, no retención que «desapareció». El resultado va como comentario en ITSC-375 y en la entrada de decisión.
+
+**Las corridas de ITSC-376** (las lanza el humano tras el merge y el `apply` de `l3`, **las dos
+seguidas el mismo día** para que el host no cambie entre una y otra). (a) *Actions → Run job*,
+`l3-backfill`, `from = 2017-08`, `to = 2018-01` y `force`, con los valores por defecto de la imagen
+(lote de 1 M de eventos, trim en 1 024 MiB cada 0,5 s). (b) La misma desde Cloud Shell con el corte
+en tramos apagado, y quitando la variable al terminar:
+
+```bash
+gcloud run jobs execute l3-backfill \
+  --project <proyecto> --region <región> \
+  --update-env-vars L3_LOT_EVENTS=0 \
+  --args="--mode,backfill,--from=2017-08,--to=2018-01,--force" \
+  --wait
+```
+
+`--update-env-vars` en `execute` vale solo para esa ejecución y el job no cambia (ver arriba), así que
+no hay nada que quitar al terminar; si alguien la fijó con `gcloud run jobs update`, quítala con
+`--remove-env-vars L3_LOT_EVENTS`.
+
+Metas sobre (a): termina; `l3_compare_runs.py --from 2017-08 --to 2018-01` da 300 de 300;
+`rss_peak_mib` de 2017-12 y 2018-01 ≤ 2 000; `cpu_s` de 2017-12 y 2018-01 no más de un 5 % sobre 55,9
+y 103,6 s. Son las tres metas bloqueantes. Lo residente sin uso de `mem_peak`
+(`rss_mib − (uordblks_mib + hblkhd_mib)`) es dato informativo, no meta: `mem_peak` se toma cuando el
+RSS acaba de subir, justo antes del siguiente trim, así que lo retenido ahí está siempre en su máximo
+(la card decía `fordblks_mib` < 30 %, que `malloc_trim(0)` no baja; ADR-L3-16, fila «Trim por marca
+de agua»). Sobre (a) contra (b): si `cpu_s`
+por mes difiere menos de 5 %, el corte en tramos no cuesta CPU y el +38 % de ITSC-373 se atribuye al
+host o a otro cambio de 0.17.0 (se anota, sin card); si difiere más, se abre una card para encontrar
+dónde paga el corte. Si 2018-01 queda sobre 2 000 MiB, la card siguiente (salida sellada de Arrow
+acotada o asignador del motor) se crea con los `mem_*` de esta corrida. Compara solo corridas con la
+misma cuota de CPU (`cores`). El resultado va como comentario en ITSC-376 y en la entrada de
+decisión de ITSC-375.
 
 ## Lector de tramas: `DC_FRAMES_IO_THREADS` y `readers`
 
