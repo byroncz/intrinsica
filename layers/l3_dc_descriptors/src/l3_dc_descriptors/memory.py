@@ -104,6 +104,14 @@ def rss_bytes() -> int | None:
     return None
 
 
+def _malloc_trim() -> Callable[[int], int] | None:
+    """`malloc_trim` del libc, o `None` si no lo tiene (otro libc)."""
+    try:
+        return ctypes.CDLL(None).malloc_trim
+    except AttributeError, OSError:
+        return None
+
+
 def release_to_kernel() -> tuple[int | None, int | None]:
     """Devuelve al kernel la memoria libre de la unidad y dice el RSS antes y después.
 
@@ -118,9 +126,8 @@ def release_to_kernel() -> tuple[int | None, int | None]:
     """
     before = rss_bytes()
     gc.collect()
-    try:
-        malloc_trim = ctypes.CDLL(None).malloc_trim
-    except AttributeError, OSError:
+    malloc_trim = _malloc_trim()
+    if malloc_trim is None:
         logger.warning(
             "sin malloc_trim: la memoria libre no vuelve al kernel entre unidades"
         )
@@ -158,6 +165,13 @@ def tune_allocators() -> None:
 # ITSC-375: qué hay dentro del RSS en el pico y al cierre de la unidad.
 _SAMPLE_ENV = "L3_MEMORY_SAMPLE_S"
 DEFAULT_SAMPLE_S = 0.25
+# ITSC-376: el trim por marca de agua del muestreador. Con 1 024 MiB los meses chicos (pico bajo
+# 1 GiB) no pagan ningún trim; en los densos el pico queda acotado por la marca más lo que crece
+# en `DEFAULT_TRIM_MIN_S`. Una marca de 0 lo desactiva.
+_TRIM_RSS_ENV = "L3_TRIM_RSS_MIB"
+_TRIM_MIN_ENV = "L3_TRIM_MIN_S"
+DEFAULT_TRIM_RSS_MIB = 1024
+DEFAULT_TRIM_MIN_S = 0.5
 _MIB = 1 << 20
 
 
@@ -212,6 +226,39 @@ def sample_period(env: Mapping[str, str]) -> float | None:
         raise ValueError(f"{_SAMPLE_ENV}={raw!r} no es un número") from None
     if not math.isfinite(value) or value <= 0:
         raise ValueError(f"{_SAMPLE_ENV}={raw!r} debe ser un número mayor que 0")
+    return value
+
+
+def trim_rss_mib(env: Mapping[str, str]) -> int | None:
+    """`L3_TRIM_RSS_MIB` como MiB (entero ≥ 0; 0 desactiva el trim periódico), o `None` si
+    falta o está vacía.
+
+    Un valor que no es un entero ≥ 0 lanza `ValueError` con el motivo: la CLI lo convierte en
+    código 2.
+    """
+    raw = env.get(_TRIM_RSS_ENV)
+    if raw is None or not raw.strip():
+        return None
+    text = raw.strip()
+    if not (text.isascii() and text.isdigit()):
+        raise ValueError(f"{_TRIM_RSS_ENV}={raw!r} debe ser un entero de MiB, 0 o más")
+    return int(text)
+
+
+def trim_min_s(env: Mapping[str, str]) -> float | None:
+    """`L3_TRIM_MIN_S` como segundos (número finito ≥ 0), o `None` si falta o está vacía.
+
+    Un valor inválido lanza `ValueError` con el motivo: la CLI lo convierte en código 2.
+    """
+    raw = env.get(_TRIM_MIN_ENV)
+    if raw is None or not raw.strip():
+        return None
+    try:
+        value = float(raw)
+    except ValueError:
+        raise ValueError(f"{_TRIM_MIN_ENV}={raw!r} no es un número") from None
+    if not math.isfinite(value) or value < 0:
+        raise ValueError(f"{_TRIM_MIN_ENV}={raw!r} debe ser un número de 0 o más")
     return value
 
 
@@ -285,20 +332,36 @@ def take_sample(
 
 
 class MemorySampler:
-    """Hilo `l3-memory-sampler`: guarda la muestra del RSS más alto que vio la unidad.
+    """Hilo `l3-memory-sampler`: guarda la muestra del RSS más alto que vio la unidad y, por
+    marca de agua, devuelve al kernel la memoria libre mientras la unidad corre (ITSC-376).
 
     En cada tick (`period_s`) lee `VmRSS`, que es barato; solo si supera el máximo visto toma
     una muestra completa, porque `mallinfo2` recorre las listas libres con el candado de cada
     arena. Así son a lo más unas pocas llamadas por segundo mientras el RSS crece y ninguna
-    cuando ya no sube. `inflight` lo asigna quien crea el motor (y lo quita al cerrarlo).
+    cuando ya no sube. Si además `VmRSS` llega a `trim_rss_mib` y pasaron `trim_min_s` desde el
+    último trim, llama a `malloc_trim(0)`, que también recorre las arenas con sus candados: por
+    eso no va tras cada sellado ni cada N segundos, y bajo la marca cuesta cero. Una marca de 0
+    lo desactiva. `trims` y `trim_s` dicen cuántos hizo y cuánto tardaron en total. `inflight`
+    lo asigna quien crea el motor (y lo quita al cerrarlo).
     """
 
-    def __init__(self, period_s: float, started: float | None = None) -> None:
+    def __init__(
+        self,
+        period_s: float,
+        started: float | None = None,
+        trim_rss_mib: int = DEFAULT_TRIM_RSS_MIB,
+        trim_min_s: float = DEFAULT_TRIM_MIN_S,
+    ) -> None:
         self.period_s = period_s
         self.started = time.perf_counter() if started is None else started
+        self.trim_rss_mib = trim_rss_mib
+        self.trim_min_s = trim_min_s
         self.inflight: Callable[[], int] | None = None
         self.peak: MemSample | None = None
         self.ticks = 0
+        self.trims = 0
+        self.trim_s = 0.0
+        self._trim: Callable[[int], int] | None = None
         self._stop = threading.Event()
         self._thread = threading.Thread(
             target=self._run, name="l3-memory-sampler", daemon=True
@@ -309,6 +372,12 @@ class MemorySampler:
             logger.warning(
                 "sin mallinfo2: las muestras de memoria no traen la contabilidad de glibc"
             )
+        if self.trim_rss_mib > 0:
+            self._trim = _malloc_trim()
+            if self._trim is None:
+                logger.warning(
+                    "sin malloc_trim: la memoria libre no vuelve al kernel durante la unidad"
+                )
         self._thread.start()
 
     def stop(self) -> None:
@@ -319,11 +388,20 @@ class MemorySampler:
 
     def _run(self) -> None:
         top = 0
+        mark = self.trim_rss_mib << 20
+        last_trim = -math.inf
         while True:
             rss = rss_bytes()
             self.ticks += 1
             if rss is not None and rss > top:
                 top = rss
                 self.peak = take_sample(self.started, self.inflight, rss)
+            if self._trim is not None and rss is not None and rss >= mark:
+                now = time.perf_counter()
+                if now - last_trim >= self.trim_min_s:
+                    self._trim(0)
+                    last_trim = time.perf_counter()
+                    self.trims += 1
+                    self.trim_s += last_trim - now
             if self._stop.wait(self.period_s):
                 return

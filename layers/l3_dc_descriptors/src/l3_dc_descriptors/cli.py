@@ -131,6 +131,20 @@ def _sample_period(env: Mapping[str, str]) -> float | None:
         raise UsageError(str(error)) from None
 
 
+def _trim_rss_mib(env: Mapping[str, str]) -> int | None:
+    try:
+        return memory.trim_rss_mib(env)
+    except ValueError as error:
+        raise UsageError(str(error)) from None
+
+
+def _trim_min_s(env: Mapping[str, str]) -> float | None:
+    try:
+        return memory.trim_min_s(env)
+    except ValueError as error:
+        raise UsageError(str(error)) from None
+
+
 def _context(mode: str, series_start: Month, env: Mapping[str, str]) -> RunContext:
     missing = [name for name in ROOT_VARS if not env.get(name)]
     if missing:
@@ -154,6 +168,8 @@ def _context(mode: str, series_start: Month, env: Mapping[str, str]) -> RunConte
         lot_events=_count(env, "L3_LOT_EVENTS", minimum=0),
         unit_process=_flag(env, "L3_UNIT_PROCESS", default=True),
         memory_sample_s=_sample_period(env),
+        trim_rss_mib=_trim_rss_mib(env),
+        trim_min_s=_trim_min_s(env),
     )
 
 

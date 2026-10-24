@@ -287,6 +287,36 @@ def test_the_lineage_is_the_same_with_any_pool(lake, tmp_path, threads):
     assert timing.phases.gate_s > 0 and not hasattr(timing.phases, "lineage_s")
 
 
+def test_the_content_hash_is_the_same_with_and_without_the_periodic_trim(
+    lake, tmp_path
+):
+    """ITSC-376: devolver memoria al kernel durante la unidad no cambia un bit de la salida."""
+
+    def hashes(**options):
+        ctx = RunContext(
+            mode="backfill",
+            run_id="run",
+            image_version="0.8.0+test",
+            series_start=M1,
+            landing_root=str(lake.l1),
+            events_root=str(lake.l2),
+            summaries_root=str(lake.l3),
+            dq_root=str(tmp_path / "dq"),
+            memory_sample_s=0.001,
+            **options,
+        )
+        result = process_unit(Unit(*M2), ctx, lake.thetas)
+        assert result.ok, result.error
+        rows = [f for f in result.findings if f.check_type == "summaries_summary"]
+        return {f.details["theta"]: f.details["content_hash"] for f in rows}, result
+
+    without, off = hashes(trim_rss_mib=0)
+    trimmed, on = hashes(trim_rss_mib=1, trim_min_s=0.0)
+    assert trimmed == without and len(trimmed) == len(lake.thetas)
+    assert off.timing.trims == 0 and off.timing.trim_rss_mib == 0
+    assert on.timing.trims >= 1 and on.timing.trim_rss_mib == 1
+
+
 def test_the_phases_report_how_it_ran(lake):
     phases = Phases()
     summarize_month(
@@ -601,8 +631,11 @@ def test_the_unit_reports_the_open_events_it_held(lake):
     )
     assert phases.inflight_bytes == 10**9
     assert phases.inflight_events_max > 0
-    assert phases.inflight_bytes_max == (
-        phases.inflight_events_max * summarize.EVENT_BYTES
+    # Las fronteras que `cover` trae por delante cuestan 65 B y no 305 (ITSC-376).
+    assert (
+        phases.inflight_events_max * boundaries.BOUNDARY_ROW_BYTES
+        <= phases.inflight_bytes_max
+        <= phases.inflight_events_max * summarize.EVENT_BYTES
     )
     # El primer row group siempre entra a un motor vacío.
     assert 0 < phases.inflight_alone_bytes_max <= phases.inflight_bytes_max
@@ -650,19 +683,22 @@ class FakeFeed:
 
     position = 0
 
-    def __init__(self, per_group: int) -> None:
+    def __init__(self, per_group: int, ahead: int = 0) -> None:
         self.per_group = per_group
+        self.ahead = ahead  # de los entregados, los que `cover` trajo por delante
         self.delivered = 0
 
     def cover(self, high: int) -> None:
         self.delivered += self.per_group
 
 
-def push_fake_row_groups(monkeypatch, cap: int, per_group: int = 1000, groups: int = 6):
-    """`_push_all` con 6 row groups de `per_group` eventos y un motor que tarda 30 ms en
-    cerrar cada uno. Devuelve el motor y las `Phases`.
+def push_fake_row_groups(
+    monkeypatch, cap: int, per_group: int = 1000, groups: int = 6, ahead: int = 0
+):
+    """`_push_all` con 6 row groups de `per_group` eventos (`ahead` de ellos por delante) y un
+    motor que tarda 30 ms en cerrar cada uno. Devuelve el motor y las `Phases`.
     """
-    engine, feed, phases = ClosingEngine(0.03), FakeFeed(per_group), Phases()
+    engine, feed, phases = ClosingEngine(0.03), FakeFeed(per_group, ahead), Phases()
     phases.inflight, phases.writers, phases.inflight_bytes = 4, 1, cap
 
     def push(engine, row_group_id, ids, columns, before_month):
@@ -710,9 +746,62 @@ def test_the_byte_cap_holds_back_a_row_group_while_the_open_events_pass_it(
     assert [r.levelno for r in caplog.records] == [logging.WARNING]
     message = caplog.records[0].getMessage()
     assert "L3_INFLIGHT_BYTES" in message
-    # ITSC-373: el remedio ya no es dividir el row group de L1 sino bajar el lote.
-    assert "L3_LOT_EVENTS" in message
-    assert "dividir el row group" not in message
+    # ITSC-376: dice qué tramo trajo cuántos eventos y que la unidad avanza; no manda bajar el
+    # lote, que no arregla un tramo que ya es del tamaño del tope.
+    assert "el tramo 0 trajo 1000 eventos" in message
+    assert "la unidad avanza" in message
+    assert "L3_LOT_EVENTS" not in message
+
+
+def test_the_boundaries_cover_brought_ahead_cost_65_bytes_not_305(monkeypatch):
+    """Los eventos que `cover` entregó por delante del tramo no tienen casilla: cuestan solo
+    sus siete columnas de fronteras (`BOUNDARY_ROW_BYTES`).
+    """
+    each = 1000 * summarize.EVENT_BYTES
+    ahead = 400
+    _, phases = push_fake_row_groups(monkeypatch, each // 2, ahead=ahead)
+    expected = (1000 - ahead) * summarize.EVENT_BYTES + (
+        ahead * boundaries.BOUNDARY_ROW_BYTES
+    )
+    assert phases.inflight_events_max == 1000
+    assert phases.inflight_alone_bytes_max == expected < each
+    # 600 × 305 + 400 × 65 = 209 000 B, y no los 305 000 de contar todo a 305 B: con el tope
+    # justo sobre eso el tramo cabe solo.
+    _, phases = push_fake_row_groups(monkeypatch, expected + 1, ahead=ahead)
+    assert phases.inflight_alone_bytes_max == expected <= phases.inflight_bytes
+
+
+def test_a_boundary_feed_counts_the_events_it_brought_ahead_of_the_covered_ids():
+    pushed: list[int] = []
+    engine = types.SimpleNamespace(
+        push_boundaries=lambda position, entry: pushed.append(entry.rows)
+    )
+    references = np.arange(0, 100, 10, dtype=np.int64)  # 10 eventos: 0, 10, ..., 90
+    columns_of_l2 = (
+        "reference_agg_trade_id",
+        "confirm_agg_trade_id",
+        "confirm_time",
+        "extreme_agg_trade_id",
+        "direction",
+        "confirm_price",
+        "extreme_price",
+    )
+
+    def batches():
+        for start in (0, 5):
+            part = references[start : start + 5]
+            columns = {name: pa.array(part) for name in columns_of_l2}
+            yield pa.RecordBatch.from_pydict(columns)
+
+    feed = native.BoundaryFeed(engine, 0, batches())
+    assert feed.ahead == 0
+    feed.cover(25)  # entrega el primer lote (0..40): su último, 40, ya pasa de 25
+    assert (feed.delivered, feed.ahead) == (5, 2)  # 30 y 40 quedan por delante
+    feed.cover(35)  # nada nuevo: 40 sigue después de 35
+    assert (feed.delivered, feed.ahead) == (5, 1)
+    feed.cover(40)  # 40 ya no pasa de 40: entrega el segundo lote (50..90)
+    assert (feed.delivered, feed.ahead) == (10, 5)
+    assert pushed == [5, 5]
 
 
 # Lote acotado en eventos (ITSC-373): cada row group de L1 se parte en tramos al empujarlo
@@ -782,6 +871,7 @@ def push_lots(monkeypatch, row_groups, lot_ticks: int | None):
     class Feed:
         position = 0
         delivered = 0
+        ahead = 0
 
         def cover(self, high):
             pushes.append(("cover", high))
@@ -892,7 +982,7 @@ def test_the_lots_and_the_small_boundary_batches_give_the_same_result(
 
 
 def test_a_normal_month_is_not_cut(lake):
-    """Con la densidad del lago de pruebas el lote por defecto (2,5 M de eventos) es mucho mayor
+    """Con la densidad del lago de pruebas el lote por defecto (1 M de eventos) es mucho mayor
     que un row group: los tramos son los row groups.
     """
     uncut, cut = Phases(), Phases()
@@ -908,7 +998,7 @@ def test_a_normal_month_is_not_cut(lake):
             lot_events=lot_events,
         )
     assert uncut.lot_events == 0 and uncut.lot_ticks is None
-    assert cut.lot_events == summarize.DEFAULT_LOT_EVENTS == 2_500_000
+    assert cut.lot_events == summarize.DEFAULT_LOT_EVENTS == 1_000_000
     assert cut.lot_ticks is not None and cut.lot_ticks > 150  # un row group de L1
     assert cut.lots == uncut.lots > 1
     assert cut.items == uncut.items

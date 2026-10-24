@@ -599,7 +599,7 @@ def test_l3_lot_events_reaches_the_unit_and_zero_turns_the_cut_off(
     assert all(0 < row["details"]["lot_ticks"] for row in cut)
     assert all(row["details"]["lot_events"] == 0 for row in off)
     assert all(row["details"]["lot_ticks"] is None for row in off)
-    assert all(row["details"]["lot_events"] == 2_500_000 for row in default)
+    assert all(row["details"]["lot_events"] == 1_000_000 for row in default)
     # Mes por mes: el corte parte row groups y el lote por defecto no parte ninguno.
     for a, b, c in zip(cut, off, default, strict=True):
         assert a["details"]["lots"] > b["details"]["lots"] == c["details"]["lots"]
@@ -627,3 +627,56 @@ def test_l3_memory_sample_s_reaches_the_unit_and_the_timing_carries_the_samples(
     for row in emitted(tmp_path, "unit_timing"):
         assert row["details"]["mem_samples"] >= 1
         assert row["details"]["mem_peak"]["rss_mib"] > 0
+
+
+# L3_TRIM_RSS_MIB y L3_TRIM_MIN_S (ITSC-376)
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("L3_TRIM_RSS_MIB", "-1"),
+        ("L3_TRIM_RSS_MIB", "1.5"),
+        ("L3_TRIM_RSS_MIB", "mucho"),
+        ("L3_TRIM_MIN_S", "-1"),
+        ("L3_TRIM_MIN_S", "nan"),
+        ("L3_TRIM_MIN_S", "pronto"),
+    ],
+)
+def test_a_bad_l3_trim_knob_is_a_usage_error(lake, tmp_path, catalog, name, value):
+    assert run(lake, tmp_path, catalog, *BACKFILL, **{name: value}) == 2
+    assert l3_files(lake) == []
+
+
+def test_the_l3_trim_knobs_reach_the_unit_and_the_timing_carries_them(
+    lake, tmp_path, catalog
+):
+    force = ["--force", "--from", "2017-08"]
+    env = {"L3_MEMORY_SAMPLE_S": "0.005"}
+    assert (
+        run(
+            lake,
+            tmp_path / "on",
+            catalog,
+            *BACKFILL,
+            *force,
+            L3_TRIM_RSS_MIB="1",
+            L3_TRIM_MIN_S="0",
+            **env,
+        )
+        == 0
+    )
+    assert (
+        run(lake, tmp_path / "off", catalog, *BACKFILL, *force, L3_TRIM_RSS_MIB="0")
+        == 0
+    )
+    assert run(lake, tmp_path / "default", catalog, *BACKFILL, *force) == 0
+    for row in emitted(tmp_path / "on", "unit_timing"):
+        assert row["details"]["trim_rss_mib"] == 1
+        assert row["details"]["trims"] >= 1 and row["details"]["trim_s"] > 0
+    for row in emitted(tmp_path / "off", "unit_timing"):
+        assert (row["details"]["trim_rss_mib"], row["details"]["trims"]) == (0, 0)
+    # Los meses chicos con la marca por defecto (1 024 MiB) no pagan ningún trim.
+    for row in emitted(tmp_path / "default", "unit_timing"):
+        assert row["details"]["trim_rss_mib"] == 1024
+        assert (row["details"]["trims"], row["details"]["trim_s"]) == (0, 0.0)

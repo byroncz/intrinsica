@@ -381,6 +381,9 @@ class Timing:
     mem_close_before_trim: MemSample | None = None
     mem_close_after_trim: MemSample | None = None
     mem_samples: int = 0
+    trims: int = 0
+    trim_s: float = 0.0
+    trim_rss_mib: int = 0
 
     @property
     def cpu_s(self) -> float:
@@ -458,6 +461,10 @@ class Timing:
         unidad). `mem_samples` son los ticks del muestreador y `mem_peak_coverage`, el RSS de
         `mem_peak` sobre `rss_peak_mib`: cerca de 1 si el muestreador vio el pico; si es menor
         que 0,9 se baja `L3_MEMORY_SAMPLE_S`. Sin `mallinfo2`, los campos de glibc van en `null`.
+        `trims` son los `malloc_trim(0)` que el muestreador hizo durante la unidad (ITSC-376),
+        `trim_s` la suma de lo que tardaron y `trim_rss_mib` la marca de agua con que corrió
+        (`L3_TRIM_RSS_MIB`; 0 si el trim periódico estaba desactivado). El trim del cierre no
+        cuenta aquí: va en `rss_before_trim_mib` y `rss_after_trim_mib`.
         """
         p = self.phases
         seconds = {
@@ -527,6 +534,9 @@ class Timing:
             "mem_close_before_trim": _sample(self.mem_close_before_trim),
             "mem_close_after_trim": _sample(self.mem_close_after_trim),
             "mem_samples": self.mem_samples,
+            "trims": self.trims,
+            "trim_s": round(self.trim_s, 3),
+            "trim_rss_mib": self.trim_rss_mib,
             "mem_peak_coverage": self._mem_peak_coverage(),
         }
 
