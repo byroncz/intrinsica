@@ -472,26 +472,52 @@ del humano, 2026-10-14 (revierte la del 2026-10-13); detalle en
 `gs://<proyecto>-manifest/l2/thetas.yaml`, el mismo objeto que usa L2. El stack
 `l3` no lo siembra ni lo copia (lo siembra `l2`); si falta, L3 sale con código 2.
 
-**Cómputo, definitivo (ITSC-335, 2026-10-15).** 4 vCPU, 4 GiB, `max_retries = 1`
-y una sola tarea en un solo hilo. Medido sobre los 110 meses (ITSC-335): RSS pico
-máximo 1 267 MiB (núcleo original). Cifra vigente, corrida de seis meses 2017-08 a
-2018-01 con la imagen 0.17.0: 2 942 MiB en 2018-01 (72 % de 4 GiB); ITSC-375 mide su
-composición. Sin OOM en los 110 meses; mes más pesado
-2021-01 con 1 419 s (no 2023-03, 873 s: la pared sigue a los eventos más que a los
-ticks); suma de `wall_s` 41 256 s (11,5 h). Timeouts con la regla de TRD-L2 §10.2:
-`l3-monthly` 10 800 s (7,6 veces 1 419 s; el mínimo son 8 514 s) y `l3-backfill`
-86 400 s (2,1 veces la suma; el mínimo son 61 884 s; es el tope del módulo).
-Decisión y cifras en [TRD-L3 §10.2](../docs/TRD/l3.md#102-dimensionamiento--hipótesis-de-partida-y-primera-medición).
-El job usa ≈ 15 % de los vCPU y su backfill completo (≈ 165 000 vCPU-s, ≈ 3,3 USD
-de lista) es el 92 % del cupo gratuito mensual de Cloud Run **solo si L3 corriera
-aislado**: el cupo es de la cuenta de facturación y lo comparten L1, L2, viz y L3.
-En octubre la cuenta lo rebasó (2,2 veces en CPU y 1,9 en memoria), L3 fue el
-41 % del CPU del mes y los créditos cubrieron el costo de lista (facturado 0;
-[TRD-L3 §10.5](../docs/TRD/l3.md#105-costo)).
+**Cómputo, definitivo (ITSC-352, 2026-10-24).** 2 vCPU, 4 GiB, `max_retries = 1`
+y una sola tarea. Sale de medir 2021-01 (46,0 M de eventos) con 1, 2, 4 y 8 vCPU
+con la imagen 0.19.0 y los valores por defecto:
 
-**Backfill histórico por rangos.** La suma de los 110 meses son 11,5 h, más que
-las 6 h que espera el run de Actions (un rango de 41 meses tomó 4 h 57 min).
-Cloud Run no corta la tarea, pero el run fallaría. Por eso el histórico se lanzó
+| vCPU | `wall_s` | vCPU-s (pared × vCPU) | `cpu_s` | `cpu_throttled_s` | `rss_peak_mib` |
+|---|---|---|---|---|---|
+| 1 | 282,5 | 283 | 242 | 745 | 1 797 |
+| **2** | **111,5** | **223** | 194 | 280 | 2 141 |
+| 4 | 95,9 | 383 | 266 | 47 | 2 183 |
+| 8 | 74,9 | 599 | 194 | 2 | 2 654 |
+
+Los 50 `content_hash` de 2021-01 son los de ITSC-335 en los cuatro tamaños. De 4 a
+8 vCPU la pared baja solo a 0,78 (el plan pedía ≤ 0,6) y el costo sube 1,6 veces:
+el motor está ocupado el 14 % del tiempo y lo que no escala es la E/S, con 12
+escritores y 2 lectores fijos. 2 vCPU es el mínimo de vCPU-s y cuesta 16 % más de
+pared que 4; con 1 vCPU la pared se triplica y el job se estrangula 745 s.
+Memoria: dos medidas distintas. Sobre los 110 meses (ITSC-335) el RSS pico
+máximo fue 1 267 MiB (núcleo original). Cifra vigente, corrida de seis meses
+2017-08 a 2018-01 con la imagen 0.19.0: 2 347 MiB en 2018-01 (57 % de 4 GiB; corrida
+(a) de ITSC-376, run 40059849133, `run_id` 62ed6bcc-d8cd-47cd-80d3-5c9928622e52, 300 de
+300 en el run 40061351593; registrada en el criterio 26 (e) de TRD-L3 §13).
+Sin OOM. Timeouts con la regla de TRD-L2 §10.2: `l3-monthly` 1 200 s (7,3 veces la
+pared estimada del mes más pesado a 2 vCPU, ≈ 164 s; el mínimo son 984 s) y
+`l3-backfill` 10 800 s (1,9 veces la suma estimada, ≈ 5 600 s; el mínimo son
+8 400 s). Las dos son estimaciones desde la medición de 4 vCPU de ITSC-364
+(mes más pesado 2022-11, 141,4 s; suma 4 828 s) por el 1,16 de 2021-01; la suma
+real sale del backfill de 110 meses con este tamaño. Decisión y cifras en
+[TRD-L3 §10.2](../docs/TRD/l3.md#102-dimensionamiento--hipótesis-de-partida-y-primera-medición).
+El backfill completo cuesta ≈ 11 200 vCPU-s y 22 400 GiB-s estimados (≈ 0,25 USD de
+lista), el 6 % del cupo gratuito mensual de Cloud Run **si L3 corriera aislado**:
+el cupo es de la cuenta de facturación y lo comparten L1, L2, viz y L3
+([TRD-L3 §10.5](../docs/TRD/l3.md#105-costo)).
+
+**Aplicar este cambio.** El plan del `apply` de `l3` debe mostrar `cpu` (4 a 2)
+en los dos jobs, `timeout` en `l3-monthly` (10 800 s a 1 200 s) y en
+`l3-backfill` (86 400 s a 10 800 s). Memoria, reintentos y env no cambian.
+Cualquier otro cambio es una sorpresa y se revisa antes de aprobar, salvo la deriva
+que dejaron los `gcloud run jobs update` de T5 (el humano cambió `cpu` a mano y lo
+devolvió a 4): el plan puede traer `client`, `client_version` o anotaciones que puso
+`gcloud`. Es esperada y no bloquea el apply.
+
+**Backfill histórico por rangos (núcleo original).** Con el núcleo original la
+suma de los 110 meses eran 11,5 h, más que las 6 h que espera el run de Actions
+(un rango de 41 meses tomó 4 h 57 min); con el núcleo nuevo son ≈ 1,3 h a 4 vCPU
+(ITSC-364) y ≈ 1,6 h estimadas a 2 vCPU (ITSC-352): caben en una sola ejecución. Cloud Run no corta la tarea, pero el run
+fallaría. Por eso el histórico se lanzó
 con *Run job* → `l3-backfill`, uno a la vez, cada uno con éxito antes del
 siguiente:
 

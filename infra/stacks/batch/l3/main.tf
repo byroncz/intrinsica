@@ -40,21 +40,27 @@ module "layer" {
   region     = local.data.region
   image      = "${local.data.artifact_registry}/l3_dc_descriptors:${trimspace(file("${path.module}/../../../../layers/l3_dc_descriptors/VERSION"))}"
 
-  # Definitivo (ITSC-335, histórico de 110 meses, 2026-10-15; TRD-L3 §10.2). 4 vCPU
-  # y 4 GiB, el tamaño de L2. Dos medidas distintas, como en infra/README.md: sobre los
-  # 110 meses (ITSC-335, núcleo original) el RSS pico máximo fue 1 267 MiB; la cifra
-  # vigente es la de la corrida de seis meses 2017-08 a 2018-01 con la imagen 0.17.0,
-  # 2 942 MiB (2018-01, 72 % de 4 GiB). ITSC-375 midió su composición y ITSC-376 la
-  # baja (meta 2 000 MiB). Sin OOM en ninguna. Una tarea y un hilo: la suma medida de
-  # los 110 meses (41 256 s) con margen 1,5 son 61 884 s, bajo 86 400 s, así que no
-  # hace falta paralelizar. El job usa ≈ 15 % de los vCPU; usarlos (procesos por θ) o
-  # bajarlos es una mejora aparte, no medida.
-  cpu    = "4"
+  # Definitivo (ITSC-352, T5: 2021-01 a 1, 2, 4 y 8 vCPU con la imagen 0.19.0,
+  # 2026-10-24; TRD-L3 §10.2). 2 vCPU y 4 GiB. Pared 282, 112, 96 y 75 s;
+  # vCPU-s facturados (pared × vCPU) 283, 223, 383 y 599: 2 vCPU es el mínimo, y
+  # 4 y 8 pagan CPU que el motor no usa (engine_busy 0,63 y 0,14). Cuesta +16 %
+  # de pared en el mes denso frente a 4 vCPU. Los 50 content_hash son los de
+  # ITSC-335 en los cuatro tamaños. Memoria: dos medidas distintas, como en
+  # infra/README.md. Sobre los 110 meses (ITSC-335, núcleo original) el RSS pico
+  # máximo fue 1 267 MiB; la cifra vigente es la de la corrida de seis meses
+  # 2017-08 a 2018-01 con la imagen 0.19.0, 2 347 MiB (2018-01, 57 % de 4 GiB;
+  # corrida (a) de ITSC-376, run 40059849133, run_id
+  # 62ed6bcc-d8cd-47cd-80d3-5c9928622e52, 300 de 300 en el run 40061351593), y
+  # 2021-01 pica a 2 141 MiB con 2 vCPU y a 2 654 con 8. Sin OOM. Una tarea.
+  cpu    = "2"
   memory = "4Gi"
 
-  # El de monthly: 10 800 s son 7,6 veces la pared del mes más pesado (2021-01,
-  # 1 419 s), sobre el mínimo de 6 veces de TRD-L2 §10.2 (8 514 s).
-  timeout = 10800
+  # El de monthly: 1 200 s son 7,3 veces la pared estimada del mes más pesado con
+  # 2 vCPU (≈ 164 s: 2022-11, 141,4 s a 4 vCPU en ITSC-364, por el 1,16 que 2 vCPU
+  # le suma a 2021-01), sobre el mínimo de 6 veces de TRD-L2 §10.2 (984 s). 900 s,
+  # el valor de ITSC-364 para 4 vCPU, ya no lo cumplen. Es una estimación: la
+  # pared de 2022-11 a 2 vCPU sale del backfill de 110 meses.
+  timeout = 1200
 
   # 1 y no 0, como L1 y L2: el reintento cubre fallos transitorios de
   # infraestructura y uno determinista (OOM, timeout, conciliación) lo resuelve
@@ -78,12 +84,12 @@ module "layer" {
   # Una service account por modo. Ambos modos leen y escriben lo mismo; la
   # separación deja revocar o auditar cada uno por su cuenta.
   modes = {
-    # 86 400 s, el tope del módulo, son 2,1 veces la suma medida de los 110 meses
-    # (41 256 s; el mínimo de la regla de TRD-L2 §10.2 es 1,5 veces, 61 884 s). Una
-    # sola tarea recorre el rango. Cloud Run no la corta, pero el run de Actions
-    # espera 6 h como máximo (41 meses tomaron 4 h 57 min): el histórico va por
-    # rangos (ver infra/README.md, stack l3).
-    backfill = { timeout = 86400, access = local.access }
+    # 10 800 s son 1,9 veces la suma estimada de los 110 meses con 2 vCPU (≈ 5 600 s:
+    # los 4 828 s de ITSC-364 a 4 vCPU por 1,16; el mínimo de la regla de TRD-L2
+    # §10.2 es 1,5 veces, 8 400 s), bajo el tope de 86 400 s del módulo. Una sola
+    # tarea recorre el rango, y 5 600 s caben en las 6 h que espera el run de
+    # Actions. La suma real sale del backfill completo con este tamaño.
+    backfill = { timeout = 10800, access = local.access }
     monthly  = { access = local.access }
   }
 }
