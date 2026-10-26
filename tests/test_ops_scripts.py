@@ -328,25 +328,51 @@ def test_permisos_avisa_si_la_cuenta_puede_escribir_en_lo_de_l3(
 def test_hashes_lista_los_hallazgos_sin_pedir_el_prefijo_sin_barra(
     lake, monkeypatch, capsys
 ):
-    """ITSC-370: `ds.dataset(prefijo)` pide el objeto sin barra y la condición IAM lo niega."""
+    """ITSC-370, ITSC-354: `ds.dataset(prefijo)` pide el objeto sin barra y la condición IAM lo niega."""
+    from google.cloud import storage
     from test_l2_backfill_lineage import IamLikeHandler
+
+    class GcsLikeHandler(IamLikeHandler):
+        """Las rutas son `bucket/objeto` (sin `/` inicial), como en GCS."""
+
+        def __init__(self):
+            self.local = pafs.SubTreeFileSystem("/", pafs.LocalFileSystem())
+
+    class FakeClient:
+        def list_blobs(self, bucket, prefix):
+            assert prefix.endswith("/")
+            base = Path("/") / bucket
+            names = (
+                p.relative_to(base).as_posix() for p in base.rglob("*") if p.is_file()
+            )
+            return [
+                type("Blob", (), {"name": name})()
+                for name in names
+                if name.startswith(prefix)
+            ]
 
     run_l2(lake, "--from", "2017-08", "--to", "2017-08", "--force")
     hashes = load("hashes_events_summary")
-    real = hashes.resolve_fs
+    monkeypatch.setattr(storage, "Client", FakeClient)
     monkeypatch.setattr(
-        hashes,
-        "resolve_fs",
-        lambda root: (pafs.PyFileSystem(IamLikeHandler()), real(root)[1]),
+        hashes.pafs, "GcsFileSystem", lambda: pafs.PyFileSystem(GcsLikeHandler())
     )
     with pytest.raises(PermissionError):
-        pafs.PyFileSystem(IamLikeHandler()).get_file_info(str(lake / "dq"))
+        pafs.PyFileSystem(GcsLikeHandler()).get_file_info(str(lake / "dq").lstrip("/"))
 
-    assert hashes.main(["--dq-root", str(lake / "dq"), "--month", "2017-08"]) == 0
+    # El bucket es el primer componente de la ruta local y el prefijo, el resto.
+    root = "gs://" + str(lake / "dq").lstrip("/")
+    assert hashes.main(["--dq-root", root, "--month", "2017-08"]) == 0
     assert (
         last_line(capsys)
         == "θ: 50; unidades: 50 (con >= 2 corridas: 50; discrepancias: 0)"
     )
+
+
+def test_hashes_no_usa_pyarrow_dataset_ni_lee_un_prefijo():
+    text = (SCRIPTS / "hashes_events_summary.py").read_text()
+    assert "pyarrow.dataset" not in text
+    assert "ds.dataset(" not in text and "pq.read_table(" not in text
 
 
 @pytest.mark.parametrize("exists", [False, True])

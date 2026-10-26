@@ -94,6 +94,23 @@ Lo que quede en `results/` lo lees desde Cloud Shell:
   objetos nuevos: no se pisa ni se borra lo ya escrito.
 - Un script de más de 1 MiB se rechaza: no es un script.
 
+### La trampa del 403 por prefijo
+
+La service account de `ops-script` lee el lago con condiciones IAM por prefijo
+(`startsWith("…/l2/")`). `pyarrow.dataset.dataset("gs://<bucket>/l2")` (o
+`pq.read_table` sobre un prefijo) pide primero el **objeto** `l2` sin barra, y la
+condición lo niega: **403, no 404**, aunque los archivos de abajo sean legibles.
+Desde Cloud Shell, con tus credenciales, no aparece; bajo `ops-script` sí.
+
+La regla para todo script nuevo: **lista de forma recursiva y abre cada archivo
+por su ruta completa**; nunca un dataset sobre un prefijo.
+
+- En GCS, `storage.Client().list_blobs(bucket, prefix="l2/")` (con barra) y luego
+  `pq.ParquetFile("bucket/objeto", filesystem=pafs.GcsFileSystem())`.
+- Los modelos son `hashes_events_summary.py` (hallazgos, ITSC-354) y
+  `l3_check_month.py` (L1, L2 y L3). Explicación completa, con el caso de L3:
+  [la trampa del 403 por prefijo](operacion-l3.md#la-trampa-del-403-por-prefijo).
+
 ## Permisos de la service account `ops-script`
 
 Rol `roles/storage.objectViewer` (lectura y listado) con condición por prefijo,
@@ -184,8 +201,6 @@ Qué hace, sus `args` (`--dry-run`, `--sample-fraction`, `--must-verify`) y cóm
 leer su última línea: [runbook de L2](operacion-l2.md#linaje-publicado-y-su-backfill-itsc-368).
 Se corre una vez, antes del apply de L3; la prueba es
 `tests/test_l2_backfill_lineage.py`.
-
-Un script de `ops-script` que lea hallazgos **lista con `FileSelector(..., recursive=True, allow_not_found=True)` y lee esa lista de rutas; no abre el prefijo con `ds.dataset(prefijo)`**: pyarrow pide primero los metadatos del objeto `l2` sin barra para saber si es archivo o carpeta, la condición IAM solo permite `l2/...` y GCS responde 403, no 404 (ITSC-370).
 
 ## Los primeros scripts
 

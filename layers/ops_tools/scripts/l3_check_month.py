@@ -448,9 +448,14 @@ def parse_thetas(text: str) -> list[str]:
     for part in text.split(","):
         try:
             theta = Decimal(part)
+            if not theta.is_finite() or theta <= 0:
+                raise ValueError(
+                    f"--thetas: {part!r} debe ser un número finito mayor que 0"
+                )
+            # 1e30 no cabe en la precisión del contexto: también lanza InvalidOperation.
+            scaled = theta.quantize(Decimal("1e-8"))
         except InvalidOperation:
-            raise ValueError(f"--thetas: {part!r} no es un número") from None
-        scaled = theta.quantize(Decimal("1e-8"))
+            raise ValueError(f"--thetas: {part!r} no es un θ válido") from None
         if scaled != theta:
             raise ValueError(f"θ {part} no cabe en 8 decimales, que es la partición")
         thetas.append(format(scaled, "f"))
