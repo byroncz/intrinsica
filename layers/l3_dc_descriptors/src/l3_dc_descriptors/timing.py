@@ -15,7 +15,8 @@ es una fase: sale de los
 bytes que la lectura trae (`lineage_s` desapareció en ITSC-365);
 `aggregate_s` es la pared del motor, del primer `push` a que el último ítem termina;
 `write_s`, la pared con algún escritor ocupado (la unión de sus intervalos), y
-`read_wall_s`, la pared con alguna lectura de L1 o L2 en vuelo. `write_s` y `read_wall_s`
+`read_wall_s`, la pared con alguna lectura de L1 o L2 en vuelo. `Stage` desglosa lo que `gate_s`,
+`setup_s` y `publish_s` esperan en tareas por θ (ITSC-369). `write_s` y `read_wall_s`
 corren dentro de `aggregate_s`, no a su lado: `other_s` es lo que falta hasta `wall_s` de
 las fases del hilo principal. `read_s` es lo que el hilo principal esperó a las lecturas.
 
@@ -82,6 +83,55 @@ class BusyClock:
             return self._seconds + open_for
 
 
+class Stage:
+    """Un paso que corre una vez por θ, en el pool o en serie: su pared, su suma y cuántas
+    corrieron solas (ITSC-369).
+
+    `task()` marca una ejecución. `seconds` es la pared del paso, la unión de los intervalos
+    de sus ejecuciones (`BusyClock`); `work_s`, la suma de lo que duró cada una. Con 50 θ de
+    50 ms en serie las dos son 2,5 s; con 8 hilos la pared baja a ≈ 0,3 s y la suma sigue en
+    2,5 s: `work_s / seconds` es cuántas se solaparon. `alone` cuenta las ejecuciones que
+    empezaron con el paso ocioso: en serie son todas, con el solape ≈ 1 (la primera). Es seguro
+    entre hilos.
+    """
+
+    def __init__(self) -> None:
+        self.clock = BusyClock()
+        self._lock = threading.Lock()
+        self._active = 0
+        self._work = 0.0
+        self._alone = 0
+
+    @contextmanager
+    def task(self) -> Iterator[None]:
+        started = time.perf_counter()
+        with self._lock:
+            self._alone += self._active == 0
+            self._active += 1
+        try:
+            with self.clock.busy():
+                yield
+        finally:
+            elapsed = time.perf_counter() - started
+            with self._lock:
+                self._active -= 1
+                self._work += elapsed
+
+    @property
+    def seconds(self) -> float:
+        return self.clock.seconds
+
+    @property
+    def work_s(self) -> float:
+        with self._lock:
+            return self._work
+
+    @property
+    def alone(self) -> int:
+        with self._lock:
+            return self._alone
+
+
 class ReadMeter:
     """Lo que la unidad leyó de L1 y L2: bytes comprimidos y la pared de las lecturas.
 
@@ -146,8 +196,14 @@ class Phases:
 
     __slots__ = (
         "aggregate_s",
+        "carry_gate",
+        "carry_wait_s",
+        "commit",
+        "engine_build_s",
         "engine_busy",
         "engine_threads",
+        "events_open",
+        "frontier",
         "gate_s",
         "inflight",
         "inflight_alone_bytes_max",
@@ -156,9 +212,12 @@ class Phases:
         "inflight_events_max",
         "inflight_max",
         "items",
+        "l1_footer",
+        "l1_wait_s",
         "lot_events",
         "lot_ticks",
         "lots",
+        "meta_workers",
         "publish_s",
         "read",
         "read_s",
@@ -170,6 +229,7 @@ class Phases:
         "threads",
         "write",
         "write_s",
+        "writer_open",
         "writers",
     )
 
@@ -196,6 +256,19 @@ class Phases:
         self.write_s = 0.0
         self.publish_s = 0.0
         self.reconcile_s = 0.0
+        self.meta_workers = 0
+        # Los pasos por θ de la entrada y la salida, y lo que el hilo principal esperó
+        # (ITSC-369): `events_open` y `frontier` son el primer tramo (`gate_s`); `carry_gate`,
+        # `l1_footer` y `writer_open` corren durante `setup_s`; `commit` es `publish_s`.
+        self.events_open = Stage()
+        self.frontier = Stage()
+        self.carry_gate = Stage()
+        self.l1_footer = Stage()
+        self.writer_open = Stage()
+        self.commit = Stage()
+        self.engine_build_s = 0.0
+        self.carry_wait_s = 0.0
+        self.l1_wait_s = 0.0
         self.read = ReadMeter()
         self.write = BusyClock()
         self.retained = Retained()
@@ -461,6 +534,12 @@ class Timing:
         unidad). `mem_samples` son los ticks del muestreador y `mem_peak_coverage`, el RSS de
         `mem_peak` sobre `rss_peak_mib`: cerca de 1 si el muestreador vio el pico; si es menor
         que 0,9 se baja `L3_MEMORY_SAMPLE_S`. Sin `mallinfo2`, los campos de glibc van en `null`.
+        `gate_open_s`, `gate_frontier_s`, `setup_carry_s`, `setup_l1_s`, `setup_writers_s` y
+        `publish_work_s` desglosan el costo fijo de la unidad (ITSC-369): `*_s` es la pared del paso
+        por θ y `*_work_s` la suma de lo que duró cada tarea; `setup_carry_wait_s`, `setup_l1_wait_s`
+        y `setup_engine_s` son lo que el hilo principal esperó dentro de `setup_s`;
+        `publish_serial`, las publicaciones que empezaron sin otra en curso y `meta_workers`, el
+        ancho del pool de metadatos (0 sin pool).
         `trims` son los `malloc_trim(0)` que el muestreador hizo durante la unidad (ITSC-376),
         `trim_s` la suma de lo que tardaron y `trim_rss_mib` la marca de agua con que corrió
         (`L3_TRIM_RSS_MIB`; 0 si el trim periódico estaba desactivado). El trim del cierre no
@@ -478,12 +557,29 @@ class Timing:
             "publish_s": p.publish_s,
             "reconcile_s": p.reconcile_s,
             "other_s": self.other_s,
+            # Desglose de `gate_s`, `setup_s` y `publish_s` (ITSC-369). `*_s` es la pared del
+            # paso (unión de sus ejecuciones) y `*_work_s`, la suma de lo que duró cada una.
+            "gate_open_s": p.events_open.seconds,
+            "gate_open_work_s": p.events_open.work_s,
+            "gate_frontier_s": p.frontier.seconds,
+            "gate_frontier_work_s": p.frontier.work_s,
+            "setup_carry_s": p.carry_gate.seconds,
+            "setup_carry_work_s": p.carry_gate.work_s,
+            "setup_carry_wait_s": p.carry_wait_s,
+            "setup_l1_s": p.l1_footer.seconds,
+            "setup_l1_wait_s": p.l1_wait_s,
+            "setup_engine_s": p.engine_build_s,
+            "setup_writers_s": p.writer_open.seconds,
+            "setup_writers_work_s": p.writer_open.work_s,
+            "publish_work_s": p.commit.work_s,
         }
         counts = self.row_groups
         utilization = self.cpu_utilization
         return {
             **{name: round(value, 3) for name, value in seconds.items()},
             "threads": p.threads,
+            "meta_workers": p.meta_workers,
+            "publish_serial": p.commit.alone,
             "engine_threads": p.engine_threads,
             "readers": p.readers,
             "inflight": p.inflight,
