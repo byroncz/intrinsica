@@ -505,20 +505,23 @@ Los 50 `content_hash` de 2021-01 son los de ITSC-335 en los cuatro tamaños. De 
 el motor está ocupado el 14 % del tiempo y lo que no escala es la E/S, con 12
 escritores y 2 lectores fijos. 2 vCPU es el mínimo de vCPU-s y cuesta 16 % más de
 pared que 4; con 1 vCPU la pared se triplica y el job se estrangula 745 s.
-Memoria: dos medidas distintas. Sobre los 110 meses (ITSC-335) el RSS pico
-máximo fue 1 267 MiB (núcleo original). Cifra vigente, corrida de seis meses
-2017-08 a 2018-01 con la imagen 0.19.0: 2 347 MiB en 2018-01 (57 % de 4 GiB; corrida
-(a) de ITSC-376, run 40059849133, `run_id` 62ed6bcc-d8cd-47cd-80d3-5c9928622e52, 300 de
-300 en el run 40061351593; registrada en el criterio 26 (e) de TRD-L3 §13).
-Sin OOM. Timeouts con la regla de TRD-L2 §10.2: `l3-monthly` 1 200 s (7,3 veces la
-pared estimada del mes más pesado a 2 vCPU, ≈ 164 s; el mínimo son 984 s) y
-`l3-backfill` 10 800 s (1,9 veces la suma estimada, ≈ 5 600 s; el mínimo son
-8 400 s). Las dos son estimaciones desde la medición de 4 vCPU de ITSC-364
-(mes más pesado 2022-11, 141,4 s; suma 4 828 s) por el 1,16 de 2021-01; la suma
-real sale del backfill de 110 meses con este tamaño. Decisión y cifras en
+Memoria: tres medidas, de la más nueva a la más vieja. Cifra vigente: **2 054 MiB**
+(2020-03, 50 % de 4 GiB), del backfill completo de 110 meses a 2 vCPU con la imagen
+0.19.0 y los valores por defecto (ITSC-378; run 40206241748, `run_id`
+06af3d3a-374b-43e8-ac60-6ded7bb3ae44; 0 avisos `L3_INFLIGHT_BYTES`). Medida anterior,
+corrida de seis meses 2017-08 a 2018-01 con la misma imagen a 4 vCPU: 2 347 MiB en
+2018-01 (57 % de 4 GiB; corrida (a) de ITSC-376, run 40059849133, `run_id`
+62ed6bcc-d8cd-47cd-80d3-5c9928622e52, 300 de 300 en el run 40061351593; registrada en
+el criterio 26 (e) de TRD-L3 §13). Y la del núcleo original sobre los 110 meses
+(ITSC-335): 1 267 MiB. Sin OOM en ninguna.
+Timeouts con la regla de TRD-L2 §10.2, confirmados por ese backfill: `l3-monthly`
+1 200 s (6,5 veces la pared de 2022-11, el mes más lento, 183,7 s) y `l3-backfill`
+10 800 s (1,63 veces los 6 638 s del job). Si un backfill completo pasa de 7 200 s, el
+margen baja de 1,5 veces y `l3-backfill` sube a 14 400 s en el siguiente PR de infra;
+mientras tanto no se sube. Decisión y cifras en
 [TRD-L3 §10.2](../docs/TRD/l3.md#102-dimensionamiento--hipótesis-de-partida-y-primera-medición).
-El backfill completo cuesta ≈ 11 200 vCPU-s y 22 400 GiB-s estimados (≈ 0,25 USD de
-lista), el 6 % del cupo gratuito mensual de Cloud Run **si L3 corriera aislado**:
+El backfill completo cuesta ≈ 13 100 vCPU-s y 26 200 GiB-s medidos (ITSC-378; ≈ 0,29 USD
+de lista), el 7 % del cupo gratuito mensual de Cloud Run **si L3 corriera aislado**:
 el cupo es de la cuenta de facturación y lo comparten L1, L2, viz y L3
 ([TRD-L3 §10.5](../docs/TRD/l3.md#105-costo)).
 
@@ -533,8 +536,9 @@ devolvió a 4): el plan puede traer `client`, `client_version` o anotaciones que
 **Backfill histórico por rangos (núcleo original).** Con el núcleo original la
 suma de los 110 meses eran 11,5 h, más que las 6 h que espera el run de Actions
 (un rango de 41 meses tomó 4 h 57 min); con el núcleo nuevo son ≈ 1,3 h a 4 vCPU
-(ITSC-364) y ≈ 1,6 h estimadas a 2 vCPU (ITSC-352): caben en una sola ejecución. Cloud Run no corta la tarea, pero el run
-fallaría. Por eso el histórico se lanzó
+(ITSC-364) y 1,84 h medidas a 2 vCPU (6 638 s, ITSC-378): caben en una sola ejecución. Cloud Run no cortaba la tarea (el timeout de
+`l3-backfill` era entonces el tope del módulo, 86 400 s), pero el run fallaría. Por
+eso el histórico se lanzó
 con *Run job* → `l3-backfill`, uno a la vez, cada uno con éxito antes del
 siguiente:
 
@@ -571,16 +575,19 @@ run 38493995515; y del rango 6 (2026-02 a 2026-08, 7 meses); la reconstrucción 
 se suma dos veces.
 
 **Regla para un backfill futuro de la serie completa** (por ejemplo, al agregar una
-familia): fija cada rango por su **pared estimada**, no por su número de meses. La
-suma de los `wall_s` esperados del rango debe quedar en **≈ 5 h (18 000 s) o menos**,
-para dejar holgura bajo las 6 h de Actions. Estima cada mes con el ajuste de
+familia): manda el timeout de `l3-backfill` (10 800 s), no las 6 h del run de Actions.
+Basta una ejecución mientras la pared esperada del job no pase de **7 200 s**
+(10 800 ÷ 1,5, el margen de los timeouts de arriba). Si pasa, fija cada rango por su
+**pared estimada**, no por su número de meses, con cada rango bajo 7 200 s. Con el
+núcleo nuevo a 2 vCPU la serie suma 6 556 s de `wall_s` (job 6 638 s, ITSC-378).
+Estima cada mes con el ajuste de
 [TRD-L3 §10.2](../docs/TRD/l3.md#102-dimensionamiento--hipótesis-de-partida-y-primera-medición)
-o con los `unit_timing` de `dq-findings/l3/`. El número de meses no sirve de medida:
-los 41 meses de 2017-08 a 2020-12 promediaron ≈ 7,2 min por mes (suma de
-`wall_s` 17 792 s), pero 2021 promedió ≈ 10,75 min por mes (2 h 09 min en 12 meses)
-y el más pesado, 2021-01, tomó 24 min; un rango de 41 meses que cubriera 2020-2022
-rondaría 7 h. Lo más simple es repetir los rangos de la tabla (1 a 4 y el resto
-hasta el último mes), que ya se sabe que caben.
+o con los `unit_timing` de `dq-findings/l3/`. El número de meses no sirve de medida;
+con el **núcleo original** (ITSC-335), los 41 meses de 2017-08 a 2020-12 promediaron
+≈ 7,2 min por mes (suma de `wall_s` 17 792 s), pero 2021 promedió ≈ 10,75 min por mes
+(2 h 09 min en 12 meses) y el más pesado, 2021-01, tomó 24 min; un rango de 41 meses
+que cubriera 2020-2022 habría rondado 7 h. El detalle de la regla está en el
+[runbook de operación de L3](../docs/runbooks/operacion-l3.md#backfill-histórico-por-rangos).
 
 **Cadena mensual.** El stack `l1` pasa a
 `next_jobs = ["l2-monthly", "viz-tiles", "l3-monthly"]` en `monthly-close`: el

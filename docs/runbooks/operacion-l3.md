@@ -116,13 +116,13 @@ conciliación, esqueleto; o `monthly` sin ningún θ listo con rezagados) o **2*
 
 ## Backfill histórico por rangos
 
-**Con el núcleo nuevo cabe en una sola ejecución.** La suma de los 110 meses son 4 828 s
-(1,34 h; ITSC-364), bajo las 6 h que espera el run de Actions: `from` = `2017-08`, `to`
-vacío y `force`, una vez. Sin `force`, o si una ejecución muere, se relanza y retoma donde
-quedó. Los 4 828 s se midieron con el asignador de T5 (rodeo de ITSC-364, que ya no hace falta):
-con la imagen 0.16.0 la corrida de 2017-08 a 2018-01 con los valores por defecto terminó (run
-39886368319), pero el backfill completo con ellos sigue pendiente: lo lanza el humano
-tras el apply del stack `l3` con 2 vCPU (ITSC-352). Lo que sigue (rangos) es de **ITSC-335, con el núcleo original**, cuya suma eran 11,5 h
+**Con el núcleo nuevo cabe en una sola ejecución.** El backfill completo de 110 meses a
+2 vCPU con la imagen 0.19.0 y los valores por defecto (ITSC-378, 2026-10-25) tardó 6 638 s
+(1,84 h; Σ `wall_s` 6 556 s), bajo las 6 h que espera el run de Actions: `from` = `2017-08`,
+`to` vacío y `force`, una vez. Sin `force`, o si una ejecución muere, se relanza y retoma
+donde quedó. Los 4 828 s de ITSC-364 (4 vCPU) se midieron con el asignador de T5, un rodeo
+que ya no hace falta desde la imagen 0.16.0 (run 39886368319). Lo que sigue (rangos) es de
+**ITSC-335, con el núcleo original**, cuya suma eran 11,5 h
 (41 256 s), más que las 6 h que espera el run de Actions: Cloud Run no cortaba la tarea (el
 timeout es el tope del módulo, 86 400 s), pero el run fallaría. Por eso entonces el
 histórico se lanzaba por rangos, **uno a la vez y cada uno con éxito antes del siguiente**.
@@ -141,17 +141,24 @@ Los de ITSC-335:
 El detalle de cada run está en [infra/README.md](../../infra/README.md#stack-l3-descriptores-por-evento).
 
 **Regla para un backfill futuro de la serie completa** (por ejemplo, al agregar
-una familia): si la suma de los `wall_s` esperados pasa de **≈ 5 h (18 000 s)**, fija cada
-rango por su **pared estimada**, no por su número de meses. Con el núcleo nuevo la serie
-suma 4 828 s para `summaries.parquet`, así que basta una ejecución mientras la familia no
-sea ≈ 4 veces más lenta. Estima cada mes con el ajuste de
+una familia): manda el timeout de `l3-backfill` (10 800 s), no las 6 h del run de Actions.
+Basta una ejecución mientras la pared esperada del job no pase de **7 200 s**, el umbral de
+margen de «Timeouts» (10 800 ÷ 1,5). Si pasa, fija cada rango por su **pared estimada**, no
+por su número de meses, con cada rango bajo 7 200 s. Con el núcleo nuevo a 2 vCPU la serie
+suma 6 556 s de `wall_s` para `summaries.parquet` (job 6 638 s, ITSC-378): una familia
+≈ 1,08 veces más lenta ya pasa los 7 200 s, y una ≈ 1,63 veces más lenta agota el timeout.
+Estima cada mes con el ajuste de
 [TRD-L3 §10.2](../TRD/l3.md#102-dimensionamiento--hipótesis-de-partida-y-primera-medición)
 (`wall_s` ≈ 68 s + 0,038 s por millón de ticks + 24,9 s por millón de eventos; es del
 **núcleo original** y sobrestima la suma unas 8,5 veces: no se reajustó con el nuevo) o con los
-`unit_timing` de `dq-findings/l3/` y el CSV de `l3_compare_runs.py --timing`. La pared sigue a los **eventos**,
-más que a los ticks: 2021-01 (46,0 M de eventos) tomó 1 419 s y 2023-03, el mes
-con más ticks, 873 s. Los 41 meses de 2017-08 a 2020-12 promediaron ≈ 7,2 min por
-mes; 2021 promedió ≈ 10,75 min. Lo más simple es repetir los rangos de la tabla.
+`unit_timing` de `dq-findings/l3/` y el CSV de `l3_compare_runs.py --timing`. Con el
+**núcleo nuevo** la pared sigue a los **ticks**: a 2 vCPU, 2022-11 (8,7 G de ticks) tardó
+184 s y 2021-01 (46,0 M de eventos, 3,3 G de ticks) 161 s
+([TRD-L3 §10.2](../TRD/l3.md#102-dimensionamiento--hipótesis-de-partida-y-primera-medición)).
+Con el **núcleo original** (ITSC-335) era al revés, la pared seguía a los eventos: 2021-01
+tomó 1 419 s y 2023-03, el mes con más ticks, 873 s; los 41 meses de 2017-08 a 2020-12
+promediaron ≈ 7,2 min por mes y 2021 ≈ 10,75 min. Lo más simple es repetir los rangos de la
+tabla.
 
 La frontera de cada θ es la cadena **contigua desde `series_start`**: un rango
 sin `from` arranca en el mes siguiente al último construido, y un mes hecho fuera
@@ -164,20 +171,31 @@ Relanzar un rango interrumpido es seguro: la frontera retoma donde quedó.
 La regla ([TRD-L2 §10.2](../TRD/l2.md)): `monthly` ≥ 6 × la pared del mes más pesado, y
 `backfill` ≥ 1,5 × la suma de los meses y ≤ 86 400 s (el tope del módulo `layer`). ITSC-364
 midió a 4 vCPU el mes más pesado (141,4 s en 2022-11) y la suma (4 828 s); ITSC-352 midió que
-2 vCPU alarga 2021-01 en 1,16 (111,5 s contra 95,9 s) y fijó el tamaño en 2 vCPU. Las paredes de
-2 vCPU de abajo son esas cifras por 1,16: estimaciones, no mediciones.
+2 vCPU alarga 2021-01 en 1,16 (111,5 s contra 95,9 s) y fijó el tamaño en 2 vCPU con paredes
+estimadas (por 1,16). ITSC-378 las reemplazó por el backfill completo de 110 meses a 2 vCPU
+(imagen 0.19.0, valores por defecto, 2026-10-25): 2022-11 midió 183,7 s y el job 6 638 s
+(Σ `wall_s` 6 556 s).
 
-| Job | Desplegado hasta el apply de ITSC-352 | Definitivo | Cuenta |
+| Job | Desplegado hasta el apply de ITSC-352 | Definitivo | Cuenta (medida) |
 | --- | --- | --- | --- |
-| `l3-monthly` | 10 800 s | **1 200 s** | 6 × 164 = 984 s: 7,3 × (los 900 s de ITSC-364 eran para 4 vCPU y ya no cumplen) |
-| `l3-backfill` | 86 400 s | **10 800 s** | 1,5 × 5 600 = 8 400 s: 1,9 × |
+| `l3-monthly` | 10 800 s | **1 200 s** | 6 × 183,7 = 1 102 s: 6,5 × |
+| `l3-backfill` | 86 400 s | **10 800 s** | 1,5 × 6 638 = 9 957 s: 1,63 × |
 
 Los valores nuevos **los aplica el humano** con el `apply` del stack `l3`; hasta entonces rigen
-los desplegados, que sobran. Son una cota, porque la suma de ITSC-364 corrió con el asignador de
-T5 y con el de la imagen cada mes denso es más rápido. El backfill de 110 meses con 2 vCPU da la
-pared real de 2022-11 y la suma: si 2022-11 pasa de 200 s o la suma de 7 200 s, se suben. Si un
-job termina por timeout con estos valores, mira primero `unit_timing` del mes: una unidad que
-pasa de 3 × su pared habitual es un hallazgo, no una razón para subir el timeout.
+los desplegados, que sobran. Las dos reglas de subida: si 2022-11 pasa de 200 s, sube
+`l3-monthly`; si un backfill completo pasa de 7 200 s (el margen baja de 1,5 ×), `l3-backfill`
+sube a **14 400 s** en el siguiente PR de infra. Mientras ninguna se cumpla, nadie los sube «por
+si acaso». Si un job termina por timeout con estos valores, mira primero `unit_timing` del mes:
+una unidad que pasa de 3 × su pared habitual es un hallazgo, no una razón para subir el timeout.
+
+**Línea base por mes.** La tabla de los 110 meses de ese backfill (`wall_s`, `cpu_utilization`,
+`rss_peak_mib`, `engine_busy`, `cores`) está en
+`gs://intrinsica-dc-ops/results/ops-script-h8hf7/l3_compare_runs_timing_20261026T025519.csv`
+(`run_id` 06af3d3a-374b-43e8-ac60-6ded7bb3ae44). Compara contra ella cualquier corrida nueva:
+un mes que se aleja de su pared de esa tabla es la señal para mirar `unit_timing`. Mira también
+`cores`: la cuota que Cloud Run entrega por «2 vCPU» varía con el host (1,613 en ese backfill,
+2,086 en T5), y una pared distinta con otro `cores` no es una regresión
+([TRD-L3 §10.2](../TRD/l3.md#102-dimensionamiento--hipótesis-de-partida-y-primera-medición)).
 
 ## Leer un fallo
 
@@ -186,14 +204,16 @@ en `gs://<proyecto>-dq-findings/l3/detected_date=<fecha>/`. Primero distingue la
 causa en el log de la ejecución:
 
 - **OOM** ("Memory limit exceeded" o `signal 9`): no hay línea `unidad <mes>:` de ese mes.
-  El pico medido con el núcleo nuevo es 3 545 MiB de 4 GiB, en 2017-12 (ITSC-364), por la
-  densidad de eventos y no por el asignador; es el caso que acota ITSC-372. Un OOM en un
+  El pico vigente, con el núcleo nuevo y el tamaño desplegado (2 vCPU), es 2 054 MiB, el
+  50 % de 4 GiB, en 2020-03 (ITSC-378). La medida anterior, 3 545 MiB en 2017-12 a 4 vCPU
+  (ITSC-364), venía de la densidad de eventos y no del asignador; es el caso que acotó
+  ITSC-372. Un OOM en un
   mes más denso, o en uno chico tras varios meses, es el hallazgo: mira
   `rss_before_trim_mib` y `rss_after_trim_mib` de los meses anteriores y la sección
   «El asignador».
 - **Timeout**: la tarea se corta sin mensaje de memoria. El de `l3-monthly` es de
-  1 200 s desde el apply de ITSC-352 (10 800 s antes; 7,3 veces la pared estimada del mes más
-  pesado a 2 vCPU; ver «Timeouts»).
+  1 200 s desde el apply de ITSC-352 (10 800 s antes; 6,5 veces la pared medida del mes más
+  lento a 2 vCPU, 183,7 s en 2022-11, ITSC-378; ver «Timeouts»).
 - **Un hallazgo `error`**: lee su `check_type` en la tabla siguiente.
 
 Los 16 `check_type` de [TRD-L3 §9.3](../TRD/l3.md#93-tipos-de-chequeo-check_type),
@@ -375,19 +395,20 @@ ejecutando. El primer cierre programado es el 2026-11-08.
 ## Volumen y costo
 
 Medidos sobre el histórico completo: el volumen y el núcleo original, en ITSC-335
-(2026-10-15), y el núcleo nuevo, en ITSC-364 (2026-10-22). Detalle en
+(2026-10-15), el núcleo nuevo, en ITSC-364 (2026-10-22), y con el tamaño definitivo de
+2 vCPU, en ITSC-378 (2026-10-25). Detalle en
 [TRD-L3 §10.2, §10.4 y §10.5](../TRD/l3.md#104-tamaño-de-l3--estimación-por-fila).
 
 | Medida | Valor |
 | --- | --- |
 | `dc-descriptors/l3/` | 46 742 260 408 B (**43,5 GiB**) en 5 500 `summaries.parquet`; 2,06 veces L2; ≈ 45 B por evento (1 042 M de filas) |
-| Suma de `wall_s` de los 110 meses | **Núcleo nuevo (ITSC-364): 4 828 s (1,34 h); 18 992 vCPU-s (19 312 con los 4 asignados).** Núcleo original (ITSC-335): 41 256 s (11,5 h); ≈ 165 000 vCPU-s y GiB-s |
-| Costo de lista (0,000018 USD por vCPU-s y 0,000002 por GiB-s) | **≈ 0,4 USD** con el núcleo nuevo; ≈ 3,3 USD con el original. Un cálculo sobre `wall_s`, no una cifra de Billing |
-| Mes más pesado | Núcleo nuevo: 2022-11, 141,4 s. Original: 2021-01, 1 419 s (46,0 M de eventos); 2023-03, el máximo por ticks, 873 s |
-| `cpu_utilization` (núcleo nuevo) | p10 0,312, p50 0,510, mínimo 0,116 (2017-08); ningún mes llega a 0,80 |
-| RSS pico máximo | Núcleo nuevo: 3 545 MiB (2017-12), 86 % de 4 GiB. Original: 1 267 MiB (2018-01), 31 % |
+| Suma de `wall_s` de los 110 meses | **2 vCPU (ITSC-378): 6 556 s (job 6 638 s, 1,84 h); ≈ 13 100 vCPU-s nominales (10 575 con `cores` 1,613).** 4 vCPU, núcleo nuevo (ITSC-364): 4 828 s (1,34 h); 18 992 vCPU-s (19 312 con los 4 asignados). Núcleo original (ITSC-335): 41 256 s (11,5 h); ≈ 165 000 vCPU-s y GiB-s |
+| Costo de lista (0,000018 USD por vCPU-s y 0,000002 por GiB-s) | **≈ 0,29 USD a 2 vCPU (ITSC-378)**; ≈ 0,4 USD a 4 vCPU; ≈ 3,3 USD con el original. Un cálculo sobre `wall_s`, no una cifra de Billing |
+| Mes más pesado | **2 vCPU: 2022-11, 183,7 s**; 4 vCPU: 2022-11, 141,4 s. Original: 2021-01, 1 419 s (46,0 M de eventos); 2023-03, el máximo por ticks, 873 s |
+| `cpu_utilization` | **2 vCPU (ITSC-378): p10 0,470, p50 0,637, mínimo 0,120 (2017-08); 99 meses bajo 0,80.** 4 vCPU (ITSC-364): p10 0,312, p50 0,510, mínimo 0,116 (2017-08); ningún mes llega a 0,80 |
+| RSS pico máximo | **2 vCPU (ITSC-378): 2 054 MiB (2020-03), 50 % de 4 GiB.** 4 vCPU, núcleo nuevo: 3 545 MiB (2017-12), 86 % de 4 GiB. Original: 1 267 MiB (2018-01), 31 % |
 | Cupo gratuito | Es de la cuenta de facturación, no de la capa: L3 fue el 41 % del CPU de octubre y los créditos cubrieron el costo (facturado 0) |
-| Estado estacionario (`l3-monthly`) | Como máximo lo que el mes más pesado: centavos |
+| Estado estacionario (`l3-monthly`) | Como máximo lo que el mes más pesado: menos de un centavo (183,7 s × 2 vCPU) |
 
 Para repetir la medición:
 
@@ -922,16 +943,14 @@ jobs:
 1. Con el stack `l3` aplicado con la imagen vigente, *Actions → Run job*: `job` =
    `l3-backfill`, `from` = `2017-08`, `to` vacío y `force` marcado. Rehace los 110 meses
    (`force` exige `from`, y con `to` vacío llega al último mes con consolidado). Con la pared
-   nueva (a 2 vCPU se esperan ≈ 164 s el mes más pesado, 2022-11, y ≈ 5 600 s en total,
-   estimados desde los 141,4 s y 4 828 s medidos a 4 vCPU) cabe en una sola ejecución
+   nueva (a 2 vCPU se midieron 183,7 s el mes más pesado, 2022-11, y 6 638 s el job; ITSC-378) cabe en una sola ejecución
    y bajo las 6 h de Actions. Anota la fecha UTC de inicio y de fin.
 
    **Con la imagen 0.16.0 (ITSC-372) basta con los valores por defecto.** La corrida de
    2017-08 a 2018-01 con ellos terminó (run 39886368319). El `--update-env-vars` con el asignador
    de T5 (`MALLOC_MMAP_THRESHOLD_=16384`, `MALLOC_TRIM_THRESHOLD_=131072`) fue el rodeo de ITSC-364
    cuando la imagen anterior moría por memoria, y ya no hace falta. El backfill completo con los
-   valores por defecto sigue pendiente: lo lanza el humano tras el apply del stack `l3` con
-   2 vCPU (ITSC-352).
+   valores por defecto y 2 vCPU ya se corrió (ITSC-378, 6 638 s; ver «Timeouts» arriba).
 2. Sube el script y lanza `ops-script` (`gcloud storage cp
    layers/ops_tools/scripts/l3_compare_runs.py gs://<proyecto>-ops/scripts/l3_compare_runs.py`),
    con las fechas de ITSC-335 como base y las del paso 1 como nueva:
