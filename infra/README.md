@@ -520,8 +520,8 @@ Timeouts con la regla de TRD-L2 §10.2, confirmados por ese backfill: `l3-monthl
 margen baja de 1,5 veces y `l3-backfill` sube a 14 400 s en el siguiente PR de infra;
 mientras tanto no se sube. Decisión y cifras en
 [TRD-L3 §10.2](../docs/TRD/l3.md#102-dimensionamiento--hipótesis-de-partida-y-primera-medición).
-El backfill completo cuesta ≈ 11 200 vCPU-s y 22 400 GiB-s estimados (≈ 0,25 USD de
-lista), el 6 % del cupo gratuito mensual de Cloud Run **si L3 corriera aislado**:
+El backfill completo cuesta ≈ 13 100 vCPU-s y 26 200 GiB-s medidos (ITSC-378; ≈ 0,29 USD
+de lista), el 7 % del cupo gratuito mensual de Cloud Run **si L3 corriera aislado**:
 el cupo es de la cuenta de facturación y lo comparten L1, L2, viz y L3
 ([TRD-L3 §10.5](../docs/TRD/l3.md#105-costo)).
 
@@ -536,7 +536,7 @@ devolvió a 4): el plan puede traer `client`, `client_version` o anotaciones que
 **Backfill histórico por rangos (núcleo original).** Con el núcleo original la
 suma de los 110 meses eran 11,5 h, más que las 6 h que espera el run de Actions
 (un rango de 41 meses tomó 4 h 57 min); con el núcleo nuevo son ≈ 1,3 h a 4 vCPU
-(ITSC-364) y ≈ 1,6 h estimadas a 2 vCPU (ITSC-352): caben en una sola ejecución. Cloud Run no corta la tarea, pero el run
+(ITSC-364) y 1,84 h medidas a 2 vCPU (6 638 s, ITSC-378): caben en una sola ejecución. Cloud Run no corta la tarea, pero el run
 fallaría. Por eso el histórico se lanzó
 con *Run job* → `l3-backfill`, uno a la vez, cada uno con éxito antes del
 siguiente:
