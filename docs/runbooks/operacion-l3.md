@@ -204,8 +204,10 @@ en `gs://<proyecto>-dq-findings/l3/detected_date=<fecha>/`. Primero distingue la
 causa en el log de la ejecución:
 
 - **OOM** ("Memory limit exceeded" o `signal 9`): no hay línea `unidad <mes>:` de ese mes.
-  El pico medido con el núcleo nuevo es 3 545 MiB de 4 GiB, en 2017-12 (ITSC-364), por la
-  densidad de eventos y no por el asignador; es el caso que acota ITSC-372. Un OOM en un
+  El pico vigente, con el núcleo nuevo y el tamaño desplegado (2 vCPU), es 2 054 MiB, el
+  50 % de 4 GiB, en 2020-03 (ITSC-378). La medida anterior, 3 545 MiB en 2017-12 a 4 vCPU
+  (ITSC-364), venía de la densidad de eventos y no del asignador; es el caso que acotó
+  ITSC-372. Un OOM en un
   mes más denso, o en uno chico tras varios meses, es el hallazgo: mira
   `rss_before_trim_mib` y `rss_after_trim_mib` de los meses anteriores y la sección
   «El asignador».
