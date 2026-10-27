@@ -151,10 +151,14 @@ Estima cada mes con el ajuste de
 [TRD-L3 §10.2](../TRD/l3.md#102-dimensionamiento--hipótesis-de-partida-y-primera-medición)
 (`wall_s` ≈ 68 s + 0,038 s por millón de ticks + 24,9 s por millón de eventos; es del
 **núcleo original** y sobrestima la suma unas 8,5 veces: no se reajustó con el nuevo) o con los
-`unit_timing` de `dq-findings/l3/` y el CSV de `l3_compare_runs.py --timing`. La pared sigue a los **eventos**,
-más que a los ticks: 2021-01 (46,0 M de eventos) tomó 1 419 s y 2023-03, el mes
-con más ticks, 873 s. Los 41 meses de 2017-08 a 2020-12 promediaron ≈ 7,2 min por
-mes; 2021 promedió ≈ 10,75 min. Lo más simple es repetir los rangos de la tabla.
+`unit_timing` de `dq-findings/l3/` y el CSV de `l3_compare_runs.py --timing`. Con el
+**núcleo nuevo** la pared sigue a los **ticks**: a 2 vCPU, 2022-11 (8,7 G de ticks) tardó
+184 s y 2021-01 (46,0 M de eventos, 3,3 G de ticks) 161 s
+([TRD-L3 §10.2](../TRD/l3.md#102-dimensionamiento--hipótesis-de-partida-y-primera-medición)).
+Con el **núcleo original** (ITSC-335) era al revés, la pared seguía a los eventos: 2021-01
+tomó 1 419 s y 2023-03, el mes con más ticks, 873 s; los 41 meses de 2017-08 a 2020-12
+promediaron ≈ 7,2 min por mes y 2021 ≈ 10,75 min. Lo más simple es repetir los rangos de la
+tabla.
 
 La frontera de cada θ es la cadena **contigua desde `series_start`**: un rango
 sin `from` arranca en el mes siguiente al último construido, y un mes hecho fuera
