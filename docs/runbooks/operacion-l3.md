@@ -141,10 +141,13 @@ Los de ITSC-335:
 El detalle de cada run está en [infra/README.md](../../infra/README.md#stack-l3-descriptores-por-evento).
 
 **Regla para un backfill futuro de la serie completa** (por ejemplo, al agregar
-una familia): si la suma de los `wall_s` esperados pasa de **≈ 5 h (18 000 s)**, fija cada
-rango por su **pared estimada**, no por su número de meses. Con el núcleo nuevo la serie
-suma 4 828 s para `summaries.parquet`, así que basta una ejecución mientras la familia no
-sea ≈ 4 veces más lenta. Estima cada mes con el ajuste de
+una familia): manda el timeout de `l3-backfill` (10 800 s), no las 6 h del run de Actions.
+Basta una ejecución mientras la pared esperada del job no pase de **7 200 s**, el umbral de
+margen de «Timeouts» (10 800 ÷ 1,5). Si pasa, fija cada rango por su **pared estimada**, no
+por su número de meses, con cada rango bajo 7 200 s. Con el núcleo nuevo a 2 vCPU la serie
+suma 6 556 s de `wall_s` para `summaries.parquet` (job 6 638 s, ITSC-378): una familia
+≈ 1,08 veces más lenta ya pasa los 7 200 s, y una ≈ 1,63 veces más lenta agota el timeout.
+Estima cada mes con el ajuste de
 [TRD-L3 §10.2](../TRD/l3.md#102-dimensionamiento--hipótesis-de-partida-y-primera-medición)
 (`wall_s` ≈ 68 s + 0,038 s por millón de ticks + 24,9 s por millón de eventos; es del
 **núcleo original** y sobrestima la suma unas 8,5 veces: no se reajustó con el nuevo) o con los
