@@ -203,8 +203,8 @@ causa en el log de la ejecución:
   `rss_before_trim_mib` y `rss_after_trim_mib` de los meses anteriores y la sección
   «El asignador».
 - **Timeout**: la tarea se corta sin mensaje de memoria. El de `l3-monthly` es de
-  1 200 s desde el apply de ITSC-352 (10 800 s antes; 7,3 veces la pared estimada del mes más
-  pesado a 2 vCPU; ver «Timeouts»).
+  1 200 s desde el apply de ITSC-352 (10 800 s antes; 6,5 veces la pared medida del mes más
+  lento a 2 vCPU, 183,7 s en 2022-11, ITSC-378; ver «Timeouts»).
 - **Un hallazgo `error`**: lee su `check_type` en la tabla siguiente.
 
 Los 16 `check_type` de [TRD-L3 §9.3](../TRD/l3.md#93-tipos-de-chequeo-check_type),
