@@ -284,9 +284,13 @@ pausar, `paused = true` por PR y apply, nunca `gcloud scheduler`.
 
 **Relleno posterior al apply.** El relleno de octubre cubrió del 2026-10-01 al
 10-25 (run de Actions 40341979316, 25 de 25 tareas). El primer `daily`
-programado procesa solo D-1, así que los días entre el 10-26 y el día del apply
-menos 2 quedan sin provisional. Tras el apply, lanza *Run job* `l1-daily` con
-`from = 2026-10-26` y `to` = el día del apply menos 2, sin `force`. No uses
+programado procesa solo D-1: si el apply es el día A después de las 03:00 UTC,
+corre en A+1 y procesa A, así que los días entre el 10-26 y A-1 quedan sin
+provisional. Tras el apply, lanza *Run job* `l1-daily` después de las 03:00 UTC
+del día A, con `from = 2026-10-26` y `to` = el día del apply menos 1, sin
+`force`. Si A-1 ya lo procesó el `daily` de A, el relleno lo salta por
+checksum; si su archivo aún no está publicado, sale `source_not_published` con
+salida 0. No uses
 `l1-backfill`: octubre no tiene mensual hasta el 2026-11-02 y daría
 `source_not_published` sin escribir. Los días sin provisional no afectan a L2,
 viz ni L3 (no leen provisionales); solo ensucian `daily_monthly_drift` del
