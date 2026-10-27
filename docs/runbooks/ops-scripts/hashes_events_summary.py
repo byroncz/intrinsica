@@ -22,10 +22,11 @@ import os
 import re
 import sys
 from collections import defaultdict
+from pathlib import Path
 
 import pyarrow.compute as pc
-import pyarrow.dataset as ds
 import pyarrow.fs as pafs
+import pyarrow.parquet as pq
 
 FIELDS = (
     "events",
@@ -33,6 +34,7 @@ FIELDS = (
     "events_content_hash",
     "carry_over_content_hash",
 )
+COLUMNS = ["check_type", "asset", "run_id", "year", "month", "details"]
 MAX_PRINTED = 50
 
 
@@ -43,11 +45,23 @@ def default_root(suffix: str) -> str:
     return f"gs://{match[1]}-{suffix}"
 
 
-def resolve_fs(root: str) -> tuple[pafs.FileSystem, str]:
-    """El sistema de archivos y la ruta base dentro de él (local si no trae esquema)."""
-    if "://" in root:
-        return pafs.FileSystem.from_uri(root)
-    return pafs.LocalFileSystem(), os.path.abspath(root)
+def list_parquets(root: str) -> tuple[pafs.FileSystem, list[str]]:
+    """El sistema de archivos y los `.parquet` bajo `root`, de forma recursiva.
+
+    En GCS se listan los objetos por prefijo con `google-cloud-storage` (`l2/`, con barra) y
+    cada archivo se abre luego por su ruta completa. Nunca se abre el prefijo como dataset:
+    pyarrow pide primero el objeto `l2` sin barra y la condición IAM por prefijo de ops-script
+    lo niega con 403 (ITSC-370, ITSC-354).
+    """
+    if not root.startswith("gs://"):
+        found = (str(p) for p in Path(root).resolve().rglob("*.parquet") if p.is_file())
+        return pafs.LocalFileSystem(), sorted(found)
+    from google.cloud import storage
+
+    bucket, _, prefix = root.removeprefix("gs://").partition("/")
+    blobs = storage.Client().list_blobs(bucket, prefix=prefix.rstrip("/") + "/")
+    names = (blob.name for blob in blobs if blob.name.endswith(".parquet"))
+    return pafs.GcsFileSystem(), sorted(f"{bucket}/{name}" for name in names)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -58,42 +72,29 @@ def main(argv: list[str] | None = None) -> int:
     ns = parser.parse_args(argv)
 
     root = (ns.dq_root or f"{default_root('dq-findings')}/l2").rstrip("/")
-    fs, base = resolve_fs(root)
-    # Se lista con selector y no se abre el prefijo con `ds.dataset(base)`: para saber si `base`
-    # es archivo o carpeta, pyarrow pide los metadatos del objeto sin barra, y la condición IAM
-    # de ops-script solo da permiso bajo `l2/` (403, ITSC-370).
-    selector = pafs.FileSelector(f"{base}/", recursive=True, allow_not_found=True)
-    paths = sorted(
-        info.path
-        for info in fs.get_file_info(selector)
-        if info.type == pafs.FileType.File and info.path.endswith(".parquet")
-    )
-    if not paths:  # sin hallazgos no hay ni esquema contra el cual filtrar
+    fs, paths = list_parquets(root)
+    if not paths:  # sin hallazgos no hay nada que comparar
         print("θ: 0; unidades: 0 (con >= 2 corridas: 0; discrepancias: 0)")
         return 1
-    dataset = ds.dataset(
-        paths,
-        filesystem=fs,
-        format="parquet",
-        partitioning="hive",
-        partition_base_dir=base,
-    )
     keep = (pc.field("check_type") == "events_summary") & (
         pc.field("asset") == ns.asset
     )
     if ns.month:
         year, month = (int(part) for part in ns.month.split("-"))
         keep &= (pc.field("year") == year) & (pc.field("month") == month)
-    table = dataset.to_table(
-        columns=["run_id", "year", "month", "details"], filter=keep
-    )
 
     # (θ, año, mes) -> run_id -> conjunto de resúmenes que esa corrida dejó
     units: dict[tuple, dict[str, set]] = defaultdict(lambda: defaultdict(set))
-    for row in table.to_pylist():
-        details = json.loads(row["details"])
-        summary = tuple(details[name] for name in FIELDS)
-        units[details["theta"], row["year"], row["month"]][row["run_id"]].add(summary)
+    # Un archivo a la vez: la tabla filtrada se suelta antes de abrir el siguiente.
+    for path in paths:
+        with pq.ParquetFile(path, filesystem=fs) as parquet:
+            table = parquet.read(columns=COLUMNS).filter(keep)
+        for row in table.to_pylist():
+            details = json.loads(row["details"])
+            summary = tuple(details[name] for name in FIELDS)
+            key = details["theta"], row["year"], row["month"]
+            units[key][row["run_id"]].add(summary)
+        del table
 
     compared = bad = 0
     thetas = {theta for theta, _, _ in units}
