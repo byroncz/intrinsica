@@ -536,8 +536,9 @@ devolvió a 4): el plan puede traer `client`, `client_version` o anotaciones que
 **Backfill histórico por rangos (núcleo original).** Con el núcleo original la
 suma de los 110 meses eran 11,5 h, más que las 6 h que espera el run de Actions
 (un rango de 41 meses tomó 4 h 57 min); con el núcleo nuevo son ≈ 1,3 h a 4 vCPU
-(ITSC-364) y 1,84 h medidas a 2 vCPU (6 638 s, ITSC-378): caben en una sola ejecución. Cloud Run no corta la tarea, pero el run
-fallaría. Por eso el histórico se lanzó
+(ITSC-364) y 1,84 h medidas a 2 vCPU (6 638 s, ITSC-378): caben en una sola ejecución. Cloud Run no cortaba la tarea (el timeout de
+`l3-backfill` era entonces el tope del módulo, 86 400 s), pero el run fallaría. Por
+eso el histórico se lanzó
 con *Run job* → `l3-backfill`, uno a la vez, cada uno con éxito antes del
 siguiente:
 
