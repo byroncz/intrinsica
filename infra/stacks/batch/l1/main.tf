@@ -76,7 +76,9 @@ module "layer" {
 }
 
 # Orquestación del estado estacionario (TRD-L1 §10.1 y §11). Ambos schedulers
-# nacen en pausa; encenderlos es decisión del humano (README del módulo).
+# nacieron en pausa y ITSC-353 los enciende (decisión del humano, 2026-10-26).
+# Pausarlos de nuevo es paused = true por PR y apply, nunca con gcloud (README
+# del módulo).
 module "orchestration" {
   source = "../../../modules/orchestration"
 
@@ -91,14 +93,14 @@ module "orchestration" {
       # Binance publica el día D durante D+1 (UTC). 03:00 UTC deja margen tras
       # el cierre de D y corre cuando el archivo de D ya está disponible.
       schedule    = "0 3 * * *"
-      paused      = true
+      paused      = false
       description = "Ingesta diaria de L1: el día D se publica en D+1."
     }
     monthly-close = {
       # El primer lunes de M+1 cae entre el 1 y el 7, así que el día 8 siempre
       # es posterior a él, a las 06:00 UTC.
       schedule    = "0 6 8 * *"
-      paused      = true
+      paused      = false
       description = "Cierre mensual de L1, tras el primer lunes de M+1."
       # El cierre mensual encadena tres jobs, en este orden: el workflow espera
       # el fin de monthly-close y, solo si fue exitoso, ejecuta l2-monthly; espera

@@ -311,8 +311,10 @@ El workflow espera a cada eslabón menos al último: `l3-monthly` queda ejecutá
 cuando el workflow ya terminó; sigue su ejecución en *Cloud Run → Jobs →
 l3-monthly*. Anota el nombre de las cuatro ejecuciones (`l1-monthly-close-…`,
 `l2-monthly-…`, `viz-tiles-…`, `l3-monthly-…`) y la pared de cada una. En el repo, el
-scheduler de `monthly-close` (día 8) está con `paused = true`
-(`infra/stacks/batch/l1/main.tf`); verifica su estado real antes de contar con él.
+scheduler de `monthly-close` (día 8) está con `paused = false` desde ITSC-353
+(`infra/stacks/batch/l1/main.tf`); no lances a mano el mismo mes y modo que
+Scheduler esté ejecutando. La prueba manual del 2026-10-26 (ITSC-353) saltó
+2026-09 en las cuatro capas: validó el cableado, no la ruta de datos de un mes nuevo.
 
 **Esta prueba no se hizo en ITSC-311 y la registra ITSC-323.** El primer cierre real
 que se registra es el de octubre de 2026 (Scheduler del 8 de noviembre, o
