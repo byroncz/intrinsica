@@ -401,6 +401,29 @@ evento de más de dos row groups y un instante de confirmación partido entre do
 (`tests/test_l3_row_groups.py`). `tests/oracle.py` es la tercera implementación, ingenua y
 sin Arrow.
 
+### Pruebas de memoria (`tests/test_l3_memory.py`)
+
+Miden el RSS de procesos hijos reales, así que dependen de la máquina: cuántos vCPU hay, cuánto
+retiene glibc de lo liberado y quién llega primero, el lector o el motor. Por eso **ninguna
+aserción es un valor en MiB**: cada una afirma una relación entre dos cifras de la misma corrida,
+con la cuenta en el comentario del código (ITSC-377; tres relanzamientos del PR 158 fallaron cada
+vez por un test distinto contra umbrales fijos).
+
+| Prueba | Qué relación afirma | Por qué es esa |
+|---|---|---|
+| `test_peak_is_a_row_group_…` y `test_peak_does_not_grow_with_the_ticks_…` | El pico no crece con los eventos ni con los ticks del evento más grande: sube a lo más lo que anclaron de más los row groups en vuelo (`inflight_max`) más dos row groups. | Corren con `readers=1`, `inflight=1` y un hilo del motor: con los valores por defecto el pico dependía de la carrera lector-motor (hasta 11,9 MB de variación con la misma `inflight_max`), que cubre `test_l3_parallel.py`. |
+| `test_rss_after_closing_…`, `test_without_the_trim_…` | El RSS al cerrar cada unidad sube, sobre el de la primera, al menos `UNITS_NO_TRIM_MIN_RISE` veces lo que la unidad tuvo en vuelo sin trim, y con trim se recupera al menos `UNITS_TRIM_MIN_SHARE` de esa subida. | La primera unidad trae el nivel base de la máquina (intérprete, librerías) y restarla lo cancela. Antes eran 57,6 MB fijos. |
+| `test_the_byte_cap_…`, `test_the_lot_lowers_…` | El pico baja al menos `DENSE_MIN_GAIN` de lo que cuestan las casillas de más que la corrida midió (`inflight_events_max` × `SLOT_BYTES`). El motor sin tope puede no acumular nada (es una carrera): entonces el tope no debe subir el pico. | El pico es la marca más alta del heap y glibc retiene lo liberado, así que solo una parte del ahorro llega al RSS (0,28 a 0,70 en 100 pares). |
+| `test_the_periodic_trim_lowers_the_peak_…` | Lo residente sin uso en el pico con trim periódico no pasa de `TRIM_MAX_RESIDUAL` del de la corrida sin él, y el pico no sube. | La baja del pico es lo libre que había en él, y eso varía (razón de 0,19 a 0,32); lo residente sin uso es lo que el trim puede quitar. |
+| `test_the_trim_returns_pages_…` | El trim de cierre nunca empeora el RSS; lo baja de verdad solo si no corrió ningún trim periódico (`trims == 0`). | Con trims por marca de agua el último pudo correr justo antes del cierre y no queda nada que devolver. |
+| `test_the_memory_sampler_sees_the_peak_…` | La muestra del pico trae `engine_inflight` si cayó dentro de la etapa de agregación; fuera de ella es `None` y no es un fallo. | El motor solo existe para el muestreador entre `new_engine` y su cierre; el RSS puede marcar su máximo en la publicación. |
+
+**Si una vuelve a fallar:** no subas el margen. Corre el archivo 10 veces sin carga y 10 con otras
+pruebas de subproceso a la vez, y anota por corrida las cifras que la aserción compara y las que
+explican la causa (`inflight_max`, `trims`, `mem_peak`, `mem_close_*`). Si la relación sigue siendo
+cierta y la cifra cae fuera, el margen estaba mal medido: corrígelo con la distribución nueva y el
+comentario con la cuenta. Si la relación dejó de ser cierta, es un cambio real del orquestador.
+
 ## Versiones
 
 `VERSION` es la de la capa (la imagen y su tag se derivan de ella). La
