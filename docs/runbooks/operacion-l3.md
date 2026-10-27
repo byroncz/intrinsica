@@ -164,20 +164,31 @@ Relanzar un rango interrumpido es seguro: la frontera retoma donde quedó.
 La regla ([TRD-L2 §10.2](../TRD/l2.md)): `monthly` ≥ 6 × la pared del mes más pesado, y
 `backfill` ≥ 1,5 × la suma de los meses y ≤ 86 400 s (el tope del módulo `layer`). ITSC-364
 midió a 4 vCPU el mes más pesado (141,4 s en 2022-11) y la suma (4 828 s); ITSC-352 midió que
-2 vCPU alarga 2021-01 en 1,16 (111,5 s contra 95,9 s) y fijó el tamaño en 2 vCPU. Las paredes de
-2 vCPU de abajo son esas cifras por 1,16: estimaciones, no mediciones.
+2 vCPU alarga 2021-01 en 1,16 (111,5 s contra 95,9 s) y fijó el tamaño en 2 vCPU con paredes
+estimadas (por 1,16). ITSC-378 las reemplazó por el backfill completo de 110 meses a 2 vCPU
+(imagen 0.19.0, valores por defecto, 2026-10-25): 2022-11 midió 183,7 s y el job 6 638 s
+(Σ `wall_s` 6 556 s).
 
-| Job | Desplegado hasta el apply de ITSC-352 | Definitivo | Cuenta |
+| Job | Desplegado hasta el apply de ITSC-352 | Definitivo | Cuenta (medida) |
 | --- | --- | --- | --- |
-| `l3-monthly` | 10 800 s | **1 200 s** | 6 × 164 = 984 s: 7,3 × (los 900 s de ITSC-364 eran para 4 vCPU y ya no cumplen) |
-| `l3-backfill` | 86 400 s | **10 800 s** | 1,5 × 5 600 = 8 400 s: 1,9 × |
+| `l3-monthly` | 10 800 s | **1 200 s** | 6 × 183,7 = 1 102 s: 6,5 × |
+| `l3-backfill` | 86 400 s | **10 800 s** | 1,5 × 6 638 = 9 957 s: 1,63 × |
 
 Los valores nuevos **los aplica el humano** con el `apply` del stack `l3`; hasta entonces rigen
-los desplegados, que sobran. Son una cota, porque la suma de ITSC-364 corrió con el asignador de
-T5 y con el de la imagen cada mes denso es más rápido. El backfill de 110 meses con 2 vCPU da la
-pared real de 2022-11 y la suma: si 2022-11 pasa de 200 s o la suma de 7 200 s, se suben. Si un
-job termina por timeout con estos valores, mira primero `unit_timing` del mes: una unidad que
-pasa de 3 × su pared habitual es un hallazgo, no una razón para subir el timeout.
+los desplegados, que sobran. Las dos reglas de subida: si 2022-11 pasa de 200 s, sube
+`l3-monthly`; si un backfill completo pasa de 7 200 s (el margen baja de 1,5 ×), `l3-backfill`
+sube a **14 400 s** en el siguiente PR de infra. Mientras ninguna se cumpla, nadie los sube «por
+si acaso». Si un job termina por timeout con estos valores, mira primero `unit_timing` del mes:
+una unidad que pasa de 3 × su pared habitual es un hallazgo, no una razón para subir el timeout.
+
+**Línea base por mes.** La tabla de los 110 meses de ese backfill (`wall_s`, `cpu_utilization`,
+`rss_peak_mib`, `engine_busy`, `cores`) está en
+`gs://intrinsica-dc-ops/results/ops-script-h8hf7/l3_compare_runs_timing_20261026T025519.csv`
+(`run_id` 06af3d3a-374b-43e8-ac60-6ded7bb3ae44). Compara contra ella cualquier corrida nueva:
+un mes que se aleja de su pared de esa tabla es la señal para mirar `unit_timing`. Mira también
+`cores`: la cuota que Cloud Run entrega por «2 vCPU» varía con el host (1,613 en ese backfill,
+2,086 en T5), y una pared distinta con otro `cores` no es una regresión
+([TRD-L3 §10.2](../TRD/l3.md#102-dimensionamiento--hipótesis-de-partida-y-primera-medición)).
 
 ## Leer un fallo
 
@@ -922,16 +933,14 @@ jobs:
 1. Con el stack `l3` aplicado con la imagen vigente, *Actions → Run job*: `job` =
    `l3-backfill`, `from` = `2017-08`, `to` vacío y `force` marcado. Rehace los 110 meses
    (`force` exige `from`, y con `to` vacío llega al último mes con consolidado). Con la pared
-   nueva (a 2 vCPU se esperan ≈ 164 s el mes más pesado, 2022-11, y ≈ 5 600 s en total,
-   estimados desde los 141,4 s y 4 828 s medidos a 4 vCPU) cabe en una sola ejecución
+   nueva (a 2 vCPU se midieron 183,7 s el mes más pesado, 2022-11, y 6 638 s el job; ITSC-378) cabe en una sola ejecución
    y bajo las 6 h de Actions. Anota la fecha UTC de inicio y de fin.
 
    **Con la imagen 0.16.0 (ITSC-372) basta con los valores por defecto.** La corrida de
    2017-08 a 2018-01 con ellos terminó (run 39886368319). El `--update-env-vars` con el asignador
    de T5 (`MALLOC_MMAP_THRESHOLD_=16384`, `MALLOC_TRIM_THRESHOLD_=131072`) fue el rodeo de ITSC-364
    cuando la imagen anterior moría por memoria, y ya no hace falta. El backfill completo con los
-   valores por defecto sigue pendiente: lo lanza el humano tras el apply del stack `l3` con
-   2 vCPU (ITSC-352).
+   valores por defecto y 2 vCPU ya se corrió (ITSC-378, 6 638 s; ver «Timeouts» arriba).
 2. Sube el script y lanza `ops-script` (`gcloud storage cp
    layers/ops_tools/scripts/l3_compare_runs.py gs://<proyecto>-ops/scripts/l3_compare_runs.py`),
    con las fechas de ITSC-335 como base y las del paso 1 como nueva:

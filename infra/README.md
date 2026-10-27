@@ -505,17 +505,20 @@ Los 50 `content_hash` de 2021-01 son los de ITSC-335 en los cuatro tamaños. De 
 el motor está ocupado el 14 % del tiempo y lo que no escala es la E/S, con 12
 escritores y 2 lectores fijos. 2 vCPU es el mínimo de vCPU-s y cuesta 16 % más de
 pared que 4; con 1 vCPU la pared se triplica y el job se estrangula 745 s.
-Memoria: dos medidas distintas. Sobre los 110 meses (ITSC-335) el RSS pico
-máximo fue 1 267 MiB (núcleo original). Cifra vigente, corrida de seis meses
-2017-08 a 2018-01 con la imagen 0.19.0: 2 347 MiB en 2018-01 (57 % de 4 GiB; corrida
-(a) de ITSC-376, run 40059849133, `run_id` 62ed6bcc-d8cd-47cd-80d3-5c9928622e52, 300 de
-300 en el run 40061351593; registrada en el criterio 26 (e) de TRD-L3 §13).
-Sin OOM. Timeouts con la regla de TRD-L2 §10.2: `l3-monthly` 1 200 s (7,3 veces la
-pared estimada del mes más pesado a 2 vCPU, ≈ 164 s; el mínimo son 984 s) y
-`l3-backfill` 10 800 s (1,9 veces la suma estimada, ≈ 5 600 s; el mínimo son
-8 400 s). Las dos son estimaciones desde la medición de 4 vCPU de ITSC-364
-(mes más pesado 2022-11, 141,4 s; suma 4 828 s) por el 1,16 de 2021-01; la suma
-real sale del backfill de 110 meses con este tamaño. Decisión y cifras en
+Memoria: tres medidas, de la más nueva a la más vieja. Cifra vigente: **2 054 MiB**
+(2020-03, 50 % de 4 GiB), del backfill completo de 110 meses a 2 vCPU con la imagen
+0.19.0 y los valores por defecto (ITSC-378; run 40206241748, `run_id`
+06af3d3a-374b-43e8-ac60-6ded7bb3ae44; 0 avisos `L3_INFLIGHT_BYTES`). Medida anterior,
+corrida de seis meses 2017-08 a 2018-01 con la misma imagen a 4 vCPU: 2 347 MiB en
+2018-01 (57 % de 4 GiB; corrida (a) de ITSC-376, run 40059849133, `run_id`
+62ed6bcc-d8cd-47cd-80d3-5c9928622e52, 300 de 300 en el run 40061351593; registrada en
+el criterio 26 (e) de TRD-L3 §13). Y la del núcleo original sobre los 110 meses
+(ITSC-335): 1 267 MiB. Sin OOM en ninguna.
+Timeouts con la regla de TRD-L2 §10.2, confirmados por ese backfill: `l3-monthly`
+1 200 s (6,5 veces la pared de 2022-11, el mes más lento, 183,7 s) y `l3-backfill`
+10 800 s (1,63 veces los 6 638 s del job). Si un backfill completo pasa de 7 200 s, el
+margen baja de 1,5 veces y `l3-backfill` sube a 14 400 s en el siguiente PR de infra;
+mientras tanto no se sube. Decisión y cifras en
 [TRD-L3 §10.2](../docs/TRD/l3.md#102-dimensionamiento--hipótesis-de-partida-y-primera-medición).
 El backfill completo cuesta ≈ 11 200 vCPU-s y 22 400 GiB-s estimados (≈ 0,25 USD de
 lista), el 6 % del cupo gratuito mensual de Cloud Run **si L3 corriera aislado**:
