@@ -574,16 +574,19 @@ run 38493995515; y del rango 6 (2026-02 a 2026-08, 7 meses); la reconstrucción 
 se suma dos veces.
 
 **Regla para un backfill futuro de la serie completa** (por ejemplo, al agregar una
-familia): fija cada rango por su **pared estimada**, no por su número de meses. La
-suma de los `wall_s` esperados del rango debe quedar en **≈ 5 h (18 000 s) o menos**,
-para dejar holgura bajo las 6 h de Actions. Estima cada mes con el ajuste de
+familia): manda el timeout de `l3-backfill` (10 800 s), no las 6 h del run de Actions.
+Basta una ejecución mientras la pared esperada del job no pase de **7 200 s**
+(10 800 ÷ 1,5, el margen de los timeouts de arriba). Si pasa, fija cada rango por su
+**pared estimada**, no por su número de meses, con cada rango bajo 7 200 s. Con el
+núcleo nuevo a 2 vCPU la serie suma 6 556 s de `wall_s` (job 6 638 s, ITSC-378).
+Estima cada mes con el ajuste de
 [TRD-L3 §10.2](../docs/TRD/l3.md#102-dimensionamiento--hipótesis-de-partida-y-primera-medición)
-o con los `unit_timing` de `dq-findings/l3/`. El número de meses no sirve de medida:
-los 41 meses de 2017-08 a 2020-12 promediaron ≈ 7,2 min por mes (suma de
-`wall_s` 17 792 s), pero 2021 promedió ≈ 10,75 min por mes (2 h 09 min en 12 meses)
-y el más pesado, 2021-01, tomó 24 min; un rango de 41 meses que cubriera 2020-2022
-rondaría 7 h. Lo más simple es repetir los rangos de la tabla (1 a 4 y el resto
-hasta el último mes), que ya se sabe que caben.
+o con los `unit_timing` de `dq-findings/l3/`. El número de meses no sirve de medida;
+con el **núcleo original** (ITSC-335), los 41 meses de 2017-08 a 2020-12 promediaron
+≈ 7,2 min por mes (suma de `wall_s` 17 792 s), pero 2021 promedió ≈ 10,75 min por mes
+(2 h 09 min en 12 meses) y el más pesado, 2021-01, tomó 24 min; un rango de 41 meses
+que cubriera 2020-2022 habría rondado 7 h. El detalle de la regla está en el
+[runbook de operación de L3](../docs/runbooks/operacion-l3.md#backfill-histórico-por-rangos).
 
 **Cadena mensual.** El stack `l1` pasa a
 `next_jobs = ["l2-monthly", "viz-tiles", "l3-monthly"]` en `monthly-close`: el
