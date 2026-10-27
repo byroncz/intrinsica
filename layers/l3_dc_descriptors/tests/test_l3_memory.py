@@ -109,11 +109,13 @@ UNITS_ROW_GROUP_BYTES = UNITS_ROW_GROUP * 48
 # 4 vCPU de Cloud Run (4 × 8) para que la prueba mida lo mismo en cualquier máquina.
 UNITS_ENV = {**IMAGE_ENV, "MALLOC_ARENA_MAX": "32"}
 # Techo de lo que queda retenido al cerrar una unidad: lo que tuvo en vuelo a la vez, R lectores
-# + K row groups en el motor (`readers=6, inflight=6` en `UNITS`), decodificados (≈ 220 MiB).
-# Es un techo y no lo que detecta la falta del trim: sin trim la deriva (158 a 214 MiB en 8
-# corridas) también cabe, y con él fue de 61 a 198. Solo vale para estas 10 unidades; con 60 el
-# RSS tras el trim sigue subiendo ≈ 2 MiB por unidad (ADR-L3-16) y aquí no se afirma lo contrario.
-UNITS_IN_FLIGHT_BYTES = (6 + 6) * UNITS_ROW_GROUP_BYTES
+# + K row groups en el motor (`readers=6, inflight=6` en `UNITS`), decodificados (≈ 220 MiB), más
+# dos row groups (≈ 37 MiB) para el ruido del intérprete (± 15 MiB). Con el trim la deriva fue de 61
+# a 198 MiB en 48 corridas (40 con 4 series en paralelo): sin los dos row groups el margen era del
+# 10 %, con ellos es del 29 %. Es un techo y no lo que detecta la falta del trim (eso lo hace la
+# ganancia contra la serie sin trim, abajo): sin trim la deriva (156 a 235 MiB) también cabe. Solo vale para estas 10 unidades; con 60 el RSS tras
+# el trim sigue subiendo ≈ 2 MiB por unidad (ADR-L3-16) y aquí no se afirma lo contrario.
+UNITS_IN_FLIGHT_BYTES = (6 + 6 + 2) * UNITS_ROW_GROUP_BYTES
 # ITSC-377. Lo que detecta la falta del trim es cuánto sube el RSS al cerrar las últimas unidades
 # sobre el de la primera (`rise`): sin trim sube lo que glibc va reteniendo, con él sube menos. La
 # comparación es contra lo que la propia corrida midió y no contra un número de la máquina (antes
@@ -228,10 +230,11 @@ def test_peak_is_a_row_group_and_does_not_grow_with_events(tmp_path):
     # debajo de los 10 row groups del evento largo (48 MB con 100 000 ticks por row group).
     assert few["peak"] < 10 * ROW_GROUP_BYTES
     assert many["peak"] < 10 * ROW_GROUP_BYTES
-    # Casi veinte veces más eventos no suben el pico. El pico de cada corrida varía entre
-    # ≈ 18 y 25 MB según la carrera entre el lector y el motor (6 corridas seguidas:
-    # many/few entre 0,94 y 1,02), así que se compara con holgura absoluta, como en la
-    # prueba siguiente, y no con una razón.
+    # Casi veinte veces más eventos no suben el pico. Con R = K = 1 (`PROBE`) no hay carrera entre
+    # el lector y el motor: en 100 pares (4 procesos en paralelo) el pico de cada corrida fue de 8,2
+    # a 14,1 MB y many − few de -4,3 a +4,3 MB. Se compara con la holgura de dos row groups
+    # (9,6 MB, más del doble del rango) y no con una razón: el rango es ruido del heap, no
+    # proporcional al pico.
     assert many["peak"] < few["peak"] + 2 * ROW_GROUP_BYTES
 
 
@@ -326,8 +329,13 @@ def test_rss_after_closing_each_unit_does_not_grow_with_the_units(unit_runs):
     miden una unidad y no lo ven.
     """
     runs = unit_runs["trim"]
-    # Lo que queda retenido no pasa de lo que la unidad tuvo en vuelo; ver UNITS_IN_FLIGHT_BYTES.
+    # Lo que queda retenido no pasa de lo que la unidad tuvo en vuelo; ver UNITS_IN_FLIGHT_BYTES. Y
+    # no sube más que la serie sin trim de la misma corrida: en 40 series la deriva con trim quedó
+    # bajo la otra por 10,6 a 123 MiB (mediana 72); la holgura son dos row groups (36,6 MiB).
     assert drift(runs) <= UNITS_IN_FLIGHT_BYTES, runs
+    assert drift(runs) <= drift(unit_runs["no-trim"]) + 2 * UNITS_ROW_GROUP_BYTES, (
+        unit_runs
+    )
     # Y el trim recupera de verdad: las últimas unidades quedan más abajo que sin él, y lo que
     # recuperan es una parte de lo que la serie sin trim sube; ver UNITS_TRIM_MIN_SHARE. Esta
     # comparación es la que falla cuando falta el trim.
@@ -376,8 +384,11 @@ print(json.dumps(out))
 """
 CHILD_UNIT_COUNT = 6
 # Lo que el padre puede moverse entre unidades: sus objetos de Python y los hallazgos que
-# recibe. En proceso, la misma lago deriva 60 a 140 MiB en 10 unidades (ADR-L3-16).
-PARENT_FLAT_BYTES = 20 * (1 << 20)
+# recibe. Un row group decodificado de las unidades (≈ 18,3 MiB): si el padre retuviera algo de
+# una unidad sería de ese orden o más (en proceso, el mismo lago deriva 60 a 140 MiB en 10
+# unidades, ADR-L3-16). Medido en 60 series de 6 unidades (4 en paralelo) el rango del `VmRSS` del
+# padre fue de 0,02 a 0,14 MiB (mediana 0,02): el techo queda 130 veces sobre el ruido.
+PARENT_FLAT_BYTES = UNITS_ROW_GROUP_BYTES
 
 
 def test_the_parent_rss_is_flat_between_units_run_in_child_processes(tmp_path):
@@ -430,9 +441,11 @@ SLOT_BYTES = 240
 # Menos que un row group (2,4 M de eventos × 305 B): cada uno avanza solo.
 DENSE_CAP = 120 * (1 << 20)
 # Un solo hilo del motor, más lento que el lector: con K = 4 solo, el lector empuja los row groups
-# uno tras otro y sus casillas se acumulan (4,35 M de eventos abiertos medidos, 1,8 row groups);
-# con el tope cada uno espera a que cierre el anterior (2,40 M, un row group). Con 4 hilos el motor
-# cierra tan rápido como se empuja y la unidad sin tope también llega a un row group: no prueba nada.
+# uno tras otro y a veces sus casillas se acumulan (hasta 4,35 M de eventos abiertos, 1,8 row
+# groups); con el tope cada uno espera a que cierre el anterior (2,40 M, un row group). Acumular
+# es una carrera (ITSC-377: en 100 corridas, de 1,0 a 1,8 row groups, y en 38 el motor alcanzó al
+# lector y no acumuló nada): el hilo único la inclina, no la elimina. Con 4 hilos el motor cierra
+# tan rápido como se empuja y la unidad sin tope también llega a un row group: no prueba nada.
 DENSE_ENGINE_THREADS = 1
 # ITSC-377. El pico baja al menos esta fracción de lo que cuestan las casillas de más (SLOT_BYTES por
 # evento abierto de más, medido en la corrida). No baja la cuenta entera: el pico del RSS es la marca
@@ -562,6 +575,7 @@ def dense_runs(tmp_path_factory) -> dict[str, dict]:
         runs[name] = {
             **json.loads(out.stdout),
             "warned": "L3_INFLIGHT_BYTES" in out.stderr,
+            "configured_inflight": options.get("inflight", 4),
         }
     return runs
 
@@ -575,10 +589,14 @@ def test_the_byte_cap_bounds_the_open_events_and_the_peak_rss(dense_runs):
     # Sin él, con un motor más lento que el lector, pueden acumularse los row groups: es el problema 2
     # tal como lo describe la ADR (O(row groups en vuelo)). Cuántos se acumulan es una carrera
     # entre el lector y el motor (ITSC-377: en 100 corridas, de 1,0 a 1,8 row groups, y en 38 el
-    # motor alcanzó al lector y no acumuló nada), así que la acumulación sin tope no se exige: aquí
-    # no hay contraprueba de que sin tope sí se acumula. La acotación del tope la prueba la primera
-    # aserción (`capped ≤ 1,2 × one_group`), que no depende de la carrera; lo que se afirma abajo es
-    # que el tope nunca abre más que el motor sin él.
+    # motor alcanzó al lector y no acumuló nada), así que la acumulación sin tope no se exige. Se
+    # intentó volverla determinista y no se encontró cómo desde Python: el motor corre en hilos
+    # nativos y frenar cualquiera de sus etapas frena también el empuje, que es lo que se mide.
+    # Lo que queda sin cubrir es que, en las corridas donde el motor alcanza al lector, un tope que
+    # no hiciera nada también pasaría esta prueba; la acotación del tope la prueban la primera
+    # aserción (`capped ≤ 1,2 × one_group`, que no depende de la carrera) y, cuando sí hay
+    # acumulación (`extra > 0`), la baja del RSS de abajo. Abajo se afirma además que el tope nunca
+    # abre más que el motor sin él.
     extra = k_only["inflight_events_max"] - capped["inflight_events_max"]
     assert extra >= 0, dense_runs
     # El RSS del pico baja lo que cuestan las casillas de más que la corrida midió (`extra`, a
@@ -660,9 +678,14 @@ def test_the_memory_sampler_sees_the_peak_of_the_dense_unit(dense_runs):
         if peak["elapsed_s"] <= engine_until:
             assert peak["engine_inflight"] is not None, (name, engine_until, peak)
         if peak["engine_inflight"] is not None:
-            # Y lo que ve es coherente con lo que el orquestador contó: tramos anclados a lo más
-            # el máximo que empujó.
-            assert 0 <= peak["engine_inflight"] <= run["inflight_max"], (name, run)
+            # Y lo que ve es coherente con la configuración: tramos anclados a lo más los K que se
+            # le dieron. No se compara con `inflight_max`: el orquestador lo lee después del `push`
+            # y, si el motor termina un tramo entre las dos cosas, el muestreador puede ver uno
+            # más que lo registrado.
+            assert 0 <= peak["engine_inflight"] <= run["configured_inflight"], (
+                name,
+                run,
+            )
 
 
 def test_the_glibc_accounting_adds_up_in_the_three_samples(dense_runs):
@@ -755,9 +778,10 @@ def test_the_periodic_trim_lowers_the_peak_by_part_of_the_free_memory_glibc_held
         trimmed,
     )
     # Y el pico del RSS no sube por hacerlo: el trim solo devuelve páginas libres. No es estricto:
-    # el pico de dos corridas iguales se mueve hasta DENSE_PEAK_NOISE (140 MiB de rango), y la baja
-    # típica del trim es de 150 a 160 MiB. En 100 pares la baja fue de 136 a 257 MiB (mediana 210),
-    # nunca negativa; la holgura cubre la corrida en que el pico sin trim cayera por azar bajo el otro.
+    # el pico de dos corridas iguales se mueve en un rango de 140 MiB (100 corridas de la unidad
+    # con tope), y lo que se permite es DENSE_PEAK_NOISE, dos row groups de L1 (≈ 41 MiB). En 100
+    # pares la baja fue de 136 a 257 MiB (mediana 210), nunca negativa; la holgura cubre la
+    # corrida en que el pico sin trim cayera por azar bajo el otro.
     assert (
         trimmed["rss_peak_mib"] * MIB
         <= untrimmed["rss_peak_mib"] * MIB + DENSE_PEAK_NOISE
