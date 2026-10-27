@@ -116,13 +116,13 @@ conciliación, esqueleto; o `monthly` sin ningún θ listo con rezagados) o **2*
 
 ## Backfill histórico por rangos
 
-**Con el núcleo nuevo cabe en una sola ejecución.** La suma de los 110 meses son 4 828 s
-(1,34 h; ITSC-364), bajo las 6 h que espera el run de Actions: `from` = `2017-08`, `to`
-vacío y `force`, una vez. Sin `force`, o si una ejecución muere, se relanza y retoma donde
-quedó. Los 4 828 s se midieron con el asignador de T5 (rodeo de ITSC-364, que ya no hace falta):
-con la imagen 0.16.0 la corrida de 2017-08 a 2018-01 con los valores por defecto terminó (run
-39886368319), pero el backfill completo con ellos sigue pendiente: lo lanza el humano
-tras el apply del stack `l3` con 2 vCPU (ITSC-352). Lo que sigue (rangos) es de **ITSC-335, con el núcleo original**, cuya suma eran 11,5 h
+**Con el núcleo nuevo cabe en una sola ejecución.** El backfill completo de 110 meses a
+2 vCPU con la imagen 0.19.0 y los valores por defecto (ITSC-378, 2026-10-25) tardó 6 638 s
+(1,84 h; Σ `wall_s` 6 556 s), bajo las 6 h que espera el run de Actions: `from` = `2017-08`,
+`to` vacío y `force`, una vez. Sin `force`, o si una ejecución muere, se relanza y retoma
+donde quedó. Los 4 828 s de ITSC-364 (4 vCPU) se midieron con el asignador de T5, un rodeo
+que ya no hace falta desde la imagen 0.16.0 (run 39886368319). Lo que sigue (rangos) es de
+**ITSC-335, con el núcleo original**, cuya suma eran 11,5 h
 (41 256 s), más que las 6 h que espera el run de Actions: Cloud Run no cortaba la tarea (el
 timeout es el tope del módulo, 86 400 s), pero el run fallaría. Por eso entonces el
 histórico se lanzaba por rangos, **uno a la vez y cada uno con éxito antes del siguiente**.
@@ -386,19 +386,20 @@ ejecutando. El primer cierre programado es el 2026-11-08.
 ## Volumen y costo
 
 Medidos sobre el histórico completo: el volumen y el núcleo original, en ITSC-335
-(2026-10-15), y el núcleo nuevo, en ITSC-364 (2026-10-22). Detalle en
+(2026-10-15), el núcleo nuevo, en ITSC-364 (2026-10-22), y con el tamaño definitivo de
+2 vCPU, en ITSC-378 (2026-10-25). Detalle en
 [TRD-L3 §10.2, §10.4 y §10.5](../TRD/l3.md#104-tamaño-de-l3--estimación-por-fila).
 
 | Medida | Valor |
 | --- | --- |
 | `dc-descriptors/l3/` | 46 742 260 408 B (**43,5 GiB**) en 5 500 `summaries.parquet`; 2,06 veces L2; ≈ 45 B por evento (1 042 M de filas) |
-| Suma de `wall_s` de los 110 meses | **Núcleo nuevo (ITSC-364): 4 828 s (1,34 h); 18 992 vCPU-s (19 312 con los 4 asignados).** Núcleo original (ITSC-335): 41 256 s (11,5 h); ≈ 165 000 vCPU-s y GiB-s |
-| Costo de lista (0,000018 USD por vCPU-s y 0,000002 por GiB-s) | **≈ 0,4 USD** con el núcleo nuevo; ≈ 3,3 USD con el original. Un cálculo sobre `wall_s`, no una cifra de Billing |
-| Mes más pesado | Núcleo nuevo: 2022-11, 141,4 s. Original: 2021-01, 1 419 s (46,0 M de eventos); 2023-03, el máximo por ticks, 873 s |
-| `cpu_utilization` (núcleo nuevo) | p10 0,312, p50 0,510, mínimo 0,116 (2017-08); ningún mes llega a 0,80 |
-| RSS pico máximo | Núcleo nuevo: 3 545 MiB (2017-12), 86 % de 4 GiB. Original: 1 267 MiB (2018-01), 31 % |
+| Suma de `wall_s` de los 110 meses | **2 vCPU (ITSC-378): 6 556 s (job 6 638 s, 1,84 h); ≈ 13 100 vCPU-s nominales (10 575 con `cores` 1,613).** 4 vCPU, núcleo nuevo (ITSC-364): 4 828 s (1,34 h); 18 992 vCPU-s (19 312 con los 4 asignados). Núcleo original (ITSC-335): 41 256 s (11,5 h); ≈ 165 000 vCPU-s y GiB-s |
+| Costo de lista (0,000018 USD por vCPU-s y 0,000002 por GiB-s) | **≈ 0,29 USD a 2 vCPU (ITSC-378)**; ≈ 0,4 USD a 4 vCPU; ≈ 3,3 USD con el original. Un cálculo sobre `wall_s`, no una cifra de Billing |
+| Mes más pesado | **2 vCPU: 2022-11, 183,7 s**; 4 vCPU: 2022-11, 141,4 s. Original: 2021-01, 1 419 s (46,0 M de eventos); 2023-03, el máximo por ticks, 873 s |
+| `cpu_utilization` | **2 vCPU (ITSC-378): p10 0,470, p50 0,637, mínimo 0,120 (2017-08); 99 meses bajo 0,80.** 4 vCPU (ITSC-364): p10 0,312, p50 0,510, mínimo 0,116 (2017-08); ningún mes llega a 0,80 |
+| RSS pico máximo | **2 vCPU (ITSC-378): 2 054 MiB (2020-03), 50 % de 4 GiB.** 4 vCPU, núcleo nuevo: 3 545 MiB (2017-12), 86 % de 4 GiB. Original: 1 267 MiB (2018-01), 31 % |
 | Cupo gratuito | Es de la cuenta de facturación, no de la capa: L3 fue el 41 % del CPU de octubre y los créditos cubrieron el costo (facturado 0) |
-| Estado estacionario (`l3-monthly`) | Como máximo lo que el mes más pesado: centavos |
+| Estado estacionario (`l3-monthly`) | Como máximo lo que el mes más pesado: menos de un centavo (183,7 s × 2 vCPU) |
 
 Para repetir la medición:
 
