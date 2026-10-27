@@ -264,6 +264,38 @@ cierre.
    siguiente. Debe haber un `daily_monthly_drift` de 2026-08 y hallazgos
    `stage = canonical` del mes que superan a los `provisional`.
 
+## Schedulers encendidos (ITSC-353)
+
+Los schedulers `daily` y `monthly-close` del stack `l1` están **encendidos**
+(`paused = false`). El PR de ITSC-353 los enciende (2026-10-26); rigen desde el
+apply de `l1`, cuya fecha queda registrada en la card. Desde ahí la plataforma
+está en estado estacionario:
+
+- `daily` (03:00 UTC): ingiere solo **D-1** (TRD-L1 §8.3). No recupera días
+  atrasados: un día que no se ingirió queda sin provisional hasta
+  `monthly-close`.
+- `monthly-close` (día 8, 06:00 UTC): cierra el mes anterior y encadena
+  `l2-monthly`, `viz-tiles` y `l3-monthly`, cada uno solo si el anterior terminó
+  bien. Primer cierre con scheduler: 2026-11-08.
+
+**No lances a mano el mismo mes y modo que Scheduler esté ejecutando.** Si
+necesitas relanzar algo, hazlo fuera de esa ventana y con `run-job.yml`. Para
+pausar, `paused = true` por PR y apply, nunca `gcloud scheduler`.
+
+**Relleno posterior al apply.** El relleno de octubre cubrió del 2026-10-01 al
+10-25 (run de Actions 40341979316, 25 de 25 tareas). El primer `daily`
+programado procesa solo D-1: si el apply es el día A después de las 03:00 UTC,
+corre en A+1 y procesa A, así que los días entre el 10-26 y A-1 quedan sin
+provisional. Tras el apply, lanza *Run job* `l1-daily` después de las 03:00 UTC
+del día A, con `from = 2026-10-26` y `to` = el día del apply menos 1, sin
+`force`. Si A-1 ya lo procesó el `daily` de A, el relleno lo salta por
+checksum; si su archivo aún no está publicado, sale `source_not_published` con
+salida 0. No uses
+`l1-backfill`: octubre no tiene mensual hasta el 2026-11-02 y daría
+`source_not_published` sin escribir. Los días sin provisional no afectan a L2,
+viz ni L3 (no leen provisionales); solo ensucian `daily_monthly_drift` del
+cierre con `missing_days`.
+
 ## Archivo aún no publicado
 
 Binance publica el diario de D el día **D+1** y el consolidado mensual de M
@@ -579,6 +611,7 @@ vCPU-s/mes ≈ 4 × 425,3 s ≈ 1.701 vCPU-s/mes
 Ambos muy por debajo del cupo gratis mensual: confirma §10.3 ("`daily` /
 `monthly-close` ≈ 0, free tier").
 
-**Estado del mes en curso:** sin provisionales hasta que el humano encienda
-los schedulers (ITSC-226) o lance `l1-daily` a mano con el rango de días
-faltantes.
+**Estado del mes en curso:** al 2026-09-26, sin provisionales hasta que el
+humano encendiera los schedulers o lanzara `l1-daily` a mano con el rango de
+días faltantes. Octubre se rellenó (10-01 a 10-25) y los schedulers se encienden
+con ITSC-353: ver "Schedulers encendidos (ITSC-353)".
