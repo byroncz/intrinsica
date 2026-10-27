@@ -283,6 +283,23 @@ humano. La reanudación no es por reintento: el modo backfill salta lo que ya
 existe con el mismo `.CHECKSUM`; si falla, relanza el rango y solo se procesan
 los meses que faltan.
 
+## Schedulers de l1 (encendidos desde ITSC-353)
+
+Los dos schedulers del stack `l1` están **encendidos** (`paused = false` en
+`stacks/batch/l1/main.tf`). El PR de ITSC-353 los enciende (2026-10-26); rigen
+desde el apply de `l1`, cuya fecha queda registrada en la card.
+
+| Scheduler | Cron (UTC) | Qué hace |
+|---|---|---|
+| `daily` | `0 3 * * *` | Ingiere solo D-1; no recupera días atrasados. |
+| `monthly-close` | `0 6 8 * *` | Cierra el mes anterior y encadena `l2-monthly`, `viz-tiles` y `l3-monthly`. |
+
+**No lances a mano el mismo mes y modo que Scheduler esté ejecutando.** Para
+reintentar o rellenar, usa `run-job.yml` fuera de esa ventana. Para pausar uno,
+cambia `paused = true` por PR y apply; `gcloud scheduler jobs pause` o `resume`
+lo revierte el siguiente apply (drift). Operación y relleno de días
+atrasados: [runbook de L1](../docs/runbooks/operacion-l1.md#schedulers-encendidos-itsc-353).
+
 ## Desplegar un cambio de capa
 
 Todo cambio de código de una capa (incluidos `shared/`, `uv.lock` y el

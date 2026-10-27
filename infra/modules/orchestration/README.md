@@ -76,7 +76,8 @@ que `l2-monthly` acaba de cerrar, porque el scheduler corre el día 8.
 
 ### Probarlo a mano
 
-Con los schedulers en pausa, el humano lanza el workflow desde Cloud Shell
+Con los schedulers en pausa (o para una prueba puntual, nunca sobre el mes que
+Scheduler esté ejecutando), el humano lanza el workflow desde Cloud Shell
 (`run-job.yml` ejecuta jobs, no el workflow):
 
 ```sh
@@ -104,8 +105,10 @@ humano y se hace por PR:
 2. Abre el PR y aplica el stack desde `terraform.yml`.
 
 No uses `gcloud scheduler jobs resume`: cambia el estado fuera de Terraform y
-el siguiente `apply` lo revierte a `paused = true` (drift). Hasta que se
-enciendan, lanza los modos con `run-job.yml`.
+el siguiente `apply` lo revierte a `paused = true` (drift). Mientras un
+scheduler siga en pausa, lanza su modo con `run-job.yml`; una vez encendido, no
+lances a mano el mismo mes y modo que Scheduler esté ejecutando. En `l1`, ambos
+están encendidos desde ITSC-353.
 
 ## Requisitos
 

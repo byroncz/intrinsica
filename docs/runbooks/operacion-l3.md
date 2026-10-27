@@ -367,9 +367,10 @@ Qué hacer:
 
 Un `l3-monthly` solo termina con código 1 si ningún θ estaba listo y había
 rezagados (un mes perdido no pasa como éxito); con algún θ al día o nada que
-procesar termina con 0. El scheduler de `monthly-close` está pausado en el repo;
-la primera prueba real de la cadena completa la cubre la card que enciende los
-schedulers, no ésta.
+procesar termina con 0. El scheduler de `monthly-close` (día 8) está con
+`paused = false` desde ITSC-353 (`infra/stacks/batch/l1/main.tf`); no lances a
+mano `monthly-close` ni `l3-monthly` para el mismo mes y modo que Scheduler esté
+ejecutando. El primer cierre programado es el 2026-11-08.
 
 ## Volumen y costo
 
