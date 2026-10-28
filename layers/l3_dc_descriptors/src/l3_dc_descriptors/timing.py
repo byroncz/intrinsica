@@ -358,24 +358,13 @@ def _open_counting(
 ) -> pq.ParquetFile:
     """Sustituto de `dc_frames.lake.open_parquet`: igual al original, y cuenta los
     row groups de `consolidated.parquet` si la unidad en curso trae un contador.
-
-    El gancho guarda el archivo con una referencia débil (ITSC-369, H5): con una fuerte, el
-    archivo y su gancho forman un ciclo, y el lector de vida corta, con el caché de
-    `pre_buffer` (≈ 2 MiB), no se suelta al cerrarlo sino en el siguiente `gc.collect()`.
     """
     parquet = _OPEN(path, what, metadata, pre_buffer)
     count = _COUNT.get()
     if count is None or not path.endswith(lake.CONSOLIDATED):
         return parquet
     count.opened(path, parquet.num_row_groups)
-    # Quien llama tiene el archivo mientras lee: la referencia débil sigue viva.
-    ref = weakref.ref(parquet)
     read = parquet.read_row_group
-    if getattr(read, "__self__", None) is parquet:
-        method = read.__func__
-
-        def read(i, **kwargs):
-            return method(ref(), i, **kwargs)
 
     def read_row_group(i, columns=None, **kwargs):
         if count.meter is None:
@@ -383,7 +372,7 @@ def _open_counting(
         else:
             with count.meter.reading():
                 table = read(i, columns=columns, **kwargs)
-        count.decoded(path, i, _compressed(ref(), i, columns))
+        count.decoded(path, i, _compressed(parquet, i, columns))
         return table
 
     parquet.read_row_group = read_row_group

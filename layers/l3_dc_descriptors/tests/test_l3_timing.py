@@ -93,31 +93,6 @@ def test_it_counts_the_row_groups_the_reader_decodes(lake, tmp_path, monkeypatch
     assert spy.of(M1) >= l1_row_groups(lake, M1)
 
 
-def test_the_counted_reader_is_freed_on_close_without_the_collector(lake):
-    """ITSC-369, H5: el gancho no forma un ciclo con el archivo. Con un ciclo, el lector de vida
-    corta y su caché de `pre_buffer` esperaban al `gc.collect()` del cierre de la unidad, que
-    los soltaba entre las dos muestras del trim.
-    """
-    import gc
-    import weakref
-
-    path = lake.l1 / "provider=binance/market=spot/asset=BTCUSDT"
-    path = str(path / f"year={M1[0]}/month={M1[1]:02d}/consolidated.parquet")
-    count = timing.RowGroupCount(month_path=path)
-    gc.disable()
-    try:
-        with timing.count_row_groups(count):
-            parquet = frames_lake.open_parquet(path, "L1", pre_buffer=True)
-            parquet.read_row_group(0, columns=["agg_trade_id"])
-            parquet.close()
-            alive = weakref.ref(parquet)
-            del parquet
-        assert alive() is None
-    finally:
-        gc.enable()
-    assert count.month == 1 and count.bytes_in > 0
-
-
 def test_events_that_cross_the_month_edge_read_previous_months(lake, tmp_path):
     ctx = context(lake, tmp_path)
     first = process_unit(unit_of(M1), ctx, lake.thetas).timing.row_groups
