@@ -258,13 +258,13 @@ group de L1 más antiguo que algún evento del mes necesita, y el acumulador par
 
 ## Mecánica de una unidad
 
-1. **Apertura** (`gate_s`). En el pool de E/S, una tarea por θ: abrir `events.parquet`
+1. **Apertura** (`gate_s`). En el pool de metadatos (`L3_META_WORKERS`), una tarea por θ: abrir `events.parquet`
    (`EventFile`: archivo y pie una sola vez; si falta, `l2_missing`), comprobar sus tipos y
    arrancar la lectura anticipada de sus fronteras (las siete columnas de §7.1, `EVENT_COLUMNS`,
    más `theta` para el esqueleto: `EVENT_FILE_COLUMNS`; las otras cuatro no se decodifican). Con las estadísticas de los pies se sabe la primera
    referencia y el último extremo del mes sin leer datos, y los tamaños de row group que pide
    el motor.
-2. **Compuerta de entrada y escritores** (`setup_s`). En el mismo pool, mientras este hilo crea el
+2. **Compuerta de entrada y escritores** (`setup_s`). También en el pool de metadatos, mientras este hilo crea el
    motor y espera el pie de L1: el carry-over del mes (y el del mes anterior, salvo en
    `series_start`) y la huella que L2 publicó del mes (`content_hash.json`, el linaje; no se
    recalcula) de cada θ, y los 50 escritores (`FamilyWriter`, con el esqueleto en RAM).
@@ -281,11 +281,11 @@ group de L1 más antiguo que algún evento del mes necesita, y el acumulador par
 4. **Escritura.** El recolector pasa lo sellado a `SealedWriters`; cada θ escribe en orden con
    `FamilyWriter` de `shared/dc_frames`, que comprueba filas, orden y límites de row group contra
    `events.parquet`. ZSTD-3, estadísticas, sin diccionario, `state_version` en los metadatos.
-5. **Conciliación** por θ y mes, en el pool: `N_M = (Σ_cerrados − P_M) + Cola_M + U_M`. `N_M`,
+5. **Conciliación** por θ y mes, en el pool de E/S (que también lee las fronteras de L2): `N_M = (Σ_cerrados − P_M) + Cola_M + U_M`. `N_M`,
    `Cola_M` y `U_M` salen del pie de `consolidated.parquet` y de los ids de L2; `Σ_cerrados` y
    `P_M` (ticks cerrados y ticks de meses anteriores), de las cuentas del motor.
 6. **Publicación** (`publish_s`). Atómica por archivo: se publica solo cuando todos los θ del mes
-   pasaron los pasos anteriores, y los `commit` corren en el pool. Un error de entrada, de resumen
+   pasaron los pasos anteriores, y los `commit` corren en el pool de metadatos. Un error de entrada, de resumen
    o de conciliación borra los temporales y no deja ningún `summaries.parquet`. Si falla la
    publicación de un θ (p. ej. el `move` a GCS), los ya publicados quedan; re-ejecutar el mes los
    reescribe con el mismo contenido.
