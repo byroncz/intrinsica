@@ -735,10 +735,12 @@ del `rss_mib` es `fordblks_mib` (libre que glibc retiene), qué parte `uordblks_
 uso) y qué parte `arrow_mib`. Lo que glibc retenía al cierre queda acotado:
 `mem_close_before_trim.rss_mib − mem_close_after_trim.rss_mib` es una cota inferior (incluye lo que
 soltó `gc.collect()`) y `fordblks_mib` antes del trim es la cota superior. Entre las dos muestras del
-cierre `fordblks_mib` cae en ≈ `keepcost_mib` (el trim recorta solo el top de la arena principal; los
-tops de las secundarias siguen residentes, y las páginas interiores de los chunks libres de todas las
-arenas se devuelven sin tocar `fordblks`) y puede subir por lo que libera `gc.collect()`: esa
-diferencia es la cima devuelta, no retención que «desapareció». El resultado va como comentario en ITSC-375 y en la entrada de decisión.
+cierre la caída de `fordblks_mib` no pasa de la de `arena_mib`: es la cima devuelta de la arena
+principal (el trim recorta solo ese top) más los heaps vacíos que `heap_trim` liberó de las
+secundarias tras `gc.collect()`; las páginas interiores de los chunks libres de todas las arenas se
+devuelven sin tocar `fordblks`, y `fordblks_mib` puede subir por lo que libera `gc.collect()`. Esa
+diferencia es memoria devuelta, no retención que «desapareció» (README de la capa y TRD-L3 §6, fila
+«Medición del pico»). Hasta TRD-L3 v2.11.0 se leía que `fordblks_mib` caía en ≈ `keepcost_mib`. El resultado va como comentario en ITSC-375 y en la entrada de decisión.
 
 **Las corridas de ITSC-376** (las lanza el humano tras el merge y el `apply` de `l3`, **las dos
 seguidas el mismo día** para que el host no cambie entre una y otra). (a) *Actions → Run job*,
