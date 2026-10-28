@@ -705,13 +705,18 @@ def test_the_trim_returns_pages_to_the_kernel_and_the_free_list_drops_at_most_th
 ):
     """`malloc_trim(0)` llama a `mtrim` por arena, que hace dos cosas: `madvise(MADV_DONTNEED)`
     sobre las páginas interiores de los chunks libres, en todas las arenas (baja el RSS y no toca
-    `fordblks`); en la arena principal, `systrim` sobre su top (baja `arena` y `fordblks` en
-    ≈ `keepcost`, que `mallinfo2` reporta solo para ella), y en las secundarias, `heap_trim`, que
-    encoge sus heaps y baja `arena` y `fordblks` por igual. Lo que `heap_trim` quita no se pierde:
-    se devuelve, y por eso la caída de `arena` se descuenta de la de `fordblks`. Entre las dos
-    muestras del cierre corre además `gc.collect()`, que puede subir `fordblks`: la subida se
-    permite y lo que queda de la caída no puede pasar de la cima. Lo retenido al cierre queda
-    acotado: Δ`rss_mib` es cota inferior y `before.fordblks_mib` cota superior.
+    `fordblks`), y, solo en la arena principal, `systrim` sobre su top (baja `arena` y `fordblks`
+    en ≈ `keepcost`, que `mallinfo2` reporta solo para ella). Los tops de las secundarias no los
+    recorta el trim. Entre las dos muestras del cierre corre antes `gc.collect()`: lo que suelta
+    sube `fordblks`, y cada `free` que en una arena secundaria deja un chunk libre, ya fusionado
+    con sus vecinos, ≥ `FASTBIN_CONSOLIDATION_THRESHOLD` (64 KiB) llama a `heap_trim` desde
+    `_int_free`, que encoge sus heaps y baja
+    `arena` y `fordblks` por igual. Esa caída no es memoria perdida sino devuelta, y por eso la
+    caída de `arena` se descuenta de la de `fordblks`; como `systrim` también baja `arena`, la
+    resta descuenta igual la cima de la principal, y lo que queda de la caída de `fordblks`, sin
+    contrapartida en `arena`, no puede pasar de `keepcost` (relación fijada por el humano en el
+    PR 162, C2). Lo retenido al cierre queda acotado: Δ`rss_mib` es cota inferior y
+    `before.fordblks_mib` cota superior.
 
     ITSC-377: el trim de cierre nunca empeora el RSS, y devuelve algo solo si había algo que
     devolver. Eso depende de cuándo cayó el último trim periódico: con trims por marca de agua
