@@ -705,11 +705,13 @@ def test_the_trim_returns_pages_to_the_kernel_and_the_free_list_drops_at_most_th
 ):
     """`malloc_trim(0)` llama a `mtrim` por arena, que hace dos cosas: `madvise(MADV_DONTNEED)`
     sobre las páginas interiores de los chunks libres, en todas las arenas (baja el RSS y no toca
-    `fordblks`), y, solo en la arena principal, `systrim` sobre su top (baja `arena` y `fordblks`
-    en ≈ `keepcost`, que `mallinfo2` reporta solo para ella). Entre las dos muestras del cierre
-    corre además `gc.collect()`, que puede subir `fordblks`: la subida se permite y la caída no
-    puede pasar de la cima. Lo retenido al cierre queda acotado: Δ`rss_mib` es cota inferior y
-    `before.fordblks_mib` cota superior.
+    `fordblks`); en la arena principal, `systrim` sobre su top (baja `arena` y `fordblks` en
+    ≈ `keepcost`, que `mallinfo2` reporta solo para ella), y en las secundarias, `heap_trim`, que
+    encoge sus heaps y baja `arena` y `fordblks` por igual. Lo que `heap_trim` quita no se pierde:
+    se devuelve, y por eso la caída de `arena` se descuenta de la de `fordblks`. Entre las dos
+    muestras del cierre corre además `gc.collect()`, que puede subir `fordblks`: la subida se
+    permite y lo que queda de la caída no puede pasar de la cima. Lo retenido al cierre queda
+    acotado: Δ`rss_mib` es cota inferior y `before.fordblks_mib` cota superior.
 
     ITSC-377: el trim de cierre nunca empeora el RSS, y devuelve algo solo si había algo que
     devolver. Eso depende de cuándo cayó el último trim periódico: con trims por marca de agua
@@ -729,7 +731,8 @@ def test_the_trim_returns_pages_to_the_kernel_and_the_free_list_drops_at_most_th
         if run["trims"] == 0:
             assert after["rss_mib"] < before["rss_mib"], (name, before, after)
         dropped = before["fordblks_mib"] - after["fordblks_mib"]
-        assert dropped <= before["keepcost_mib"] + TRIM_TOLERANCE_MIB, (
+        returned = max(0.0, before["arena_mib"] - after["arena_mib"])
+        assert dropped - returned <= before["keepcost_mib"] + TRIM_TOLERANCE_MIB, (
             name,
             before,
             after,
