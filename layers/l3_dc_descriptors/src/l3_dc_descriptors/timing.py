@@ -495,7 +495,7 @@ class Timing:
         §9.1. `read_s` es lo que el hilo principal esperó a las lecturas y `read_wall_s`, la
         pared con alguna lectura de L1 o L2 en vuelo (lectura, decodificación y el hash del
         linaje de L2); `read_bytes`, los bytes comprimidos que leyó de las dos. `threads` es
-        el pool de E/S (pasada de entrada, L2, conciliación y publicación); `engine_threads`,
+        el pool de E/S (fronteras de L2 y conciliación); `engine_threads`,
         los hilos del motor; `readers`, los row groups de L1 que se leen a la vez; `inflight`,
         el tope de tramos empujados al motor que aún anclan sus ticks (un tramo es un row group de L1 o una parte de uno) e `inflight_max`,
         el máximo que hubo; `boundaries_peak_mib`, el máximo de fronteras de L2 que el motor

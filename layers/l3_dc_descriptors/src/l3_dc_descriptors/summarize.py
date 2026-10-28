@@ -120,8 +120,9 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_KEY = ("binance", "spot", "BTCUSDT")
 _THETA_SCALE = Decimal("1e-8")
-# Hilos del pool de E/S por vCPU efectivo: la espera de red de cada θ (compuerta y apertura,
-# lectura de L2, conciliación y publicación) se solapa con la de otros (ITSC-360).
+# Hilos del pool de E/S por vCPU efectivo: la espera de red de la lectura de las fronteras de L2
+# y de la conciliación de cada θ se solapa con la de otros (ITSC-360). La entrada, los escritores
+# y la publicación van en el pool de metadatos (ITSC-369).
 THREADS_PER_CORE = 3
 # Hilos del pool de metadatos (ITSC-369): abrir `events.parquet`, `carry_over.parquet` y la huella,
 # abrir los escritores, el pie de L1 y publicar son esperas de red de un viaje cada una, no CPU, así
@@ -651,16 +652,17 @@ def summarize_month(
     de la serie: el único cuyo mes anterior no tiene carry-over de L2.
 
     Los hilos y los topes son del orquestador y no cambian el resultado: `threads` es el
-    pool de E/S (compuerta, apertura, lectura de L2, conciliación y publicación; por defecto
-    `THREADS_PER_CORE` × vCPU efectivos, nunca más que θ; con 1 no hay pool y esos pasos
-    van en serie), `readers` los row groups de L1 que se leen a la vez (R), `inflight` los
+    pool de E/S (lectura de las fronteras de L2 y conciliación; por defecto
+    `THREADS_PER_CORE` × vCPU efectivos, nunca más que θ; con 1 no hay pool y todo
+    va en serie), `readers` los row groups de L1 que se leen a la vez (R), `inflight` los
     que pueden anclar sus ticks en el motor (K), `writers` los escritores (W) y
     `engine_threads` los hilos del motor (por defecto los vCPU efectivos) e `inflight_bytes`
     el tope de bytes de eventos abiertos (`DEFAULT_INFLIGHT_BYTES`). `lot_events` es el lote
     en eventos (`DEFAULT_LOT_EVENTS`): cada row group de L1 se parte en tramos que traen a lo
     más esos eventos según la densidad del mes, y 0 desactiva el corte. `meta_workers` es el
-    pool de metadatos (`DEFAULT_META_WORKERS`, nunca más que θ, tope `MAX_META_WORKERS`; sin
-    pool de E/S tampoco hay pool de metadatos). Ver el módulo para la cuenta de memoria.
+    pool de metadatos (compuerta, apertura, pie de L1, escritores y publicación;
+    `DEFAULT_META_WORKERS`, nunca más que θ, tope `MAX_META_WORKERS`; sin pool de E/S
+    tampoco hay pool de metadatos). Ver el módulo para la cuenta de memoria.
 
     Atómico por archivo: la unidad comprueba la entrada de L2, resume todos los θ y concilia
     los ticks de cada uno antes de publicar el primero; un error de entrada, de resumen o de
