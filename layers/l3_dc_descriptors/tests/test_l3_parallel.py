@@ -50,7 +50,13 @@ READERS = (1, 2)
 INFLIGHT = (1, 4)
 WRITERS = (1, 4)
 KNOBS = list(itertools.product(ENGINE_THREADS, READERS, INFLIGHT, WRITERS))
-THREAD_PREFIXES = ("l3-theta", "l3-write", "l3-collector", "dc-frames-read")
+THREAD_PREFIXES = (
+    "l3-theta",
+    "l3-meta",
+    "l3-write",
+    "l3-collector",
+    "dc-frames-read",
+)
 
 
 @pytest.fixture(scope="module")
@@ -161,13 +167,27 @@ def test_the_io_pool_changes_nothing(lake, reference, threads):
     assert l3_threads() == []
 
 
+@pytest.mark.parametrize("meta_workers", [1, 3, summarize.MAX_META_WORKERS])
+def test_the_metadata_pool_changes_nothing(lake, reference, meta_workers):
+    assert_same(run_all(lake, threads=4, meta_workers=meta_workers), reference)
+    assert l3_threads() == []
+
+
 def test_the_defaults_give_the_same_result_too(lake, reference):
     assert_same(run_all(lake), reference)
 
 
 @pytest.mark.parametrize(
     "option",
-    ["threads", "readers", "inflight", "writers", "engine_threads", "inflight_bytes"],
+    [
+        "threads",
+        "readers",
+        "inflight",
+        "writers",
+        "engine_threads",
+        "inflight_bytes",
+        "meta_workers",
+    ],
 )
 def test_it_rejects_a_knob_out_of_range(lake, option):
     with pytest.raises(ValueError, match=option):
@@ -180,6 +200,30 @@ def test_it_rejects_a_knob_out_of_range(lake, option):
             series_start=M1,
             **{option: 0},
         )
+
+
+def test_the_metadata_pool_has_a_cap(lake):
+    with pytest.raises(ValueError, match="meta_workers"):
+        summarize_month(
+            lake.l1,
+            lake.l2,
+            lake.l3,
+            M1,
+            lake.theta_texts,
+            series_start=M1,
+            meta_workers=summarize.MAX_META_WORKERS + 1,
+        )
+
+
+def test_the_metadata_pool_does_not_depend_on_the_cores(monkeypatch):
+    # Son esperas de red, no CPU: el ancho es el mismo con 1 vCPU que con 8, y nunca pasa de θ.
+    for cores in (0.5, 1.0, 8.0):
+        monkeypatch.setattr(
+            summarize, "cpu_limit", lambda cores=cores: CpuLimit(cores, 8, "cgroup-v2")
+        )
+        assert summarize._meta_workers(None, 50) == summarize.DEFAULT_META_WORKERS
+    assert summarize._meta_workers(None, 5) == 5
+    assert summarize._meta_workers(3, 50) == 3
 
 
 def test_it_never_uses_more_io_threads_than_thetas():
@@ -334,6 +378,7 @@ def test_the_phases_report_how_it_ran(lake):
         writers=2,
     )
     assert (phases.threads, phases.engine_threads, phases.readers) == (3, 2, 1)
+    assert phases.meta_workers == min(summarize.DEFAULT_META_WORKERS, len(lake.thetas))
     assert (phases.inflight, phases.writers) == (3, 2)
     assert 1 <= phases.inflight_max <= 3
     assert phases.items > 0 and phases.items % len(lake.thetas) == 0

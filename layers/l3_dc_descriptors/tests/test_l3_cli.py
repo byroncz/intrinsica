@@ -406,6 +406,17 @@ def test_unit_timing_has_what_the_probe_needs(lake, tmp_path, catalog):
             "read_s",
             "aggregate_s",
             "write_s",
+            "gate_open_s",
+            "gate_frontier_s",
+            "setup_carry_s",
+            "setup_carry_wait_s",
+            "setup_l1_s",
+            "setup_l1_wait_s",
+            "setup_engine_s",
+            "setup_writers_s",
+            "publish_serial",
+            "publish_work_s",
+            "meta_workers",
             "rss_peak_mib",
             "row_groups_month",
             "row_groups_previous",
@@ -520,9 +531,10 @@ def test_without_l3_profile_the_cli_emits_no_unit_profile(lake, tmp_path, catalo
     assert emitted(tmp_path, "unit_profile") == []
 
 
-# L3_THREADS, L3_READERS, L3_INFLIGHT, L3_WRITERS y L3_ENGINE_THREADS (ITSC-357, ITSC-363)
+# L3_THREADS, L3_READERS, L3_INFLIGHT, L3_WRITERS y L3_ENGINE_THREADS (ITSC-357, ITSC-363);
+# L3_META_WORKERS (ITSC-369)
 
-KNOBS = ("threads", "readers", "inflight", "writers", "engine_threads")
+KNOBS = ("threads", "readers", "inflight", "writers", "engine_threads", "meta_workers")
 
 
 def test_the_l3_knobs_reach_the_unit(lake, tmp_path, catalog):
@@ -532,11 +544,12 @@ def test_the_l3_knobs_reach_the_unit(lake, tmp_path, catalog):
         "L3_INFLIGHT": "3",
         "L3_WRITERS": "2",
         "L3_ENGINE_THREADS": "3",
+        "L3_META_WORKERS": "2",
     }
     assert run(lake, tmp_path, catalog, *BACKFILL, **env) == 0
     for row in emitted(tmp_path, "unit_timing"):
         details = row["details"]
-        assert [details[name] for name in KNOBS] == [2, 1, 3, 2, 3]
+        assert [details[name] for name in KNOBS] == [2, 1, 3, 2, 3, 2]
         assert details["inflight_max"] <= 3
 
 
@@ -548,6 +561,7 @@ def test_without_the_knobs_the_defaults_apply(lake, tmp_path, catalog):
         assert 1 <= details["threads"] <= len(lake.thetas)
         assert details["threads"] <= max(1, math.ceil(3 * details["cores"]))
         assert details["engine_threads"] == max(1, round(details["cores"]))
+        assert details["meta_workers"] == min(16, len(lake.thetas))
         assert (details["readers"], details["inflight"], details["writers"]) == (
             2,
             4,
@@ -564,6 +578,9 @@ def test_without_the_knobs_the_defaults_apply(lake, tmp_path, catalog):
         ("L3_INFLIGHT", "0"),
         ("L3_WRITERS", "-1"),
         ("L3_ENGINE_THREADS", "1.5"),
+        ("L3_META_WORKERS", "0"),
+        ("L3_META_WORKERS", "65"),
+        ("L3_META_WORKERS", "ocho"),
     ],
 )
 def test_a_bad_l3_knob_is_a_usage_error(lake, tmp_path, catalog, name, value):

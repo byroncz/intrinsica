@@ -38,7 +38,8 @@ Entorno: `L3_LANDING_ROOT` (L1), `L3_EVENTS_ROOT` (L2), `L3_SUMMARIES_ROOT` (L3)
 enteros ≥ 1 (otro valor es código 2; `L3_LOT_EVENTS` admite 0): `L3_READERS` (lectores de L1, R; por defecto 2),
 `L3_INFLIGHT` (row groups en el motor, K; 4), `L3_WRITERS` (escritores, W; 12),
 `L3_ENGINE_THREADS` (hilos del motor; por defecto `round(vCPU efectivos)`), `L3_THREADS` (pool de
-E/S; por defecto `ceil(3 × vCPU)`, nunca más que θ) y `L3_INFLIGHT_BYTES` (tope de bytes de eventos
+E/S; por defecto `ceil(3 × vCPU)`, nunca más que θ), `L3_META_WORKERS` (pool de metadatos: compuerta,
+apertura de `events.parquet` y de los escritores, pie de L1 y publicación; entre 1 y 64, por defecto 16) y `L3_INFLIGHT_BYTES` (tope de bytes de eventos
 abiertos; 805 306 368 = 768 MiB), `L3_LOT_EVENTS` (eventos de un tramo; 1 000 000; 0 desactiva el
 corte), `L3_MEMORY_SAMPLE_S` (segundos entre ticks del muestreador de memoria; número > 0, por
 defecto 0,25), `L3_TRIM_RSS_MIB` (marca de agua del trim periódico, en MiB; entero ≥ 0, por
@@ -257,13 +258,13 @@ group de L1 más antiguo que algún evento del mes necesita, y el acumulador par
 
 ## Mecánica de una unidad
 
-1. **Apertura** (`gate_s`). En el pool de E/S, una tarea por θ: abrir `events.parquet`
+1. **Apertura** (`gate_s`). En el pool de metadatos (`L3_META_WORKERS`), una tarea por θ: abrir `events.parquet`
    (`EventFile`: archivo y pie una sola vez; si falta, `l2_missing`), comprobar sus tipos y
    arrancar la lectura anticipada de sus fronteras (las siete columnas de §7.1, `EVENT_COLUMNS`,
    más `theta` para el esqueleto: `EVENT_FILE_COLUMNS`; las otras cuatro no se decodifican). Con las estadísticas de los pies se sabe la primera
    referencia y el último extremo del mes sin leer datos, y los tamaños de row group que pide
    el motor.
-2. **Compuerta de entrada y escritores** (`setup_s`). En el mismo pool, mientras este hilo crea el
+2. **Compuerta de entrada y escritores** (`setup_s`). También en el pool de metadatos, mientras este hilo crea el
    motor y espera el pie de L1: el carry-over del mes (y el del mes anterior, salvo en
    `series_start`) y la huella que L2 publicó del mes (`content_hash.json`, el linaje; no se
    recalcula) de cada θ, y los 50 escritores (`FamilyWriter`, con el esqueleto en RAM).
@@ -280,11 +281,11 @@ group de L1 más antiguo que algún evento del mes necesita, y el acumulador par
 4. **Escritura.** El recolector pasa lo sellado a `SealedWriters`; cada θ escribe en orden con
    `FamilyWriter` de `shared/dc_frames`, que comprueba filas, orden y límites de row group contra
    `events.parquet`. ZSTD-3, estadísticas, sin diccionario, `state_version` en los metadatos.
-5. **Conciliación** por θ y mes, en el pool: `N_M = (Σ_cerrados − P_M) + Cola_M + U_M`. `N_M`,
+5. **Conciliación** por θ y mes, en el pool de E/S (que también lee las fronteras de L2): `N_M = (Σ_cerrados − P_M) + Cola_M + U_M`. `N_M`,
    `Cola_M` y `U_M` salen del pie de `consolidated.parquet` y de los ids de L2; `Σ_cerrados` y
    `P_M` (ticks cerrados y ticks de meses anteriores), de las cuentas del motor.
 6. **Publicación** (`publish_s`). Atómica por archivo: se publica solo cuando todos los θ del mes
-   pasaron los pasos anteriores, y los `commit` corren en el pool. Un error de entrada, de resumen
+   pasaron los pasos anteriores, y los `commit` corren en el pool de metadatos. Un error de entrada, de resumen
    o de conciliación borra los temporales y no deja ningún `summaries.parquet`. Si falla la
    publicación de un θ (p. ej. el `move` a GCS), los ya publicados quedan; re-ejecutar el mes los
    reescribe con el mismo contenido.
@@ -383,8 +384,10 @@ también reporta solo para ella); los tops de las arenas secundarias siguen resi
 muestras del cierre corre además `gc.collect()`, que puede subir `fordblks`. Por eso lo que glibc
 retenía al cierre queda acotado: `mem_close_before_trim.rss_mib − mem_close_after_trim.rss_mib` es
 una **cota inferior** (incluye lo que soltó `gc.collect()`), `fordblks_mib` antes del trim es la
-**cota superior**, y `before.fordblks_mib − after.fordblks_mib` es la cima devuelta, no retención
-que «desapareció». `mem_peak_coverage` = RSS de `mem_peak` ÷ `rss_peak_mib`: bajo 0,9 el
+**cota superior**, y `before.fordblks_mib − after.fordblks_mib` es la cima devuelta más lo que
+`heap_trim` devolvió de las secundarias, no retención que «desapareció»: las liberaciones de
+`gc.collect()` pueden encoger una arena secundaria, que baja `arena` y `fordblks` por igual (TRD-L3 §6,
+fila «Medición del pico»). `mem_peak_coverage` = RSS de `mem_peak` ÷ `rss_peak_mib`: bajo 0,9 el
 muestreador se perdió el pico y se baja `L3_MEMORY_SAMPLE_S`. El muestreo no cambia el pico; el trim
 que hace el mismo hilo sí (arriba). La muestra del pico se toma antes del trim del tick.
 `mallinfo2` toma el candado de cada arena y recorre sus listas libres, por eso no corre en cada tick.

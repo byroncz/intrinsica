@@ -706,10 +706,17 @@ def test_the_trim_returns_pages_to_the_kernel_and_the_free_list_drops_at_most_th
     """`malloc_trim(0)` llama a `mtrim` por arena, que hace dos cosas: `madvise(MADV_DONTNEED)`
     sobre las páginas interiores de los chunks libres, en todas las arenas (baja el RSS y no toca
     `fordblks`), y, solo en la arena principal, `systrim` sobre su top (baja `arena` y `fordblks`
-    en ≈ `keepcost`, que `mallinfo2` reporta solo para ella). Entre las dos muestras del cierre
-    corre además `gc.collect()`, que puede subir `fordblks`: la subida se permite y la caída no
-    puede pasar de la cima. Lo retenido al cierre queda acotado: Δ`rss_mib` es cota inferior y
-    `before.fordblks_mib` cota superior.
+    en ≈ `keepcost`, que `mallinfo2` reporta solo para ella). Los tops de las secundarias no los
+    recorta el trim. Entre las dos muestras del cierre corre antes `gc.collect()`: lo que suelta
+    sube `fordblks`, y cada `free` que en una arena secundaria deja un chunk libre, ya fusionado
+    con sus vecinos, ≥ `FASTBIN_CONSOLIDATION_THRESHOLD` (64 KiB) llama a `heap_trim` desde
+    `_int_free`; una secundaria solo baja `arena` (y `fordblks` por igual) si un heap entero queda
+    vacío y `heap_trim` lo libera, porque encoger un heap lo impide `MALLOC_TRIM_THRESHOLD_` en
+    1 GiB. Así, todo lo que sale de la lista libre tiene que haber vuelto al sistema, lo devuelva
+    `systrim` o el borrado de un heap vacío: la caída de `fordblks` no pasa de la de `arena`
+    (relación fijada por el arquitecto en el PR 162, C2 y C3, criterio 5 de ITSC-369). `keepcost`
+    no entra: la cima de la principal ya baja `arena`. Lo retenido al cierre queda acotado:
+    Δ`rss_mib` es cota inferior y `before.fordblks_mib` cota superior.
 
     ITSC-377: el trim de cierre nunca empeora el RSS, y devuelve algo solo si había algo que
     devolver. Eso depende de cuándo cayó el último trim periódico: con trims por marca de agua
@@ -729,7 +736,8 @@ def test_the_trim_returns_pages_to_the_kernel_and_the_free_list_drops_at_most_th
         if run["trims"] == 0:
             assert after["rss_mib"] < before["rss_mib"], (name, before, after)
         dropped = before["fordblks_mib"] - after["fordblks_mib"]
-        assert dropped <= before["keepcost_mib"] + TRIM_TOLERANCE_MIB, (
+        returned = max(0.0, before["arena_mib"] - after["arena_mib"])
+        assert dropped <= returned + TRIM_TOLERANCE_MIB, (
             name,
             before,
             after,

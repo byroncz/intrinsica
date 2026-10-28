@@ -35,7 +35,7 @@ los θ y de los tramos no cambia un bit de la salida: el motor deja cada fila en
 de su evento y sella los row groups de salida de cada θ en orden.
 
 **Entrada de los θ en dos tramos (ITSC-365).** El primer tramo, una tarea por θ en el pool de
-E/S, abre `events.parquet` (si falta, `l2_missing`), comprueba sus tipos y arranca la lectura
+metadatos (ITSC-369), abre `events.parquet` (si falta, `l2_missing`), comprueba sus tipos y arranca la lectura
 anticipada de sus fronteras; de ahí salen el pie del archivo y, con él, los tamaños de row
 group que el constructor del motor pide de los 50 θ. El segundo tramo (la compuerta de
 carry-over del mes y del anterior, con la huella del mes, y la apertura del `FamilyWriter` con
@@ -53,9 +53,17 @@ las claves del esqueleto. El carry-over se lee una vez. El linaje (`l2_events_co
 `l2_carry_over_content_hash`) es el que L2 publicó en `content_hash.json`: se lee, no se
 recalcula, y si falta la unidad falla con `l2_lineage_missing`.
 
+**El pool de metadatos (ITSC-369).** Abrir `events.parquet`, el carry-over y la huella, abrir los
+escritores, pedir el pie de L1 y publicar son esperas de red de un viaje por archivo: con 50 θ son
+≈ 200 viajes antes del primer row group y 50 después. Corren en un pool propio (`L3_META_WORKERS`,
+`DEFAULT_META_WORKERS`), de ancho fijo y sin relación con los vCPU, que no comparte hilos con las
+lecturas de datos de L2 (`BatchStream`, en el pool de E/S): la compuerta no hace cola detrás de
+ellas. Se descartó arrancar la lectura del primer row group de L1 durante la compuerta (TRD-L3
+§8.1).
+
 Atómico por archivo: nada se publica hasta que todo el mes se resumió y concilió. Con
-`threads=1` no hay pool de E/S: la compuerta, la apertura, la conciliación y la publicación
-van en serie en el hilo principal (los hilos del motor y del lector no se apagan).
+`threads=1` no hay pool de E/S ni de metadatos: la compuerta, la apertura, la conciliación y la
+publicación van en serie en el hilo principal (los hilos del motor y del lector no se apagan).
 """
 
 import logging
@@ -106,15 +114,24 @@ from l3_dc_descriptors.reconcile import (
     reconcile,
 )
 from l3_dc_descriptors.schema import FAMILY, STATE_VERSION, SUMMARIES_SCHEMA
-from l3_dc_descriptors.timing import Phases
+from l3_dc_descriptors.timing import Phases, Stage
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_KEY = ("binance", "spot", "BTCUSDT")
 _THETA_SCALE = Decimal("1e-8")
-# Hilos del pool de E/S por vCPU efectivo: la espera de red de cada θ (compuerta y apertura,
-# lectura de L2, conciliación y publicación) se solapa con la de otros (ITSC-360).
+# Hilos del pool de E/S por vCPU efectivo: la espera de red de la lectura de las fronteras de L2
+# y de la conciliación de cada θ se solapa con la de otros (ITSC-360). La entrada, los escritores
+# y la publicación van en el pool de metadatos (ITSC-369).
 THREADS_PER_CORE = 3
+# Hilos del pool de metadatos (ITSC-369): abrir `events.parquet`, `carry_over.parquet` y la huella,
+# abrir los escritores, el pie de L1 y publicar son esperas de red de un viaje cada una, no CPU, así
+# que su ancho no depende de los vCPU. Un θ de la compuerta cuesta cuatro viajes (los `events`,
+# el carry-over del mes y del anterior, la huella): con 50 θ son 200 por unidad y con un viaje de
+# 50 ms 10 s en serie, 1,3 s con 8 hilos y 0,7 s con 16. El tope acota los hilos y las conexiones
+# abiertas a la vez contra GCS.
+DEFAULT_META_WORKERS = 16
+MAX_META_WORKERS = 64
 # Lectores de L1 (R), row groups en vuelo en el motor (K) y escritores (W). Ley de Little
 # (ITSC-363): con el motor al 95 % la unidad consume ≈ 1 row group por segundo y con
 # `pre_buffer` una lectura tarda ≈ 0,6 s, así que dos lectores bastan; K = 4 deja uno en
@@ -195,6 +212,15 @@ def _workers(requested: int | None, thetas: int) -> int:
     return min(requested, thetas)
 
 
+def _meta_workers(requested: int | None, thetas: int) -> int:
+    """Hilos del pool de metadatos: lo pedido o `DEFAULT_META_WORKERS`; nunca más que θ.
+
+    Cada tramo de la entrada y de la salida es una tarea por θ, así que más hilos que θ no
+    solapan nada.
+    """
+    return min(DEFAULT_META_WORKERS if requested is None else requested, thetas)
+
+
 def _engine_threads(requested: int | None) -> int:
     """Hilos del motor: lo pedido o, por defecto, los vCPU efectivos (redondeado al entero
     más cercano: con 3,95 vCPU medidos son 4, no un hilo más que cores).
@@ -209,6 +235,11 @@ def theta_pool(threads: int) -> AbstractContextManager[ThreadPoolExecutor | None
     if threads <= 1:
         return nullcontext()
     return ThreadPoolExecutor(threads, thread_name_prefix="l3-theta")
+
+
+def meta_pool(workers: int) -> ThreadPoolExecutor:
+    """El pool de metadatos de `workers` hilos para un `with`: solo esperas de red."""
+    return ThreadPoolExecutor(workers, thread_name_prefix="l3-meta")
 
 
 def _theta(value: Decimal | str) -> Decimal:
@@ -382,11 +413,13 @@ def _enter_theta(
     escritor son el segundo tramo (`_read_gate`, `_open_writer`).
     """
     item = _Input()
-    item.file = _open_events(l2_root, key, month, text)
+    with phases.events_open.task():
+        item.file = _open_events(l2_root, key, month, text)
     try:
-        check_types(item.file)
-        item.events = L2Events(item.file, theta)
-        item.stream = BatchStream(item.file, pool, phases.read, tap=item.events.tap)
+        with phases.frontier.task():
+            check_types(item.file)
+            item.events = L2Events(item.file, theta)
+            item.stream = BatchStream(item.file, pool, phases.read, tap=item.events.tap)
     except BaseException:
         item.file.close()
         raise
@@ -610,6 +643,7 @@ def summarize_month(
     engine_threads: int | None = None,
     inflight_bytes: int | None = None,
     lot_events: int | None = None,
+    meta_workers: int | None = None,
 ) -> dict[Decimal, ThetaResult]:
     """Escribe `summaries.parquet` del mes para cada θ y devuelve lo que dejó de cada uno.
 
@@ -618,15 +652,17 @@ def summarize_month(
     de la serie: el único cuyo mes anterior no tiene carry-over de L2.
 
     Los hilos y los topes son del orquestador y no cambian el resultado: `threads` es el
-    pool de E/S (compuerta, apertura, lectura de L2, conciliación y publicación; por defecto
-    `THREADS_PER_CORE` × vCPU efectivos, nunca más que θ; con 1 no hay pool y esos pasos
-    van en serie), `readers` los row groups de L1 que se leen a la vez (R), `inflight` los
+    pool de E/S (lectura de las fronteras de L2 y conciliación; por defecto
+    `THREADS_PER_CORE` × vCPU efectivos, nunca más que θ; con 1 no hay pool y todo
+    va en serie), `readers` los row groups de L1 que se leen a la vez (R), `inflight` los
     que pueden anclar sus ticks en el motor (K), `writers` los escritores (W) y
     `engine_threads` los hilos del motor (por defecto los vCPU efectivos) e `inflight_bytes`
     el tope de bytes de eventos abiertos (`DEFAULT_INFLIGHT_BYTES`). `lot_events` es el lote
     en eventos (`DEFAULT_LOT_EVENTS`): cada row group de L1 se parte en tramos que traen a lo
-    más esos eventos según la densidad del mes, y 0 desactiva el corte. Ver el módulo para la
-    cuenta de memoria.
+    más esos eventos según la densidad del mes, y 0 desactiva el corte. `meta_workers` es el
+    pool de metadatos (compuerta, apertura, pie de L1, escritores y publicación;
+    `DEFAULT_META_WORKERS`, nunca más que θ, tope `MAX_META_WORKERS`; sin pool de E/S
+    tampoco hay pool de metadatos). Ver el módulo para la cuenta de memoria.
 
     Atómico por archivo: la unidad comprueba la entrada de L2, resume todos los θ y concilia
     los ticks de cada uno antes de publicar el primero; un error de entrada, de resumen o de
@@ -659,13 +695,21 @@ def summarize_month(
         ("writers", writers),
         ("engine_threads", engine_threads),
         ("inflight_bytes", inflight_bytes),
+        ("meta_workers", meta_workers),
     ):
         if value is not None and value < 1:
             raise ValueError(f"{name} {value} debe ser al menos 1")
+    if meta_workers is not None and meta_workers > MAX_META_WORKERS:
+        raise ValueError(
+            f"meta_workers {meta_workers} pasa del tope {MAX_META_WORKERS}"
+        )
     if lot_events is not None and lot_events < 0:
         raise ValueError(f"lot_events {lot_events} debe ser al menos 0")
     threads = _workers(threads, len(values))
     phases.threads = threads
+    # Sin pool de E/S (`threads` 1) todo va en serie: tampoco hay pool de metadatos.
+    meta_threads = _meta_workers(meta_workers, len(values)) if threads > 1 else 0
+    phases.meta_workers = meta_threads
     phases.readers = DEFAULT_READERS if readers is None else readers
     phases.inflight = DEFAULT_INFLIGHT if inflight is None else inflight
     phases.writers = DEFAULT_WRITERS if writers is None else writers
@@ -678,10 +722,11 @@ def summarize_month(
 
     with ExitStack() as stack:
         pool = stack.enter_context(theta_pool(threads))
+        meta = stack.enter_context(meta_pool(meta_threads)) if meta_threads else None
         # El pie de L1 se lee mientras los θ pasan su entrada. Si algún θ falla, el error
         # de L2 sale primero, como cuando la compuerta iba antes que L1: su resultado
         # se pide después de esperar la compuerta de carry-over.
-        pending = pool.submit(L1Month, l1_root, key, month) if pool else None
+        pending = meta.submit(_open_l1, phases, l1_root, key, month) if meta else None
         if pending is not None:
             stack.callback(_close_l1, pending)
 
@@ -690,7 +735,7 @@ def summarize_month(
         # `texts`. El orden de entrada es el inverso del cierre: lo último que se abre
         # (hilos, motor) se cierra primero.
         inputs = _open_all(
-            pool,
+            meta,
             stack,
             lambda i: _enter_theta(
                 pool, phases, l2_root, key, month, values[i], texts[i]
@@ -704,29 +749,51 @@ def summarize_month(
         # escritores, que se esperan al escribir el primer row group sellado de cada θ.
         for item, text in zip(inputs, texts, strict=True):
             item.gate = _submit(
-                pool, _read_gate, l2_root, key, month, series_start, text
+                meta,
+                _timed,
+                phases.carry_gate,
+                _read_gate,
+                l2_root,
+                key,
+                month,
+                series_start,
+                text,
             )
         for item, text in zip(inputs, texts, strict=True):
             item.writer = _submit(
-                pool, _open_writer, l3_root, key, month, text, item.events
+                meta,
+                _timed,
+                phases.writer_open,
+                _open_writer,
+                l3_root,
+                key,
+                month,
+                text,
+                item.events,
             )
         # El motor pide los tamaños de row group de los 50 θ, que están en el pie de sus
         # `events.parquet`: no necesita los escritores abiertos.
+        built = time.perf_counter()
         engine = native.new_engine(
             values, [item.events.row_groups for item in inputs], phases.engine_threads
         )
         stack.callback(engine.close)
+        phases.engine_build_s += time.perf_counter() - built
         if phases.sampler is not None:
             # Se registra después de cerrar el motor, así que al salir se suelta antes.
             phases.sampler.inflight = engine.inflight
             stack.callback(setattr, phases.sampler, "inflight", None)
         # La compuerta de carry-over se espera antes que el pie de L1: con L1 ilegible y un
         # carry-over ausente sale el `l2_input_missing` de la compuerta, no el error de L1.
+        waited = time.perf_counter()
         _await_gates(inputs)
+        phases.carry_wait_s += time.perf_counter() - waited
+        waited = time.perf_counter()
         if pending is not None:
             l1 = pending.result()
         else:
-            l1 = stack.enter_context(closing(L1Month(l1_root, key, month)))
+            l1 = stack.enter_context(closing(_open_l1(phases, l1_root, key, month)))
+        phases.l1_wait_s += time.perf_counter() - waited
 
         # Dónde empiezan y terminan los eventos de todos los θ, con las estadísticas del
         # pie de L2 (sin leer datos): el primer row group de L1 que se lee es el que
@@ -830,7 +897,9 @@ def summarize_month(
 
         begun = time.perf_counter()
         digests = ordered(
-            pool, lambda i: _commit(family[i], texts[i], month), range(len(values))
+            meta,
+            lambda i: _commit(phases, family[i], texts[i], month),
+            range(len(values)),
         )
         phases.publish_s += time.perf_counter() - begun
         return {
@@ -875,9 +944,22 @@ def _reconciliation_targets(inputs, references, extremes) -> list[int]:
     return targets
 
 
-def _commit(writer: FamilyWriter, text: str, month: Month) -> str:
+def _commit(phases: Phases, writer: FamilyWriter, text: str, month: Month) -> str:
     """Publica el archivo del θ y devuelve su `content_hash`."""
     try:
-        return writer.commit()
+        with phases.commit.task():
+            return writer.commit()
     except FamilySkeletonMismatch as error:
         raise SkeletonMismatch(text, month, FAMILY, error.detail) from error
+
+
+def _timed[R](stage: Stage, fn: Callable[..., R], *args) -> R:
+    """`fn(*args)` como una ejecución de `stage`."""
+    with stage.task():
+        return fn(*args)
+
+
+def _open_l1(phases: Phases, l1_root: str, key, month: Month) -> L1Month:
+    """El pie de L1 del mes, como una ejecución de `phases.l1_footer`."""
+    with phases.l1_footer.task():
+        return L1Month(l1_root, key, month)

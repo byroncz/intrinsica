@@ -37,6 +37,7 @@ from l3_dc_descriptors.landing import last_consolidated
 from l3_dc_descriptors.memory import tune_allocators
 from l3_dc_descriptors.pipeline import process_unit
 from l3_dc_descriptors.schema import FAMILY
+from l3_dc_descriptors.summarize import MAX_META_WORKERS
 from l3_dc_descriptors.thetas import ThetasError, load_thetas
 from l3_dc_descriptors.unit_process import run_unit
 
@@ -100,7 +101,9 @@ def _image_version(env: Mapping[str, str]) -> str:
     return f"{version}+local"
 
 
-def _count(env: Mapping[str, str], name: str, *, minimum: int) -> int | None:
+def _count(
+    env: Mapping[str, str], name: str, *, minimum: int, maximum: int | None = None
+) -> int | None:
     """Un entero de entorno (`L3_THREADS`, `L3_READERS`, ...), o `None` si no está o está vacío."""
     raw = env.get(name)
     if raw is None or not raw.strip():
@@ -111,6 +114,8 @@ def _count(env: Mapping[str, str], name: str, *, minimum: int) -> int | None:
         raise UsageError(f"{name}={raw!r} no es un entero") from None
     if value < minimum:
         raise UsageError(f"{name}={value} debe ser al menos {minimum}")
+    if maximum is not None and value > maximum:
+        raise UsageError(f"{name}={value} pasa del tope {maximum}")
     return value
 
 
@@ -166,6 +171,9 @@ def _context(mode: str, series_start: Month, env: Mapping[str, str]) -> RunConte
         engine_threads=_count(env, "L3_ENGINE_THREADS", minimum=1),
         inflight_bytes=_count(env, "L3_INFLIGHT_BYTES", minimum=1),
         lot_events=_count(env, "L3_LOT_EVENTS", minimum=0),
+        meta_workers=_count(
+            env, "L3_META_WORKERS", minimum=1, maximum=MAX_META_WORKERS
+        ),
         unit_process=_flag(env, "L3_UNIT_PROCESS", default=True),
         memory_sample_s=_sample_period(env),
         trim_rss_mib=_trim_rss_mib(env),

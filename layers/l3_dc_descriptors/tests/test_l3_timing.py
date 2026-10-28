@@ -3,6 +3,7 @@
 import cProfile
 import pstats
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 
@@ -10,7 +11,7 @@ import pyarrow.parquet as pq
 import pytest
 from dc_frames import lake as frames_lake
 from dq import Severity, Status
-from l3_dc_descriptors import memory, pipeline, timing
+from l3_dc_descriptors import memory, pipeline, summarize, timing
 from l3_dc_descriptors.context import RunContext, Unit
 from l3_dc_descriptors.pipeline import process_unit
 from l3_lake import KEY, M1, M2, M3, build_lake, fixture_ticks, month_cuts
@@ -495,3 +496,87 @@ def test_unit_timing_records_the_periodic_trim(lake, tmp_path):
     assert (default["trims"], default["trim_s"]) == (0, 0.0)
     off = process_unit(unit_of(M2), replace(base, trim_rss_mib=0), lake.thetas)
     assert off.timing.details()["trim_rss_mib"] == 0 and off.timing.trims == 0
+
+
+BREAKDOWN = (
+    "gate_open_s",
+    "gate_open_work_s",
+    "gate_frontier_s",
+    "gate_frontier_work_s",
+    "setup_carry_s",
+    "setup_carry_work_s",
+    "setup_carry_wait_s",
+    "setup_l1_s",
+    "setup_l1_wait_s",
+    "setup_engine_s",
+    "setup_writers_s",
+    "setup_writers_work_s",
+    "publish_work_s",
+)
+
+
+@pytest.mark.parametrize("knobs", [SERIAL, {"threads": 4}], ids=["serial", "pool"])
+def test_the_breakdown_explains_the_gate_the_setup_and_the_publish(
+    lake, tmp_path, knobs
+):
+    ctx = replace(context(lake, tmp_path), **knobs)
+    timing = process_unit(unit_of(M2), ctx, lake.thetas).timing
+    details = timing.details()
+    assert all(details[name] >= 0 for name in BREAKDOWN)
+    # Cada paso por θ corrió una vez por θ (el `details` redondea a ms).
+    phases = timing.phases
+    for stage in (
+        phases.events_open,
+        phases.frontier,
+        phases.carry_gate,
+        phases.writer_open,
+        phases.commit,
+    ):
+        assert stage.work_s > 0 and stage.seconds > 0
+    thetas = len(lake.thetas)
+    # La pared de un paso no pasa de su suma, y la suma de sus tareas no es menor que la pared
+    # del hilo principal que las espera.
+    for name in ("gate_open", "gate_frontier", "setup_carry", "setup_writers"):
+        assert details[f"{name}_s"] <= details[f"{name}_work_s"] + 0.01
+    # `gate_s` es el primer tramo: abrir y arrancar las fronteras; `setup_s`, lo que el hilo
+    # principal hace hasta el primer row group.
+    assert (
+        details["gate_open_s"] + details["gate_frontier_s"] <= details["gate_s"] + 0.01
+    )
+    waits = details["setup_engine_s"] + details["setup_carry_wait_s"]
+    assert waits + details["setup_l1_wait_s"] <= details["setup_s"] + 0.01
+    # En serie la compuerta de carry-over es lo que el hilo principal espera; con pool, lo que
+    # queda tras construir el motor.
+    if knobs is SERIAL:
+        assert details["publish_serial"] == thetas
+        assert details["meta_workers"] == 0
+        assert details["setup_carry_wait_s"] == 0
+    else:
+        assert details["meta_workers"] == min(summarize.DEFAULT_META_WORKERS, thetas)
+        assert details["setup_carry_wait_s"] <= details["setup_s"]
+    assert details["publish_work_s"] >= details["publish_s"] - 0.01
+
+
+def test_a_stage_counts_the_wall_the_sum_and_the_tasks_that_ran_alone():
+    stage = timing.Stage()
+
+    def task() -> None:
+        with stage.task():
+            time.sleep(0.05)
+
+    for _ in range(
+        3
+    ):  # en serie: cada una empieza con el paso ocioso y la pared es la suma
+        task()
+    assert stage.alone == 3
+    assert stage.work_s >= 0.15
+    assert stage.seconds == pytest.approx(stage.work_s, rel=0.1)
+    wall, work = stage.seconds, stage.work_s
+    with ThreadPoolExecutor(
+        4
+    ) as pool:  # a la vez: la suma crece 4 tareas y la pared, una
+        for future in [pool.submit(task) for _ in range(4)]:
+            future.result()
+    assert 3 <= stage.alone < 7
+    assert stage.work_s - work >= 0.2
+    assert stage.seconds - wall < (stage.work_s - work) / 2

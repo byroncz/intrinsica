@@ -672,12 +672,17 @@ mismo que traen las excepciones del resumidor, de las que sale la mayoría de lo
   `write_s` (la pared con algún escritor ocupado) y `read_wall_s` (la pared con alguna lectura de
   L1 o L2 en vuelo) corren dentro de `aggregate_s`; `read_s` es lo que el hilo principal esperó
   a las lecturas (`read_wall_s` incluye decodificar los lotes de L2) y `read_bytes`, los bytes comprimidos que viajaron de L1 y L2. La configuración
-  con que corrió: `threads` (pool de E/S, `L3_THREADS`), `engine_threads` (`L3_ENGINE_THREADS`),
+  con que corrió: `threads` (pool de E/S, `L3_THREADS`), `meta_workers` (pool de metadatos,
+  `L3_META_WORKERS`; 0 con `threads` 1), `engine_threads` (`L3_ENGINE_THREADS`),
   `readers` (`L3_READERS`), `inflight` (`L3_INFLIGHT`) y `writers` (`L3_WRITERS`); y lo que
   hizo el motor: `inflight_max` (máximo de row groups empujados que aún anclaban sus ticks),
   `engine_busy` (fracción del tiempo con ítems en la cola del motor), `items` (ítems
   `(row group, θ)`) y `boundaries_peak_mib` (máximo de fronteras de L2 que el motor tuvo en mano).
-  `prefetch` ya no existe. Además: `rss_peak_mib`
+  `prefetch` ya no existe. El costo fijo de `gate_s`, `setup_s` y `publish_s` se desglosa desde la
+  2.12.0 del TRD-L3 (ITSC-369): `gate_open_s`, `gate_frontier_s`, `setup_carry_s`,
+  `setup_carry_wait_s`, `setup_l1_s`, `setup_l1_wait_s`, `setup_engine_s`, `setup_writers_s` y
+  `publish_work_s` (cada paso por θ con su `*_work_s`, la suma de sus tareas) y `publish_serial`
+  (publicaciones que empezaron sin otra en curso). Además: `rss_peak_mib`
   (`VmHWM`) con `rss_peak_scope` (`unit` si el pico se reinició al empezar la unidad,
   `process` si el sistema no lo permite y es el de todo el proceso); las decodificaciones
   de row group de L1, `row_groups_month` (del archivo del mes), `row_groups_previous` (de
