@@ -384,8 +384,10 @@ también reporta solo para ella); los tops de las arenas secundarias siguen resi
 muestras del cierre corre además `gc.collect()`, que puede subir `fordblks`. Por eso lo que glibc
 retenía al cierre queda acotado: `mem_close_before_trim.rss_mib − mem_close_after_trim.rss_mib` es
 una **cota inferior** (incluye lo que soltó `gc.collect()`), `fordblks_mib` antes del trim es la
-**cota superior**, y `before.fordblks_mib − after.fordblks_mib` es la cima devuelta, no retención
-que «desapareció». `mem_peak_coverage` = RSS de `mem_peak` ÷ `rss_peak_mib`: bajo 0,9 el
+**cota superior**, y `before.fordblks_mib − after.fordblks_mib` es la cima devuelta más lo que
+`heap_trim` devolvió de las secundarias, no retención que «desapareció»: las liberaciones de
+`gc.collect()` pueden encoger una arena secundaria, que baja `arena` y `fordblks` por igual (TRD-L3 §6,
+fila «Medición del pico»). `mem_peak_coverage` = RSS de `mem_peak` ÷ `rss_peak_mib`: bajo 0,9 el
 muestreador se perdió el pico y se baja `L3_MEMORY_SAMPLE_S`. El muestreo no cambia el pico; el trim
 que hace el mismo hilo sí (arriba). La muestra del pico se toma antes del trim del tick.
 `mallinfo2` toma el candado de cada arena y recorre sus listas libres, por eso no corre en cada tick.
