@@ -1068,8 +1068,9 @@ Mide los **huecos entre ticks consecutivos de L1** de un mes (ITSC-392): la dife
 `transact_time` contiguos del `consolidated.parquet`, con el hueco entre el último tick de un row
 group y el primero del siguiente. Con los resúmenes de varios meses el arquitecto fija `silence_us`,
 el umbral de silencio de la familia T: separa «mercado en silencio» de «proveedor caído». Mide
-**ticks, no eventos**: el hueco del proveedor de 2018-02-08 (unas 30 horas) sale como el máximo de
-ese mes. **No importa ninguna capa** (una importación cambiaría `uv.lock`) y abre el archivo por su
+**ticks, no eventos**: el hueco del proveedor de 2018-02 sale como el máximo de ese mes. La corrida
+real lo midió en 33,5 h y lo cierra un tick del 2018-02-09 10:00 UTC (tabla de «Corrida real»).
+**No importa ninguna capa** (una importación cambiaría `uv.lock`) y abre el archivo por su
 ruta completa, por la [trampa del 403](#la-trampa-del-403-por-prefijo).
 
 ```bash
