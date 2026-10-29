@@ -222,10 +222,10 @@ ROWS = {
             reference_time=30_000_000,
             reference_agg_trade_id=3900,
             confirm_price="79",
-            confirm_time=31_000_000,
+            confirm_time=34_000_000,
             confirm_agg_trade_id=4000,
             extreme_price="79",
-            extreme_time=31_000_000,
+            extreme_time=34_000_000,
             extreme_agg_trade_id=4000,
             direction=-1,
             theta="0.01",
@@ -259,10 +259,10 @@ ROWS = {
             reference_time=40_000_000,
             reference_agg_trade_id=4800,
             confirm_price="121.5",
-            confirm_time=41_000_000,
+            confirm_time=45_000_000,
             confirm_agg_trade_id=5000,
             extreme_price="123",
-            extreme_time=42_000_000,
+            extreme_time=47_000_000,
             extreme_agg_trade_id=5100,
             direction=1,
             theta="0.01",
@@ -465,7 +465,7 @@ EXPECTED = {
         None,  # os_vwap nulo
         -0.003125,  # (79 - 80) / (80 * 4 s)
         None,  # os_duration nulo
-        -0.0125,  # (79 - 80) / (80 * 1 s)
+        -0.003125,  # (79 - 80) / (80 * 4 s)
         False,
         True,
         False,
@@ -486,7 +486,7 @@ EXPECTED = {
         1 / 240,  # (122 - 121.5) / 120
         0.0025,  # (121.5 - 120) / (120 * 5 s)
         0.00625,  # (123 - 121.5) / (120 * 2 s)
-        0.0125,  # (123 - 120) / (120 * 2 s)
+        1 / 280,  # (123 - 120) / (120 * 7 s)
         False,
         False,
         True,  # 150 < 5000 - 4800
