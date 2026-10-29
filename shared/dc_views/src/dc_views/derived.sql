@@ -3,8 +3,11 @@
 -- cantidades se castean a DOUBLE dentro de cada razón; las duraciones están en
 -- µs y se pasan a segundos. Una división por cero da nulo con NULLIF.
 -- D-02 y D-08 no necesitan NULLIF (c_ticks >= 1 y las cantidades de la
--- confirmación son > 0). D-05, D-07, D-11, D-13 y D-18 salen nulos porque los
--- os_* de summaries son nulos con overshoot vacío.
+-- confirmación son > 0). D-05, D-07, D-11, D-13 y D-18 salen nulos con
+-- overshoot vacío porque los os_* de summaries son nulos. Además, D-05, D-07 y
+-- D-18 llevan NULLIF sobre os_duration: un overshoot de un tick, o con todos
+-- sus ticks en el mismo µs, tiene os_duration = 0 (S-13) y sin NULLIF daría
+-- ±inf. Esto extiende la regla de NULLIF de la Épica, que omitió ese caso.
 CREATE OR REPLACE VIEW derived AS
 SELECT
     theta,
@@ -31,12 +34,12 @@ SELECT
         AS os_flow_imbalance,
     -- D-04, D-05
     s.c_ticks::DOUBLE / NULLIF(s.c_duration::DOUBLE / 1e6, 0) AS c_tick_rate,
-    s.os_ticks::DOUBLE / (s.os_duration::DOUBLE / 1e6) AS os_tick_rate,
+    s.os_ticks::DOUBLE / NULLIF(s.os_duration::DOUBLE / 1e6, 0) AS os_tick_rate,
     -- D-06, D-07
     (s.c_quantity_buy::DOUBLE + s.c_quantity_sell::DOUBLE)
         / NULLIF(s.c_duration::DOUBLE / 1e6, 0) AS c_quantity_rate,
     (s.os_quantity_buy::DOUBLE + s.os_quantity_sell::DOUBLE)
-        / (s.os_duration::DOUBLE / 1e6) AS os_quantity_rate,
+        / NULLIF(s.os_duration::DOUBLE / 1e6, 0) AS os_quantity_rate,
     -- D-08, D-09
     (s.c_quantity_buy::DOUBLE + s.c_quantity_sell::DOUBLE)
         / s.c_ticks::DOUBLE AS c_mean_trade,
@@ -57,7 +60,8 @@ SELECT
         / (e.reference_price::DOUBLE * NULLIF(s.c_duration::DOUBLE / 1e6, 0))
         AS c_speed,
     (e.extreme_price::DOUBLE - e.confirm_price::DOUBLE)
-        / (e.reference_price::DOUBLE * (s.os_duration::DOUBLE / 1e6)) AS os_speed,
+        / (e.reference_price::DOUBLE * NULLIF(s.os_duration::DOUBLE / 1e6, 0))
+        AS os_speed,
     (e.extreme_price::DOUBLE - e.reference_price::DOUBLE)
         / (
             e.reference_price::DOUBLE

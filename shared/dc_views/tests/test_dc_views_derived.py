@@ -343,6 +343,44 @@ ROWS = {
             theta="0.02",
         ),
     ),
+    # H: overshoot de un tick (os_duration = 0 sin ser vacío): las tres razones
+    # con os_duration en el denominador salen nulas y las demás os_* no.
+    "H": (
+        fila(
+            theta="0.01",
+            confirm_agg_trade_id=7000,
+            c_ticks=100,
+            c_quantity_buy="3",
+            c_quantity_sell="1",
+            c_price_max="70.8",
+            c_price_min="70",
+            c_duration=1_000_000,
+            c_vwap="70.5",
+            os_ticks=1,
+            os_quantity_buy="2",
+            os_quantity_sell="0",
+            os_price_max="70.9",
+            os_price_min="70.9",
+            os_duration=0,
+            os_vwap="70.9",
+            confirm_instant_ticks=2,
+            confirm_instant_price_best="70.8",
+            confirm_instant_price_worst="70.7",
+        ),
+        fila(
+            reference_price="70",
+            reference_time=70_000_000,
+            reference_agg_trade_id=6900,
+            confirm_price="70.7",
+            confirm_time=71_000_000,
+            confirm_agg_trade_id=7000,
+            extreme_price="70.9",
+            extreme_time=71_500_000,
+            extreme_agg_trade_id=7001,
+            direction=1,
+            theta="0.01",
+        ),
+    ),
 }
 
 # Los 19 valores de cada fila, en el orden de COLUMNS_D, calculados a mano.
@@ -491,6 +529,27 @@ EXPECTED = {
         0.025,  # (10.25 - 10) / (10 * 1 s)
         0.0125,  # (10.5 - 10.25) / (10 * 2 s)
         1 / 60,  # (10.5 - 10) / (10 * 3 s)
+        False,
+        False,
+        False,
+    ],
+    "H": [
+        1 / 700,  # (70.8 - 70.7) / 70
+        0.5,  # (3 - 1) / 4
+        1.0,  # (2 - 0) / 2
+        100.0,  # 100 / 1 s
+        None,  # os_duration = 0
+        4.0,  # 4 / 1 s
+        None,  # os_duration = 0
+        0.04,  # 4 / 100
+        2.0,  # 2 / 1
+        2 / 175,  # (70.8 - 70) / 70
+        0.0,  # (70.9 - 70.9) / 70
+        -1 / 350,  # (70.5 - 70.7) / 70
+        1 / 350,  # (70.9 - 70.7) / 70
+        0.01,  # (70.7 - 70) / (70 * 1 s)
+        None,  # os_duration = 0
+        3 / 350,  # (70.9 - 70) / (70 * 1.5 s)
         False,
         False,
         False,
