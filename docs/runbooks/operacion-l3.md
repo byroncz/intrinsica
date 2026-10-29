@@ -828,7 +828,7 @@ locales (`uv run`).
 | `l3_probe_reader.py` | Mide el lector de tramas (pared por fase, RSS, bytes, row groups) contra los umbrales de TRD-L3 §10.3 | `--theta all --from 2023-03`; con lectores, `--theta all --from 2021-01 --modo row-groups --readers 2 --sin-contar-io` |
 | `l3_check_month.py` | Verificación cruzada: agrega por su cuenta las tramas de cada evento del mes y compara fila a fila con `summaries.parquet` | `--month 2026-09` |
 | `l3_compare_runs.py` | Compara dos corridas por sus hallazgos (`content_hash` y `rows` de cada θ y mes) y, con `--timing`, mide la nueva | `--base-dates 2026-10-14:2026-10-15 --new-dates 2026-10-22 --timing` |
-| `l3_derived_check.py` | Prueba la vista `derived` (familia D) sobre un θ y un mes: resumen por columna, conteo de banderas e invariantes en un CSV | `--theta 0.00100000 --month 2026-09` |
+| `l3_derived_check.py` | Prueba la vista `derived` (familia D) sobre un θ y un mes: resumen por columna, conteo de banderas e invariantes en un CSV | `--theta 0.00098052 --month 2026-09` |
 
 ```bash
 gcloud storage cp layers/ops_tools/scripts/l3_check_month.py \
@@ -1012,7 +1012,7 @@ Si cambias `derived.sql`, vuelve a subirlo: la sonda usa la copia de `scripts/`,
 
 | `args` | Efecto |
 | --- | --- |
-| `--theta 0.00100000 --month 2026-09` | Obligatorios: un θ (8 decimales como máximo) y un mes `YYYY-MM` |
+| `--theta 0.00098052 --month 2026-09` | Obligatorios: un θ (8 decimales como máximo) y un mes `YYYY-MM` |
 | `--summaries-root`, `--events-root` | Otras raíces, también locales (por defecto `<proyecto>-dc-descriptors/l3` y `<proyecto>-dc-events/l2`) |
 | `--sql gs://<proyecto>-ops/scripts/derived.sql` | Otra copia de la vista, local o `gs://` (por defecto, la de `scripts/` bajo `ops-script` y la del repo en local) |
 | `--provider`, `--market`, `--asset` | Otra serie (por defecto `binance`, `spot`, `BTCUSDT`) |
@@ -1034,7 +1034,7 @@ La **cota de confirmación** se calcula sobre `summaries` unido a `events`, porq
 `c_price_max` ni `c_price_min`: en un upturn `(c_price_max − reference_price) / reference_price ≥ θ`
 y en un downturn `(reference_price − c_price_min) / reference_price ≥ θ`. **`c_range ≥ θ` no es
 invariante**: el tick de referencia no pertenece a la fase
-([TRD-L3 §7.1](../TRD/l3.md#71-entrada), consecuencia 3), así que
+([TRD-L3 §6.1 (ADR-L3-01)](../TRD/l3.md#61-adr-l3-01--pertenencia-de-un-tick-a-una-fase-por-agg_trade_id-no-por-tiempo-ni-por-posición), consecuencia 3), así que
 `c_price_min` puede quedar por encima de `p_R` en un upturn y `c_range` por debajo de θ en esa
 distancia.
 
@@ -1045,7 +1045,9 @@ tres conteos son las banderas verdaderas; `violaciones` suma todos los invariant
 
 **Códigos:** **0** sin violaciones; **1** con violaciones, sin alguno de los dos archivos, si el
 `.sql` no se lee o si DuckDB falla; **2** por uso (`--theta` o `--month` ausentes o inválidos, sin
-raíces ni `OPS_RESULTS_URI`, `--out` `gs://` fuera de `results/`). Una violación **nunca se
+raíces ni `OPS_RESULTS_URI`, `--out` `gs://` fuera de `results/`). Si el CSV no se puede
+escribir, la sonda sale con **0** (si no hay violaciones) y lo avisa en el log con
+`no se guardó la tabla en …`. Una violación **nunca se
 tolera**: es un defecto de `derived.sql` o del dato de entrada; abre una card de bug con la línea.
 
 **Cómo correrla.** *Actions → Run job*: `job` = `ops-script`, `script` = `l3_derived_check.py`,
@@ -1053,11 +1055,11 @@ tolera**: es un defecto de `derived.sql` o del dato de entrada; abre una card de
 medianas retienen los valores de las 16 columnas). Para el primer mes real elige un θ con
 decenas de miles de filas, no el más fino.
 
-**Corrida real (ITSC-386).** Pendiente: la lanza el humano.
+**Corrida real (ITSC-386, 2026-10-29).**
 
 | Mes | θ | Filas | `atomic_sweep` | `empty_overshoot` | `provider_gap` | Violaciones | Pared | Run |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| _por llenar_ | | | | | | | | |
+| 2023-03 | `0.00098052` | 36 239 | 1 872 | 2 706 | 0 | 0 | 2,2 s | [40804620149](https://github.com/byroncz/intrinsica/actions/runs/40804620149) |
 
 ### La trampa del 403 por prefijo
 

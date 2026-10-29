@@ -691,8 +691,8 @@ def test_ratio_invariants(con):
         if row["os_flow_imbalance"] is not None:
             assert abs(row["os_flow_imbalance"]) <= 1 + REL
         # c_range >= theta no es invariante: el tick de referencia no pertenece a la fase
-        # (TRD-L3 §7.1, consecuencia 3). Lo que vale es la cota de confirmación, que D no
-        # puede calcular porque no trae c_price_max ni c_price_min.
+        # (TRD-L3 §6.1 (ADR-L3-01), consecuencia 3). Lo que vale es la cota de
+        # confirmación, que D no puede calcular porque no trae c_price_max ni c_price_min.
         assert row["c_range"] >= 0
         assert row["c_instant_bias"] >= -REL
         reference = float(event["reference_price"])

@@ -422,7 +422,7 @@ from dc_views import DERIVED_VERSION, load_derived
 
 con = duckdb.connect()
 partition = (
-    "provider=binance/market=spot/asset=BTCUSDT/theta=0.00100000/year=2026/month=09"
+    "provider=binance/market=spot/asset=BTCUSDT/theta=0.00098052/year=2026/month=09"
 )
 load_derived(
     con,

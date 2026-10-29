@@ -208,6 +208,23 @@ def test_fila_quitada_de_summaries_da_violaciones(check, lake, tmp_path, capsys)
     assert line["violaciones"] == "1"
 
 
+def test_clave_repetida_en_summaries_falla_union_sin_inflar_filas(
+    check, lake, tmp_path, capsys
+):
+    path = partition(lake[0], THETA) / "summaries.parquet"
+    table = pq.read_table(path)
+    pq.write_table(pa.concat_tables([table, table.slice(0, 1)]), path)
+    out = tmp_path / "salida.csv"
+    assert check.main(argv(lake, out)) == 1
+    line = last_line(capsys)
+    rows = read_csv(out)
+    # Las cuentas salen de derived sola: la clave repetida suma una fila, no un producto.
+    assert line["filas"] == str(len(IN_MONTH) + 1)
+    assert rows["invariante", "union_1a1"]["violaciones"] == "1"
+    assert rows["invariante", "filas_vista_igual_summaries"]["violaciones"] == "0"
+    assert rows["bandera", "atomic_sweep"]["filas"] == str(len(IN_MONTH) + 1)
+
+
 def test_cantidad_negada_saca_el_flujo_de_cero_a_uno(check, lake, tmp_path, capsys):
     path = partition(lake[0], THETA) / "summaries.parquet"
     table = pq.read_table(path)
@@ -269,6 +286,21 @@ def test_falta_solo_events_es_fallo(check, lake, tmp_path, capsys):
     text = capsys.readouterr().out
     assert "events.parquet" in text
     assert text.strip().splitlines()[-1].endswith("veredicto=fallo")
+
+
+def test_error_de_e_s_al_abrir_un_archivo_es_fallo_con_codigo_1(
+    check, lake, tmp_path, capsys, monkeypatch
+):
+    def denied(uri):
+        raise PermissionError(f"403 {uri}")
+
+    monkeypatch.setattr(check, "open_dataset", denied)
+    out = tmp_path / "salida.csv"
+    assert check.main(argv(lake, out)) == 1
+    text = capsys.readouterr().out
+    assert "no se pudo abrir" in text and "PermissionError" in text
+    assert text.strip().splitlines()[-1].endswith("veredicto=fallo")
+    assert not out.exists()
 
 
 def test_sql_sin_cabecera_es_fallo(check, lake, tmp_path, capsys):
