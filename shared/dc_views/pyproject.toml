@@ -1,0 +1,10 @@
+[project]
+name = "dc_views"
+version = "0.0.0"
+description = "Vistas SQL versionadas de L3 sobre summaries y events, cargadas en DuckDB."
+requires-python = ">=3.14"
+dependencies = ["duckdb", "pyarrow"]
+
+[build-system]
+requires = ["uv_build"]
+build-backend = "uv_build"
