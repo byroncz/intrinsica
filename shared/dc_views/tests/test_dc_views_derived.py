@@ -683,13 +683,24 @@ def test_one_row_per_summary_and_one_to_one_join(con, summaries):
 
 
 def test_ratio_invariants(con):
-    for row in _rows_by_key(con).values():
+    inputs = {_key(s): (s, e) for s, e in ROWS.values()}
+    for key, row in _rows_by_key(con).items():
+        summary, event = inputs[key]
         theta = float(row["theta"])
         assert abs(row["c_flow_imbalance"]) <= 1 + REL
         if row["os_flow_imbalance"] is not None:
             assert abs(row["os_flow_imbalance"]) <= 1 + REL
-        assert row["c_range"] >= theta * (1 - REL)
+        # c_range >= theta no es invariante: el tick de referencia no pertenece a la fase
+        # (TRD-L3 §7.1, consecuencia 3). Lo que vale es la cota de confirmación, que D no
+        # puede calcular porque no trae c_price_max ni c_price_min.
+        assert row["c_range"] >= 0
         assert row["c_instant_bias"] >= -REL
+        reference = float(event["reference_price"])
+        if event["direction"] == 1:
+            bound = (float(summary["c_price_max"]) - reference) / reference
+        else:
+            bound = (reference - float(summary["c_price_min"])) / reference
+        assert bound >= theta * (1 - REL), key
 
 
 def test_flag_invariants(con):

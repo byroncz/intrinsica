@@ -1,4 +1,4 @@
-# Runbook: operación de L3 (backfill histórico, lectura de fallos, cascada, cadena mensual, volumen y costo, perfil de una unidad, hilos de la unidad, verificación cruzada, comparación de corridas)
+# Runbook: operación de L3 (backfill histórico, lectura de fallos, cascada, cadena mensual, volumen y costo, perfil de una unidad, hilos de la unidad, verificación cruzada, comparación de corridas, vista derived)
 
 Lo ejecuta el humano desde *Actions → Run job* y Cloud Shell; ningún agente
 dispara `terraform.yml` ni `run-job.yml`. Dice cómo se opera L3 una vez construido
@@ -817,7 +817,7 @@ se decodifican a lo sumo 2 row groups más que con 1, al final.
 
 ## Scripts de operación
 
-Tres scripts de `layers/ops_tools/scripts/`, para el job `ops-script`
+Cuatro scripts de `layers/ops_tools/scripts/`, para el job `ops-script`
 ([runbook de operación ad hoc](operacion-ops.md)). Se suben a
 `gs://<proyecto>-ops/scripts/` y se lanzan con `job` = `ops-script`. Todos solo
 leen, toman las raíces del proyecto de `OPS_RESULTS_URI` y también aceptan rutas
@@ -828,6 +828,7 @@ locales (`uv run`).
 | `l3_probe_reader.py` | Mide el lector de tramas (pared por fase, RSS, bytes, row groups) contra los umbrales de TRD-L3 §10.3 | `--theta all --from 2023-03`; con lectores, `--theta all --from 2021-01 --modo row-groups --readers 2 --sin-contar-io` |
 | `l3_check_month.py` | Verificación cruzada: agrega por su cuenta las tramas de cada evento del mes y compara fila a fila con `summaries.parquet` | `--month 2026-09` |
 | `l3_compare_runs.py` | Compara dos corridas por sus hallazgos (`content_hash` y `rows` de cada θ y mes) y, con `--timing`, mide la nueva | `--base-dates 2026-10-14:2026-10-15 --new-dates 2026-10-22 --timing` |
+| `l3_derived_check.py` | Prueba la vista `derived` (familia D) sobre un θ y un mes: resumen por columna, conteo de banderas e invariantes en un CSV | `--theta 0.00100000 --month 2026-09` |
 
 ```bash
 gcloud storage cp layers/ops_tools/scripts/l3_check_month.py \
@@ -988,13 +989,83 @@ usó el asignador de T5 (`MALLOC_MMAP_THRESHOLD_=16384` y `MALLOC_TRIM_THRESHOLD
 porque la imagen con sus valores por defecto murió por memoria en el quinto mes (ITSC-371,
 ITSC-372).
 
+### `l3_derived_check.py`
+
+Prueba la vista `derived` (familia D, [`derived.sql`](../../shared/dc_views/src/dc_views/derived.sql);
+contrato en [data-contracts](../data-contracts.md#vista-derived)) sobre **un θ y un mes** reales
+(ITSC-386). Abre el `summaries.parquet` de L3 y el `events.parquet` de L2 de esa partición por su
+ruta completa, los registra en DuckDB como datasets de PyArrow, ejecuta `derived.sql` y cuenta
+todo con consultas de agregación: ninguna fila pasa por Python. **No importa `dc_views`**: la
+imagen de `ops_tools` no lo trae e importarlo cambiaría `uv.lock`; por eso el `.sql` se sube
+aparte y `derived_version` sale de su primera línea (`-- derived_version: X.Y.Z`).
+
+Se suben **dos** archivos a `scripts/` (el `.sql` es de lectura, como el script):
+
+```bash
+gcloud storage cp layers/ops_tools/scripts/l3_derived_check.py \
+  gs://<proyecto>-ops/scripts/l3_derived_check.py
+gcloud storage cp shared/dc_views/src/dc_views/derived.sql \
+  gs://<proyecto>-ops/scripts/derived.sql
+```
+
+Si cambias `derived.sql`, vuelve a subirlo: la sonda usa la copia de `scripts/`, no la del repo.
+
+| `args` | Efecto |
+| --- | --- |
+| `--theta 0.00100000 --month 2026-09` | Obligatorios: un θ (8 decimales como máximo) y un mes `YYYY-MM` |
+| `--summaries-root`, `--events-root` | Otras raíces, también locales (por defecto `<proyecto>-dc-descriptors/l3` y `<proyecto>-dc-events/l2`) |
+| `--sql gs://<proyecto>-ops/scripts/derived.sql` | Otra copia de la vista, local o `gs://` (por defecto, la de `scripts/` bajo `ops-script` y la del repo en local) |
+| `--provider`, `--market`, `--asset` | Otra serie (por defecto `binance`, `spot`, `BTCUSDT`) |
+| `--out` | Otra ruta del CSV; una ruta que termina en `/` es un directorio |
+
+**El CSV** (`l3_derived_check_<mes>_<θ>.csv`, en `results/<ejecución>/`) tiene el encabezado
+`seccion,columna,filas,nulos,min,mediana,max,verdaderas,violaciones` y una fila por cosa medida:
+
+- `doble`: las 16 columnas `DOUBLE` de D, con `filas`, `nulos`, `min`, `mediana` y `max`.
+- `bandera`: `atomic_sweep`, `empty_overshoot` y `provider_gap`, con `filas` y `verdaderas`.
+- `invariante`: una fila por invariante con sus `violaciones` (0 es lo esperado): filas de la
+  vista = filas de `summaries`; unión 1:1 por `(theta, confirm_agg_trade_id)` (sin huérfanas ni
+  claves repetidas); `|c_flow_imbalance| ≤ 1`; `|os_flow_imbalance| ≤ 1`; `c_range ≥ 0`;
+  `c_instant_bias ≥ 0` (tolerancia 1e-9 por el redondeo de `DOUBLE`); la cota de confirmación;
+  `atomic_sweep` ⇔ `c_duration = 0` ⇔ `c_tick_rate` nulo; `empty_overshoot` ⇔ todos los `os_*`
+  de D nulos; banderas sin nulos; columnas «nunca nulas» sin nulos; sin `±inf` ni `NaN`.
+
+La **cota de confirmación** se calcula sobre `summaries` unido a `events`, porque D no trae
+`c_price_max` ni `c_price_min`: en un upturn `(c_price_max − reference_price) / reference_price ≥ θ`
+y en un downturn `(reference_price − c_price_min) / reference_price ≥ θ`. **`c_range ≥ θ` no es
+invariante**: el tick de referencia no pertenece a la fase
+([TRD-L3 §7.1](../TRD/l3.md#71-entrada), consecuencia 3), así que
+`c_price_min` puede quedar por encima de `p_R` en un upturn y `c_range` por debajo de θ en esa
+distancia.
+
+**Última línea:** `derived check: mes=… theta=… derived_version=… filas=… atomic_sweep=…
+empty_overshoot=… provider_gap=… violaciones=… pared_s=… veredicto=ok|violaciones|fallo`. Los
+tres conteos son las banderas verdaderas; `violaciones` suma todos los invariantes. Con
+`veredicto=fallo` (falta un archivo, el `.sql` no se lee o DuckDB falla) los conteos salen `-`.
+
+**Códigos:** **0** sin violaciones; **1** con violaciones, sin alguno de los dos archivos, si el
+`.sql` no se lee o si DuckDB falla; **2** por uso (`--theta` o `--month` ausentes o inválidos, sin
+raíces ni `OPS_RESULTS_URI`, `--out` `gs://` fuera de `results/`). Una violación **nunca se
+tolera**: es un defecto de `derived.sql` o del dato de entrada; abre una card de bug con la línea.
+
+**Cómo correrla.** *Actions → Run job*: `job` = `ops-script`, `script` = `l3_derived_check.py`,
+`args` = `--theta <θ> --month <mes>`. Un θ y un mes por corrida: la memoria es O(partición) (las
+medianas retienen los valores de las 16 columnas). Para el primer mes real elige un θ con
+decenas de miles de filas, no el más fino.
+
+**Corrida real (ITSC-386).** Pendiente: la lanza el humano.
+
+| Mes | θ | Filas | `atomic_sweep` | `empty_overshoot` | `provider_gap` | Violaciones | Pared | Run |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| _por llenar_ | | | | | | | | |
+
 ### La trampa del 403 por prefijo
 
 La service account de `ops-script` lee `l1/`, `l2/`, `l3/` y `viz/tiles/` con
 condiciones IAM por prefijo. `pyarrow.dataset.dataset("gs://<bucket>/l3")` (o
 `pq.read_table` sobre un prefijo) pide primero el **objeto** `l3` sin barra, y la
 condición `startsWith("…/l3/")` lo niega: 403, aunque los archivos de abajo sean
-legibles (run 38659287542 de `ops-script`). Los tres scripts evitan el problema:
+legibles (run 38659287542 de `ops-script`). Los scripts evitan el problema:
 **listan de forma recursiva** y **abren cada archivo por su ruta completa**. Un
 script nuevo hace lo mismo; desde Cloud Shell, con tus credenciales, el 403 no
 aparece.

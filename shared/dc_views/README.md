@@ -35,7 +35,7 @@ mezclar:
 |---|---|
 | `pyarrow.Table` | La tabla en memoria. |
 | Ruta (`str` o `Path`, local o `gs://`) a un archivo `.parquet` | Un dataset de PyArrow de ese solo archivo. La vista no trae `year` ni `month`. |
-| Ruta a un directorio | Un dataset de PyArrow con particionado hive descubierto bajo él: solo los archivos `summaries.parquet` o `events.parquet`, según el argumento. La vista trae `year` y `month` como enteros (`INTEGER`) entre las claves y las 19 columnas. |
+| Ruta a un directorio | Un dataset de PyArrow con particionado hive descubierto bajo él: solo los archivos `summaries.parquet` o `events.parquet`, según el argumento. Si es `summaries`, la vista trae `year` y `month` como enteros (`INTEGER`) entre las claves y las 19 columnas, sea cual sea la forma de `events`; si es `events`, no las trae. |
 
 Las rutas se resuelven con `pyutils.resolve_fs`, el mismo acceso al lago que
 L3 y viz. DuckDB lee el dataset por lotes y no recibe credenciales ni carga
