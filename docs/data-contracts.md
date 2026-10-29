@@ -370,6 +370,71 @@ summaries = pq.read_table(
 )
 ```
 
+### Vista `derived`
+
+Primera familia en forma de vista ([TRD-L3 §7.3](TRD/l3.md#73-directorio-de-la-capa-y-esqueleto-común)):
+no es un archivo, sino `derived.sql`, que une `summaries` con `events` de L2 por
+`(theta, confirm_agg_trade_id)` y calcula 19 columnas por fila. Fuente en
+código: [`shared/dc_views/src/dc_views/derived.sql`](../shared/dc_views/src/dc_views/derived.sql).
+Una prueba (`shared/dc_views/tests/test_dc_views_contract_doc.py`) rompe el CI si
+esta tabla se desvía de las columnas y los tipos de la vista.
+
+`derived_version` es `DERIVED_VERSION` de `dc_views` (hoy `1.0.0`), igual a la
+primera línea del `.sql`. Con una raíz hive, `year` y `month` (`INTEGER`) llegan
+entre las claves y estas columnas; con rutas de archivo, no.
+
+`R`, `C` y `E` son los `agg_trade_id` de referencia, confirmación y extremo;
+`ref`, `conf` y `ext` los precios de esos tres puntos; `d` la `direction` del
+evento. Los precios y las cantidades se castean a `DOUBLE` y las duraciones, en
+microsegundos, se pasan a segundos (`/ 1e6`). «Cero» en la regla de nulos
+significa división por cero: da nulo con `NULLIF`, nunca `±inf`.
+
+| Columna | Tipo DuckDB | Fórmula | Nulos |
+|---|---|---|---|
+| `theta` | DECIMAL(9,8) | clave, la de `summaries` | nunca |
+| `confirm_agg_trade_id` | BIGINT | clave, la de `summaries` | nunca |
+| `c_instant_bias` | DOUBLE | `d · (confirm_instant_price_best − conf) / ref` | nunca |
+| `c_flow_imbalance` | DOUBLE | `(c_quantity_buy − c_quantity_sell) / (c_quantity_buy + c_quantity_sell)` | nunca |
+| `os_flow_imbalance` | DOUBLE | `(os_quantity_buy − os_quantity_sell) / (os_quantity_buy + os_quantity_sell)` | overshoot vacío |
+| `c_tick_rate` | DOUBLE | `c_ticks / (c_duration / 1e6)` | `c_duration = 0` |
+| `os_tick_rate` | DOUBLE | `os_ticks / (os_duration / 1e6)` | overshoot vacío o `os_duration = 0` |
+| `c_quantity_rate` | DOUBLE | `(c_quantity_buy + c_quantity_sell) / (c_duration / 1e6)` | `c_duration = 0` |
+| `os_quantity_rate` | DOUBLE | `(os_quantity_buy + os_quantity_sell) / (os_duration / 1e6)` | overshoot vacío o `os_duration = 0` |
+| `c_mean_trade` | DOUBLE | `(c_quantity_buy + c_quantity_sell) / c_ticks` | nunca |
+| `os_mean_trade` | DOUBLE | `(os_quantity_buy + os_quantity_sell) / os_ticks` | overshoot vacío |
+| `c_range` | DOUBLE | `(c_price_max − c_price_min) / ref` | nunca |
+| `os_range` | DOUBLE | `(os_price_max − os_price_min) / ref` | overshoot vacío |
+| `c_vwap_distance` | DOUBLE | `(c_vwap − conf) / ref` | nunca |
+| `os_vwap_distance` | DOUBLE | `(os_vwap − conf) / ref` | overshoot vacío |
+| `c_speed` | DOUBLE | `(conf − ref) / (ref · c_duration / 1e6)` | `c_duration = 0` |
+| `os_speed` | DOUBLE | `(ext − conf) / (ref · os_duration / 1e6)` | overshoot vacío o `os_duration = 0` |
+| `ev_speed` | DOUBLE | `(ext − ref) / (ref · (extreme_time − reference_time) / 1e6)` | `extreme_time = reference_time` |
+| `atomic_sweep` | BOOLEAN | `c_duration = 0` | nunca |
+| `empty_overshoot` | BOOLEAN | `os_ticks = 0` | nunca |
+| `provider_gap` | BOOLEAN | `c_ticks < C − R` o `os_ticks < E − C` | nunca |
+
+Cargar una partición (un θ y un mes):
+
+```python
+import duckdb
+from dc_views import DERIVED_VERSION, load_derived
+
+con = duckdb.connect()
+partition = (
+    "provider=binance/market=spot/asset=BTCUSDT/theta=0.00100000/year=2026/month=09"
+)
+load_derived(
+    con,
+    f"<raíz L3>/{partition}/summaries.parquet",
+    f"<raíz L2>/{partition}/events.parquet",
+)
+derived = con.execute("SELECT * FROM derived").to_arrow_table()
+```
+
+`load_derived` acepta rutas locales o `gs://` y tablas de Arrow; el detalle de
+sus tres formas de entrada y la advertencia sobre las raíces hive están en
+[`shared/dc_views/README.md`](../shared/dc_views/README.md).
+
 ## Lago de hallazgos de calidad de datos
 
 Contrato del lago donde toda capa deja sus hallazgos de calidad de datos (DQ).
