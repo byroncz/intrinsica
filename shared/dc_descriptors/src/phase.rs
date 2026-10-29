@@ -96,6 +96,8 @@ impl EventAcc {
 pub enum TickError {
     Negative,
     TooLarge,
+    /// Un `price` en 0: la familia T calcula `ln` de cocientes de precios.
+    ZeroPrice,
 }
 
 impl fmt::Display for TickError {
@@ -103,13 +105,14 @@ impl fmt::Display for TickError {
         f.write_str(match self {
             Self::Negative => "un row group de L1 trae price o quantity negativos",
             Self::TooLarge => "un row group de L1 trae price o quantity que no caben en 63 bits",
+            Self::ZeroPrice => "un row group de L1 trae un price en 0",
         })
     }
 }
 
 impl std::error::Error for TickError {}
 
-fn le_u64(bytes: &[u8]) -> u64 {
+pub(crate) fn le_u64(bytes: &[u8]) -> u64 {
     u64::from_le_bytes(bytes[..8].try_into().expect("8 bytes"))
 }
 

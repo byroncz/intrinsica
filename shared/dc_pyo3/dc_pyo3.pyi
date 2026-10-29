@@ -89,7 +89,7 @@ class FanOut:
 class DescriptorError(ValueError):
     """Un fallo del motor de L3. `kind` dice cuál: `input`, `ticks`, `internal`,
     `skeleton`, `incomplete`, `boundary`, `confirm_time`, `direction`, `invariant`,
-    `quantity_too_large`, `no_quantity` o `notional_overflow`. Según el caso trae `theta`
+    `quantity_too_large`, `no_quantity`, `notional_overflow` o `path_overflow`. Según el caso trae `theta`
     (posición), `event`, `confirm_agg_trade_id`, `phase`, `field`, `got`, `wanted`, `rows`,
     `missing` o `expected`. `boundary` (una frontera de un evento que no es un tick de L1)
     trae además `reason` (`not_a_tick` o `unseen`), `bounds` (`R`, `C`, `E`), `low` y
@@ -110,7 +110,7 @@ class EventBatch(Protocol):
     con estos atributos): `rows` y, por columna, `(bytes del buffer, offset)` en el layout
     de Arrow.
     `reference`, `confirm`, `confirm_time` y `extreme` son `int64`; `direction`, `int8`;
-    los precios, `decimal128`."""
+    los precios (`confirm_price`, `extreme_price` y `reference_price`), `decimal128`."""
 
     rows: int
     reference: tuple[memoryview, int]
@@ -120,10 +120,21 @@ class EventBatch(Protocol):
     direction: tuple[memoryview, int]
     confirm_price: tuple[memoryview, int]
     extreme_price: tuple[memoryview, int]
+    reference_price: tuple[memoryview, int]
 
 # (rows, closed_ticks, before_month, first_reference, last_extreme)
 type Stats = tuple[int, int, int, int | None, int | None]
-type Sealed = tuple[int, int, int, list[SealedColumn], SealedColumn | None, int]
+# (theta, index, rows, columns, validity, null_count). En `summaries`, `validity` es el mapa de
+# las filas con overshoot (o `None`); en `path`, una lista con una entrada por columna:
+# `(mapa de bits, nulos)` si la columna tiene nulos y `None` si no.
+type Sealed = tuple[
+    int,
+    int,
+    int,
+    list[SealedColumn],
+    SealedColumn | None | list[tuple[SealedColumn, int] | None],
+    int,
+]
 
 class Engine:
     def __new__(
@@ -132,6 +143,8 @@ class Engine:
         schema: Sequence[tuple[str, int, bool]],
         row_groups: Sequence[Sequence[int]],
         threads: int | None = None,
+        family: str = "summaries",
+        silence_us: int = 0,
     ) -> Self: ...
     def push_boundaries(self, theta: int, batch: EventBatch) -> None: ...
     def needed(self, theta: int) -> int: ...

@@ -10,6 +10,7 @@ coincide, aborta con `FamilySkeletonMismatch` (`family_skeleton_mismatch`) sin p
 
 import os
 import re
+from collections.abc import Mapping
 from contextlib import closing
 from pathlib import Path
 from types import TracebackType
@@ -140,6 +141,12 @@ class FamilyWriter:
     renombra sobre el destino: un fallo, o salir del bloque `with` sin `commit`, deja el
     archivo anterior intacto. `commit` devuelve el `content_hash` del contenido lógico.
 
+    `metadata` (opcional) agrega claves al pie de Parquet junto a `state_version`, p. ej.
+    `{"silence_us": "10000000"}` para la familia path. Claves y valores son `str`; repetir
+    `state_version` o pasar algo que no sea `str` lanza `ValueError`. Sin `metadata` el
+    archivo lleva solo `state_version`, como antes. Los metadatos no entran en el
+    `content_hash`.
+
     Memoria: un row group de la familia y, con una ruta, las dos columnas de claves del
     esqueleto.
     """
@@ -150,9 +157,12 @@ class FamilyWriter:
         schema: pa.Schema,
         state_version: str,
         skeleton: str | os.PathLike[str] | Skeleton,
+        *,
+        metadata: Mapping[str, str] | None = None,
     ) -> None:
         if not _VERSION.fullmatch(state_version):
             raise ValueError(f"state_version {state_version!r} no es semver (X.Y.Z)")
+        file_metadata = _file_metadata(state_version, metadata)
         _require_keys(schema)
         self.path = path
         self._owned = isinstance(skeleton, str | os.PathLike)
@@ -165,7 +175,7 @@ class FamilyWriter:
             self._schema = schema.remove_metadata()
             self._writer = PartitionWriter(
                 path,
-                self._schema.with_metadata({"state_version": state_version}),
+                self._schema.with_metadata(file_metadata),
                 SORT_ORDER,
                 compact_encoding=True,
             )
@@ -261,6 +271,23 @@ class FamilyWriter:
         detail = self._skeleton.differing_key(n, self._rows, batch)
         if detail is not None:
             raise self._mismatch(detail)
+
+
+def _file_metadata(
+    state_version: str, extra: Mapping[str, str] | None
+) -> dict[str, str]:
+    """`state_version` más los metadatos adicionales, ya validados."""
+    metadata = {"state_version": state_version}
+    for key, value in (extra or {}).items():
+        if not isinstance(key, str) or not isinstance(value, str):
+            # ValueError por contrato del escritor, como el resto de sus argumentos.
+            raise ValueError(  # noqa: TRY004
+                f"metadata {key!r}: clave y valor deben ser str"
+            )
+        if key in metadata:
+            raise ValueError(f"metadata repite la clave {key!r}")
+        metadata[key] = value
+    return metadata
 
 
 def _require_keys(schema: pa.Schema) -> None:

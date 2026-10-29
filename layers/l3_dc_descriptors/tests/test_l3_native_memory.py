@@ -66,7 +66,7 @@ def column(array, start):
 batches = [
     native.EventBatch(
         min(S, n - start), column(r, start), column(c, start), column(c, start),
-        column(e, start), column(direction, start), (price[0], start), (price[0], start),
+        column(e, start), column(direction, start), (price[0], start), (price[0], start), (price[0], start),
     )
     for start in range(0, n, S)
 ]

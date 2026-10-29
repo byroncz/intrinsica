@@ -1,8 +1,10 @@
-//! Las 18 columnas de datos de `summaries.parquet` (TRD-L3 §7.2) y la fila de un evento.
+//! Las 18 columnas de datos de `summaries.parquet` (TRD-L3 §7.2), las 14 de `path.parquet`
+//! (la clave y los 13 registros de la familia T) y la fila de un evento de cada una.
 //!
-//! Es el contrato con `l3_dc_descriptors.schema` (`_COLUMNS`): mismo orden, mismos
-//! tipos. Los decimales (`DECIMAL(18,8)`) viajan sin escalar: el entero de 64 bits es la
-//! palabra baja del decimal de 128 bits y la alta es su extensión de signo.
+//! Es el contrato con `l3_dc_descriptors.schema` (`_COLUMNS` y `PATH_SCHEMA`): mismo orden,
+//! mismos tipos. Los decimales (`DECIMAL(18,8)`) viajan sin escalar: el entero de 64 bits es
+//! la palabra baja del decimal de 128 bits y la alta es su extensión de signo. Los `DOUBLE`
+//! de `path.parquet` viajan como los 64 bits del `f64`.
 
 /// Columnas de datos por fila (sin `theta`, que es constante por row group).
 pub const WIDTH: usize = 18;
@@ -74,6 +76,73 @@ pub const COLUMNS: [ColumnSpec; WIDTH] = [
     dec("confirm_instant_price_worst"),
 ];
 
+/// Qué familia calcula el motor: la de resumen (`summaries.parquet`, S) o la de trayectoria
+/// (`path.parquet`, T).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Family {
+    #[default]
+    Summaries,
+    Path,
+}
+
+impl Family {
+    /// Las columnas de datos que la familia entrega, en orden.
+    pub const fn columns(self) -> &'static [ColumnSpec] {
+        match self {
+            Self::Summaries => &COLUMNS,
+            Self::Path => &PATH_COLUMNS,
+        }
+    }
+}
+
+/// Columnas de datos por fila de `path.parquet` (sin `theta`): la clave y los 13 registros.
+pub const PATH_WIDTH: usize = 14;
+
+pub const PATH_COLUMNS: [ColumnSpec; PATH_WIDTH] = [
+    int("confirm_agg_trade_id"),
+    int("c_realized_var"),
+    nullable(int("os_realized_var")),
+    int("c_tortuosity"),
+    nullable(int("os_tortuosity")),
+    nullable(int("c_sign_autocorr")),
+    nullable(int("os_sign_autocorr")),
+    int("c_max_gap"),
+    nullable(int("os_max_gap")),
+    nullable(int("c_idle_fraction")),
+    nullable(int("os_idle_fraction")),
+    nullable(int("c_t25")),
+    nullable(int("c_t50")),
+    nullable(int("c_t75")),
+];
+
+/// Posición de cada columna de `path.parquet` en la fila.
+pub mod path_col {
+    pub const CONFIRM_AGG_TRADE_ID: usize = 0;
+    pub const C_REALIZED_VAR: usize = 1;
+    pub const OS_REALIZED_VAR: usize = 2;
+    pub const C_TORTUOSITY: usize = 3;
+    pub const OS_TORTUOSITY: usize = 4;
+    pub const C_SIGN_AUTOCORR: usize = 5;
+    pub const OS_SIGN_AUTOCORR: usize = 6;
+    pub const C_MAX_GAP: usize = 7;
+    pub const OS_MAX_GAP: usize = 8;
+    pub const C_IDLE_FRACTION: usize = 9;
+    pub const OS_IDLE_FRACTION: usize = 10;
+    pub const C_T25: usize = 11;
+    pub const C_T50: usize = 12;
+    pub const C_T75: usize = 13;
+}
+
+/// La fila de un evento de `path.parquet`: `cells[c]` es la columna `c` (un `int64`, o los
+/// bits de un `f64`), `valid` tiene el bit `c` en 1 si la columna `c` no es nula (una
+/// celda nula vale 0) y `ticks` son los ticks de sus dos fases, para las cuentas del θ.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PathRow {
+    pub cells: [i64; PATH_WIDTH],
+    pub valid: u16,
+    pub ticks: u64,
+}
+
 /// Posición de cada columna en la fila.
 pub mod col {
     pub const CONFIRM_AGG_TRADE_ID: usize = 0;
@@ -103,6 +172,27 @@ pub type Row = [i64; WIDTH];
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_path_columns_are_the_key_and_the_thirteen_registers() {
+        assert_eq!(PATH_COLUMNS[path_col::C_T75].name, "c_t75");
+        assert_eq!(PATH_COLUMNS[PATH_WIDTH - 1].name, "c_t75");
+        assert!(PATH_COLUMNS.iter().all(|c| !c.wide));
+        let required: Vec<_> = PATH_COLUMNS
+            .iter()
+            .filter(|c| !c.nullable)
+            .map(|c| c.name)
+            .collect();
+        assert_eq!(
+            required,
+            [
+                "confirm_agg_trade_id",
+                "c_realized_var",
+                "c_tortuosity",
+                "c_max_gap"
+            ]
+        );
+    }
 
     #[test]
     fn the_nullable_columns_are_the_overshoot_ones() {

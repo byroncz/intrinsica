@@ -15,6 +15,7 @@ es la agregación de Python por row group, que vive en `tests/` (`rowgroup.py`, 
 
 from collections.abc import Iterable, Sequence
 from decimal import Decimal
+from types import MappingProxyType
 from typing import Any, NamedTuple
 
 import dc_pyo3
@@ -28,14 +29,33 @@ from l3_dc_descriptors.errors import (
     PhaseValueError,
     SkeletonMismatch,
 )
-from l3_dc_descriptors.schema import FAMILY, SUMMARIES_SCHEMA
+from l3_dc_descriptors.schema import (
+    FAMILY,
+    PATH_FAMILY,
+    PATH_SCHEMA,
+    SUMMARIES_SCHEMA,
+)
 from l3_dc_descriptors.timing import Retained
 
-# Las 18 columnas de datos como las comprueba el motor: (nombre, bytes por valor, nulable).
-ENGINE_SCHEMA = tuple(
-    (field.name, 16 if pa.types.is_decimal(field.type) else 8, field.nullable)
-    for field in list(SUMMARIES_SCHEMA)[1:]
+# Las columnas de datos de cada familia como las comprueba el motor: (nombre, bytes por valor,
+# nulable). Las 18 de `summaries` y las 14 de `path`.
+FAMILY_SCHEMAS = MappingProxyType(
+    {
+        FAMILY: SUMMARIES_SCHEMA,
+        PATH_FAMILY: PATH_SCHEMA,
+    }
 )
+
+
+def _engine_schema(schema: pa.Schema) -> tuple[tuple[str, int, bool], ...]:
+    return tuple(
+        (field.name, 16 if pa.types.is_decimal(field.type) else 8, field.nullable)
+        for field in list(schema)[1:]
+    )
+
+
+ENGINE_SCHEMA = _engine_schema(SUMMARIES_SCHEMA)
+PATH_ENGINE_SCHEMA = _engine_schema(PATH_SCHEMA)
 
 _NAMES = ("referencia", "confirmación", "extremo")
 
@@ -54,6 +74,7 @@ class EventBatch(NamedTuple):
     direction: Region
     confirm_price: Region
     extreme_price: Region
+    reference_price: Region
 
 
 def _bytes(array: pa.Array) -> Region:
@@ -63,7 +84,7 @@ def _bytes(array: pa.Array) -> Region:
 
 
 def event_batch(batch: pa.RecordBatch) -> EventBatch:
-    """Las siete columnas de L2 de un lote de eventos, sin copiar."""
+    """Las ocho columnas de L2 de un lote de eventos, sin copiar."""
     return EventBatch(
         batch.num_rows,
         _bytes(batch.column("reference_agg_trade_id")),
@@ -73,6 +94,7 @@ def event_batch(batch: pa.RecordBatch) -> EventBatch:
         _bytes(batch.column("direction")),
         _bytes(batch.column("confirm_price")),
         _bytes(batch.column("extreme_price")),
+        _bytes(batch.column("reference_price")),
     )
 
 
@@ -185,44 +207,66 @@ def push(
 
 
 def new_engine(
-    thetas: Sequence[Decimal], row_groups: Sequence[Sequence[int]], threads: int | None
+    thetas: Sequence[Decimal],
+    row_groups: Sequence[Sequence[int]],
+    threads: int | None,
+    family: str = FAMILY,
+    silence_us: int = 0,
 ) -> dc_pyo3.Engine:
-    """Un motor para `thetas` (los `Decimal` de la unidad) con el esqueleto de cada uno."""
+    """Un motor para `thetas` (los `Decimal` de la unidad) con el esqueleto de cada uno.
+
+    `family` es `summaries` o `path`; `silence_us` es el umbral de silencio de `path`.
+    """
+    schema = _engine_schema(FAMILY_SCHEMAS[family])
     return dc_pyo3.Engine(
         [int(theta.scaleb(8)) for theta in thetas],
-        ENGINE_SCHEMA,
+        schema,
         [list(sizes) for sizes in row_groups],
         threads,
+        family,
+        silence_us,
     )
 
 
-def to_batch(theta: Decimal, sealed: tuple) -> tuple[int, int, pa.RecordBatch]:
+def to_batch(
+    theta: Decimal, sealed: tuple, family: str = FAMILY
+) -> tuple[int, int, pa.RecordBatch]:
     """Un row group de salida sellado como `RecordBatch`, sin copiar los buffers del motor.
 
-    Devuelve `(posición del θ, índice del row group de salida, batch)`.
+    Devuelve `(posición del θ, índice del row group de salida, batch)`. En `summaries` los
+    `os_*` nulables comparten el mapa de validez del motor; en `path` cada columna nulable
+    trae el suyo (o ninguno, si no tiene nulos).
     """
+    schema = FAMILY_SCHEMAS[family]
     position, index, rows, columns, validity, null_count = sealed
     constant = np.zeros((rows, 2), "<i8")
     constant[:, 0] = int(theta.scaleb(8))
     arrays = [
         pa.Array.from_buffers(
-            SUMMARIES_SCHEMA.field("theta").type,
+            schema.field("theta").type,
             rows,
             [None, pa.py_buffer(constant)],
         )
     ]
-    fields = list(SUMMARIES_SCHEMA)[1:]
-    for column, field in zip(columns, fields, strict=True):
-        nulls = null_count if field.nullable else 0
-        mask = (
-            pa.py_buffer(validity) if field.nullable and validity is not None else None
-        )
+    fields = list(schema)[1:]
+    for i, (column, field) in enumerate(zip(columns, fields, strict=True)):
+        if family == PATH_FAMILY:
+            own = validity[i] if field.nullable else None
+            mask = pa.py_buffer(own[0]) if own is not None else None
+            nulls = own[1] if own is not None else 0
+        else:
+            nulls = null_count if field.nullable else 0
+            mask = (
+                pa.py_buffer(validity)
+                if field.nullable and validity is not None
+                else None
+            )
         arrays.append(
             pa.Array.from_buffers(
                 field.type, rows, [mask, pa.py_buffer(column)], null_count=nulls
             )
         )
-    return position, index, pa.RecordBatch.from_arrays(arrays, schema=SUMMARIES_SCHEMA)
+    return position, index, pa.RecordBatch.from_arrays(arrays, schema=schema)
 
 
 def to_summarize_error(

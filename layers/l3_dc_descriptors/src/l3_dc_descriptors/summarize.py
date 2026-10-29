@@ -147,7 +147,7 @@ DEFAULT_WRITERS = 12
 # (2 331 contra 1 864).
 PENDING_PER_WRITER = 3
 # Bytes que cuesta un evento abierto: su fila de salida (las 18 columnas de `ENGINE_SCHEMA`, 240 B)
-# más sus siete columnas de fronteras de L2, que el motor retiene hasta cerrarlo (65 B).
+# más sus ocho columnas de fronteras de L2, que el motor retiene hasta cerrarlo (81 B).
 EVENT_BYTES = sum(width for _, width, _ in native.ENGINE_SCHEMA) + BOUNDARY_ROW_BYTES
 # Tope de bytes de eventos entregados al motor que aún no cerraron (ITSC-372): lo que la unidad
 # retiene crece con los eventos en vuelo, no con los row groups, y un mes denso (2017-12:
@@ -491,7 +491,7 @@ def _unclosed(
     Los eventos son los entregados menos el índice del primero que no cerró
     (`Engine.needed`), por θ. Los que `cover` entregó por delante del último row group
     empujado (`BoundaryFeed.ahead`) no tienen casilla todavía y cuestan solo sus fronteras
-    (`BOUNDARY_ROW_BYTES`, 65 B); el resto, `EVENT_BYTES` (305 B). Cota superior de lo abierto.
+    (`BOUNDARY_ROW_BYTES`, 81 B); el resto, `EVENT_BYTES` (321 B). Cota superior de lo abierto.
     """
     events = ahead = 0
     for feed in feeds:
@@ -558,7 +558,7 @@ def _push_all(
     `inflight_bytes` de eventos abiertos (contrapresión; cada tramo la espera): el lector trae
     por delante a lo más `readers`, así que en RAM hay a lo más `inflight + readers + 1`
     tramos o row groups de L1. Los bytes de eventos son lo que de verdad crece con la densidad
-    (ITSC-372): `_unclosed`, con las fronteras que `cover` trae por delante a 65 B (ITSC-376), y
+    (ITSC-372): `_unclosed`, con las fronteras que `cover` trae por delante a 81 B (ITSC-376), y
     el tramo acota lo que entra de a uno. Con ningún tramo en el motor siempre avanza, y si ese
     solo tramo pasa del tope avisa una vez y sigue.
     `read_s` suma lo que este hilo esperó al lector y a las fronteras de L2. Cada row group

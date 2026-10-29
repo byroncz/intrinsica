@@ -1,4 +1,5 @@
-"""Esquema de `summaries.parquet` (TRD-L3 §7.2) y su codificación en Arrow.
+"""Esquema de `summaries.parquet` (TRD-L3 §7.2) y de `path.parquet` (TRD-L3 §7.2.1), y su
+codificación en Arrow.
 
 Las filas se arman en un buffer de NumPy por columna, con los decimales en su escala
 (10⁻⁸): el valor de 64 bits es la palabra baja del decimal de 128 bits. Al llenar un row
@@ -12,6 +13,11 @@ import pyarrow as pa
 
 STATE_VERSION = "1.0.0"
 FAMILY = "summaries"
+# La familia T (trayectoria): su archivo, su versión de estado y el umbral de silencio (µs) que
+# fija T-09 y T-10; va en los metadatos del archivo junto a `state_version`.
+PATH_FAMILY = "path"
+PATH_STATE_VERSION = "1.0.0"
+SILENCE_US = 10_000_000
 
 DECIMAL = pa.decimal128(18, 8)
 THETA = pa.decimal128(9, 8)
@@ -43,6 +49,30 @@ SUMMARIES_SCHEMA = pa.schema(
     [
         pa.field("theta", THETA, nullable=False),
         *(pa.field(name, kind, nullable=null) for name, kind, null in _COLUMNS),
+    ]
+)
+# Las 13 columnas de `path.parquet` tras las claves, con `(nombre, tipo, nulable)`: los DOUBLE
+# viajan como los 64 bits del `f64` y los INT64 de huecos son µs.
+_PATH_COLUMNS = (
+    ("c_realized_var", pa.float64(), False),
+    ("os_realized_var", pa.float64(), True),
+    ("c_tortuosity", pa.float64(), False),
+    ("os_tortuosity", pa.float64(), True),
+    ("c_sign_autocorr", pa.float64(), True),
+    ("os_sign_autocorr", pa.float64(), True),
+    ("c_max_gap", pa.int64(), False),
+    ("os_max_gap", pa.int64(), True),
+    ("c_idle_fraction", pa.float64(), True),
+    ("os_idle_fraction", pa.float64(), True),
+    ("c_t25", pa.float64(), True),
+    ("c_t50", pa.float64(), True),
+    ("c_t75", pa.float64(), True),
+)
+PATH_SCHEMA = pa.schema(
+    [
+        pa.field("theta", THETA, nullable=False),
+        pa.field("confirm_agg_trade_id", pa.int64(), nullable=False),
+        *(pa.field(name, kind, nullable=null) for name, kind, null in _PATH_COLUMNS),
     ]
 )
 WIDTH = len(_COLUMNS)
