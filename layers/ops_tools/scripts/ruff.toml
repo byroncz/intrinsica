@@ -1,7 +1,7 @@
 # Los dos primeros son los originales de gs://intrinsica-dc-ops/scripts/, versionados tal cual
 # (ITSC-311): no se les aplica el formato ni el lint del repo para no alterarlos. El tercero es
 # una sonda de operación (ITSC-338), excluida como los demás scripts de operación; l3_derived_check.py
-# (ITSC-386) también. El resto de
+# (ITSC-386) y l3_gap_probe.py (ITSC-392) también. El resto de
 # la carpeta sigue la configuración raíz.
 extend = "../../../pyproject.toml"
 extend-exclude = [
@@ -9,4 +9,5 @@ extend-exclude = [
     "viz_probe_ticks.py",
     "l2_event_durations.py",
     "l3_derived_check.py",
+    "l3_gap_probe.py",
 ]

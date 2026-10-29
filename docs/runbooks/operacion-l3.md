@@ -817,7 +817,7 @@ se decodifican a lo sumo 2 row groups más que con 1, al final.
 
 ## Scripts de operación
 
-Cuatro scripts de `layers/ops_tools/scripts/`, para el job `ops-script`
+Cinco scripts de `layers/ops_tools/scripts/`, para el job `ops-script`
 ([runbook de operación ad hoc](operacion-ops.md)). Se suben a
 `gs://<proyecto>-ops/scripts/` y se lanzan con `job` = `ops-script`. Todos solo
 leen, toman las raíces del proyecto de `OPS_RESULTS_URI` y también aceptan rutas
@@ -829,6 +829,7 @@ locales (`uv run`).
 | `l3_check_month.py` | Verificación cruzada: agrega por su cuenta las tramas de cada evento del mes y compara fila a fila con `summaries.parquet` | `--month 2026-09` |
 | `l3_compare_runs.py` | Compara dos corridas por sus hallazgos (`content_hash` y `rows` de cada θ y mes) y, con `--timing`, mide la nueva | `--base-dates 2026-10-14:2026-10-15 --new-dates 2026-10-22 --timing` |
 | `l3_derived_check.py` | Prueba la vista `derived` (familia D) sobre un θ y un mes: resumen por columna, conteo de banderas e invariantes en un CSV | `--theta 0.00098052 --month 2026-09` |
+| `l3_gap_probe.py` | Mide los huecos entre ticks consecutivos de L1 en un mes (cuantiles, máximo y conteos por umbral, con los huecos entre row groups) para fijar `silence_us` de la familia T | `--month 2018-02` |
 
 ```bash
 gcloud storage cp layers/ops_tools/scripts/l3_check_month.py \
@@ -1060,6 +1061,70 @@ decenas de miles de filas, no el más fino.
 | Mes | θ | Filas | `atomic_sweep` | `empty_overshoot` | `provider_gap` | Violaciones | Pared | Run |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | 2023-03 | `0.00098052` | 36 239 | 1 872 | 2 706 | 0 | 0 | 2,2 s | [40804620149](https://github.com/byroncz/intrinsica/actions/runs/40804620149) |
+
+### `l3_gap_probe.py`
+
+Mide los **huecos entre ticks consecutivos de L1** de un mes (ITSC-392): la diferencia entre
+`transact_time` contiguos del `consolidated.parquet`, con el hueco entre el último tick de un row
+group y el primero del siguiente. Con los resúmenes de varios meses el arquitecto fija `silence_us`,
+el umbral de silencio de la familia T: separa «mercado en silencio» de «proveedor caído». Mide
+**ticks, no eventos**: el hueco del proveedor de 2018-02-08 (unas 30 horas) sale como el máximo de
+ese mes. **No importa ninguna capa** (una importación cambiaría `uv.lock`) y abre el archivo por su
+ruta completa, por la [trampa del 403](#la-trampa-del-403-por-prefijo).
+
+```bash
+gcloud storage cp layers/ops_tools/scripts/l3_gap_probe.py \
+  gs://<proyecto>-ops/scripts/l3_gap_probe.py
+```
+
+| `args` | Efecto |
+| --- | --- |
+| `--month 2018-02` | Obligatorio: el mes `YYYY-MM` |
+| `--landing-root` | Otra raíz de L1, también local con la misma disposición hive (por defecto `gs://<proyecto>-landing/l1`) |
+| `--provider`, `--market`, `--asset` | Otra serie (por defecto `binance`, `spot`, `BTCUSDT`) |
+| `--out` | Otra ruta del CSV; una ruta que termina en `/` es un directorio |
+
+**Memoria.** Lee un row group a la vez y solo `transact_time`; el último tiempo de cada grupo se
+conserva para medir el hueco con el primero del siguiente. Los huecos de hasta 1 s van a un
+histograma exacto de una cuenta por µs (10⁶ + 1 enteros, 8 MB) y los mayores se guardan uno a uno.
+El pico es O(row group): no crece con los ticks del mes. Al final lee `agg_trade_id` de **un** row
+group, el del tick que cierra el hueco máximo. Sobre un mes sintético de 6 M ticks en 8 row groups
+tarda 0,1 s y el RSS sube 54 MB.
+
+**Cuantil.** Rango más cercano: con N huecos, el cuantil q es el que ocupa el lugar ⌈N·q⌉ al
+ordenarlos. Es exacto y siempre es un hueco que ocurrió, nunca una interpolación.
+
+**El CSV** (`l3_gap_probe_<mes>.csv`, en `results/<ejecución>/`) tiene el encabezado
+`medida,valor,legible,agg_trade_id,transact_time` y una fila por medida, en este orden:
+
+- `ticks` y `huecos` (`ticks − 1`).
+- `p50_us`, `p90_us`, `p99_us`, `p999_us`, `p9999_us` y `max_us`: `valor` en µs y `legible` en
+  segundos, minutos u horas. `max_us` trae además el `agg_trade_id` y el `transact_time` (µs) del
+  tick que **cierra** el hueco máximo; si el máximo se repite, el primero.
+- `ge_1s`, `ge_10s`, `ge_60s` y `ge_600s`: cuántos huecos son ≥ 1 s, ≥ 10 s, ≥ 60 s y ≥ 600 s.
+
+**Última línea:** `gap probe: mes=… ticks=… p50_us=… p90_us=… p99_us=… p999_us=… p9999_us=…
+max_us=… ge_1s=… ge_10s=… ge_60s=… ge_600s=… pared_s=… veredicto=ok|fallo`. Con
+`veredicto=fallo` las medidas salen `-`; un mes de un solo tick sale `ok` con los cuantiles y el
+máximo en `-`.
+
+**Códigos:** **0** si midió; **1** sin `consolidated.parquet` del mes, si la lectura falla o si
+`transact_time` decrece; **2** por uso (`--month` ausente o inválido, sin `--landing-root` ni
+`OPS_RESULTS_URI`, `--out` `gs://` fuera de `results/`). Si el CSV no se puede escribir, sale con
+**0** y lo avisa en el log con `no se guardó la tabla en …`. Solo lee; lo único que escribe es el CSV.
+
+**Cómo correrla.** *Actions → Run job*: `job` = `ops-script`, `script` = `l3_gap_probe.py`,
+`args` = `--month <mes>`. Un mes por corrida. Las corridas las lanza y aprueba el humano; pega las
+tres últimas líneas en ITSC-392.
+
+**Corrida real (ITSC-392).** Pendiente: la tabla se llena con las tres últimas líneas que pegue el
+humano.
+
+| Mes | Ticks | p50 | p99 | p99,99 | Máximo | ≥ 1 s | ≥ 10 s | ≥ 60 s | ≥ 600 s | Pared | Run |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 2018-02 | pendiente | | | | | | | | | | |
+| 2023-03 | pendiente | | | | | | | | | | |
+| 2026-08 | pendiente | | | | | | | | | | |
 
 ### La trampa del 403 por prefijo
 
