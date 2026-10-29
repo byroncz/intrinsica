@@ -15,10 +15,10 @@ upturn (c_price_max − reference_price) / reference_price ≥ θ y en un downtu
 (reference_price − c_price_min) / reference_price ≥ θ; atomic_sweep ⇔ c_duration = 0 ⇔
 c_tick_rate nulo; empty_overshoot ⇔ todos los os_* de D nulos; banderas sin nulos; columnas
 DOUBLE sin ±inf ni NaN; y sin nulos en las columnas que D declara «nunca nulas». `c_range ≥ θ`
-no es invariante: el tick de referencia no pertenece a la fase (TRD-L3 §7.1, consecuencia 3).
+no es invariante: el tick de referencia no pertenece a la fase (TRD-L3 §6.1 (ADR-L3-01), consecuencia 3).
 
 Args:
-  --theta 0.00100000  --month YYYY-MM          (obligatorios; un θ y un mes por corrida)
+  --theta 0.00098052  --month YYYY-MM          (obligatorios; un θ y un mes por corrida)
   --summaries-root gs://<proyecto>-dc-descriptors/l3   (por defecto, los del proyecto según
   --events-root gs://<proyecto>-dc-events/l2            OPS_RESULTS_URI; también rutas locales
                                                         con la misma disposición hive)
@@ -189,7 +189,7 @@ def check_out(out: str) -> None:
 
 
 def stats_query() -> str:
-    """Una pasada sobre `derived` unida a `summaries`: estadísticas e invariantes de D."""
+    """Una pasada sobre `derived` sola: estadísticas e invariantes de D."""
     items = ["count(*) AS filas"]
     for c in DOUBLES:
         items += [
@@ -210,8 +210,6 @@ def stats_query() -> str:
         f"count(*) FILTER (WHERE abs(os_flow_imbalance) > 1 + {TOL}) AS v_os_flow",
         f"count(*) FILTER (WHERE c_range < -{TOL}) AS v_c_range",
         f"count(*) FILTER (WHERE c_instant_bias < -{TOL}) AS v_c_bias",
-        "count(*) FILTER (WHERE atomic_sweep IS DISTINCT FROM (c_duration = 0)) "
-        "AS v_atomic_duration",
         "count(*) FILTER (WHERE atomic_sweep IS DISTINCT FROM (c_tick_rate IS NULL)) "
         "AS v_atomic_rate",
         f"count(*) FILTER (WHERE empty_overshoot IS DISTINCT FROM ({all_os_null})) "
@@ -223,9 +221,7 @@ def stats_query() -> str:
         + " OR ".join(f"{c} IS NULL" for c in NEVER_NULL)
         + ") AS v_never_null",
     ]
-    return (
-        f"SELECT {', '.join(items)} FROM derived AS d JOIN summaries AS s USING {KEY}"
-    )
+    return f"SELECT {', '.join(items)} FROM derived"
 
 
 # D no trae c_price_max ni c_price_min: la cota sale de summaries unido a events. La unión
@@ -241,6 +237,14 @@ SELECT
         (e.reference_price::DOUBLE - s.c_price_min::DOUBLE) / e.reference_price::DOUBLE
             < theta::DOUBLE * (1 - {TOL})) AS v_down
 FROM summaries AS s FULL JOIN events AS e USING {KEY}
+"""
+
+
+# D no trae `c_duration`: la equivalencia con atomic_sweep sale de `summaries`. Una clave
+# repetida infla solo esta cuenta; `union_1a1` ya la reporta.
+ATOMIC_QUERY = f"""
+SELECT count(*) FILTER (WHERE d.atomic_sweep IS DISTINCT FROM (s.c_duration = 0))
+FROM derived AS d JOIN summaries AS s USING {KEY}
 """
 
 
@@ -263,6 +267,7 @@ def measure(con: duckdb.DuckDBPyConnection) -> dict:
     bound = dict(
         zip([d[0] for d in cursor.description], cursor.fetchone(), strict=True)
     )
+    stats["v_atomic_duration"] = con.execute(ATOMIC_QUERY).fetchone()[0]
     summaries_rows, summaries_dups = key_counts(con, "summaries")
     _events_rows, events_dups = key_counts(con, "events")
     stats["no_finitos"] = sum(stats[f"{c}__nofinito"] for c in DOUBLES)
@@ -412,6 +417,8 @@ def run(parser: argparse.ArgumentParser, ns: argparse.Namespace) -> int:
             datasets[table] = open_dataset(path)
         except FileNotFoundError:
             missing.append(f"falta el archivo {path}")
+        except OSError as exc:
+            missing.append(f"no se pudo abrir {path}: {type(exc).__name__}: {exc}")
     if missing:
         return fail("; ".join(missing), version)
 
