@@ -13,6 +13,7 @@ Un paquete por subcarpeta, cada uno con su `pyproject.toml` (o `Cargo.toml`).
 |---|---|
 | [`dq`](dq/) | Contrato del hallazgo de DQ (esquema Arrow) |
 | [`dc_frames`](dc_frames/) | Lector de tramas (por evento o por chunks) y escritor común de archivos de familia de L3 (ITSC-330, ITSC-342) |
+| [`dc_views`](dc_views/) | Vistas SQL versionadas de L3 (`derived.sql`, familia D) y su cargador sobre DuckDB (ITSC-384) |
 | [`pyutils`](pyutils/) | Escritor Parquet atómico, `content_hash` y `resolve_fs` compartidos por L1 y L2 (ITSC-245) |
 | [`dc_core`](dc_core/) | Crate Rust del núcleo de Directional Change: detector DC de un θ (ITSC-239) |
 | [`dc_descriptors`](dc_descriptors/) | Crate Rust del motor de agregación de L3: ítems por row group y θ en hilos nativos, aritmética `u128` (ITSC-358) |
