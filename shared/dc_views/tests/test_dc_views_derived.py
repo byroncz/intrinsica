@@ -561,7 +561,7 @@ def _decimal(value):
     return None if value is None else Decimal(value)
 
 
-def _table(schema, rows, extra=None):
+def _table(schema, rows):
     columns = {}
     for field in schema:
         values = [row[field.name] for row in rows]
