@@ -95,7 +95,9 @@ posición) y L3 (por valor de id) lo asumen.
   SHA-256 del esquema más un SHA-256 por columna sobre los bytes de sus
   valores en orden, sin importar el chunking. Se hashea el contenido lógico y
   no el archivo porque el Parquet puede diferir en bytes entre versiones de
-  la librería sin que cambien los datos.
+  la librería sin que cambien los datos. `ContentHasher` también hashea columnas
+  `float64` (camino vectorizado, por los bits de cada valor); `HASHER_VERSION` no sube
+  porque ninguna huella publicada tiene columnas `float64`.
 
 ### Escribir
 
@@ -269,14 +271,16 @@ events = pq.read_table(
 
 ## Salida Parquet de L3
 
-Contrato hacia L4: el resumen por fase de cada evento de L2, una fila por evento
-y θ, en la misma partición que su fila de L2. Fuente de diseño:
-[TRD-L3 §7.2](TRD/l3.md#72-salida--summariesparquet-contrato-hacia-l4) y
+Contrato hacia L4: el resumen por fase de cada evento de L2 (`summaries.parquet`) y,
+sobre el mismo esqueleto, la trayectoria de cada fase (`path.parquet`), una fila por
+evento y θ en cada archivo, en la misma partición que su fila de L2. Fuente de diseño:
+[TRD-L3 §7.2](TRD/l3.md#72-salida--summariesparquet-contrato-hacia-l4),
+[§7.2.1](TRD/l3.md#721-salida--pathparquet-familia-t) y
 [§7.3](TRD/l3.md#73-directorio-de-la-capa-y-esqueleto-común). Fuente en código:
-`SUMMARIES_SCHEMA` en
+`SUMMARIES_SCHEMA` y `PATH_SCHEMA` en
 [`layers/l3_dc_descriptors/src/l3_dc_descriptors/schema.py`](../layers/l3_dc_descriptors/src/l3_dc_descriptors/schema.py).
 Una prueba (`layers/l3_dc_descriptors/tests/test_l3_contract_doc.py`) rompe el CI
-si la tabla se desvía del código.
+si las tablas se desvían del código.
 
 La fase de confirmación es `(R, C]` y el overshoot, `(C, E]`, con `R`, `C` y `E`
 los `agg_trade_id` de referencia, confirmación y extremo de la fila de L2. Las
@@ -368,6 +372,106 @@ summaries = pq.read_table(
     "<raíz>/provider=binance/market=spot/asset=BTCUSDT"
     "/theta=0.00010000/year=2020/month=01/summaries.parquet"
 )
+```
+
+### Esquema de `path.parquet`
+
+Familia T ([TRD-L3 §7.2.1](TRD/l3.md#721-salida--pathparquet-familia-t)): la
+trayectoria de precios, lados y tiempos de cada fase. Tiene las mismas filas, en
+el mismo orden y con los mismos row groups que `summaries.parquet` de la
+partición, así que se une 1:1 por `(theta, confirm_agg_trade_id)`. Si falta el
+`summaries.parquet` del mes, `path.parquet` no se escribe.
+
+Una **fase** es la confirmación `(R, C]` o el overshoot `(C, E]`. En una fase de
+`n` ticks, `p_i` es el precio del tick `i`, `t_i` su `transact_time` (µs) y `s_i`
+su lado: `+1` si el agresor compró (`is_buyer_maker = false`) y `−1` si vendió.
+`p_0` es el **ancla** de la fase y no es un tick de ella: `p_R = reference_price`
+de la fila de L2 en la confirmación, y `p_C = confirm_price` en el overshoot;
+`p_E = extreme_price`. Los precios son el entero sin escalar de un `DECIMAL(18,8)`.
+
+| Columna | Tipo Arrow/Parquet | Nulable | Descripción |
+|---|---|---|---|
+| `theta` | decimal128(9, 8) | no | θ del evento; clave, redundante con la partición |
+| `confirm_agg_trade_id` | int64 | no | Clave: con `theta` identifica al evento y une con su fila de `summaries.parquet` |
+| `c_realized_var` | double | no | T-01. `Σ (ln(p_i / p_{i−1}))²` de la confirmación, con el paso del ancla al primer tick; no negativo |
+| `os_realized_var` | double | sí | T-02. Lo mismo en el overshoot; nulo si `os_ticks = 0` |
+| `c_tortuosity` | double | no | T-03. `Σ\|p_i − p_{i−1}\|` de la confirmación (con el paso del ancla `p_R`) entre `\|p_C − p_R\|`; al menos 1 |
+| `os_tortuosity` | double | sí | T-04. `Σ\|p_i − p_{i−1}\|` del overshoot (con el paso del ancla `p_C`) entre `\|p_E − p_C\|`; nulo si `os_ticks = 0` o `p_E = p_C` |
+| `c_sign_autocorr` | double | sí | T-05. Autocorrelación de rezago 1 de los lados de la confirmación, centrada con la media de la fase; nula con menos de dos ticks o con todos del mismo lado |
+| `os_sign_autocorr` | double | sí | T-06. Lo mismo en el overshoot; nula si `os_ticks = 0`, con un solo tick o con todos del mismo lado |
+| `c_max_gap` | int64 | no | T-07. Mayor diferencia de `transact_time` entre ticks consecutivos de la confirmación, en µs; 0 con un solo tick; no pasa de `c_duration` |
+| `os_max_gap` | int64 | sí | T-08. Lo mismo en el overshoot, en µs; nulo si `os_ticks = 0` |
+| `c_idle_fraction` | double | sí | T-09. Suma de los huecos de la confirmación estrictamente mayores que `silence_us`, entre `c_duration`; nula si `c_duration = 0` |
+| `os_idle_fraction` | double | sí | T-10. Lo mismo en el overshoot, entre `os_duration`; nula si `os_ticks = 0` o `os_duration = 0` |
+| `c_t25` | double | sí | T-11. `(t* − t_1) / c_duration`, con `t_1` el tiempo del primer tick de la confirmación y `t*` el del primero que alcanza el 25 % del camino de `p_R` a `p_C`; nula si `c_duration = 0` |
+| `c_t50` | double | sí | T-12. Lo mismo con el 50 %; nula si `c_duration = 0` |
+| `c_t75` | double | sí | T-13. Lo mismo con el 75 %; nula si `c_duration = 0` |
+
+La **regla de nulos** es exacta, nada más es nulo: todas las `os_*` con
+`os_ticks = 0`; además `os_tortuosity` con `p_E = p_C`; `c_sign_autocorr` y
+`os_sign_autocorr` con menos de dos ticks en la fase o con todos sus ticks del mismo
+lado; `c_idle_fraction`, `c_t25`, `c_t50` y `c_t75` con `c_duration = 0` (todos los
+ticks de la confirmación en el mismo instante); `os_idle_fraction` con
+`os_duration = 0`. Las columnas nunca guardan `±inf` ni `NaN`.
+
+### Fórmulas de `path.parquet`
+
+- **`*_realized_var`.** Cada término es `ln_1p((p_i − p_{i−1}) / p_{i−1})` al
+  cuadrado, calculado en `f64`; se cuantiza **una sola vez** a un entero de punto
+  fijo (escala 2⁻⁹⁶, `i128`, redondeo al más cercano) y los enteros se suman
+  exactos; el `f64` sale una vez, al cerrar (`× 2⁻⁹⁶`). El resultado no depende de
+  cómo se partan los ticks en tramos ni del número de hilos. Error absoluto por
+  término ≤ 2⁻⁹⁷; error relativo < 10⁻¹⁵ con 10⁷ términos si cada paso es de al
+  menos un tick mínimo de precio. Una suma que no cabe en 128 bits es un error de
+  fase, nunca un valor truncado.
+- **`*_tortuosity`.** El camino `Σ|p_i − p_{i−1}|` (con el paso del ancla) y el
+  desplazamiento neto son enteros; hay una sola división `f64`. Siempre vale al menos 1:
+  el camino incluye el paso desde el ancla y vale la desigualdad triangular.
+- **`*_sign_autocorr`.** Con `S = Σ s_i`, `P = Σ_{i=2..n} s_i·s_{i−1}` y `s_1`, `s_n` el
+  primer y el último lado:
+  `r = [n²·P − n·S·(2S − s_1 − s_n) + (n − 1)·S²] / [n·(n² − S²)]`. Son enteros
+  `i128` y una división `f64`. Alternancia estricta de 4 ticks da −0,75; dos rachas de
+  dos ticks dan 0,25; `|r| ≤ 1`. Solo usa los lados de los ticks de la fase.
+- **`*_max_gap` y `*_idle_fraction`.** Los huecos son las diferencias de
+  `transact_time` entre ticks consecutivos **de la fase** (no incluyen el ancla ni
+  ticks de otras fases), así que `c_max_gap ≤ c_duration` y `os_max_gap ≤ os_duration`,
+  las de `summaries.parquet`. La fracción es la suma de los huecos mayores que
+  `silence_us` entre la duración de la fase, en `[0, 1]`; con `silence_us` mayor que
+  `c_duration`, `c_idle_fraction = 0`.
+- **`c_t25`, `c_t50`, `c_t75`.** `t*` es el menor `transact_time` de un tick de la
+  confirmación que alcanza el `k`·25 % del camino de `p_R` a `p_C`, comparado en
+  enteros. Upturn (`direction = 1`): `4·(p − p_R) ≥ k·(p_C − p_R)`, con `k = 1, 2, 3`;
+  downturn, el espejo: `4·(p_R − p) ≥ k·(p_R − p_C)`. Valen
+  `0 ≤ c_t25 ≤ c_t50 ≤ c_t75 ≤ 1`.
+
+### Metadatos y lectura de `path.parquet`
+
+- **Metadatos del archivo**: `state_version = "1.0.0"` y `silence_us = "10000000"` (10 s
+  en µs; los metadatos de Parquet son texto). Cambiar `silence_us` exige una
+  `state_version` nueva. No entran en el `content_hash`.
+- **Disposición física**: la de `summaries.parquet` (misma partición, ZSTD nivel 3, sin
+  diccionario, `sorting_columns` por `confirm_agg_trade_id`, mismos row groups). El
+  `content_hash` lo calcula `pyutils.ContentHasher`, que hashea las columnas `double`
+  por los bits de cada valor (sin `NaN` ni `inf`, porque L3 no los produce).
+- **Quién lo escribe**: el motor de agregación (`Config.family = path`) calcula las filas;
+  la CLI de L3 todavía acepta solo `--family summaries`, así que ninguna corrida
+  publica `path.parquet` hasta que se conecte la pasada de la familia.
+- **Leer**: se une con `summaries.parquet` por `(theta, confirm_agg_trade_id)`; la unión
+  es 1:1 y también por posición.
+
+```python
+import duckdb
+
+partition = (
+    "<raíz L3>/provider=binance/market=spot/asset=BTCUSDT"
+    "/theta=0.00010000/year=2020/month=01"
+)
+con = duckdb.connect()
+wide = con.execute(
+    f"SELECT * FROM read_parquet('{partition}/summaries.parquet') AS s "
+    f"JOIN read_parquet('{partition}/path.parquet') AS p "
+    "USING (theta, confirm_agg_trade_id)"
+).to_arrow_table()
 ```
 
 ### Vista `derived`
@@ -770,8 +874,8 @@ mismo que traen las excepciones del resumidor, de las que sale la mayoría de lo
   `rss_after_trim_mib`, el `VmRSS` del proceso justo antes y después de devolver la memoria al kernel
   al cerrar la unidad (desde la 2.5.0 del TRD-L3); `inflight_bytes` (el tope de bytes de eventos
   abiertos, `L3_INFLIGHT_BYTES`), `inflight_events_max`, `inflight_bytes_max` (el máximo de
-  eventos entregados al motor que aún no cerraron y ese máximo en bytes, a 305 B por evento y a 65 B
-  los que `cover` trajo por delante del último tramo; puede pasar del tope hasta en un tramo, porque
+  eventos entregados al motor que aún no cerraron y ese máximo en bytes, a 321 B por evento y a 81 B
+  (305 B y 65 B hasta el TRD-L3 2.12.1) los que `cover` trajo por delante del último tramo; puede pasar del tope hasta en un tramo, porque
   el tope se mira antes de empujar) e `inflight_alone_bytes_max` (lo mismo
   para los tramos que entraron a un motor vacío: si pasa del tope, un solo tramo lo superó)
   y `spawn_s` (lo que tardó en arrancar el proceso hijo de la unidad; `null`

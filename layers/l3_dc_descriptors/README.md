@@ -57,15 +57,16 @@ margen del job: con el asignador de la imagen (ver «Memoria») el RSS medido es
 **Memoria acotada por los eventos en vuelo (ITSC-372):** el orquestador tampoco empuja un row group
 nuevo mientras haya algún row group en el motor y los bytes de eventos abiertos pasen de
 `L3_INFLIGHT_BYTES`. Los eventos abiertos son los que `BoundaryFeed` entregó al motor menos los que
-ya cerraron (`Engine.needed`), por θ. Un evento cuesta 305 B: 240 B de la fila de salida (las 18
-columnas de `ENGINE_SCHEMA`) y 65 B de las fronteras de L2 que el motor retiene hasta cerrarlo. Los
+ya cerraron (`Engine.needed`), por θ. Un evento cuesta 321 B: 240 B de la fila de salida (las 18
+columnas de `ENGINE_SCHEMA`) y 81 B de las fronteras de L2 que el motor retiene hasta cerrarlo
+(cuatro `int64`, un `int8` y tres `decimal128`; con `reference_price` de ITSC-393, antes 65 B y 305 B). Los
 que `cover` trajo por delante del último tramo empujado (`BoundaryFeed.ahead`, eventos cuya
-referencia pasa del último id cubierto) aún no tienen casilla y cuestan solo los 65 B; desde ITSC-376
-así se cuentan, y antes se contaban a 305 B. 768 MiB son ≈ 2,6 M de eventos de 305 B. Un row group de un mes normal trae ≈ 0,6 M de eventos y 2017-12 trae
+referencia pasa del último id cubierto) aún no tienen casilla y cuestan solo los 81 B; desde ITSC-376
+así se cuentan, y antes se contaban a 321 B (entonces 65 B y 305 B). 768 MiB son ≈ 2,5 M de eventos de 321 B. Un row group de un mes normal trae ≈ 0,6 M de eventos y 2017-12 trae
 4,5 M: sin este tope, con K = 4 caben los tres row groups del mes y la unidad picó a 3 545 MiB. Un
 tramo que por sí solo pasa del tope avanza igual (avisa una vez; `inflight_alone_bytes_max` >
 `inflight_bytes` en `unit_timing`); el aviso dice qué tramo trajo cuántos eventos y que la unidad
-avanza. Con el lote por defecto (1 M ≈ 305 MB) y el tope por defecto no debe salir en ningún mes: si sale,
+avanza. Con el lote por defecto (1 M ≈ 321 MB) y el tope por defecto no debe salir en ningún mes: si sale,
 un tramo solo pasa de 768 MiB, y se arregla con un lote más chico (`L3_LOT_EVENTS`: el tramo sale de
 la densidad media del mes y uno localmente denso puede pasar del tope) o con más memoria en el job. El tope se mira
 antes de empujar, así que `inflight_bytes_max` puede pasar de `inflight_bytes` hasta en un tramo sin
@@ -76,8 +77,8 @@ y el mes picó a 3 002 MiB aunque nunca convivieran dos row groups. Por eso `_pu
 row group en **tramos** contiguos de a lo más `N` ticks y empuja cada uno al motor como si fuera un
 row group (con su ordinal, su `cover(high)` y la bandera `before_month`). `N = floor(L3_LOT_EVENTS /
 densidad)`, con la densidad del mes = eventos de los θ (pies de L2) ÷ ticks (pie de L1), así que un
-tramo trae ≈ `L3_LOT_EVENTS` eventos con cualquier densidad. **La cuenta:** 1 M de eventos × 305 B
-(`EVENT_BYTES`) ≈ 305 MB de casillas y fronteras abiertas, bajo el tope de 768 MiB con holgura. En
+tramo trae ≈ `L3_LOT_EVENTS` eventos con cualquier densidad. **La cuenta:** 1 M de eventos × 321 B
+(`EVENT_BYTES`; 305 B antes de ITSC-393) ≈ 321 MB de casillas y fronteras abiertas, bajo el tope de 768 MiB con holgura. En
 2017-12 (6,1 eventos por tick) son ≈ 164 000 ticks y ≈ 6 tramos por row group. **Lo que se probó
 y qué dio:** ITSC-373 fijó 1 M y midió +38 % de CPU en los meses densos (sin aislar la causa);
 ITSC-375 subió el lote a 2,5 M para ahorrarla y midió lo contrario: 2017-12 subió de 2 681 a
@@ -247,7 +248,7 @@ for theta, result in results.items():
 | Entrada | Qué usa |
 |---|---|
 | L1 `consolidated.parquet` del mes, y de los meses anteriores que algún evento necesite | `agg_trade_id`, `transact_time`, `price`, `quantity`, `is_buyer_maker`, a través del lector de tramas (`shared/dc_frames`) |
-| L2 `events.parquet` del mes y θ | Las siete columnas del contrato: `reference_agg_trade_id`, `confirm_agg_trade_id`, `confirm_time`, `extreme_agg_trade_id`, `direction`, `confirm_price`, `extreme_price` |
+| L2 `events.parquet` del mes y θ | Las ocho columnas del contrato: `reference_agg_trade_id`, `confirm_agg_trade_id`, `confirm_time`, `extreme_agg_trade_id`, `direction`, `confirm_price`, `extreme_price`, `reference_price` (esta última es el ancla de la familia T) |
 | L2 `carry_over.parquet` del mes y θ | `direction`, `has_pending_event`, `pending_reference_agg_trade_id`, `ext_high_agg_trade_id`, `ext_low_agg_trade_id`: solo para conciliar los ticks y comprobar la coherencia de L2 |
 | L2 `carry_over.parquet` del mes anterior | Solo `direction` |
 
@@ -260,8 +261,8 @@ group de L1 más antiguo que algún evento del mes necesita, y el acumulador par
 
 1. **Apertura** (`gate_s`). En el pool de metadatos (`L3_META_WORKERS`), una tarea por θ: abrir `events.parquet`
    (`EventFile`: archivo y pie una sola vez; si falta, `l2_missing`), comprobar sus tipos y
-   arrancar la lectura anticipada de sus fronteras (las siete columnas de §7.1, `EVENT_COLUMNS`,
-   más `theta` para el esqueleto: `EVENT_FILE_COLUMNS`; las otras cuatro no se decodifican). Con las estadísticas de los pies se sabe la primera
+   arrancar la lectura anticipada de sus fronteras (las ocho columnas de §7.1, `EVENT_COLUMNS`,
+   más `theta` para el esqueleto: `EVENT_FILE_COLUMNS`; `reference_time` y `extreme_time` no se decodifican). Con las estadísticas de los pies se sabe la primera
    referencia y el último extremo del mes sin leer datos, y los tamaños de row group que pide
    el motor.
 2. **Compuerta de entrada y escritores** (`setup_s`). También en el pool de metadatos, mientras este hilo crea el

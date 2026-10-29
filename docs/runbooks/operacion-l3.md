@@ -663,8 +663,8 @@ Dos mecanismos, los dos por construcción y no por ajuste del asignador
 | Variable | Qué fija | Por defecto |
 |---|---|---|
 | `L3_UNIT_PROCESS` | `1`: cada unidad de `backfill` corre en un proceso hijo (`spawn`) y su memoria muere con ella; `0`: en el proceso de la CLI. `monthly` no la usa. Otro valor es código 2 | `1` |
-| `L3_INFLIGHT_BYTES` | Tope de bytes de eventos entregados al motor que aún no cerraron (305 B por evento). Entero ≥ 1 | 805 306 368 (768 MiB, ≈ 2,6 M de eventos) |
-| `L3_LOT_EVENTS` | Eventos de un tramo: cada row group de L1 se parte en tramos de a lo más `L3_LOT_EVENTS ÷ densidad del mes` ticks (ITSC-373). Entero ≥ 0; `0` desactiva el corte | 1 000 000 (≈ 305 MB de casillas y fronteras; ITSC-375 probó 2 500 000 y no ganó nada, ITSC-376 lo revirtió) |
+| `L3_INFLIGHT_BYTES` | Tope de bytes de eventos entregados al motor que aún no cerraron (321 B por evento; 305 B hasta la imagen anterior a ITSC-393). Entero ≥ 1 | 805 306 368 (768 MiB, ≈ 2,5 M de eventos) |
+| `L3_LOT_EVENTS` | Eventos de un tramo: cada row group de L1 se parte en tramos de a lo más `L3_LOT_EVENTS ÷ densidad del mes` ticks (ITSC-373). Entero ≥ 0; `0` desactiva el corte | 1 000 000 (≈ 321 MB de casillas y fronteras; ITSC-375 probó 2 500 000 y no ganó nada, ITSC-376 lo revirtió) |
 | `L3_MEMORY_SAMPLE_S` | Segundos entre ticks del hilo `l3-memory-sampler`, que lee `VmRSS` y, solo si supera su máximo, toma una muestra con `mallinfo2`. Número > 0; otro valor es código 2 (ITSC-375) | `0,25` |
 | `L3_TRIM_RSS_MIB` | Marca de agua del trim periódico (ITSC-376): en cada tick, si `VmRSS` llega a estos MiB y pasó `L3_TRIM_MIN_S`, el hilo `l3-memory-sampler` llama a `malloc_trim(0)`. Entero ≥ 0; `0` lo desactiva (queda el del cierre); otro valor es código 2 | `1024` |
 | `L3_TRIM_MIN_S` | Segundos mínimos entre dos trims periódicos. Número ≥ 0; otro valor es código 2 | `0,5` |
@@ -679,9 +679,9 @@ bytes abiertos tras empujar un tramo a un motor vacío: si pasa de `inflight_byt
 trajo más eventos que el tope (la unidad avanza igual y avisa en el log, con el tramo y los eventos
 que trajo): el pico de ese mes es ≈ ese tramo, y se arregla con un lote más chico (`L3_LOT_EVENTS`) o
 subiendo la memoria del job. Con el valor
-por defecto (1 M de eventos ≈ 305 MB contra un tope de 805 MB) un tramo cabe con holgura, y las
-fronteras de L2 que `cover` trae por delante (hasta ≈ 1,6 M de eventos con 50 θ) se cuentan a 65 B,
-lo que valen (ITSC-376; antes se contaban a 305 B e inflaban `inflight_alone_bytes_max`): el aviso
+por defecto (1 M de eventos ≈ 321 MB contra un tope de 805 MB) un tramo cabe con holgura, y las
+fronteras de L2 que `cover` trae por delante (hasta ≈ 1,6 M de eventos con 50 θ) se cuentan a 81 B,
+lo que valen (ITSC-376; antes se contaban a 321 B e inflaban `inflight_alone_bytes_max`; las cifras de ITSC-376 son de cuando valían 65 B y 305 B): el aviso
 no debe salir en ningún mes, y si sale es una señal real. `lot_events`
 es el lote con que corrió (0 si no hay corte), `lot_ticks` el tamaño de tramo en ticks (`null` sin
 corte) y `lots` los tramos empujados: en un mes normal `lots` es `row_groups_month` (más los de
@@ -726,9 +726,9 @@ no más de un 3 % peor que 29,9 s. **Qué esperar:** con tramos de 2,5 M el pico
 sobre los 2 681 de 2017-12 (≈ 130 MiB por millón de eventos abiertos) y la CPU de los meses densos
 debería recuperar parte del +38 %; si 2018-01 pasa de 3 072 MiB se anota, el job tiene 4 GiB y la
 medición es el objetivo. El aviso `L3_INFLIGHT_BYTES` es esperable en 2017-12 y 2018-01: las
-fronteras de L2 por delante del tramo (sobrestimadas a 305 B cuando valen 65 B) bastan para pasar el
+fronteras de L2 por delante del tramo (sobrestimadas a 321 B cuando valen 81 B; en esa corrida eran 305 B y 65 B) bastan para pasar el
 tope. No es razón para bajar `L3_LOT_EVENTS`; se anota en la card. Un tramo que no cabe de verdad
-sería `inflight_alone_bytes_max` mayor que el tope + 1,6 M × 305 B ≈ 1,29 GB. Si muere por memoria (`exit_signal` 9), relanza **desde Cloud Shell** con
+sería `inflight_alone_bytes_max` mayor que el tope + 1,6 M × 321 B ≈ 1,32 GB (con 305 B, ≈ 1,29 GB). Si muere por memoria (`exit_signal` 9), relanza **desde Cloud Shell** con
 `L3_LOT_EVENTS=1000000` (`--update-env-vars`) para obtener la medición igual; que 2,5 M no cabe entra
 en la decisión. **Qué leer:** de `mem_peak` y `mem_close_before_trim` de 2017-12 y 2018-01, qué parte
 del `rss_mib` es `fordblks_mib` (libre que glibc retiene), qué parte `uordblks_mib` + `hblkhd_mib` (en

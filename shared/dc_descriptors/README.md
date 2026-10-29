@@ -1,8 +1,10 @@
 # dc_descriptors
 
 Motor de agregación de L3 (ITSC-358, [ADR-L3-16](../../docs/TRD/l3.md)): calcula los
-descriptores de `summaries.parquet` por evento DC sin pasar por el intérprete de
-Python. Python orquesta, Arrow transporta, Rust calcula.
+descriptores por evento DC sin pasar por el intérprete de Python. Python orquesta, Arrow
+transporta, Rust calcula. Tiene dos familias (`Config.family`): `summaries`
+(`summaries.parquet`, la familia S) y `path` (`path.parquet`, la familia T, ITSC-393,
+[ADR-L3-17](../../docs/TRD/l3.md)).
 
 Es un crate sin libpython (`cargo test` no necesita Python). Los bindings viven en
 [`dc_pyo3`](../dc_pyo3/README.md) (`dc_pyo3.Engine`). Pertenece al workspace de Cargo; no
@@ -19,6 +21,20 @@ push(row group k) ──► cola de ítems (θ₀,k) (θ₁,k) … (θ₄₉,k) 
                       almacén de parciales de θ ◄─ eventos que cruzan row groups
                       row group de salida lleno ──► sellado ──► pop_sealed()
 ```
+
+- **Familias.** El motor calcula una familia por instancia (`Config.family`). Las dos usan
+  los mismos ítems, casillas, ubicación de fronteras y sellado; cambian el acumulador, el
+  cierre y las columnas de salida:
+
+  | Familia | Archivo | Columnas de datos | Parciales de un evento que cruza row groups |
+  |---|---|---|---|
+  | `Family::Summaries` (por defecto) | `summaries.parquet` | 18 (`COLUMNS`) | uno por row group, en cualquier orden |
+  | `Family::Path` | `path.parquet` | 14 (`PATH_COLUMNS`: la clave y T-01 a T-13) | corridas de row groups vecinos, fusión ordenada |
+
+  La familia T usa además `Config.silence_us` (µs): un hueco entre ticks de una fase cuenta
+  como inactividad si es estrictamente mayor. S no lo usa. Los registros de T, sus fórmulas y
+  su regla de nulos están en [`docs/data-contracts.md`](../../docs/data-contracts.md) y en
+  TRD-L3 §7.2.1.
 
 - **Fronteras.** `push_boundaries` agrega un lote de filas de L2 de un θ detrás de los
   anteriores, antes o después de empezar los `push`. El lote de un evento debe llegar antes
@@ -42,20 +58,47 @@ push(row group k) ──► cola de ítems (θ₀,k) (θ₁,k) … (θ₄₉,k) 
 - **Sumas.** Conteos, `Σ quantity` compradora y vendedora y `Σ price·quantity` en `u128`
   (cada tick aporta menos de 2¹²⁰; un desborde es un error de fase, nunca un valor
   truncado). VWAP = división entera con redondeo half-even.
-- **Parciales.** Un evento que cruza row groups deja un parcial por row group en el
+- **Parciales de S.** Un evento que cruza row groups deja un parcial por row group en el
   almacén de su θ. Todo es suma, máximo, mínimo o selección por posición sobre enteros
   (el primer y el último tiempo, como mínimo y máximo), así que los parciales se fusionan
   en cualquier orden. El evento está completo cuando se fusionaron `último − primero + 1`
   parciales, con `primero` el ordinal del row group del parcial que no empieza antes y
   `último` el del que no termina después.
-- **Cierre.** Al completarse, un evento verifica las cantidades de las fases y los siete
+- **Parciales de T y fusión ordenada.** En T los pasos entre ticks consecutivos, los huecos
+  y los pares de lados dependen del par que une dos tramos, así que los parciales no se
+  fusionan en cualquier orden. Cada `PhasePath` lleva su estado de borde (primer y último
+  precio, tiempo y lado; `n`, `Σ|Δp|`, `Σ(Δln p)²`, `S`, `P`, hueco máximo y suma de
+  huecos mayores que `silence_us`) y `PathAcc` suma, por evento, el menor tiempo de cada
+  nivel de T-11 a T-13. El almacén de un θ guarda por evento abierto una lista de
+  **corridas** (`Runs`): tramos de ordinales consecutivos `[primero..último]`, sin
+  solaparse. Un parcial nuevo se une solo con la corrida que termina en el ordinal anterior
+  y con la que empieza en el siguiente; si ninguna lo toca, abre otra. El evento cierra
+  cuando queda una única corrida del row group de `R` al de `E`. `merge` es asociativo
+  (enteros, mínimos y máximos), así que el orden de llegada de los row groups y de los
+  hilos no cambia ni un bit. Un parcial pesa del orden de 300 B y el almacén crece con los
+  eventos abiertos, no con los ticks.
+- **Sumas exactas de T.** Camino, lados, pares, huecos y los niveles de T-11 a T-13 son
+  enteros. La única cuenta en `f64` por paso es `Δln p = ln_1p((p_i − p_{i−1}) / p_{i−1})`;
+  su cuadrado se cuantiza **una vez** a un entero de punto fijo (escala 2⁻⁹⁶, `i128`,
+  redondeo al más cercano) y se suma exacto; el `f64` sale al cerrar (`× 2⁻⁹⁶`). Por eso el
+  resultado no depende del tamaño de tramo ni de los hilos. Error absoluto por término
+  ≤ 2⁻⁹⁷; una suma que no cabe en 128 bits es un error de fase (`PathOverflow`), nunca un
+  valor truncado. Tortuosidad y autocorrelación son una sola división `f64` de dos enteros.
+- **Cierre de T.** `close_path` suma el paso del ancla (`reference_price` en la confirmación,
+  `confirm_price` en el overshoot) al primer tick de cada fase y deriva los 13 registros
+  con la regla de nulos del contrato. Solo comprueba lo que necesita para no producir
+  `±inf` ni `NaN` y para que `c_tortuosity ≥ 1` valga: dirección, anclas positivas del lado
+  que la dirección dice y niveles alcanzados; los invariantes de §7.2 contra L2 son de S.
+- **Cierre de S.** Al completarse, un evento verifica las cantidades de las fases y los siete
   invariantes de TRD-L3 §7.2 contra su fila de L2, en el orden de `build_row`; un fallo
   trae el campo y los valores del hallazgo `l2_state_inconsistent`. El invariante 8
   (`buy + sell` es la suma de `quantity`) vale por construcción.
 - **Sellado.** Cuando todas las filas de un row group de salida están escritas, el motor
-  lo sella y lo entrega con sus 18 columnas en el layout de Arrow (`decimal128` de 16
-  bytes o `int64`) y el mapa de bits de validez de las columnas `os_*`. Cada θ sale en
-  orden de row group de salida.
+  lo sella y lo entrega con sus columnas en el layout de Arrow (`decimal128` de 16
+  bytes o `int64`; los `DOUBLE` de T viajan como los 64 bits del `f64`). En S, `validity` es
+  el mapa de bits de las columnas `os_*`. En T, `SealedRowGroup.masks[columna]` trae el mapa
+  de validez de cada columna nulable (`ColumnMask`: `bits` y `null_count`), o `None` si la
+  columna no es nulable o no tiene nulos. Cada θ sale en orden de row group de salida.
 - **Errores.** Si varios eventos fallan se reporta el de menor `(row group donde termina,
   θ, evento)`. Un fallo se levanta en `push`, `pop_sealed` o `finish` cuando ya ningún
   row group anterior al suyo puede traer uno de menor clave.
@@ -70,8 +113,10 @@ push(row group k) ──► cola de ítems (θ₀,k) (θ₁,k) … (θ₄₉,k) 
   así las búsquedas sobre los eventos en mano dan lo mismo que sobre todos. Lo retenido va
   de la marca al último lote entregado: O(lote + eventos abiertos de los row groups en
   vuelo), no O(eventos del mes); un evento largo abierto en la marca ancla los lotes
-  entregados detrás de él (unos 65 bytes por evento: `R`, `C`, `confirm_time` y `E`,
-  `direction` y dos `decimal128`). Los buffers de
+  entregados detrás de él (**81 bytes por evento**, antes 65: `R`, `C`, `confirm_time` y
+  `E` de 8 bytes, `direction` de 1 y tres `decimal128` de 16: `confirm_price`,
+  `extreme_price` y `reference_price`; son 81 y no 73 porque `reference_price` llega como
+  `decimal128` de Arrow y no se copia). Los buffers de
   salida se reservan al llegar la primera fila de su row group y se entregan al sellar.
 
 ## API
@@ -81,12 +126,16 @@ let engine = Engine::<B>::new(Config {
     thetas,      // round(θ × 10⁸), en el orden en que se reportan los errores
     threads,     // hilos nativos
     row_groups,  // por θ, las filas de cada row group de salida
+    family,      // Family::Summaries (por defecto) o Family::Path
+    silence_us,  // umbral de silencio de la familia T, en µs (S no lo usa)
 })?;
 // Por lotes, en orden y sin copiar: filas consecutivas de events.parquet de L2 del θ, por
 // delante del row group que las toca (antes o después de empezar los push).
 engine.push_boundaries(theta, EventBatch::new(rows, reference, confirm, confirm_time,
                                               extreme, direction, confirm_price,
-                                              extreme_price)?)?;
+                                              extreme_price, reference_price)?)?;
+// reference_price (último argumento, la octava columna de L2) es el ancla de la confirmación
+// de T: decimal128 de 16 bytes, sin copia. S no la lee, pero se entrega siempre.
 engine.needed(theta)?;  // primer evento del θ sin cerrar: leer L2 por delante, y no más
 engine.push(RowGroupInput {
     id,            // ordinal del row group entre los que entrega el lector: 0, 1, 2, …
@@ -109,7 +158,8 @@ Contrato de entrada:
 - `push_boundaries` entrega los eventos de un θ en orden, en lotes de cualquier tamaño (un
   θ sin eventos no necesita ninguno). El lote de un evento llega antes que el row group que
   lo toca; si no, `push` falla con `Input` (no espera). Los eventos cumplen `R < C ≤ E` y
-  `E_i ≤ R_{i+1}`, también entre un lote y el anterior, y los precios caben en `i64`
+  `E_i ≤ R_{i+1}`, también entre un lote y el anterior, y los tres precios
+  (`confirm_price`, `extreme_price` y `reference_price`) caben en `i64`
   (contrato de L2); se comprueba al entregarlos, y un lote que pasa del esqueleto falla con
   `Skeleton`. El evento `i` es la fila `i` del esqueleto, sea cual sea el lote que lo trajo.
 - `needed(θ)` es el primer evento del θ que no cerró; los lotes enteros anteriores ya se
@@ -125,6 +175,8 @@ Contrato de entrada:
   evento y el rango de ids del row group) y `ConfirmTime`; si un row group trae los dos,
   gana el de frontera, como en el lector.
 - El motor valida los ticks que agrega (`0 ≤ valor < 2⁶³`), no los que ninguna fase toca.
+- Un ordinal que aporta dos veces su tramo al mismo evento de T, o fuera del rango del
+  evento, es un `EngineError::Internal`, no un dato.
 - `finish()` espera los ítems pendientes y falla con `Incomplete` si alguna casilla quedó
   sin llenar. Los sellados siguen disponibles en `pop_sealed()` después de `finish()`.
 
@@ -135,7 +187,17 @@ cargo test -p dc_descriptors
 cargo run --release -p dc_descriptors --example bench_engine -- [ticks] [row_group] [θ] [hilos…]
 ```
 
-`tests/engine.rs` compara el motor con un oráculo ingenuo (suma tick a tick con otra
+`tests/path.rs` prueba la familia T: los 13 registros calculados a mano (un upturn con
+overshoot, un downturn que espeja los niveles, fases de un tick, overshoot vacío o de un
+tick, cruce atómico, los casos de la autocorrelación y huecos a ambos lados de
+`silence_us`), un evento repartido en tres row groups con el mismo resultado bit a bit en
+**todos** los órdenes de `push`, un row group intermedio sin ticks de la fase, que el
+almacén de corridas quede vacío al terminar, los eventos y ticks inválidos (son error, no
+valor) y un oráculo ingenuo en `f64` sobre series aleatorias que, además, no cambia con los
+cortes, el orden de `push` ni con 1 y 4 hilos. Las pruebas unitarias de `src/path.rs`
+cubren la fusión de vecinos en cualquier asociación y la cuantización por término.
+
+`tests/engine.rs` compara el motor de S con un oráculo ingenuo (suma tick a tick con otra
 fórmula de redondeo) con 1 y 4 hilos, en órdenes de `push` barajados y con las fronteras en
 lotes de 1 a 3 eventos intercalados con los `push`; comprueba que un lote se suelta en
 cuanto sus eventos cerraron (su `B` muere) y que un row group sin sus fronteras falla, e
