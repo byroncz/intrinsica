@@ -380,8 +380,9 @@ Una prueba (`shared/dc_views/tests/test_dc_views_contract_doc.py`) rompe el CI s
 esta tabla se desvía de las columnas y los tipos de la vista.
 
 `derived_version` es `DERIVED_VERSION` de `dc_views` (hoy `1.0.0`), igual a la
-primera línea del `.sql`. Con una raíz hive, `year` y `month` (`INTEGER`) llegan
-entre las claves y estas columnas; con rutas de archivo, no.
+primera línea del `.sql`. Cuando `summaries` es un directorio (raíz hive), `year` y
+`month` (`INTEGER`) llegan entre las claves y estas columnas, sea cual sea la
+forma de `events`; con `summaries` como archivo, no.
 
 `R`, `C` y `E` son los `agg_trade_id` de referencia, confirmación y extremo;
 `ref`, `conf` y `ext` los precios de esos tres puntos; `d` la `direction` del
