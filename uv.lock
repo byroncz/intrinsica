@@ -280,12 +280,14 @@ source = { editable = "shared/dc_views" }
 dependencies = [
     { name = "duckdb" },
     { name = "pyarrow" },
+    { name = "pyutils" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "duckdb" },
     { name = "pyarrow" },
+    { name = "pyutils", editable = "shared/pyutils" },
 ]
 
 [[package]]
