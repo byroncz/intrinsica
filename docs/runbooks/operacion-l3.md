@@ -1118,14 +1118,17 @@ máximo en `-`.
 `args` = `--month <mes>`. Un mes por corrida. Las corridas las lanza y aprueba el humano; pega las
 tres últimas líneas en ITSC-392.
 
-**Corrida real (ITSC-392).** Pendiente: la tabla se llena con las tres últimas líneas que pegue el
-humano.
+**Corrida real (ITSC-392), 2026-10-29.** Las cifras son las de la última línea de cada corrida;
+las de 2026-08 vienen del CSV, porque su salida llegó a Cloud Logging después del paso de logs del
+run. Antes de 2025, L1 viene de milisegundos convertidos a µs: los huecos de 2018-02 y 2023-03 son
+múltiplos de 1 000 µs y el p50 de 2023-03 sale en 0 por los ticks del mismo ms. Con estas cifras
+`silence_us` quedó en 10 000 000 (10 s), escrito en la Épica ITSC-391.
 
 | Mes | Ticks | p50 | p99 | p99,99 | Máximo | ≥ 1 s | ≥ 10 s | ≥ 60 s | ≥ 600 s | Pared | Run |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 2018-02 | pendiente | | | | | | | | | | |
-| 2023-03 | pendiente | | | | | | | | | | |
-| 2026-08 | pendiente | | | | | | | | | | |
+| 2018-02 | 9 811 197 | 36 ms | 2,482 s | 9,708 s | 33,5 h | 550 420 | 830 | 3 | 3 | 3,0 s | [40869457621](https://github.com/byroncz/intrinsica/actions/runs/40869457621) |
+| 2023-03 | 190 227 841 | 0 | 234 ms | 1,593 s | 2,5 h | 89 008 | 1 | 1 | 1 | 38,1 s | [40869510256](https://github.com/byroncz/intrinsica/actions/runs/40869510256) |
+| 2026-08 | 23 939 440 | 68 µs | 1,62 s | 5,489 s | 13,5 s | 631 803 | 22 | 0 | 0 | pendiente | [40869570000](https://github.com/byroncz/intrinsica/actions/runs/40869570000) |
 
 ### La trampa del 403 por prefijo
 
