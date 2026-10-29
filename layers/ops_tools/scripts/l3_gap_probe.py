@@ -33,8 +33,8 @@ Salida: la tabla de medidas, la ruta del CSV y, como última línea, `gap probe:
 p50_us=… p90_us=… p99_us=… p999_us=… p9999_us=… max_us=… ge_1s=… ge_10s=… ge_60s=… ge_600s=…
 pared_s=… veredicto=ok|fallo`.
 
-Códigos: 0 si midió; 1 sin `consolidated.parquet` o si la lectura falla; 2 por uso. Solo lee;
-lo único que escribe es el CSV de `--out`.
+Códigos: 0 si midió; 1 sin `consolidated.parquet`, si la lectura falla o si `transact_time`
+decrece; 2 por uso. Solo lee; lo único que escribe es el CSV de `--out`.
 """
 
 import argparse
