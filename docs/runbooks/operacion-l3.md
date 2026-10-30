@@ -855,7 +855,7 @@ se decodifican a lo sumo 2 row groups más que con 1, al final.
 
 ## Scripts de operación
 
-Cinco scripts de `layers/ops_tools/scripts/`, para el job `ops-script`
+Seis scripts de `layers/ops_tools/scripts/`, para el job `ops-script`
 ([runbook de operación ad hoc](operacion-ops.md)). Se suben a
 `gs://<proyecto>-ops/scripts/` y se lanzan con `job` = `ops-script`. Todos solo
 leen, toman las raíces del proyecto de `OPS_RESULTS_URI` y también aceptan rutas
@@ -868,6 +868,7 @@ locales (`uv run`).
 | `l3_compare_runs.py` | Compara dos corridas por sus hallazgos (`content_hash` y `rows` de cada θ y mes) y, con `--timing`, mide la nueva | `--base-dates 2026-10-14:2026-10-15 --new-dates 2026-10-22 --timing` |
 | `l3_derived_check.py` | Prueba la vista `derived` (familia D) sobre un θ y un mes: resumen por columna, conteo de banderas e invariantes en un CSV | `--theta 0.00098052 --month 2026-09` |
 | `l3_gap_probe.py` | Mide los huecos entre ticks consecutivos de L1 en un mes (cuantiles, máximo y conteos por umbral, con los huecos entre row groups) para fijar `silence_us` de la familia T | `--month 2018-02` |
+| `l3_path_check.py` | Prueba `path.parquet` (familia T) contra `summaries.parquet` sobre un θ y un mes: resumen por columna, esqueleto, invariantes y regla de nulos en un CSV | `--theta 0.00098052 --month 2023-03` |
 
 ```bash
 gcloud storage cp layers/ops_tools/scripts/l3_check_month.py \
@@ -1167,6 +1168,92 @@ múltiplos de 1 000 µs y el p50 de 2023-03 sale en 0 por los ticks del mismo ms
 | 2018-02 | 9 811 197 | 36 ms | 2,482 s | 9,708 s | 33,5 h | 550 420 | 830 | 3 | 3 | 3,0 s | [40869457621](https://github.com/byroncz/intrinsica/actions/runs/40869457621) |
 | 2023-03 | 190 227 841 | 0 | 234 ms | 1,593 s | 2,5 h | 89 008 | 1 | 1 | 1 | 38,1 s | [40869510256](https://github.com/byroncz/intrinsica/actions/runs/40869510256) |
 | 2026-08 | 23 939 440 | 68 µs | 1,62 s | 5,489 s | 13,5 s | 631 803 | 22 | 0 | 0 | pendiente | [40869570000](https://github.com/byroncz/intrinsica/actions/runs/40869570000) |
+
+### `l3_path_check.py`
+
+Prueba `path.parquet` (familia T, [contrato](../data-contracts.md#esquema-de-pathparquet); [TRD-L3 §7.2.1](../TRD/l3.md#721-salida--pathparquet-familia-t))
+sobre **un θ y un mes** reales (ITSC-395). Abre el `path.parquet` y el `summaries.parquet` de L3 de
+esa partición por su ruta completa, los registra en DuckDB como datasets de PyArrow y cuenta todo
+con consultas de agregación: ninguna fila pasa por Python. `state_version` y `silence_us` salen de
+los metadatos de `path.parquet`, leídos con PyArrow. **No importa ninguna capa** (una importación
+cambiaría `uv.lock`). A diferencia de `l3_derived_check.py`, no necesita un `.sql` ni `events.parquet`
+de L2: todo lo que cruza sale de `summaries.parquet`.
+
+```bash
+gcloud storage cp layers/ops_tools/scripts/l3_path_check.py \
+  gs://<proyecto>-ops/scripts/l3_path_check.py
+```
+
+| `args` | Efecto |
+| --- | --- |
+| `--theta 0.00098052 --month 2023-03` | Obligatorios: un θ (8 decimales como máximo) y un mes `YYYY-MM` |
+| `--summaries-root` | Otra raíz de L3, también local, donde viven los dos archivos (por defecto `gs://<proyecto>-dc-descriptors/l3`) |
+| `--provider`, `--market`, `--asset` | Otra serie (por defecto `binance`, `spot`, `BTCUSDT`) |
+| `--out` | Otra ruta del CSV; una ruta que termina en `/` es un directorio |
+
+**El CSV** (`l3_path_check_<mes>_<θ>.csv`, en `results/<ejecución>/`) tiene el encabezado
+`seccion,columna,filas,nulos,min,mediana,max,violaciones` y una fila por cosa medida:
+
+- `columna`: las 13 columnas de datos de T (T-01 a T-13), con `filas`, `nulos`, `min`, `mediana` y `max`.
+- `invariante`: una fila por invariante con sus `violaciones` (0 es lo esperado). Los límites con
+  tolerancia 1e-9 por el redondeo de `DOUBLE`:
+  - **Esqueleto:** filas de `path` = filas de `summaries`; unión 1:1 por `(theta, confirm_agg_trade_id)`
+    (sin huérfanas ni claves repetidas); mismos row groups y filas por row group según los pies de
+    los dos archivos.
+  - **Rangos:** `c_realized_var ≥ 0` y `os_realized_var ≥ 0`; `c_tortuosity ≥ 1` y `os_tortuosity ≥ 1`;
+    `|c_sign_autocorr| ≤ 1` y `|os_sign_autocorr| ≤ 1`; `0 ≤ c_max_gap ≤ c_duration` y
+    `0 ≤ os_max_gap ≤ os_duration` (las duraciones de `summaries`); `0 ≤ *_idle_fraction ≤ 1`;
+    `c_idle_fraction = 0` donde `silence_us > c_duration`; `0 ≤ c_t25 ≤ c_t50 ≤ c_t75 ≤ 1`.
+  - **Regla de nulos**, una invariante `nulos_<columna>` por cada una de las 13: cuenta las filas
+    donde la columna es nula y la regla dice que no, o al revés. `os_realized_var` y `os_max_gap` ⇔
+    `os_ticks = 0`; `c_sign_autocorr` ⇔ `c_ticks < 2` **o todos los ticks del mismo lado**
+    (`c_quantity_buy = 0` o `c_quantity_sell = 0`), y `os_sign_autocorr` igual con `os_*`;
+    `c_idle_fraction` y `c_t25` a `c_t75` ⇔ `c_duration = 0`; `os_idle_fraction` ⇔ `os_ticks = 0` o
+    `os_duration = 0`; `c_realized_var`, `c_tortuosity` y `c_max_gap` nunca nulas.
+  - **`doubles_finitos`:** ni `±inf` ni `NaN` en las once columnas `DOUBLE`.
+
+Dos precisiones sobre la regla de nulos, ambas del contrato:
+
+- **`*_sign_autocorr`.** La nulidad no es solo `ticks < 2`: con dos o más ticks todos del mismo lado la
+  varianza de los lados es 0 y el contrato la deja nula ([TRD-L3 §7.2.1](../TRD/l3.md#721-salida--pathparquet-familia-t)).
+  Un mismo lado se lee de `summaries` como una cantidad de compra o de venta igual a 0 (todo tick tiene
+  cantidad positiva).
+- **`os_tortuosity`.** Es nula con `os_ticks = 0` y también con `p_E = p_C`, pero `summaries` no trae
+  `confirm_price` ni `extreme_price` y la sonda no lee L2. Comprueba lo que sí ve: una no nula con
+  `os_ticks = 0` es violación, y una nula con `os_ticks > 0` solo es válida si el extremo del
+  overshoot toca el de la confirmación (`os_price_max = c_price_max` u `os_price_min = c_price_min`,
+  necesario para `p_E = p_C`). Es una comprobación laxa a propósito, sin falsos positivos: un `inf` o
+  `NaN` donde `p_E = p_C` lo atrapa `doubles_finitos`.
+
+**Última línea:** `path check: mes=… theta=… state_version=… silence_us=… filas=… violaciones=…
+pared_s=… veredicto=ok|violaciones|fallo`. `violaciones` suma todas las invariantes. Con
+`veredicto=fallo` (falta un archivo, no se lee un pie, `path.parquet` no trae `silence_us` o DuckDB
+falla) lo que no se pudo medir sale `-`.
+
+**Códigos:** **0** sin violaciones; **1** con violaciones, sin alguno de los dos archivos, si un pie
+no se lee o si DuckDB falla; **2** por uso (`--theta` o `--month` ausentes o inválidos, sin
+`--summaries-root` ni `OPS_RESULTS_URI`, `--out` `gs://` fuera de `results/`). Si el CSV no se puede
+escribir, la sonda sale con **0** (si no hay violaciones) y lo avisa en el log con
+`no se guardó la tabla en …`. Una violación **nunca se tolera**: es un defecto del motor de T o del
+dato de entrada; abre una card de bug con la línea.
+
+**Memoria.** Un θ y un mes por corrida: el pico es O(partición), porque las medianas retienen los
+valores de las 13 columnas. Para el primer mes real elige un θ con decenas de miles de filas, no el
+más fino.
+
+**Cómo correrla.** Necesita `path.parquet` del θ y el mes, o sea el backfill de T de ITSC-394.
+*Actions → Run job*: `job` = `ops-script`, `script` =
+`gs://<proyecto>-ops/scripts/l3_path_check.py` (la URI completa: `run-job-tasks.sh` rechaza otra
+cosa con código 2), `args` = `--theta <θ> --month <mes>`. Las corridas las lanza y aprueba el humano; pega la última
+línea en ITSC-395.
+
+**Corrida real (ITSC-395, 2026-10-30).** Las 29 invariantes dieron 0 violaciones; las 36 239 filas
+coinciden con las de `summaries.parquet` del mismo θ y mes (`l3_derived_check.py`, ITSC-386). El CSV
+quedó en `results/ops-script-pd47c/l3_path_check_2023-03_0.00098052.csv`.
+
+| Mes | θ | `state_version` | `silence_us` | Filas | Violaciones | Pared | Run |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 2023-03 | `0.00098052` | 1.0.0 | 10 000 000 | 36 239 | 0 | 2,4 s | [41052835807](https://github.com/byroncz/intrinsica/actions/runs/41052835807) |
 
 ### La trampa del 403 por prefijo
 
