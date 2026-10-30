@@ -1247,7 +1247,7 @@ más fino.
 cosa con código 2), `args` = `--theta <θ> --month <mes>`. Las corridas las lanza y aprueba el humano; pega la última
 línea en ITSC-395.
 
-**Corrida real (ITSC-395, 2026-10-30).** Las 30 invariantes dieron 0 violaciones; las 36 239 filas
+**Corrida real (ITSC-395, 2026-10-30).** Las 29 invariantes dieron 0 violaciones; las 36 239 filas
 coinciden con las de `summaries.parquet` del mismo θ y mes (`l3_derived_check.py`, ITSC-386). El CSV
 quedó en `results/ops-script-pd47c/l3_path_check_2023-03_0.00098052.csv`.
 
