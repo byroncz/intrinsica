@@ -343,17 +343,18 @@ comprueba al escribir que iguala la suma de `quantity` de sus ticks.
 
 Lo escribe la imagen `l3_dc_descriptors` (`python -m l3_dc_descriptors --mode
 backfill|monthly`, [TRD-L3 §8](TRD/l3.md#8-pipeline-interno-y-modos-de-ejecución)),
-con `--family summaries` (la única familia por ahora). Lee `L3_LANDING_ROOT` (L1) y
+con `--family summaries` (la predeterminada) o `--family path` (la familia T, ITSC-394). Lee `L3_LANDING_ROOT` (L1) y
 `L3_EVENTS_ROOT` (L2), escribe bajo `L3_SUMMARIES_ROOT` y deja sus hallazgos en
 `L3_DQ_ROOT`. El catálogo de θ no es de L3: `L3_THETAS_URI` (o `--thetas-uri`) apunta al
 mismo objeto `l2/thetas.yaml` que usa L2, y sin él la corrida termina con código 2.
 
-No hay manifiesto de L3: la **frontera** de un θ, hasta qué mes llegó, sale del lago. Es
-el último mes de su serie de `summaries.parquet` contigua desde `--series-start` cuyo
-archivo es válido, es decir, que:
+No hay manifiesto de L3: la **frontera** de un θ y una familia, hasta qué mes llegó, sale
+del lago. Es el último mes de su serie de `<familia>.parquet` contigua desde `--series-start`
+cuyo archivo es válido, es decir, que:
 
 - existe y se lee;
-- su esquema es `SUMMARIES_SCHEMA`, su `state_version` es el de la imagen y la
+- su esquema es el de la familia (`SUMMARIES_SCHEMA` o `PATH_SCHEMA`), su `state_version` es el
+  de la familia en la imagen y la
   estadística de `theta` de cada row group es el θ de la partición;
 - tiene las mismas filas por row group que `events.parquet` de L2 del mismo mes.
 
@@ -362,6 +363,15 @@ frontera; si ese archivo no cumple, la frontera retrocede al mes anterior. Nunca
 L2: un mes sin `events.parquet` y `carry_over.parquet` de L2 no se procesa
 (`l2_input_missing`). Por eso cambiar `STATE_VERSION` o el esquema hace que el siguiente
 `backfill` reescriba la serie del θ sin `--force`.
+
+La frontera es **por familia**: `path.parquet` tiene la suya, y la de una familia distinta de
+`summaries` **nunca supera la de `summaries`** del mismo θ, porque repite su esqueleto. Una
+corrida de `--family path` no toca `summaries.parquet`, y la frontera de `summaries` no mira
+`path.parquet`. `--family path` solo escribe un mes si `summaries.parquet` de ese `(θ, mes)`
+existe; si no, el θ sale del rango con `family_skeleton_missing` y la corrida termina con
+código 1. La compuerta lee además el pie de `summaries.parquet`: sus filas por row group deben
+ser las de `events.parquet` (si no, `family_skeleton_mismatch`). `path` no concilia ticks ni
+lee carry-overs: ya lo hizo la pasada de `summaries`.
 
 ### Leer
 
@@ -453,9 +463,10 @@ ticks de la confirmación en el mismo instante); `os_idle_fraction` con
   diccionario, `sorting_columns` por `confirm_agg_trade_id`, mismos row groups). El
   `content_hash` lo calcula `pyutils.ContentHasher`, que hashea las columnas `double`
   por los bits de cada valor (sin `NaN` ni `inf`, porque L3 no los produce).
-- **Quién lo escribe**: el motor de agregación (`Config.family = path`) calcula las filas;
-  la CLI de L3 todavía acepta solo `--family summaries`, así que ninguna corrida
-  publica `path.parquet` hasta que se conecte la pasada de la familia.
+- **Quién lo escribe**: la CLI de L3 con `--family path` (ITSC-394), después de la de
+  `summaries`: el motor de agregación (`Config.family = path`) calcula las filas y el
+  `FamilyWriter` las repite sobre el esqueleto de `summaries.parquet` de la partición, con los
+  metadatos de arriba. Su frontera por θ es la de «Quién lo escribe y hasta dónde llegó».
 - **Leer**: se une con `summaries.parquet` por `(theta, confirm_agg_trade_id)`; la unión
   es 1:1 y también por posición.
 
@@ -785,6 +796,11 @@ mismo que traen las excepciones del resumidor, de las que sale la mayoría de lo
   En `backfill`, antes de procesar el mes, detiene el rango de ese θ (los demás siguen) y
   la corrida termina con código 1. También lo lanza la compuerta de entrada si falta el
   `carry_over.parquet` del mes anterior.
+- **`family_skeleton_missing`** (`error`, `fail`): una familia distinta de `summaries` (hoy
+  `path`) no encontró `summaries.parquet` de `(θ, mes)`, su esqueleto (`details.theta`,
+  `details.month`, `details.family`, `details.file` = `summaries.parquet`). Detiene el rango de
+  ese θ (los demás siguen) y la corrida termina con código 1. Se resuelve corriendo antes la
+  pasada de `summaries`.
 - **`l2_lineage_missing`** (`error`, `fail`): la partición de L2 de `(θ, mes)` no trae
   `content_hash.json` o no es válido (`details.theta`, `details.month`, `details.file` =
   `content_hash.json`, `details.reason`: `no existe` o qué incumple del formato). La unidad
@@ -814,9 +830,10 @@ mismo que traen las excepciones del resumidor, de las que sale la mayoría de lo
   Código 2, sin escribir datos; `year` y `month` son los del primer mes que iba a procesar.
 - **`theta_behind_frontier`** (`warning`, `fail`): `monthly` no procesó un θ
   (`details.theta`, `details.frontier` en `YYYY-MM` o `null`, `details.reason`). `reason` es
-  `l2_missing` si L2 no tiene el mes de ese θ, y `l3_frontier` si su serie de L3 no llega al
-  mes previo (se agregó al catálogo sin backfill, o tiene un hueco); si pasan las dos,
-  `l2_missing`, que es lo que bloquea. No falla la unidad mientras otros θ avancen o ya
+  `l2_missing` si L2 no tiene el mes de ese θ, `summaries_missing` si la familia no es
+  `summaries` y falta `summaries.parquet` del mes, y `l3_frontier` si la serie de L3 de la familia
+  no llega al mes previo (se agregó al catálogo sin backfill, o tiene un hueco); si pasan
+  varias, la primera de ese orden, que es lo que bloquea No falla la unidad mientras otros θ avancen o ya
   tengan el mes; si ninguno está listo ni lo tiene, `monthly` termina con código 1 sin leer
   L1. Se resuelve lanzando `backfill` sin `--from`.
 - **`theta_config_drift`** (`info`, `pass`): el lago de L3 tiene particiones de un θ que el
@@ -827,11 +844,13 @@ mismo que traen las excepciones del resumidor, de las que sale la mayoría de lo
   `summaries.parquet`, `l2_events_content_hash` y `l2_carry_over_content_hash` (los de las
   entradas de L2 que usó, leídos de su `content_hash.json` desde la 2.4.0 del TRD-L3 y
   no recalculados; son los mismos que L2 registra en su `events_summary`, que es donde
-  se comparan) y `unassigned_ticks` (`U_M` de la conciliación). Es la huella de la
+  se comparan) y, solo en `summaries`, `unassigned_ticks` (`U_M` de la conciliación; `path` no concilia y
+  no lo publica). `family` es `summaries` o `path` y `content_hash` es el del archivo de esa
+  familia. Es la huella de la
   corrida y el linaje contra L2: si L2 se reprocesa y cambia, estos hashes ya no coinciden
   con los suyos y el mes está obsoleto (`--force --from <mes> --thetas <θ>`).
 - **`unit_timing`** (`info`, `pass`): uno por unidad (mes), no por θ. `metric_value` es la
-  pared (`wall_s`). `details` lleva el tiempo por fase, todas en **pared**
+  pared (`wall_s`). `details` lleva `family` (la de la corrida, ITSC-394), el tiempo por fase, todas en **pared**
   (desde la 2.0.0 del TRD-L3): `gate_s` (el primer tramo de la entrada de los θ: abrir
   `events.parquet` y arrancar la lectura de sus fronteras, una tarea por θ), `setup_s` (el
   motor, el pie de L1 y la compuerta de carry-over; los escritores se abren en el pool durante
