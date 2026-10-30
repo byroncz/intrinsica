@@ -458,8 +458,9 @@ Instancia del módulo `layer` con tres modos: `l3-backfill`, `l3-monthly` y
 service account y una sola tarea (sin task array). `l3-monthly-path` es el mismo
 modo `monthly` de la CLI con `--family path`: usa `args = ["--mode", "monthly",
 "--family", "path"]` del módulo `layer` y hereda imagen, CPU, memoria y timeout de
-`l3-monthly` (la pared de T fue 11,4 % menor que la de S en el backfill de
-ITSC-395, así que los 1 200 s alcanzan). Imagen
+`l3-monthly` (la pared de T fue 11,4 % menor que la de S en el backfill de T
+de ITSC-394, TRD-L3 §10.2, así que los 1 200 s
+alcanzan). Imagen
 `l3_dc_descriptors:<VERSION>`, de `layers/l3_dc_descriptors/VERSION`. Diseño y
 decisiones en [TRD-L3 §11](../docs/TRD/l3.md#11-operaciones).
 
@@ -635,9 +636,11 @@ tiene `l3` aplicado con `frames`. Todo por el humano, después del merge:
 3. `permisos.py` desde *Run job* (`ops-script`): la última línea debe ser
    `permisos: 13 de 13 como se esperaba`.
 
-El plan de `l3` en el PR muestra las tres cuentas, sus bindings y los tres jobs; el
-de `l1`, el workflow `l1-run-job` con la cadena nueva y dos bindings nuevos:
-`run.invoker` sobre `l3-monthly-path` y `run.viewer` sobre `l3-monthly`, que ahora el
+Desde cero, el plan de `l3` muestra las tres cuentas, sus bindings y los tres jobs.
+En el PR de ITSC-396, sobre un proyecto ya aplicado, crea solo `l3-monthly-path` con
+su cuenta y sus bindings, y actualiza la imagen (0.21.1) de `l3-backfill` y
+`l3-monthly`. El plan de `l1` muestra el workflow `l1-run-job` con la cadena nueva y dos bindings
+nuevos: `run.invoker` sobre `l3-monthly-path` y `run.viewer` sobre `l3-monthly`, que ahora el
 workflow espera (el `run.invoker` sobre `l3-monthly` ya existía).
 
 **Lanzar los jobs.** *Actions → Run job* (nunca un agente):
