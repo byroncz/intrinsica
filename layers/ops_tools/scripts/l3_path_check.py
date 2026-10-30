@@ -104,7 +104,6 @@ COLUMNS = (
     "c_t50",
     "c_t75",
 )
-NEVER_NULL = ("c_realized_var", "c_tortuosity", "c_max_gap")
 CSV_HEADER = [
     "seccion",
     "columna",
