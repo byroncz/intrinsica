@@ -14,6 +14,7 @@ import importlib
 import inspect
 import itertools
 import logging
+import math
 import pkgutil
 import threading
 import time
@@ -23,11 +24,12 @@ from decimal import Decimal
 
 import l3_dc_descriptors
 import numpy as np
+import pathref
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pyref
 import pytest
-from dc_frames import FamilySkeletonMismatch, FamilyWriter
+from dc_frames import FamilySkeletonMismatch, FamilyWriter, FramesInputError
 from dc_frames.lake import EventFile, l1_path
 from l3_dc_descriptors import (
     SUMMARIES_SCHEMA,
@@ -42,8 +44,10 @@ from l3_dc_descriptors import (
 from l3_dc_descriptors.context import RunContext, Unit
 from l3_dc_descriptors.cpu import CpuLimit
 from l3_dc_descriptors.pipeline import process_unit
+from l3_dc_descriptors.schema import PATH_SCHEMA
 from l3_dc_descriptors.timing import BusyClock, Phases, ReadMeter
 from l3_lake import M1, M2, build_lake, fixture_ticks, month_cuts
+from native_driver import path_native
 
 ENGINE_THREADS = (1, 2, 4)
 READERS = (1, 2)
@@ -1454,3 +1458,217 @@ def test_the_unit_reports_the_boundaries_the_engine_held(lake, tiny_l2):
     assert 0 < phases.retained.peak
     assert phases.retained.peak < month_bytes * 65
     assert phases.retained.current == 0
+
+
+# La pasada de la familia T (`--family path`): mismas tablas y mismo `content_hash` que la
+# referencia con cualquier hilo, lector, escritor, lote y tamaño de lote de fronteras.
+
+
+def run_path(lake, **options) -> dict:
+    """Los resultados y las tablas de `path.parquet` de todos los meses (con `summaries.parquet`
+    ya escrito por la referencia de S).
+    """
+    results, tables = {}, {}
+    for month in lake.months:
+        results[month] = summarize_month(
+            lake.l1,
+            lake.l2,
+            lake.l3,
+            month,
+            lake.theta_texts,
+            series_start=M1,
+            family="path",
+            **options,
+        )
+        for theta, result in results[month].items():
+            tables[month, theta] = pq.read_table(result.path, schema=PATH_SCHEMA)
+    return {"results": results, "tables": tables}
+
+
+@pytest.fixture(scope="module")
+def path_reference(lake, reference):
+    """La referencia de T: `native_driver.path_native` sobre el `summaries.parquet` de la
+    referencia de S, que queda escrito en el lago.
+    """
+    results, tables = {}, {}
+    for month in lake.months:
+        results[month] = path_native(lake.l1, lake.l2, lake.l3, month, lake.theta_texts)
+        for theta, result in results[month].items():
+            tables[month, theta] = pq.read_table(result.path, schema=PATH_SCHEMA)
+    return {"results": results, "tables": tables}
+
+
+def assert_same_path(got: dict, expected: dict) -> None:
+    assert got["results"].keys() == expected["results"].keys()
+    for month, per_theta in expected["results"].items():
+        assert got["results"][month].keys() == per_theta.keys()
+        for theta, result in per_theta.items():
+            other = got["results"][month][theta]
+            assert other.content_hash == result.content_hash
+            assert other.rows == result.rows
+            assert other.reconciliation is None  # T no concilia: ya lo hizo S
+    left, right = expected["tables"], got["tables"]
+    assert left.keys() == right.keys()
+    assert all(left[key].equals(right[key]) for key in left)
+    assert sum(t.num_rows for t in left.values()) > 0
+
+
+def test_the_path_reference_is_the_oracle(lake, path_reference):
+    """La referencia de T es el oráculo `pathref` sobre el lector de `dc_frames`: INT64 y nulos
+    exactos, DOUBLE a 1e-12 relativo.
+    """
+    compared = 0
+    for month in lake.months:
+        wanted = pathref.from_lake(lake.l1, lake.l2, month, lake.theta_texts)
+        got = {
+            (row["theta"], row["confirm_agg_trade_id"]): row
+            for (m, _), table in path_reference["tables"].items()
+            if m == month
+            for row in table.to_pylist()
+        }
+        assert got.keys() == wanted.keys()
+        for key, values in wanted.items():
+            for name, value in zip(pathref.COLUMNS, values, strict=True):
+                if value is None or isinstance(value, int):
+                    assert got[key][name] == value, (key, name)
+                else:
+                    assert math.isclose(got[key][name], value, rel_tol=1e-12), (
+                        key,
+                        name,
+                    )
+        compared += len(got)
+    assert compared > 0
+
+
+@pytest.mark.parametrize(("engine_threads", "readers", "inflight", "writers"), KNOBS)
+def test_the_path_pass_gives_the_same_table_and_hash_with_any_knobs(
+    lake, path_reference, engine_threads, readers, inflight, writers
+):
+    got = run_path(
+        lake,
+        threads=4,
+        engine_threads=engine_threads,
+        readers=readers,
+        inflight=inflight,
+        writers=writers,
+    )
+    assert_same_path(got, path_reference)
+    assert l3_threads() == []
+
+
+@pytest.mark.parametrize("threads", [1, 2, 50])
+def test_the_path_pass_does_not_depend_on_the_io_pool(lake, path_reference, threads):
+    assert_same_path(run_path(lake, threads=threads), path_reference)
+
+
+@pytest.mark.parametrize("lot_events", [1, 5, 10, 25, 100])
+@pytest.mark.parametrize(
+    ("engine_threads", "readers", "inflight", "writers"), [(1, 1, 1, 1), (4, 2, 4, 4)]
+)
+def test_the_path_pass_gives_the_same_result_in_lots(
+    lake, path_reference, lot_events, engine_threads, readers, inflight, writers
+):
+    """Con tramos de pocos ticks hay eventos que cruzan tramos y row groups: la fusión
+    ordenada de T (ADR-L3-17) da la misma tabla y el mismo `content_hash` que sin corte.
+    """
+    got = run_path(
+        lake,
+        threads=4,
+        engine_threads=engine_threads,
+        readers=readers,
+        inflight=inflight,
+        writers=writers,
+        lot_events=lot_events,
+    )
+    assert_same_path(got, path_reference)
+
+
+@pytest.mark.parametrize(
+    ("engine_threads", "readers", "inflight", "writers"),
+    [(1, 1, 1, 1), (2, 2, 4, 1), (4, 1, 4, 4), (4, 2, 1, 4)],
+)
+def test_the_path_pass_gives_the_same_result_with_boundaries_in_lots_of_three(
+    lake, path_reference, tiny_l2, engine_threads, readers, inflight, writers
+):
+    got = run_path(
+        lake,
+        threads=4,
+        engine_threads=engine_threads,
+        readers=readers,
+        inflight=inflight,
+        writers=writers,
+    )
+    assert_same_path(got, path_reference)
+    assert_same_path(
+        run_path(lake, engine_threads=4, inflight=4, lot_events=3), path_reference
+    )
+
+
+def test_a_path_run_does_not_change_a_byte_of_summaries(lake, path_reference):
+    files = sorted(lake.l3.rglob("summaries.parquet"))
+    assert len(files) == len(lake.thetas) * len(lake.months)
+    before = {f: f.read_bytes() for f in files}
+    run_path(lake, engine_threads=2, lot_events=10)
+    assert {f: f.read_bytes() for f in files} == before
+
+
+def test_the_path_pass_reports_the_lineage_of_l2_like_summaries(
+    lake, reference, path_reference
+):
+    for month, per_theta in path_reference["results"].items():
+        got = summarize_month(
+            lake.l1,
+            lake.l2,
+            lake.l3,
+            month,
+            lake.theta_texts,
+            series_start=M1,
+            family="path",
+        )
+        for theta, result in got.items():
+            assert result.l2_events_content_hash == (
+                reference["results"][month][theta].l2_events_content_hash
+            )
+            assert result.l2_carry_over_content_hash == (
+                reference["results"][month][theta].l2_carry_over_content_hash
+            )
+            assert result.content_hash == per_theta[theta].content_hash
+
+
+def test_the_path_pass_without_summaries_fails_without_publishing(lake, path_reference):
+    theta = lake.theta_texts[0]
+    target = lake.l3 / (
+        "provider=binance/market=spot/asset=BTCUSDT/"
+        f"theta={theta}/year={M1[0]}/month={M1[1]:02d}"
+    )
+    hidden = target / "summaries.hidden"
+    (target / "summaries.parquet").rename(hidden)
+    before = (target / "path.parquet").read_bytes()
+    try:
+        with pytest.raises(FramesInputError, match="summaries"):
+            summarize_month(
+                lake.l1,
+                lake.l2,
+                lake.l3,
+                M1,
+                lake.theta_texts,
+                series_start=M1,
+                family="path",
+            )
+    finally:
+        hidden.rename(target / "summaries.parquet")
+    assert (target / "path.parquet").read_bytes() == before
+    assert l3_threads() == []
+
+
+def test_an_unknown_family_is_refused(lake):
+    with pytest.raises(ValueError, match="familia"):
+        summarize_month(
+            lake.l1,
+            lake.l2,
+            lake.l3,
+            M1,
+            lake.theta_texts,
+            series_start=M1,
+            family="fit",
+        )

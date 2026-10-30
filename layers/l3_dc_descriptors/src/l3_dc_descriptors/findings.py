@@ -83,6 +83,25 @@ def l2_input_missing(ctx: RunContext, unit: Unit, *, theta: str, file: str) -> F
     )
 
 
+def family_skeleton_missing(
+    ctx: RunContext, unit: Unit, *, theta: str, file: str
+) -> Finding:
+    """Falta `summaries.parquet` de `(θ, mes)`, el esqueleto de la familia de la corrida: el
+    θ sale del rango (§7.3, RL3-11) y no se escribe nada de la familia.
+    """
+    return failure(
+        ctx,
+        unit,
+        "family_skeleton_missing",
+        {
+            "theta": theta,
+            "month": f"{unit.year:04d}-{unit.month:02d}",
+            "family": ctx.family,
+            "file": file,
+        },
+    )
+
+
 def input_missing(
     ctx: RunContext, unit: Unit, check_type: str, details: dict
 ) -> Finding:
@@ -111,7 +130,8 @@ def theta_behind_frontier(
     reason: str,
 ) -> Finding:
     """`monthly` no procesó el θ (§8.3). `reason` es `l3_frontier` (su serie de L3 no
-    llega al mes previo) o `l2_missing` (L2 no tiene el mes de ese θ).
+    llega al mes previo), `l2_missing` (L2 no tiene el mes de ese θ) o `summaries_missing`
+    (una familia distinta de S, y `summaries.parquet` del mes no existe).
     """
     return finding(
         ctx,
@@ -150,9 +170,23 @@ def summaries_summary(
     content_hash: str,
     l2_events_content_hash: str,
     l2_carry_over_content_hash: str,
-    unassigned_ticks: int,
+    unassigned_ticks: int | None = None,
 ) -> Finding:
-    """Resumen de lo que escribió un θ: filas, hash del archivo y linaje contra L2."""
+    """Resumen de lo que escribió un θ: filas, hash del archivo y linaje contra L2.
+
+    `unassigned_ticks` es de la conciliación de S (§9.1): la pasada de las demás familias no
+    concilia y no lo publica.
+    """
+    details = {
+        "theta": theta,
+        "family": ctx.family,
+        "rows": rows,
+        "content_hash": content_hash,
+        "l2_events_content_hash": l2_events_content_hash,
+        "l2_carry_over_content_hash": l2_carry_over_content_hash,
+    }
+    if unassigned_ticks is not None:
+        details["unassigned_ticks"] = unassigned_ticks
     return finding(
         ctx,
         unit,
@@ -160,15 +194,7 @@ def summaries_summary(
         severity=Severity.INFO,
         status=Status.PASS,
         metric_value=float(rows),
-        details={
-            "theta": theta,
-            "family": ctx.family,
-            "rows": rows,
-            "content_hash": content_hash,
-            "l2_events_content_hash": l2_events_content_hash,
-            "l2_carry_over_content_hash": l2_carry_over_content_hash,
-            "unassigned_ticks": unassigned_ticks,
-        },
+        details=details,
     )
 
 
@@ -185,7 +211,7 @@ def unit_timing(ctx: RunContext, unit: Unit, timing: Timing) -> Finding:
         severity=Severity.INFO,
         status=Status.PASS,
         metric_value=round(timing.wall_s, 3),
-        details=timing.details(),
+        details={"family": ctx.family, **timing.details()},
     )
 
 

@@ -26,23 +26,25 @@ from l3_dc_descriptors import findings, memory
 from l3_dc_descriptors.context import RunContext, Unit
 from l3_dc_descriptors.frontier import (
     Listing,
+    family_file,
     frontiers,
     l2_missing,
     label,
     list_l2,
     list_summaries,
+    skeleton_missing,
     theta_text,
 )
 from l3_dc_descriptors.landing import last_consolidated
 from l3_dc_descriptors.memory import tune_allocators
 from l3_dc_descriptors.pipeline import process_unit
-from l3_dc_descriptors.schema import FAMILY
+from l3_dc_descriptors.schema import FAMILY, PATH_FAMILY
 from l3_dc_descriptors.summarize import MAX_META_WORKERS
 from l3_dc_descriptors.thetas import ThetasError, load_thetas
 from l3_dc_descriptors.unit_process import run_unit
 
 MODES = ("backfill", "monthly")
-FAMILIES = (FAMILY,)
+FAMILIES = (FAMILY, PATH_FAMILY)
 EXIT_USAGE = 2
 ROOT_VARS = (
     "L3_LANDING_ROOT",
@@ -150,13 +152,16 @@ def _trim_min_s(env: Mapping[str, str]) -> float | None:
         raise UsageError(str(error)) from None
 
 
-def _context(mode: str, series_start: Month, env: Mapping[str, str]) -> RunContext:
+def _context(
+    mode: str, series_start: Month, env: Mapping[str, str], family: str
+) -> RunContext:
     missing = [name for name in ROOT_VARS if not env.get(name)]
     if missing:
         raise UsageError(f"falta la variable de entorno {', '.join(missing)}")
     return RunContext(
         mode=mode,
         run_id=str(uuid.uuid4()),
+        family=family,
         image_version=_image_version(env),
         series_start=series_start,
         landing_root=env["L3_LANDING_ROOT"],
@@ -300,9 +305,10 @@ def _run_unit(
     # proceso hijo (el `Timing` no se serializa).
     timing = next(f for f in result.findings if f.check_type == "unit_timing").details
     logger.info(
-        "unidad %s: θ=%d eventos=%d ticks=%d wall_s=%.1f rss_peak_mib=%.0f "
+        "unidad %s: familia=%s θ=%d eventos=%d ticks=%d wall_s=%.1f rss_peak_mib=%.0f "
         "row_groups_month=%d row_groups_previous=%d spawn_s=%s",
         unit,
+        ctx.family,
         len(thetas),
         timing["events"],
         timing["ticks"],
@@ -313,6 +319,14 @@ def _run_unit(
         timing["spawn_s"],
     )
     return True
+
+
+def _without_skeleton(ctx: RunContext, summaries: Listing, theta: int, n: int) -> bool:
+    """¿La familia de la corrida necesita `summaries.parquet` de `(θ, mes n)` y no existe?
+
+    S no tiene esqueleto previo (repite el de `events.parquet`); las demás repiten el de S (§7.3).
+    """
+    return ctx.family != FAMILY and skeleton_missing(summaries, theta, n)
 
 
 def _before(reached: int | None, n: int) -> bool:
@@ -328,6 +342,7 @@ def _backfill(
     frontier: dict[int, int | None],
     l2: Listing,
     force: bool,
+    summaries: Listing,
 ) -> int:
     """Recorre `months` en orden; cada mes lleva solo los θ cuya frontera es anterior.
 
@@ -335,7 +350,9 @@ def _backfill(
     necesita se salta sin leer L1. Con `force`, todos los θ de `thetas` reprocesan todos
     los meses. Un θ al que L2 no le ha llegado al mes deja `l2_input_missing`, sale del
     rango y la corrida termina con código 1 (la frontera de L3 nunca supera la de L2); los
-    demás siguen. Un fallo de la unidad detiene el rango; los meses siguientes no se tocan.
+    demás siguen. Una familia distinta de S exige además `summaries.parquet` del mes
+    (`summaries` es su listado, §7.3): al θ que no lo tiene le pasa lo mismo, con
+    `family_skeleton_missing`. Un fallo de la unidad detiene el rango; los meses siguientes no se tocan.
     """
     stopped: set[int] = set()
     processed = 0
@@ -353,25 +370,44 @@ def _backfill(
         ready = []
         for theta in pending:
             absent = l2_missing(l2, theta, n)
-            if not absent:
+            if absent:
+                stopped.add(theta)
+                logger.error(
+                    "unidad %s: θ=%d sin %s de L2, su rango se detiene",
+                    unit,
+                    theta,
+                    " ni ".join(absent),
+                )
+                findings.emit(
+                    ctx,
+                    [
+                        findings.l2_input_missing(
+                            ctx, unit, theta=theta_text(theta), file=name
+                        )
+                        for name in absent
+                    ],
+                )
+            elif _without_skeleton(ctx, summaries, theta, n):
+                stopped.add(theta)
+                logger.error(
+                    "unidad %s: θ=%d sin %s del mes, su rango se detiene",
+                    unit,
+                    theta,
+                    family_file(FAMILY),
+                )
+                findings.emit(
+                    ctx,
+                    [
+                        findings.family_skeleton_missing(
+                            ctx,
+                            unit,
+                            theta=theta_text(theta),
+                            file=family_file(FAMILY),
+                        )
+                    ],
+                )
+            else:
                 ready.append(theta)
-                continue
-            stopped.add(theta)
-            logger.error(
-                "unidad %s: θ=%d sin %s de L2, su rango se detiene",
-                unit,
-                theta,
-                " ni ".join(absent),
-            )
-            findings.emit(
-                ctx,
-                [
-                    findings.l2_input_missing(
-                        ctx, unit, theta=theta_text(theta), file=name
-                    )
-                    for name in absent
-                ],
-            )
         if not ready:
             continue
         if not _run_unit(unit, ctx, ready, isolated=ctx.unit_process):
@@ -391,13 +427,15 @@ def _monthly(
     thetas: list[int],
     frontier: dict[int, int | None],
     l2: Listing,
+    summaries: Listing,
 ) -> int:
     """Procesa el mes solo para los θ cuya frontera es el mes previo y cuyo L2 ya lo tiene.
 
     Un θ que ya llegó al mes se salta (re-ejecutarlo daría los mismos archivos). Uno
     rezagado no se procesa y deja `theta_behind_frontier` con su frontera y el `reason`:
     `l2_missing` si L2 no tiene el mes de ese θ (es lo que bloquea, también si además hay
-    un hueco en L3) o `l3_frontier` si su serie de L3 no llega al mes previo. La unidad no
+    un hueco en L3), `summaries_missing` si la familia no es S y falta `summaries.parquet` del
+    mes (su esqueleto, §7.3) o `l3_frontier` si su serie de L3 no llega al mes previo. La unidad no
     falla por ellos, salvo que ninguno esté listo ni tenga ya el mes: con rezagados y sin
     nada que avanzar termina con código 1 sin leer L1 (fail-closed), para que un mes perdido
     no pase como éxito.
@@ -410,6 +448,8 @@ def _monthly(
             done.append(theta)
         elif l2_missing(l2, theta, n):
             behind[theta] = "l2_missing"
+        elif _without_skeleton(ctx, summaries, theta, n):
+            behind[theta] = "summaries_missing"
         # Sin frontera solo puede arrancar el primer mes de la serie.
         elif reached == n - 1 or (reached is None and ctx.series_start == unit.at):
             ready.append(theta)
@@ -491,7 +531,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--family",
         default=FAMILY,
-        help=f"familia de descriptores; por ahora solo {FAMILY!r} (la predeterminada)",
+        help=f"familia de descriptores: {', '.join(FAMILIES)} (por defecto {FAMILY!r}). "
+        f"{PATH_FAMILY!r} necesita 'summaries.parquet' del mes",
     )
     parser.add_argument(
         "--force",
@@ -516,7 +557,7 @@ def main(
         _require_single_task(env)
         if args.family not in FAMILIES:
             raise UsageError(
-                f"--family {args.family!r}: por ahora solo existe {FAMILY!r}"
+                f"--family {args.family!r}: las familias son {', '.join(FAMILIES)}"
             )
         declared = args.series_start or env.get("L3_SERIES_START")
         if not declared:
@@ -543,7 +584,7 @@ def main(
                 f"la unidad {start[0]:04d}-{start[1]:02d} es anterior a "
                 f"la serie ({declared})"
             )
-        ctx = _context(args.mode, series_start, env)
+        ctx = _context(args.mode, series_start, env, args.family)
         asset = Unit(*start, asset=args.asset)
         catalog = _catalog(args, env, ctx, asset)
         thetas = _select(catalog, args.thetas)
@@ -553,22 +594,36 @@ def main(
 
     tune_allocators()
     summaries_root, events_root = str(ctx.summaries_root), str(ctx.events_root)
-    listed = list_summaries(summaries_root, asset.key)
-    _report_drift(ctx, asset, catalog, listed)
+    # `summaries.parquet` de cada mes: el esqueleto de las demás familias (§7.3) y la base de
+    # su frontera. El resto de los archivos de la familia, si es otra, se lista aparte.
+    summaries = list_summaries(summaries_root, asset.key)
+    listed = (
+        summaries
+        if args.family == FAMILY
+        else list_summaries(summaries_root, asset.key, args.family)
+    )
+    _report_drift(ctx, asset, catalog, summaries)
     l2 = list_l2(events_root, asset.key)
     forced = args.force
     frontier = (
         {}
         if forced
         else frontiers(
-            thetas, listed, series_start, summaries_root, events_root, asset.key
+            thetas,
+            listed,
+            series_start,
+            summaries_root,
+            events_root,
+            asset.key,
+            args.family,
+            summaries,
         )
     )
     for theta in thetas:
         logger.info("θ=%d frontera=%s", theta, label(frontier.get(theta)))
 
     if args.mode == "monthly":
-        return _monthly(ctx, asset, thetas, frontier, l2)
+        return _monthly(ctx, asset, thetas, frontier, l2, summaries)
 
     if args.to is None:
         last = last_consolidated(str(ctx.landing_root), asset.key)
@@ -589,4 +644,4 @@ def main(
             )
             return 0
     months = resolve_range(first, args.to)
-    return _backfill(months, ctx, asset, thetas, frontier, l2, forced)
+    return _backfill(months, ctx, asset, thetas, frontier, l2, forced, summaries)

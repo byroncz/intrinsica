@@ -76,6 +76,7 @@ from contextlib import AbstractContextManager, ExitStack, closing, nullcontext
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
+from types import MappingProxyType
 
 import dc_pyo3
 import numpy as np
@@ -88,7 +89,14 @@ from dc_frames import (
     family_path,
     l2_path,
 )
-from dc_frames.lake import L1, EventFile, Month, month_of, month_ordinal
+from dc_frames.lake import (
+    L1,
+    EventFile,
+    Month,
+    month_of,
+    month_ordinal,
+    open_parquet,
+)
 
 from l3_dc_descriptors import native
 from l3_dc_descriptors.boundaries import (
@@ -100,6 +108,7 @@ from l3_dc_descriptors.boundaries import (
 )
 from l3_dc_descriptors.cpu import cpu_limit
 from l3_dc_descriptors.errors import L2StateInconsistent, SkeletonMismatch, month_text
+from l3_dc_descriptors.frontier import row_group_sizes
 from l3_dc_descriptors.l2 import (
     EVENTS,
     read_carry_over,
@@ -113,7 +122,15 @@ from l3_dc_descriptors.reconcile import (
     first_reference_bound,
     reconcile,
 )
-from l3_dc_descriptors.schema import FAMILY, STATE_VERSION, SUMMARIES_SCHEMA
+from l3_dc_descriptors.schema import (
+    FAMILY,
+    PATH_FAMILY,
+    PATH_SCHEMA,
+    PATH_STATE_VERSION,
+    SILENCE_US,
+    STATE_VERSION,
+    SUMMARIES_SCHEMA,
+)
 from l3_dc_descriptors.timing import Phases, Stage
 
 logger = logging.getLogger(__name__)
@@ -171,6 +188,18 @@ type Lot = tuple[
     np.ndarray, Sequence[pa.Array], int, bool
 ]  # ids, columnas, high, before_month
 
+# Por familia: su esquema, su `state_version` y los metadatos del archivo además de ella.
+_OUTPUT = MappingProxyType(
+    {
+        FAMILY: (SUMMARIES_SCHEMA, STATE_VERSION, None),
+        PATH_FAMILY: (
+            PATH_SCHEMA,
+            PATH_STATE_VERSION,
+            MappingProxyType({"silence_us": str(SILENCE_US)}),
+        ),
+    }
+)
+
 
 @dataclass(frozen=True, slots=True)
 class ThetaResult:
@@ -182,9 +211,12 @@ class ThetaResult:
     path: str
     rows: int
     content_hash: str
-    reconciliation: Reconciliation
+    reconciliation: Reconciliation | None
     l2_events_content_hash: str
     l2_carry_over_content_hash: str
+    # Ticks de los eventos cerrados y los que eran de meses anteriores, del motor.
+    closed: int = 0
+    before_month: int = 0
 
 
 def ordered[T, R](
@@ -381,13 +413,22 @@ def _open_events(l2_root: str, key, month: Month, text: str) -> EventFile:
         raise
 
 
-def _open_writer(l3_root: str, key, month: Month, text: str, skeleton: L2Events):
-    """El `FamilyWriter` del θ, ya abierto (su temporal creado)."""
+def _open_writer(
+    l3_root: str, key, month: Month, text: str, skeleton: L2Events, family: str
+):
+    """El `FamilyWriter` de la familia del θ, ya abierto (su temporal creado).
+
+    El esqueleto en RAM es el mismo en las dos familias: `path.parquet` repite el de
+    `summaries.parquet`, que repitió el de `events.parquet` al escribirse (la compuerta
+    comprueba sus filas por row group, `_path_gate`).
+    """
+    schema, version, metadata = _OUTPUT[family]
     writer = FamilyWriter(
-        family_path(l3_root, key, text, month, FAMILY),
-        SUMMARIES_SCHEMA,
-        STATE_VERSION,
+        family_path(l3_root, key, text, month, family),
+        schema,
+        version,
         skeleton,
+        metadata=metadata,
     )
     try:
         return writer.__enter__()
@@ -446,6 +487,38 @@ def _read_gate(
         ).direction
     )
     return carry, read_lineage(l2_root, key, text, month), previous
+
+
+def _path_gate(
+    l2_root: str,
+    l3_root: str,
+    key: tuple[str, str, str],
+    month: Month,
+    text: str,
+    row_groups: list[int],
+):
+    """La compuerta de entrada de la familia T de un θ (§7.3, §9.2): `summaries.parquet` del mes
+    existe y sus filas por row group son las de `events.parquet`, y la huella de L2.
+
+    Devuelve lo mismo que `_read_gate`; T no concilia ticks, así que no lee carry-overs
+    (`carry` es `None` y la dirección previa, 0). Sin `summaries.parquet` falla con
+    `FramesInputError`: la CLI no lanza el mes sin él, así que solo ocurre si desaparece
+    entre el listado y la unidad.
+    """
+    path = family_path(l3_root, key, text, month, FAMILY)
+    with closing(open_parquet(path, f"{FAMILY}.parquet del θ {text}")) as skeleton:
+        sizes = row_group_sizes(skeleton)
+    if sizes != row_groups:
+        raise SkeletonMismatch(
+            text,
+            month,
+            PATH_FAMILY,
+            f"sus filas por row group no son las de events.parquet: {FAMILY}.parquet "
+            f"tiene {len(sizes)} row groups con {sum(sizes)} filas y events.parquet "
+            f"{len(row_groups)} con {sum(row_groups)}",
+            source=f"{FAMILY}.parquet",
+        )
+    return None, read_lineage(l2_root, key, text, month), 0
 
 
 def _await_gates(inputs: Sequence[_Input]) -> None:
@@ -644,8 +717,13 @@ def summarize_month(
     inflight_bytes: int | None = None,
     lot_events: int | None = None,
     meta_workers: int | None = None,
+    family: str = FAMILY,
 ) -> dict[Decimal, ThetaResult]:
-    """Escribe `summaries.parquet` del mes para cada θ y devuelve lo que dejó de cada uno.
+    """Escribe el archivo de la `family` del mes para cada θ y devuelve lo que dejó de cada uno.
+
+    `family` es `summaries` (S, `summaries.parquet`) o `path` (T, `path.parquet`). T corre la
+    misma pasada con el motor de T (`SILENCE_US`), repite el esqueleto de `summaries.parquet`
+    del mes, que debe existir (§7.3), y no concilia ticks: ya los conciliaba S.
 
     Los eventos son los que cierran en `month` (la partición de L2); sus ticks pueden
     estar en meses anteriores de L1, que el lector relee. `series_start` es el primer mes
@@ -703,8 +781,11 @@ def summarize_month(
         raise ValueError(
             f"meta_workers {meta_workers} pasa del tope {MAX_META_WORKERS}"
         )
+    if family not in _OUTPUT:
+        raise ValueError(f"familia {family!r}: debe ser una de {sorted(_OUTPUT)}")
     if lot_events is not None and lot_events < 0:
         raise ValueError(f"lot_events {lot_events} debe ser al menos 0")
+    is_path = family == PATH_FAMILY
     threads = _workers(threads, len(values))
     phases.threads = threads
     # Sin pool de E/S (`threads` 1) todo va en serie: tampoco hay pool de metadatos.
@@ -748,17 +829,12 @@ def summarize_month(
         # carry-over de todos primero, que se espera antes del primer `push`, y después los
         # escritores, que se esperan al escribir el primer row group sellado de cada θ.
         for item, text in zip(inputs, texts, strict=True):
-            item.gate = _submit(
-                meta,
-                _timed,
-                phases.carry_gate,
-                _read_gate,
-                l2_root,
-                key,
-                month,
-                series_start,
-                text,
+            gate = (
+                (_path_gate, l2_root, l3_root, key, month, text, item.events.row_groups)
+                if is_path
+                else (_read_gate, l2_root, key, month, series_start, text)
             )
+            item.gate = _submit(meta, _timed, phases.carry_gate, *gate)
         for item, text in zip(inputs, texts, strict=True):
             item.writer = _submit(
                 meta,
@@ -770,12 +846,17 @@ def summarize_month(
                 month,
                 text,
                 item.events,
+                family,
             )
         # El motor pide los tamaños de row group de los 50 θ, que están en el pie de sus
         # `events.parquet`: no necesita los escritores abiertos.
         built = time.perf_counter()
         engine = native.new_engine(
-            values, [item.events.row_groups for item in inputs], phases.engine_threads
+            values,
+            [item.events.row_groups for item in inputs],
+            phases.engine_threads,
+            family,
+            SILENCE_US if is_path else 0,
         )
         stack.callback(engine.close)
         phases.engine_build_s += time.perf_counter() - built
@@ -803,7 +884,8 @@ def summarize_month(
         extremes = [_require_statistics(f, "extreme_agg_trade_id") for f in files]
         # Los ids hasta los que la conciliación cuenta ticks, con lo que se sabe antes de
         # leer L1; si el motor encuentra otros, `count_up_to` decodifica como siempre.
-        l1.watch(_reconciliation_targets(inputs, references, extremes))
+        if not is_path:
+            l1.watch(_reconciliation_targets(inputs, references, extremes))
         # La densidad del mes (eventos de los θ por tick de L1) fija el tramo: con los pies de
         # L2 y de L1, sin leer datos.
         phases.lot_ticks = _lot_ticks(
@@ -824,6 +906,7 @@ def summarize_month(
             texts,
             month,
             phases.write,
+            family,
         )
         stack.callback(sink.stop)
         collector = stack.enter_context(Collector(engine, sink))
@@ -875,21 +958,25 @@ def summarize_month(
             raise converted from error
 
         wait([item.writer for item in inputs])
-        family = [item.writer.result() for item in inputs]
+        files = [item.writer.result() for item in inputs]
 
         begun = time.perf_counter()
         reconciled = ordered(
             pool,
-            lambda i: reconcile(
-                l1,
-                theta=texts[i],
-                month=month,
-                closed=stats[i][1],
-                before_month=stats[i][2],
-                last_extreme=stats[i][4],
-                first_reference=stats[i][3],
-                previous_direction=inputs[i].previous_direction,
-                carry=inputs[i].carry,
+            lambda i: (
+                None
+                if is_path
+                else reconcile(
+                    l1,
+                    theta=texts[i],
+                    month=month,
+                    closed=stats[i][1],
+                    before_month=stats[i][2],
+                    last_extreme=stats[i][4],
+                    first_reference=stats[i][3],
+                    previous_direction=inputs[i].previous_direction,
+                    carry=inputs[i].carry,
+                )
             ),
             range(len(values)),
         )
@@ -898,18 +985,20 @@ def summarize_month(
         begun = time.perf_counter()
         digests = ordered(
             meta,
-            lambda i: _commit(phases, family[i], texts[i], month),
+            lambda i: _commit(phases, files[i], texts[i], month, family),
             range(len(values)),
         )
         phases.publish_s += time.perf_counter() - begun
         return {
             theta: ThetaResult(
-                family[i].path,
+                files[i].path,
                 stats[i][0],
                 digests[i],
                 reconciled[i],
                 inputs[i].lineage.events,
                 inputs[i].lineage.carry_over,
+                stats[i][1],
+                stats[i][2],
             )
             for i, theta in enumerate(values)
         }
@@ -944,13 +1033,15 @@ def _reconciliation_targets(inputs, references, extremes) -> list[int]:
     return targets
 
 
-def _commit(phases: Phases, writer: FamilyWriter, text: str, month: Month) -> str:
+def _commit(
+    phases: Phases, writer: FamilyWriter, text: str, month: Month, family: str
+) -> str:
     """Publica el archivo del θ y devuelve su `content_hash`."""
     try:
         with phases.commit.task():
             return writer.commit()
     except FamilySkeletonMismatch as error:
-        raise SkeletonMismatch(text, month, FAMILY, error.detail) from error
+        raise SkeletonMismatch(text, month, family, error.detail) from error
 
 
 def _timed[R](stage: Stage, fn: Callable[..., R], *args) -> R:

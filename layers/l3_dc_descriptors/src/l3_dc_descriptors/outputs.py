@@ -59,7 +59,9 @@ class SealedWriters:
         texts: Sequence[str],
         month: Month,
         clock: BusyClock,
+        family: str = FAMILY,
     ) -> None:
+        self._family = family
         self._pool = pool
         self._writers = writers
         self._thetas = thetas
@@ -139,11 +141,13 @@ class SealedWriters:
     def _write(self, position: int, sealed: tuple) -> None:
         try:
             with self._clock.busy():
-                _, _, batch = native.to_batch(self._thetas[position], sealed)
+                _, _, batch = native.to_batch(
+                    self._thetas[position], sealed, self._family
+                )
                 self._writers[position].write_row_group(batch)
         except FamilySkeletonMismatch as error:
             raise SkeletonMismatch(
-                self._texts[position], self._month, FAMILY, error.detail
+                self._texts[position], self._month, self._family, error.detail
             ) from error
 
     def join(self) -> None:
