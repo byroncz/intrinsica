@@ -56,7 +56,7 @@ resource "google_cloud_run_v2_job" "this" {
 
       containers {
         image = var.image
-        args  = ["--mode", each.key]
+        args  = coalesce(each.value.args, ["--mode", each.key])
 
         dynamic "env" {
           for_each = coalesce(each.value.env, var.env)

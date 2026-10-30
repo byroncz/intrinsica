@@ -18,6 +18,9 @@
 # anterior; lo decide la CLI) y no admite to distinto de from ni force. Ambos
 # admiten series_start y family (ITSC-394: summaries o path; el backfill de path va
 # después del de summaries, que escribe el esqueleto de cada mes).
+# La cadena mensual corre además el job l3-monthly-path (ITSC-396: --mode monthly
+# --family path, después de l3-monthly). No está en la lista: a mano, la pasada de T
+# se lanza como l3-monthly con family = path, que da los mismos argumentos.
 #
 # ops-script (ITSC-298) no es una capa de datos: corre un script Python de
 # gs://<proyecto>-ops/scripts/ (input script, con args libres en args) y deja

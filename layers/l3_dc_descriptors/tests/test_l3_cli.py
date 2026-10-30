@@ -480,6 +480,7 @@ def test_monthly_reports_the_stragglers_and_goes_on(lake, tmp_path, catalog):
         "theta": theta_text(lake.thetas[-1]),
         "frontier": None,
         "reason": "l3_frontier",
+        "family": "summaries",
     }
     assert len(l3_files(lake)) == len(lake.thetas[:-1]) * 2
 
@@ -494,6 +495,7 @@ def test_monthly_names_l2_as_the_reason_when_it_has_no_month(lake, tmp_path, cat
         "theta": theta_text(BIG),
         "frontier": "2017-08",
         "reason": "l2_missing",
+        "family": "summaries",
     }
     assert len(l3_files(lake)) == 2 * len(lake.thetas) - 1
 

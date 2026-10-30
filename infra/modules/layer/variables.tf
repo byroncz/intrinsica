@@ -64,9 +64,10 @@ variable "max_retries" {
 }
 
 variable "modes" {
-  description = "Modos de la capa: mapa modo → acceso. Cada modo crea el job <layer>-<modo> y la service account <layer>-<modo>. access es un mapa nombre de bucket → {role, prefixes}: el rol de storage y los prefijos de objeto donde lo tiene. timeout (opcional, segundos), cpu y memory (opcionales) sobrescriben var.timeout, var.cpu y var.memory para ese modo; env (opcional) reemplaza a var.env, no se mezcla con él."
+  description = "Modos de la capa: mapa modo → acceso. Cada modo crea el job <layer>-<modo> y la service account <layer>-<modo>. access es un mapa nombre de bucket → {role, prefixes}: el rol de storage y los prefijos de objeto donde lo tiene. args (opcional) reemplaza los argumentos del contenedor, que por defecto son ["--mode", <modo>]: sirve a un job que es un modo de la CLI con opciones fijas (l3-monthly-path). timeout (opcional, segundos), cpu y memory (opcionales) sobrescriben var.timeout, var.cpu y var.memory para ese modo; env (opcional) reemplaza a var.env, no se mezcla con él."
   type = map(object({
     timeout = optional(number)
+    args    = optional(list(string))
     cpu     = optional(string)
     memory  = optional(string)
     env     = optional(map(string))

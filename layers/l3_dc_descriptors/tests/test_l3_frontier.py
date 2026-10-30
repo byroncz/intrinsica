@@ -314,6 +314,7 @@ def test_monthly_path_names_the_path_frontier_as_the_reason(lake, tmp_path):
     assert len(rows) == len(lake.thetas)
     assert {r["details"]["reason"] for r in rows} == {"l3_frontier"}
     assert {r["details"]["frontier"] for r in rows} == {"2017-08"}
+    assert {r["details"]["family"] for r in rows} == {"path"}
     assert not file_of(lake.l3, SMALL, M3, "path.parquet").exists()
     assert before == {p: p.read_bytes() for p in lake.l3.rglob("summaries.parquet")}
 
@@ -333,6 +334,7 @@ def test_monthly_path_names_summaries_as_the_reason_when_the_month_has_none(
         "theta": theta_text(BIG),
         "frontier": "2017-08",
         "reason": "summaries_missing",
+        "family": "path",
     }
     assert file_of(lake.l3, SMALL, M2, "path.parquet").exists()
     assert not file_of(lake.l3, BIG, M2, "path.parquet").exists()
