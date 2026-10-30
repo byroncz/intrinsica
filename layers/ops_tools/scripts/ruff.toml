@@ -10,4 +10,5 @@ extend-exclude = [
     "l2_event_durations.py",
     "l3_derived_check.py",
     "l3_gap_probe.py",
+    "l3_path_check.py",
 ]
