@@ -833,7 +833,7 @@ mismo que traen las excepciones del resumidor, de las que sale la mayoría de lo
   `l2_missing` si L2 no tiene el mes de ese θ, `summaries_missing` si la familia no es
   `summaries` y falta `summaries.parquet` del mes, y `l3_frontier` si la serie de L3 de la familia
   no llega al mes previo (se agregó al catálogo sin backfill, o tiene un hueco); si pasan
-  varias, la primera de ese orden, que es lo que bloquea No falla la unidad mientras otros θ avancen o ya
+  varias, la primera de ese orden, que es lo que bloquea. No falla la unidad mientras otros θ avancen o ya
   tengan el mes; si ninguno está listo ni lo tiene, `monthly` termina con código 1 sin leer
   L1. Se resuelve lanzando `backfill` sin `--from`.
 - **`theta_config_drift`** (`info`, `pass`): el lago de L3 tiene particiones de un θ que el
