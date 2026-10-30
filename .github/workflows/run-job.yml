@@ -16,7 +16,8 @@
 # l3-backfill va en una sola tarea que recorre el rango y la frontera de cada θ
 # decide desde dónde avanza (from vacío); l3-monthly resume un mes (vacío, el mes
 # anterior; lo decide la CLI) y no admite to distinto de from ni force. Ambos
-# admiten series_start.
+# admiten series_start y family (ITSC-394: summaries o path; el backfill de path va
+# después del de summaries, que escribe el esqueleto de cada mes).
 #
 # ops-script (ITSC-298) no es una capa de datos: corre un script Python de
 # gs://<proyecto>-ops/scripts/ (input script, con args libres en args) y deja
@@ -73,6 +74,14 @@ on:
         description: "Solo L2 y L3: primer mes de la serie, YYYY-MM (vacío: la CLI usa L2_SERIES_START o L3_SERIES_START del stack)"
         type: string
         required: false
+      family:
+        description: "Solo l3-backfill y l3-monthly: familia de descriptores que se escribe. summaries (por defecto) o path (la familia T, necesita summaries.parquet del mes: corre antes el backfill de summaries). Los demás jobs la rechazan si no es summaries"
+        type: choice
+        options:
+          - summaries
+          - path
+        default: summaries
+        required: false
       script:
         description: "Solo ops-script (obligatorio ahí): URI del script, gs://<proyecto>-ops/scripts/<nombre>.py"
         type: string
@@ -95,6 +104,7 @@ jobs:
       TO: ${{ inputs.to }}
       FORCE: ${{ inputs.force }}
       SERIES_START: ${{ inputs.series_start }}
+      FAMILY: ${{ inputs.family }}
       SCRIPT: ${{ inputs.script }}
       SCRIPT_ARGS: ${{ inputs.args }}
       GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
@@ -109,6 +119,13 @@ jobs:
           # de Cloud Run y gastaría una ejecución.
           if [[ -n "$SERIES_START" && "$JOB" != l2-* && "$JOB" != l3-* ]]; then
             echo "::error::series_start solo aplica a los jobs l2-* y l3-*, no a $JOB"
+            exit 1
+          fi
+          # La familia es de L3 (ITSC-394): la CLI de los demás jobs no define --family y
+          # argparse saldría con 2 dentro de Cloud Run. summaries es el valor por defecto
+          # del input y no cuenta.
+          if [[ -n "$FAMILY" && "$FAMILY" != summaries && "$JOB" != l3-backfill && "$JOB" != l3-monthly ]]; then
+            echo "::error::family solo aplica a l3-backfill y l3-monthly, no a $JOB"
             exit 1
           fi
           # l3-monthly resume un mes y no reprocesa: su CLI sale con 2 con --force.
@@ -160,7 +177,7 @@ jobs:
           # mes cerrado de L1; to = from = un solo mes.
           # Para ops-script devuelve --script y --script-args con el separador
           # ;; de gcloud, porque el texto libre puede llevar comas.
-          args="$(.github/scripts/run-job-args.sh "$JOB" "$FROM" "$TO" "$FORCE" "$SERIES_START" "$SCRIPT" "$SCRIPT_ARGS")"
+          args="$(.github/scripts/run-job-args.sh "$JOB" "$FROM" "$TO" "$FORCE" "$SERIES_START" "$SCRIPT" "$SCRIPT_ARGS" "$FAMILY")"
           # --args reemplaza los argumentos del contenedor, no el ENTRYPOINT.
           # Con --format, gcloud imprime el nombre de la ejecución al terminar.
           inicio="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
