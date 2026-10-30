@@ -102,22 +102,27 @@ module "orchestration" {
       schedule    = "0 6 8 * *"
       paused      = false
       description = "Cierre mensual de L1, tras el primer lunes de M+1."
-      # El cierre mensual encadena tres jobs, en este orden: el workflow espera
+      # El cierre mensual encadena cuatro jobs, en este orden: el workflow espera
       # el fin de monthly-close y, solo si fue exitoso, ejecuta l2-monthly; espera
       # su fin y, solo si fue exitoso, ejecuta viz-tiles; espera su fin y, solo si
-      # fue exitoso, ejecuta l3-monthly (el último no se espera). Los tres corren
-      # sin overrides: l2-monthly procesa el mes que L1 acaba de cerrar, y
-      # viz-tiles y l3-monthly toman el mes anterior, el mismo.
+      # fue exitoso, ejecuta l3-monthly; espera su fin y, solo si fue exitoso,
+      # ejecuta l3-monthly-path (el último no se espera). Los cuatro corren sin
+      # overrides: l2-monthly procesa el mes que L1 acaba de cerrar, y viz-tiles,
+      # l3-monthly y l3-monthly-path toman el mes anterior, el mismo.
       # L3 va al final y viz no queda detrás de ella (decisión del humano,
       # 2026-10-13). Costo asumido: si viz-tiles falla un mes, l3-monthly no corre
       # y el humano lo lanza desde run-job.yml.
+      # l3-monthly-path (ITSC-396) es la pasada de la familia T y necesita el
+      # summaries.parquet del mes que escribe l3-monthly: por eso va después y solo
+      # si ese terminó con código 0. Es el último, así que su fallo no afecta a S,
+      # que ya publicó; el humano lo relanza con l3-monthly y family = path.
       # Los nombres siguen la convención <capa>-<modo> del módulo layer y no
       # salen de los outputs job_names de los stacks l2, viz y l3: leerlos exigiría
       # remote_state y outputs que estos stacks no necesitan, porque el nombre no
       # cambia sin cambiar la convención. Los stacks l2, viz y l3 deben estar
       # aplicados antes: el IAM se da sobre esos jobs. El apply de l3 va antes que
       # el de l1.
-      next_jobs = ["l2-monthly", "viz-tiles", "l3-monthly"]
+      next_jobs = ["l2-monthly", "viz-tiles", "l3-monthly", "l3-monthly-path"]
     }
   }
 }

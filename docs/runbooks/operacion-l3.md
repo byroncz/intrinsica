@@ -74,7 +74,9 @@ relanza los mismos inputs.
      --format='yaml(spec.template.spec.template.spec)'
    ```
 
-   Deben existir `l3-backfill` y `l3-monthly`; el primero con `timeoutSeconds:
+   Deben existir `l3-backfill`, `l3-monthly` y `l3-monthly-path` (este último con
+   `args` `--mode monthly --family path` y los mismos recursos que `l3-monthly`,
+   ITSC-396; compruébalo con `gcloud run jobs describe l3-monthly-path`); el primero con `timeoutSeconds:
    10800`, `maxRetries: 1`, `cpu: '2'` y `memory: 4Gi` en `limits` (desde el apply de ITSC-352;
    antes 86400 y `'4'`). Las raíces
    (`L3_LANDING_ROOT`, `L3_EVENTS_ROOT`, `L3_SUMMARIES_ROOT`, `L3_DQ_ROOT`),
@@ -107,6 +109,7 @@ orden. `l3-monthly` resume un mes.
 | --- | --- | --- | --- |
 | `l3-backfill` | Vacío: la frontera de cada θ decide desde dónde avanza | Vacío: hasta el último mes con consolidado en L1. Si lo pasas, el workflow lo manda siempre, aunque sea igual a `from` | Reprocesa desde `from` e ignora la frontera; **exige `from`** |
 | `l3-monthly` | El mes; vacío = el mes anterior | Vacío o igual a `from`; **la CLI rechaza otro valor** (código 2) | **No lo admite**: el workflow falla antes de lanzar. Usa `l3-backfill` con `from` |
+| `l3-monthly-path` | **No está en la lista de *Run job***: la cadena mensual lo corre solo. A mano, se lanza como `l3-monthly` con `family` = `path` | Igual que `l3-monthly` | Igual que `l3-monthly`: no lo admite |
 
 `series_start` vacío usa el del stack. `family` (solo `l3-backfill` y `l3-monthly`;
 `summaries` por defecto, o `path`) agrega `--family=<f>`; los demás jobs rechazan `path`.
@@ -271,7 +274,7 @@ repares un archivo de `l3/` a mano.
 | `input_missing` | `error` | El mes no tiene `consolidated.parquet` ni provisionales | Corre `l1-backfill` o `l1-monthly-close` del mes ([runbook de L1](operacion-l1.md)); luego relanza |
 | `input_provisional_only` | `error` | El mes solo tiene `provisional-day=DD.parquet` | Espera el cierre de L1 (el consolidado sale el primer lunes del mes siguiente) o lanza `l1-monthly-close`; luego relanza |
 | `theta_catalog_invalid` | `error` | El catálogo no existe, no se lee o incumple TRD-L2 §7.3. Código 2, sin escribir | Corrige `manifest/l2/thetas.yaml` ([runbook de L2](operacion-l2.md#el-catálogo-de-θ)); relanza |
-| `theta_behind_frontier` | `warning` | `monthly` no procesó un θ; `details.reason` es `l3_frontier` (la serie de L3 de la familia tiene un hueco o no existe), `l2_missing` (L2 no tiene el mes) o `summaries_missing` (familia `path` sin `summaries.parquet` del mes) | `l3_frontier`: lanza `l3-backfill` de esa familia sin `from` ni `to`, que retoma desde la frontera de cada θ. `l2_missing`: completa L2 primero. `summaries_missing`: corre el backfill de `summaries`. No falla la unidad si otros θ avanzan |
+| `theta_behind_frontier` | `warning` | `monthly` no procesó un θ; `details.family` es la pasada (`summaries` o `path`, ITSC-396) y `details.reason` es `l3_frontier` (la serie de L3 de la familia tiene un hueco o no existe), `l2_missing` (L2 no tiene el mes) o `summaries_missing` (familia `path` sin `summaries.parquet` del mes) | `l3_frontier`: lanza `l3-backfill` de esa familia sin `from` ni `to`, que retoma desde la frontera de cada θ. `l2_missing`: completa L2 primero. `summaries_missing`: corre el backfill de `summaries`. No falla la unidad si otros θ avanzan |
 | `theta_config_drift` | `info` | L3 tiene particiones de un θ que ya no está en el catálogo | Informa. Quitar un θ del catálogo no borra nada; si fue un error, restáuralo |
 | `summaries_summary` | `info` | Uno por θ, mes y familia: filas, `content_hash` del archivo de la familia y de las entradas de L2 que usó | Es el linaje contra L2: sirve para comparar corridas y para detectar un mes obsoleto |
 | `unit_timing` | `info` | Uno por unidad (mes): pared, tiempo por fase, CPU efectiva y consumida (`cpu_s`, `cpu_utilization`) y bytes leídos | Es la fuente de las cifras de "Volumen y costo" |
@@ -406,11 +409,16 @@ histórico). L2 no cambió de contenido; sí cambió L3 desde 2026-02.
 ## La cadena mensual
 
 `monthly-close` de L1 dispara el workflow `l1-run-job`, que encadena
-**`l1-monthly-close` → `l2-monthly` → `viz-tiles` → `l3-monthly`**, cada uno solo
-si el anterior terminó bien y sin overrides (cada job toma el mes anterior). L3
-va al final porque depende del cierre de L2 y de que viz no quede detrás
-(decisión del 2026-10-13, [TRD-L3 §11](../TRD/l3.md#11-operaciones)). El workflow
-no espera a `l3-monthly`: sigue su ejecución en *Cloud Run → Jobs → l3-monthly*.
+**`l1-monthly-close` → `l2-monthly` → `viz-tiles` → `l3-monthly` → `l3-monthly-path`**,
+cada uno solo si el anterior terminó bien y sin overrides (cada job toma el mes
+anterior). L3 va al final porque depende del cierre de L2 y de que viz no quede
+detrás (decisión del 2026-10-13, [TRD-L3 §11](../TRD/l3.md#11-operaciones)).
+`l3-monthly` escribe `summaries.parquet` (familia S) y `l3-monthly-path`, la pasada
+de la familia T (`--mode monthly --family path`, ITSC-396), lo necesita como
+esqueleto: por eso el workflow espera a `l3-monthly` y T corre solo si S terminó
+con código 0. El workflow no espera a `l3-monthly-path`: sigue su ejecución en
+*Cloud Run → Jobs → l3-monthly-path*. Así `path.parquet` del mes nuevo existe sin
+intervención y la frontera de T sigue a la de S mes a mes.
 
 **Si `viz-tiles` falla un mes, `l3-monthly` no corre.** Costo asumido del diseño.
 Qué hacer:
@@ -420,8 +428,20 @@ Qué hacer:
 2. Lanza **`l3-monthly` a mano** (*Run job*, `job` = `l3-monthly`, `from` = el
    mes, `to` y `force` vacíos). No vuelvas a lanzar `monthly-close`: relanzaría
    `l2-monthly`.
-3. Verifica que no queden `theta_behind_frontier`: si los hay,
-   `l3-backfill` sin `from` ni `to` los pone al día.
+3. Lanza **`l3-monthly` con `family` = `path`** (mismo mes, `to` y `force` vacíos):
+   la cadena no llegó a `l3-monthly-path`, y sin este paso la frontera de T
+   queda un mes detrás de la de S.
+4. Verifica que no queden `theta_behind_frontier`, de S (`details.family` =
+   `summaries`) ni de T (`path`): si los hay, `l3-backfill` sin `from` ni `to`,
+   con la familia que corresponda, los pone al día.
+
+**Si `l3-monthly-path` falla un mes, S no se ve afectada**: ya publicó, y el
+workflow ya había terminado bien porque no espera al último eslabón; el fallo solo
+se ve en *Cloud Run → Jobs → l3-monthly-path* y en los hallazgos de T. Relánzalo
+a mano como `l3-monthly` con `family` = `path` y el mes. Si el mes quedó rezagado
+(`theta_behind_frontier` con `family` = `path`), `l3-backfill` con `family` =
+`path`, sin `from` ni `to`, lo pone al día. `l3-monthly-path` termina con código 1
+en las mismas condiciones que `l3-monthly`: ningún θ listo y rezagados.
 
 Un `l3-monthly` solo termina con código 1 si ningún θ estaba listo y había
 rezagados (un mes perdido no pasa como éxito); con algún θ al día o nada que

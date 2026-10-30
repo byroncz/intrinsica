@@ -292,7 +292,7 @@ desde el apply de `l1`, cuya fecha queda registrada en la card.
 | Scheduler | Cron (UTC) | Qué hace |
 |---|---|---|
 | `daily` | `0 3 * * *` | Ingiere solo D-1; no recupera días atrasados. |
-| `monthly-close` | `0 6 8 * *` | Cierra el mes anterior y encadena `l2-monthly`, `viz-tiles` y `l3-monthly`. |
+| `monthly-close` | `0 6 8 * *` | Cierra el mes anterior y encadena `l2-monthly`, `viz-tiles`, `l3-monthly` y `l3-monthly-path`. |
 
 **No lances a mano el mismo mes y modo que Scheduler esté ejecutando.** Para
 reintentar o rellenar, usa `run-job.yml` fuera de esa ventana. Para pausar uno,
@@ -453,12 +453,18 @@ revisa antes de aprobar el `apply`.
 
 ## Stack l3 (Descriptores por evento)
 
-Instancia del módulo `layer` con dos modos: `l3-backfill` y `l3-monthly`, cada
-uno con su service account y una sola tarea (sin task array). Imagen
+Instancia del módulo `layer` con tres modos: `l3-backfill`, `l3-monthly` y
+`l3-monthly-path` (la pasada mensual de la familia T, ITSC-396), cada uno con su
+service account y una sola tarea (sin task array). `l3-monthly-path` es el mismo
+modo `monthly` de la CLI con `--family path`: usa `args = ["--mode", "monthly",
+"--family", "path"]` del módulo `layer` y hereda imagen, CPU, memoria y timeout de
+`l3-monthly` (la pared de T fue 11,4 % menor que la de S en el backfill de T
+de ITSC-394, TRD-L3 §10.2, así que los 1 200 s
+alcanzan). Imagen
 `l3_dc_descriptors:<VERSION>`, de `layers/l3_dc_descriptors/VERSION`. Diseño y
 decisiones en [TRD-L3 §11](../docs/TRD/l3.md#11-operaciones).
 
-**Buckets y accesos.** Las dos cuentas tienen el mismo acceso y nada más:
+**Buckets y accesos.** Las tres cuentas tienen el mismo acceso y nada más:
 
 | Bucket | Rol | Prefijo | Para qué |
 |---|---|---|---|
@@ -590,10 +596,15 @@ que cubriera 2020-2022 habría rondado 7 h. El detalle de la regla está en el
 [runbook de operación de L3](../docs/runbooks/operacion-l3.md#backfill-histórico-por-rangos).
 
 **Cadena mensual.** El stack `l1` pasa a
-`next_jobs = ["l2-monthly", "viz-tiles", "l3-monthly"]` en `monthly-close`: el
-workflow corre cada job solo si el anterior terminó bien, y L3 queda al final.
-Costo asumido: si `viz-tiles` falla un mes, `l3-monthly` no corre y el humano lo
-lanza desde *Run job*. Ninguno recibe overrides: `l3-monthly` toma el mes anterior.
+`next_jobs = ["l2-monthly", "viz-tiles", "l3-monthly", "l3-monthly-path"]` en
+`monthly-close`: el workflow corre cada job solo si el anterior terminó bien, y L3
+queda al final. Costo asumido: si `viz-tiles` falla un mes, `l3-monthly` no corre y
+el humano lo lanza desde *Run job*. `l3-monthly` se espera, porque
+`l3-monthly-path` necesita el `summaries.parquet` del mes que él escribe, y T corre
+solo si S terminó con código 0. `l3-monthly-path` es el último y el único que no se
+espera: si falla, S ya publicó y la frontera de T queda un mes detrás; el humano lo
+relanza como `l3-monthly` con `family` = `path`. Ninguno recibe overrides: los dos
+mensuales toman el mes anterior.
 
 **Orden de apply de un despliegue desde cero, todo por el humano**:
 
@@ -604,7 +615,8 @@ lanza desde *Run job*. Ninguno recibe overrides: `l3-monthly` toma el mes anteri
 2. `l3`, tras mergear y cuando CI publique `l3_dc_descriptors:<versión>`. Va
    **antes** que `l1`.
 3. `l1`: el workflow de la orquestación recibe `run.invoker` y `run.viewer`
-   sobre `l3-monthly`, que debe existir. Si `l1` se aplica primero, falla.
+   sobre `l3-monthly` y `l3-monthly-path`, que deben existir. Si `l1` se aplica
+   primero, falla.
 
 **Migración de `frames` a `dc-descriptors` (ITSC-350)**, sobre un proyecto que ya
 tiene `l3` aplicado con `frames`. Todo por el humano, después del merge:
@@ -624,10 +636,12 @@ tiene `l3` aplicado con `frames`. Todo por el humano, después del merge:
 3. `permisos.py` desde *Run job* (`ops-script`): la última línea debe ser
    `permisos: 13 de 13 como se esperaba`.
 
-El plan de `l3` en el PR muestra las dos cuentas, sus bindings y los dos jobs; el
-de `l1`, el workflow `l1-run-job` con la cadena nueva y dos bindings nuevos:
-`run.invoker` sobre `l3-monthly` y `run.viewer` sobre `viz-tiles`, que ahora el
-workflow espera.
+Desde cero, el plan de `l3` muestra las tres cuentas, sus bindings y los tres jobs.
+En el PR de ITSC-396, sobre un proyecto ya aplicado, crea solo `l3-monthly-path` con
+su cuenta y sus bindings, y actualiza la imagen (0.21.1) de `l3-backfill` y
+`l3-monthly`. El plan de `l1` muestra el workflow `l1-run-job` con la cadena nueva y dos bindings
+nuevos: `run.invoker` sobre `l3-monthly-path` y `run.viewer` sobre `l3-monthly`, que ahora el
+workflow espera (el `run.invoker` sobre `l3-monthly` ya existía).
 
 **Lanzar los jobs.** *Actions → Run job* (nunca un agente):
 
@@ -636,7 +650,10 @@ workflow espera.
   `consolidated.parquet` en L1. `force` reprocesa desde `from` e ignora la
   frontera (exige `from`). `series_start` es opcional.
 - `l3-monthly`: `from` es el mes (vacío = el mes anterior); `to` vacío o igual a
-  `from`; no admite `force`.
+  `from`; no admite `force`. La pasada de T se lanza
+  como `l3-monthly` con `family` = `path` (no hay una opción `l3-monthly-path` en
+  *Run job*: es el mismo modo con otra familia); necesita el `summaries.parquet`
+  del mes.
 
 Regla: no lanzar a mano el mismo mes y modo que Scheduler esté ejecutando.
 

@@ -131,7 +131,8 @@ def theta_behind_frontier(
 ) -> Finding:
     """`monthly` no procesó el θ (§8.3). `reason` es `l3_frontier` (su serie de L3 no
     llega al mes previo), `l2_missing` (L2 no tiene el mes de ese θ) o `summaries_missing`
-    (una familia distinta de S, y `summaries.parquet` del mes no existe).
+    (una familia distinta de S, y `summaries.parquet` del mes no existe). `family` dice
+    cuál de las dos pasadas mensuales (S o T) dejó el θ rezagado.
     """
     return finding(
         ctx,
@@ -139,7 +140,12 @@ def theta_behind_frontier(
         "theta_behind_frontier",
         severity=Severity.WARNING,
         status=Status.FAIL,
-        details={"theta": theta, "frontier": frontier, "reason": reason},
+        details={
+            "theta": theta,
+            "frontier": frontier,
+            "reason": reason,
+            "family": ctx.family,
+        },
     )
 
 

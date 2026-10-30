@@ -91,5 +91,15 @@ module "layer" {
     # Actions. La suma real sale del backfill completo con este tamaño.
     backfill = { timeout = 10800, access = local.access }
     monthly  = { access = local.access }
+
+    # La pasada de la familia T (ITSC-396): el mismo modo monthly de la CLI con
+    # --family path, en su propio job para que el workflow la corra después de la
+    # de S y un fallo de T no toque lo que S ya publicó. Mismos recursos que
+    # monthly (los heredados del módulo) y misma imagen. El nombre del modo no es
+    # el de la CLI, de ahí los args propios.
+    monthly-path = {
+      args   = ["--mode", "monthly", "--family", "path"]
+      access = local.access
+    }
   }
 }

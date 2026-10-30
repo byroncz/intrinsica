@@ -829,7 +829,8 @@ mismo que traen las excepciones del resumidor, de las que sale la mayoría de lo
   [TRD-L2 §7.3](TRD/l2.md#73-el-catálogo-de-θ) (`details.source`, `details.problems`).
   Código 2, sin escribir datos; `year` y `month` son los del primer mes que iba a procesar.
 - **`theta_behind_frontier`** (`warning`, `fail`): `monthly` no procesó un θ
-  (`details.theta`, `details.frontier` en `YYYY-MM` o `null`, `details.reason`). `reason` es
+  (`details.theta`, `details.frontier` en `YYYY-MM` o `null`, `details.reason`,
+  `details.family`: `summaries` o `path`, la pasada mensual que lo dejó rezagado, ITSC-396). `reason` es
   `l2_missing` si L2 no tiene el mes de ese θ, `summaries_missing` si la familia no es
   `summaries` y falta `summaries.parquet` del mes, y `l3_frontier` si la serie de L3 de la familia
   no llega al mes previo (se agregó al catálogo sin backfill, o tiene un hueco); si pasan
