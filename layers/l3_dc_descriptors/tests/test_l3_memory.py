@@ -130,17 +130,23 @@ UNITS_NO_TRIM_MIN_RISE = 1.0
 MIB = 1 << 20
 
 
-def write_flat_l1(root, ticks: int, row_group: int = ROW_GROUP) -> None:
-    """Precio y cantidad 1 en todos los ticks, tiempo = id: una fase suma lo que mide."""
+def write_flat_l1(
+    root, ticks: int, row_group: int = ROW_GROUP, price: int = 10**8
+) -> None:
+    """Cantidad 1 y un mismo precio (por defecto 1) en todos los ticks, tiempo = id: una fase suma
+    lo que mide.
+    """
     ids = pa.array(np.arange(ticks, dtype=np.int64))
     # El decimal 1 sin escalar es 10⁸ en la palabra baja y 0 en la alta.
     words = np.zeros((ticks, 2), "<i8")
     words[:, 0] = 10**8
     one = pa.Array.from_buffers(DEC, ticks, [None, pa.py_buffer(words)])
+    words[:, 0] = price
+    flat = pa.Array.from_buffers(DEC, ticks, [None, pa.py_buffer(words)])
     table = pa.table(
         {
             "agg_trade_id": ids,
-            "price": one,
+            "price": flat,
             "quantity": one,
             "first_trade_id": ids,
             "last_trade_id": ids,
@@ -436,6 +442,8 @@ DENSE_THETAS = 16
 DENSE_GROUPS = 3
 DENSE_GROUP_TICKS = 450_000
 DENSE_TICKS_PER_EVENT = 3
+# El precio de todos los ticks de L1 de la unidad densa.
+DENSE_PRICE = 10**8 + 1
 # Lo que cuesta una casilla de salida abierta (las 18 columnas de `ENGINE_SCHEMA`).
 SLOT_BYTES = 240
 # Menos que un row group (2,4 M de eventos × 321 B): cada uno avanza solo.
@@ -479,6 +487,7 @@ if "batch_rows" in options:
     boundaries.L2_BATCH_ROWS = options["batch_rows"]
 ctx = RunContext(
     mode="backfill", run_id="run", image_version="test", series_start=(2017, 8),
+    family=options.get("family", "summaries"),
     landing_root=l1, events_root=l2, summaries_root=l3, dq_root=f"{l3}/dq",
     threads=8, readers=2, inflight=options.get("inflight", 4), writers=1,
     engine_threads=int(engine_threads), inflight_bytes=int(cap) or None,
@@ -510,10 +519,16 @@ def write_dense_theta(root, theta: int, ticks: int, start: int) -> None:
     """
     count = (ticks - start - 10) // DENSE_TICKS_PER_EVENT
     reference = start + DENSE_TICKS_PER_EVENT * np.arange(count, dtype=np.int64)
-    one = dense_decimal(np.full(count, 10**8, "<i8"))
+    # La confirmación y el extremo son el precio de L1 (`DENSE_PRICE`) y la referencia, un paso
+    # abajo (la dirección es +1): la familia T exige que la confirmación supere a la referencia.
+    prices = {
+        "reference": dense_decimal(np.full(count, DENSE_PRICE - 1, "<i8")),
+        "confirm": dense_decimal(np.full(count, DENSE_PRICE, "<i8")),
+        "extreme": dense_decimal(np.full(count, DENSE_PRICE, "<i8")),
+    }
     columns = {"direction": pa.array(np.ones(count, "i1"))}
     for name, offset in (("reference", 0), ("confirm", 1), ("extreme", 3)):
-        columns[f"{name}_price"] = one
+        columns[f"{name}_price"] = prices[name]
         columns[f"{name}_time"] = pa.array(reference + offset)
         columns[f"{name}_agg_trade_id"] = pa.array(reference + offset)
     constant = np.zeros((count, 2), "<i8")
@@ -539,7 +554,7 @@ def dense_runs(tmp_path_factory) -> dict[str, dict]:
     """
     root = tmp_path_factory.mktemp("dense")
     ticks = DENSE_GROUPS * DENSE_GROUP_TICKS
-    write_flat_l1(root / "l1", ticks, DENSE_GROUP_TICKS)
+    write_flat_l1(root / "l1", ticks, DENSE_GROUP_TICKS, DENSE_PRICE)
     for k in range(1, DENSE_THETAS + 1):
         write_dense_theta(root / "events", 100_000 * k, ticks, 100 + 7 * k)
     cut = {"lot_events": LOT_EVENTS, "batch_rows": LOT_BATCH_ROWS}
@@ -552,6 +567,9 @@ def dense_runs(tmp_path_factory) -> dict[str, dict]:
         ("lots_trim", DENSE_CAP, {**cut, **TRIM}),
         # Los valores por defecto de producción: tope de 768 MiB y lote de 1 M de eventos.
         ("defaults", 0, {"lot_events": None, "batch_rows": LOT_BATCH_ROWS}),
+        # La familia T sobre lo que acaba de escribir S con las mismas opciones (ITSC-394): su
+        # `summaries.parquet` es el esqueleto, así que va en la misma carpeta que la corrida de S.
+        ("lots_path", DENSE_CAP, {**cut, "family": "path", "skeleton": "lots"}),
     ):
         out = subprocess.run(
             [
@@ -560,7 +578,7 @@ def dense_runs(tmp_path_factory) -> dict[str, dict]:
                 DENSE_UNIT,
                 str(root / "l1"),
                 str(root / "events"),
-                str(root / "l3" / name),
+                str(root / "l3" / options.get("skeleton", name)),
                 str(cap),
                 str(DENSE_THETAS),
                 str(DENSE_ENGINE_THREADS),
@@ -645,6 +663,36 @@ def test_the_lot_lowers_the_peak_rss_by_what_the_open_slots_cost(dense_runs):
     gain = (uncut["rss_peak_mib"] - cut["rss_peak_mib"]) * MIB
     floor = DENSE_MIN_GAIN * extra * SLOT_BYTES
     assert gain >= floor, (extra, gain, floor, dense_runs)
+
+
+# ITSC-394. La familia T corre la misma unidad sobre el `summaries.parquet` que la corrida de S dejó
+# (`lots_path` contra `lots`, las mismas opciones). El estado de T es por evento abierto y el
+# estimador de bytes no cambia, así que el pico no debe subir. La relación se afirma, no un MiB: en
+# 20 pares bajo carga (8 procesos ocupando CPU en 10 núcleos) T quedó entre 0,85 y 0,93 veces el pico
+# de S (S 945 a 1 034 MiB, T 852 a 896); sus eventos abiertos fueron 444 255 a 463 005 (los de S,
+# 431 755 a 463 005) y `inflight_alone_bytes_max` 34,7 MB (S, hasta 37,2 MB). El tope es 1,05.
+PATH_MAX_RISE = 0.05
+
+
+def test_the_path_family_does_not_raise_the_peak_rss_over_summaries(dense_runs):
+    summaries, path = dense_runs["lots"], dense_runs["lots_path"]
+    assert path["events"] == summaries["events"], dense_runs
+    assert path["rss_peak_mib"] <= (1 + PATH_MAX_RISE) * summaries["rss_peak_mib"], (
+        dense_runs
+    )
+
+
+def test_the_path_family_stays_under_the_same_caps_as_summaries(dense_runs):
+    ahead = DENSE_THETAS * LOT_BATCH_ROWS
+    cap_events = DENSE_CAP // (SLOT_BYTES + 65)
+    path = dense_runs["lots_path"]
+    assert path["lot_events"] == LOT_EVENTS and path["lots"] > 10 * DENSE_GROUPS, path
+    # Los mismos topes de las pruebas de lotes: un tramo a la vez, y nunca más que el tope y un tramo.
+    assert path["inflight_events_max"] <= (
+        cap_events + LOT_EVENTS + ahead + 10 * DENSE_THETAS
+    ), path
+    assert path["inflight_alone_bytes_max"] <= path["inflight_bytes"] == DENSE_CAP, path
+    assert path["warned"] is False, path
 
 
 # ITSC-375. La composición del RSS en el pico y al cierre. Ninguna aserción es un MiB absoluto

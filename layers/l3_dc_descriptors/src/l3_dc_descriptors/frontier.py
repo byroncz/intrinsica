@@ -1,9 +1,10 @@
 """La frontera de cada θ y la disponibilidad de L2: dos listados recursivos (TRD-L3 §8.2).
 
-La frontera de un θ es el último mes de su serie de `summaries.parquet`, **contigua desde
-`series_start`**, cuyo archivo es **válido**: existe, se lee, su esquema, su `theta` y su
-`state_version` son los de la imagen y su número de filas por row group es el de
-`events.parquet` de L2 del mismo mes. Contigua porque cada mes se escribe en orden y un
+La frontera de un θ y una familia es el último mes de su serie de `<familia>.parquet`,
+**contigua desde `series_start`**, cuyo archivo es **válido**: existe, se lee, su esquema, su
+`theta` y su `state_version` son los de la familia en la imagen y su número de filas por row
+group es el de `events.parquet` de L2 del mismo mes. La frontera de una familia distinta de S
+nunca supera la de S del θ: su archivo repite el esqueleto de `summaries.parquet` (§7.3). Contigua porque cada mes se escribe en orden y un
 hueco es un mes que falta; sin carry-over (ADR-L3-12) los meses no dependen unos de otros,
 pero la frontera dice "hasta aquí está todo" y eso solo vale sin huecos.
 
@@ -20,6 +21,7 @@ from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from decimal import Decimal
+from types import MappingProxyType
 
 import pyarrow as pa
 import pyarrow.fs as pafs
@@ -28,14 +30,27 @@ from dc_frames.lake import Month, month_of, month_ordinal, open_parquet
 from pyutils import resolve_fs
 
 from l3_dc_descriptors.l2 import CARRY_OVER, EVENTS
-from l3_dc_descriptors.schema import FAMILY, STATE_VERSION, SUMMARIES_SCHEMA
+from l3_dc_descriptors.schema import (
+    FAMILY,
+    PATH_FAMILY,
+    PATH_SCHEMA,
+    PATH_STATE_VERSION,
+    STATE_VERSION,
+    SUMMARIES_SCHEMA,
+)
 
 logger = logging.getLogger(__name__)
 
 # Lecturas simultáneas de los pies de la frontera (un archivo de familia y uno de L2 por θ).
 READ_WORKERS = 8
 THETA_DIGITS = 8
-FAMILY_FILE = f"{FAMILY}.parquet"
+# Por familia: su esquema y su `state_version`, lo que hace válido el archivo de la frontera.
+_CONTRACTS = MappingProxyType(
+    {
+        FAMILY: (SUMMARIES_SCHEMA, STATE_VERSION),
+        PATH_FAMILY: (PATH_SCHEMA, PATH_STATE_VERSION),
+    }
+)
 
 _FILE = re.compile(
     rf"/theta=0\.(\d{{{THETA_DIGITS}}})/year=(\d{{4}})/month=(\d{{2}})/([^/]+)$"
@@ -84,8 +99,16 @@ def list_partitions(
     return found
 
 
-def list_summaries(summaries_root: str, key: tuple[str, str, str]) -> Listing:
-    return list_partitions(summaries_root, key, [FAMILY_FILE])
+def family_file(family: str) -> str:
+    """El archivo de la familia en la partición: `summaries.parquet`, `path.parquet`."""
+    return f"{family}.parquet"
+
+
+def list_summaries(
+    summaries_root: str, key: tuple[str, str, str], family: str = FAMILY
+) -> Listing:
+    """Los archivos de la `family` de cada partición (por defecto `summaries.parquet`)."""
+    return list_partitions(summaries_root, key, [family_file(family)])
 
 
 def list_l2(events_root: str, key: tuple[str, str, str]) -> Listing:
@@ -98,7 +121,12 @@ def l2_missing(listed: Listing, theta: int, n: int) -> list[str]:
     return [name for name in (EVENTS, CARRY_OVER) if name not in have]
 
 
-def _row_groups(parquet) -> list[int]:
+def skeleton_missing(summaries: Listing, theta: int, n: int) -> bool:
+    """¿Falta `summaries.parquet` de `(θ, mes)`, el esqueleto de las demás familias (§7.3)?"""
+    return family_file(FAMILY) not in summaries.get(theta, {}).get(n, set())
+
+
+def row_group_sizes(parquet) -> list[int]:
     meta = parquet.metadata
     sizes = (meta.row_group(i).num_rows for i in range(meta.num_row_groups))
     # Los row groups vacíos no se escriben (`FamilyWriter`): no cuentan.
@@ -111,30 +139,32 @@ def invalid_reason(
     key: tuple[str, str, str],
     theta: int,
     month: Month,
+    family: str = FAMILY,
 ) -> str | None:
-    """Por qué el archivo de la familia de `(θ, mes)` no es una frontera válida, o `None`.
+    """Por qué el archivo de la `family` de `(θ, mes)` no es una frontera válida, o `None`.
 
-    Lee solo los pies de `summaries.parquet` y de `events.parquet` del mes.
+    Lee solo los pies del archivo de la familia y de `events.parquet` del mes.
     """
+    expected, version_wanted = _CONTRACTS[family]
     text = theta_text(theta)
-    path = family_path(summaries_root, key, text, month, FAMILY)
+    path = family_path(summaries_root, key, text, month, family)
     events = l2_path(events_root, key, text, month)
     try:
         with (
-            closing(open_parquet(path, "la familia")) as family,
+            closing(open_parquet(path, "la familia")) as table,
             closing(open_parquet(events, "L2")) as skeleton,
         ):
-            schema = family.schema_arrow
-            if not schema.remove_metadata().equals(SUMMARIES_SCHEMA):
+            schema = table.schema_arrow
+            if not schema.remove_metadata().equals(expected):
                 return "su esquema no es el de la imagen"
             version = (schema.metadata or {}).get(b"state_version")
-            if version != STATE_VERSION.encode():
+            if version != version_wanted.encode():
                 got = version.decode() if version else None
-                return f"state_version {got} y la imagen es {STATE_VERSION}"
+                return f"state_version {got} y la imagen es {version_wanted}"
             wanted = Decimal(theta).scaleb(-THETA_DIGITS)
             index = schema.get_field_index("theta")
-            for i in range(family.metadata.num_row_groups):
-                group = family.metadata.row_group(i)
+            for i in range(table.metadata.num_row_groups):
+                group = table.metadata.row_group(i)
                 if not group.num_rows:
                     continue
                 stats = group.column(index).statistics
@@ -145,7 +175,7 @@ def invalid_reason(
                     or stats.max != wanted
                 ):
                     return f"el row group {i} no es del θ {text}"
-            if _row_groups(family) != _row_groups(skeleton):
+            if row_group_sizes(table) != row_group_sizes(skeleton):
                 return "sus filas por row group no son las de events.parquet de L2"
     except (FramesError, pa.ArrowException, OSError) as exc:
         return f"no se pudo leer ({exc})"
@@ -159,6 +189,7 @@ def _frontier(
     summaries_root: str,
     events_root: str,
     key: tuple[str, str, str],
+    family: str,
 ) -> int | None:
     """La frontera de un θ: el fin de su serie contigua con un archivo válido."""
     last = start
@@ -166,11 +197,13 @@ def _frontier(
         last += 1
     # `last` es el primer mes que falta: la serie llega hasta el anterior.
     for n in range(last - 1, start - 1, -1):
-        problem = invalid_reason(summaries_root, events_root, key, theta, month_of(n))
+        problem = invalid_reason(
+            summaries_root, events_root, key, theta, month_of(n), family
+        )
         if problem is None:
             return n
         logger.warning(
-            "θ=%d %s: archivo de la familia inválido (%s)", theta, label(n), problem
+            "θ=%d %s: archivo de %s inválido (%s)", theta, label(n), family, problem
         )
     return None
 
@@ -182,18 +215,35 @@ def frontiers(
     summaries_root: str,
     events_root: str,
     key: tuple[str, str, str],
+    family: str = FAMILY,
+    summaries: Listing | None = None,
 ) -> dict[int, int | None]:
     """La frontera (ordinal del último mes cerrado) de cada θ; `None` si no tiene.
 
-    Un archivo inválido en la frontera la retrocede al mes anterior, que se verifica a su
-    vez: el θ se reprocesa desde el último mes utilizable.
+    `listed` son los archivos de la `family`. Un archivo inválido en la frontera la retrocede
+    al mes anterior, que se verifica a su vez: el θ se reprocesa desde el último mes
+    utilizable. La de una familia distinta de S nunca supera la de S: `summaries`, el listado
+    de `summaries.parquet`, es obligatorio, porque su archivo repite ese esqueleto.
     """
     thetas = list(thetas)
     start = month_ordinal(series_start)
 
     def one(theta: int) -> int | None:
         months = set(listed.get(theta, {}))
-        return _frontier(theta, months, start, summaries_root, events_root, key)
+        return _frontier(theta, months, start, summaries_root, events_root, key, family)
 
     with ThreadPoolExecutor(max_workers=READ_WORKERS) as pool:
-        return dict(zip(thetas, pool.map(one, thetas), strict=True))
+        found = dict(zip(thetas, pool.map(one, thetas), strict=True))
+    if family == FAMILY:
+        return found
+    if summaries is None:
+        raise ValueError(f"la frontera de {family!r} necesita el listado de {FAMILY!r}")
+    ceiling = frontiers(
+        thetas, summaries, series_start, summaries_root, events_root, key
+    )
+    return {
+        theta: None
+        if reached is None or ceiling[theta] is None
+        else min(reached, ceiling[theta])
+        for theta, reached in found.items()
+    }

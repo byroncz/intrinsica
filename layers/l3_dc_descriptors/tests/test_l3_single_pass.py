@@ -182,8 +182,8 @@ def alter_first_sealed(monkeypatch, name, change):
     """
     sealed = native.to_batch
 
-    def altered(theta, item):
-        position, index, batch = sealed(theta, item)
+    def altered(theta, item, *family):
+        position, index, batch = sealed(theta, item, *family)
         if position == 1 and index == 0:
             at = batch.schema.get_field_index(name)
             column = change(batch.column(at))
@@ -474,12 +474,12 @@ def test_the_engine_gets_its_first_row_group_before_the_writers_are_open(
 
     open_writer = orchestrator._open_writer
 
-    def late(l3_root, key, month, text, skeleton):
+    def late(l3_root, key, month, text, skeleton, *family):
         if text == lake.theta_texts[0]:
             assert pushed.wait(10), (
                 "el motor no recibió nada con el escritor abriéndose"
             )
-        return open_writer(l3_root, key, month, text, skeleton)
+        return open_writer(l3_root, key, month, text, skeleton, *family)
 
     monkeypatch.setattr(native, "push", spying_push)
     monkeypatch.setattr(orchestrator, "_open_writer", late)
@@ -493,10 +493,10 @@ def test_a_writer_that_cannot_open_aborts_the_unit_without_publishing(
 ):
     open_writer = orchestrator._open_writer
 
-    def broken(l3_root, key, month, text, skeleton):
+    def broken(l3_root, key, month, text, skeleton, *family):
         if text == lake.theta_texts[1]:
             raise FramesInputError("no se pudo abrir el escritor")
-        return open_writer(l3_root, key, month, text, skeleton)
+        return open_writer(l3_root, key, month, text, skeleton, *family)
 
     monkeypatch.setattr(orchestrator, "_open_writer", broken)
     with pytest.raises(FramesInputError, match="no se pudo abrir el escritor"):

@@ -29,7 +29,7 @@ memoria del mes muere con su proceso. Un mes que ningún θ necesita se salta si
 | `--series-start` / `L3_SERIES_START` | Primer mes de la serie de L2, el único sin mes anterior. Se declara, no se infiere |
 | `--thetas` | Acota el catálogo, en decimal como en la ruta (`0.00010000,0.00031313`) |
 | `--force` | Reprocesa el rango ignorando la frontera. Exige `--from`; solo en `backfill` |
-| `--family` | `summaries` (la predeterminada y única por ahora); otro valor es código 2 |
+| `--family` | `summaries` (la predeterminada) o `path` (la familia T, `path.parquet`, [TRD-L3 §7.2.1](../../docs/TRD/l3.md#721-salida--pathparquet-familia-t)); otro valor es código 2. `path` repite el esqueleto de `summaries.parquet`: sin él en el mes, el θ sale del rango con `family_skeleton_missing` y la corrida termina con código 1. No concilia ticks (ya lo hizo S) y su frontera nunca supera la de `summaries` |
 | `--thetas-uri` / `L3_THETAS_URI` | **Obligatorio.** El catálogo de θ: el mismo objeto `l2/thetas.yaml` que usa L2 (ruta local o `gs://`). L3 no lleva copia |
 | `--asset` | Activo; por defecto `BTCUSDT` |
 
@@ -95,8 +95,9 @@ por delante (un lote de 32 768 eventos por θ) también cuentan como abiertas.
 de la unidad (entrada de L1 o L2 ausente, L2 incoherente, esqueleto, conciliación) o `monthly`
 sin ningún θ listo y con rezagados; 2 uso o configuración (no escribe nada).
 
-**Frontera** ([§8.2](../../docs/TRD/l3.md#82-modo-backfill-histórico)): por θ, el último mes de
-su serie contigua desde `--series-start` cuyo `summaries.parquet` es válido (esquema, `theta`,
+**Frontera** ([§8.2](../../docs/TRD/l3.md#82-modo-backfill-histórico)): por θ y familia, el último mes de
+su serie contigua desde `--series-start` cuyo archivo de la familia (`summaries.parquet` o
+`path.parquet`) es válido (esquema, `theta`,
 `state_version` y filas por row group iguales a `events.parquet` de L2 del mes). Sale de un
 listado de la raíz de L3 más el pie del archivo de cada θ; no se consulta cada partición. Un
 mes sin `events.parquet` y `carry_over.parquet` de L2 detiene el rango de ese θ con
@@ -104,12 +105,12 @@ mes sin `events.parquet` y `carry_over.parquet` de L2 detiene el rango de ese θ
 con sus dos Parquet pero sin `content_hash.json` (el linaje que L2 publica, ITSC-368) falla la
 unidad con `l2_lineage_missing`: se cubre con el backfill del linaje antes del apply de la
 imagen ([runbook](../../docs/runbooks/operacion-l3.md#cambios-requeridos)). En `monthly`, un θ
-que no llegó al mes previo (`l3_frontier`) o al que L2 no le ha llegado (`l2_missing`) deja
+que no llegó al mes previo (`l3_frontier`) o al que L2 no le ha llegado (`l2_missing`) o, en `--family path`, no tiene `summaries.parquet` del mes (`summaries_missing`) deja
 `theta_behind_frontier` y no falla la unidad mientras otro avance.
 
 **Hallazgos**: el catálogo de `check_type` y sus `details` están en
 [`docs/data-contracts.md`](../../docs/data-contracts.md). Cada excepción tipada del núcleo
-(tabla de abajo) se traduce a su hallazgo con los `details` que ya trae. `unit_timing` lleva lo
+(tabla de abajo) se traduce a su hallazgo con los `details` que ya trae. `unit_timing` (con `family`, ITSC-394) lleva lo
 que necesita la medición del umbral 3 de [§10.3](../../docs/TRD/l3.md#103-sonda-del-lector-de-tramas--umbrales-de-aceptación-se-escriben-antes-de-medir):
 pared total y por fase (todas son pared: `gate_s`, abrir `events.parquet` de los θ y arrancar la lectura de sus fronteras; `setup_s`,
 el motor, el pie de L1 y la compuerta de carry-over; `aggregate_s` del motor, `publish_s`, `reconcile_s`; `lineage_s`
@@ -304,7 +305,7 @@ del hallazgo y sus `details` (valores JSON).
 | `L2StateInconsistent.no_pending` | `l2_state_inconsistent` | `theta`, `month`, `direction`, `has_pending_event` |
 | `PhaseQuantityMismatch` | `phase_quantity_mismatch` | `theta`, `confirm_agg_trade_id`, `phase`, `expected`, `got` |
 | `PhaseTicksMismatch` | `phase_ticks_mismatch` | `theta`, `month`, `N_M`, `sigma_closed`, `P_M`, `tail_M`, `U_M` |
-| `SkeletonMismatch` | `family_skeleton_mismatch` | `theta`, `month`, `family`, `detail` (qué difiere del esqueleto de L2) |
+| `SkeletonMismatch` | `family_skeleton_mismatch` | `theta`, `month`, `family`, `detail` (qué difiere del esqueleto: `events.parquet` de L2 o, en `path`, `summaries.parquet`) |
 | `PhaseValueError` | ninguno | `theta`, `confirm_agg_trade_id`: un valor no cabe en `DECIMAL(18,8)` |
 
 Los valores de `got` y `wanted` de precios son enteros sin escalar (10⁻⁸). Además

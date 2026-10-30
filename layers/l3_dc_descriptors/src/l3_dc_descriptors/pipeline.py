@@ -52,9 +52,9 @@ from l3_dc_descriptors.timing import (
 class Result:
     """Lo que dejó la unidad. `error` es `None` si el mes se escribió; si no, el motivo.
 
-    `findings` son los hallazgos para emitir: en un éxito, un `summaries_summary` por θ
-    y el `unit_timing`; en un fallo, el hallazgo del error (ninguno si el error no tiene
-    `check_type`).
+    `findings` son los hallazgos para emitir: en un éxito, un `summaries_summary` por θ (de
+    la familia de `ctx.family`) y el `unit_timing`; en un fallo, el hallazgo del error
+    (ninguno si el error no tiene `check_type`).
     """
 
     findings: tuple[Finding, ...]
@@ -143,6 +143,7 @@ def _process_unit(
                 inflight_bytes=ctx.inflight_bytes,
                 lot_events=ctx.lot_events,
                 meta_workers=ctx.meta_workers,
+                family=ctx.family,
             )
     except SummarizeError as error:
         found = findings.from_error(ctx, unit, error)
@@ -208,7 +209,11 @@ def _process_unit(
                     content_hash=result.content_hash,
                     l2_events_content_hash=result.l2_events_content_hash,
                     l2_carry_over_content_hash=result.l2_carry_over_content_hash,
-                    unassigned_ticks=result.reconciliation.unassigned,
+                    unassigned_ticks=(
+                        None
+                        if result.reconciliation is None
+                        else result.reconciliation.unassigned
+                    ),
                 )
                 for theta, result in sorted(summaries, key=lambda item: item[0])
             ),
@@ -219,10 +224,6 @@ def _process_unit(
 
 
 def _stats(theta: int, result: ThetaResult) -> ThetaStats:
-    reconciliation = result.reconciliation
     return ThetaStats(
-        theta_text(theta),
-        result.rows,
-        reconciliation.closed,
-        reconciliation.before_month,
+        theta_text(theta), result.rows, result.closed, result.before_month
     )

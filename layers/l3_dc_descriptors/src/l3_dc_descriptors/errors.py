@@ -169,9 +169,11 @@ class SkeletonMismatch(SummarizeError):
 
     check_type = "family_skeleton_mismatch"
 
-    def __init__(self, theta: str, month: Month, family: str, detail: str) -> None:
+    def __init__(
+        self, theta: str, month: Month, family: str, detail: str, source: str = "L2"
+    ) -> None:
         super().__init__(
-            f"θ {theta}, {month_text(month)}: {family} no repite el esqueleto de L2: "
+            f"θ {theta}, {month_text(month)}: {family} no repite el esqueleto de {source}: "
             f"{detail}",
             {
                 "theta": theta,

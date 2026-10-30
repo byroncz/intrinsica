@@ -4,12 +4,15 @@
 # gcloud rechaza un --args con un valor repetido en la lista (ITSC-232:
 # to == from; ITSC-280: series_start == from), y así dos meses iguales no chocan.
 #
-# Uso: run-job-args.sh <job> [from] [to] [force] [series_start] [script] [args]
+# Uso: run-job-args.sh <job> [from] [to] [force] [series_start] [script] [args] [family]
 #   job:   <capa>-<modo>; el modo (--mode) es lo que sigue al primer guion
 #   force: "true" agrega --force; cualquier otro valor, nada
 #   script, args: solo ops-script (ITSC-298); los demás jobs los ignoran
 #   viz-tiles (ITSC-307) y viz-render (ITSC-310) rechazan series_start, script y
 #   args; to igual a from se omite
+#   family (ITSC-394): solo l3-backfill y l3-monthly; agrega --family=<f> (summaries o
+#   path). El workflow la pasa siempre, con summaries por defecto, así que en los demás
+#   jobs vacío y summaries son "sin familia" y cualquier otro valor se rechaza con 2
 #
 # --to se omite si es igual a from, salvo en l2-backfill (ITSC-292) y
 # l3-backfill (ITSC-334). En L1 la CLI asume to = from cuando falta, y la de
@@ -22,8 +25,8 @@
 # antes de gastar una ejecución.
 set -euo pipefail
 
-[[ $# -ge 1 && $# -le 7 ]] || {
-  echo "uso: run-job-args.sh <job> [from] [to] [force] [series_start] [script] [args]" >&2
+[[ $# -ge 1 && $# -le 8 ]] || {
+  echo "uso: run-job-args.sh <job> [from] [to] [force] [series_start] [script] [args] [family]" >&2
   exit 2
 }
 job=$1
@@ -33,6 +36,23 @@ force=${4:-}
 series_start=${5:-}
 script=${6:-}
 script_args=${7:-}
+family=${8:-}
+
+# La familia (ITSC-394) es de L3: la CLI de los demás jobs no define --family y argparse
+# saldría con 2 dentro de Cloud Run. `summaries` es el valor por defecto del workflow y no
+# cuenta como pedir una familia; en L3 solo existen summaries y path.
+if [[ "$job" == l3-backfill || "$job" == l3-monthly ]]; then
+  case "$family" in
+    "" | summaries | path) ;;
+    *)
+      echo "run-job-args: family '$family' no existe: summaries o path" >&2
+      exit 2
+      ;;
+  esac
+elif [[ -n "$family" && "$family" != summaries ]]; then
+  echo "run-job-args: family solo aplica a l3-backfill y l3-monthly, no a $job" >&2
+  exit 2
+fi
 
 # ops-script (ITSC-298): el texto libre de args puede llevar comas y valores
 # repetidos (--a 5 --b 5), que el formato de lista de gcloud no tolera. Va como
@@ -80,5 +100,8 @@ if [[ "$force" == "true" ]]; then
 fi
 if [[ -n "$series_start" ]]; then
   args="${args},--series-start=${series_start}"
+fi
+if [[ -n "$family" && ( "$job" == l3-backfill || "$job" == l3-monthly ) ]]; then
+  args="${args},--family=${family}"
 fi
 echo "$args"

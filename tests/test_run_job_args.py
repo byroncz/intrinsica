@@ -218,3 +218,74 @@ def test_l3_monthly_rechaza_force():
     )
     assert out.returncode == 2
     assert "l3-monthly no admite force" in out.stderr
+
+
+# ITSC-394: la entrada family (summaries o path) es de l3-backfill y l3-monthly.
+def test_l3_backfill_family_path_va_al_final():
+    assert (
+        args("l3-backfill", "", "", "", "", "", "", "path")
+        == "--mode,backfill,--family=path"
+    )
+
+
+def test_l3_backfill_family_con_rango_y_series_start():
+    assert (
+        args("l3-backfill", "2023-03", "2023-05", "true", "2023-03", "", "", "path")
+        == "--mode,backfill,--from=2023-03,--to=2023-05,--force,"
+        "--series-start=2023-03,--family=path"
+    )
+
+
+def test_l3_monthly_family_path():
+    assert (
+        args("l3-monthly", "2023-03", "2023-03", "", "", "", "", "path")
+        == "--mode,monthly,--from=2023-03,--family=path"
+    )
+
+
+@pytest.mark.parametrize("job", ["l3-backfill", "l3-monthly"])
+def test_l3_family_summaries_se_pasa_explicita(job):
+    modo = job.split("-", 1)[1]
+    assert args(job, "", "", "", "", "", "", "summaries") == (
+        f"--mode,{modo},--family=summaries"
+    )
+
+
+@pytest.mark.parametrize("job", ["l3-backfill", "l3-monthly"])
+def test_l3_sin_family_no_agrega_la_opcion(job):
+    modo = job.split("-", 1)[1]
+    assert args(job) == f"--mode,{modo}"
+
+
+@pytest.mark.parametrize("job", ["l3-backfill", "l3-monthly"])
+@pytest.mark.parametrize("family", ["fit", "Path", "path,fit"])
+def test_l3_rechaza_una_familia_que_no_existe(job, family):
+    with pytest.raises(subprocess.CalledProcessError) as error:
+        args(job, "", "", "", "", "", "", family)
+    assert error.value.returncode == 2
+
+
+@pytest.mark.parametrize(
+    "job",
+    [
+        "l1-backfill",
+        "l1-daily",
+        "l1-monthly-close",
+        "l1-seam-check",
+        "l2-backfill",
+        "l2-monthly",
+        "viz-render",
+        "viz-tiles",
+        "ops-script",
+    ],
+)
+def test_los_demas_jobs_rechazan_family_path(job):
+    with pytest.raises(subprocess.CalledProcessError) as error:
+        args(job, "", "", "", "", "", "", "path")
+    assert error.value.returncode == 2
+
+
+@pytest.mark.parametrize("job", ["l1-backfill", "l2-backfill", "viz-tiles"])
+def test_los_demas_jobs_ignoran_el_valor_por_defecto_summaries(job):
+    # El input del workflow trae summaries siempre: no es pedir una familia.
+    assert args(job, "2023-03", "", "", "", "", "", "summaries") == args(job, "2023-03")
