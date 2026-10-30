@@ -1242,15 +1242,18 @@ valores de las 13 columnas. Para el primer mes real elige un θ con decenas de m
 más fino.
 
 **Cómo correrla.** Necesita `path.parquet` del θ y el mes, o sea el backfill de T de ITSC-394.
-*Actions → Run job*: `job` = `ops-script`, `script` = `l3_path_check.py`,
-`args` = `--theta <θ> --month <mes>`. Las corridas las lanza y aprueba el humano; pega la última
+*Actions → Run job*: `job` = `ops-script`, `script` =
+`gs://<proyecto>-ops/scripts/l3_path_check.py` (la URI completa: `run-job-tasks.sh` rechaza otra
+cosa con código 2), `args` = `--theta <θ> --month <mes>`. Las corridas las lanza y aprueba el humano; pega la última
 línea en ITSC-395.
 
-**Corrida real (ITSC-395).**
+**Corrida real (ITSC-395, 2026-10-30).** Las 30 invariantes dieron 0 violaciones; las 36 239 filas
+coinciden con las de `summaries.parquet` del mismo θ y mes (`l3_derived_check.py`, ITSC-386). El CSV
+quedó en `results/ops-script-pd47c/l3_path_check_2023-03_0.00098052.csv`.
 
 | Mes | θ | `state_version` | `silence_us` | Filas | Violaciones | Pared | Run |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| 2023-03 | `0.00098052` | pendiente | pendiente | pendiente | pendiente | pendiente | pendiente |
+| 2023-03 | `0.00098052` | 1.0.0 | 10 000 000 | 36 239 | 0 | 2,4 s | [41052835807](https://github.com/byroncz/intrinsica/actions/runs/41052835807) |
 
 ### La trampa del 403 por prefijo
 
