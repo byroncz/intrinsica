@@ -119,14 +119,14 @@ def test_every_l2_batch_is_read_even_if_the_engine_never_asked_for_it(lake):
 
 
 def test_l2_events_taps_the_columns_the_engine_uses_in_their_order(lake):
-    """`L2Events.tap` entrega las siete columnas del motor en su orden aunque el lote traiga
-    las fronteras primero, y el archivo se lee sin las cuatro que ya no se usan.
+    """`L2Events.tap` entrega las ocho columnas del motor en su orden aunque el lote traiga
+    las fronteras primero, y el archivo se lee sin las que no se usan.
     """
     path = next(lake.l2.rglob("theta=0.00100000/year=2017/month=09/events.parquet"))
     with EventFile(str(path), "L2", boundaries.EVENT_FILE_COLUMNS) as file:
         events = L2Events(file, Decimal("0.001"))
         assert set(file.columns) == set(boundaries.EVENT_FILE_COLUMNS)
-        assert len(file.columns) == 8 < len(file.schema.names)
+        assert len(file.columns) == 9 < len(file.schema.names)
         for lot in file.lots(1 << 20):
             for batch in file.batches(lot, 4, 1 << 20):
                 assert events.tap(batch).schema.names == list(boundaries.EVENT_COLUMNS)

@@ -6,7 +6,7 @@
 //! reservan al llegar la primera fila de su row group y se entregan, con su dueño, al
 //! llenarse la última: el motor no conserva nada de un row group sellado.
 
-use crate::layout::{col, Row, COLUMNS, WIDTH};
+use crate::layout::{col, PathRow, Row, COLUMNS, PATH_COLUMNS, PATH_WIDTH, WIDTH};
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
 use std::sync::{Mutex, PoisonError};
@@ -14,7 +14,9 @@ use std::sync::{Mutex, PoisonError};
 /// Un row group de salida lleno: `columns[c]` es la columna `c` en el layout de Arrow
 /// (`decimal128` de 16 bytes o `int64` de 8, little-endian). Si algún `os_ticks` es 0,
 /// `validity` es el mapa de bits de las filas con overshoot (las columnas `os_*`
-/// nulables son nulas en el resto).
+/// nulables son nulas en el resto). Un row group de `path.parquet` no usa `validity`: cada
+/// columna nulable trae su propio mapa en `masks[columna]` (`None` si no es nulable o no
+/// tiene nulos).
 #[derive(Debug)]
 pub struct SealedRowGroup {
     pub theta: usize,
@@ -22,6 +24,14 @@ pub struct SealedRowGroup {
     pub rows: usize,
     pub columns: Vec<Vec<u8>>,
     pub validity: Option<Vec<u8>>,
+    pub null_count: usize,
+    pub masks: Vec<Option<ColumnMask>>,
+}
+
+/// El mapa de validez de una columna (bit en 1: valor presente) y sus nulos.
+#[derive(Debug)]
+pub struct ColumnMask {
+    pub bits: Vec<u8>,
     pub null_count: usize,
 }
 
@@ -53,10 +63,34 @@ impl fmt::Display for OutputError {
 
 impl std::error::Error for OutputError {}
 
+/// Una fila que la tabla sabe escribir: de qué anchos son sus columnas, cómo se copia a su
+/// casilla y cómo se sella el row group lleno.
+pub trait OutRow: Copy {
+    /// Si la fila lleva un mapa de columnas presentes (`path.parquet`).
+    const TRACKS_VALID: bool;
+
+    /// Los buffers de un row group de `size` filas, en cero.
+    fn columns(size: usize) -> Vec<Vec<u8>>;
+
+    /// Copia la fila a la casilla `r`; `valid[r]` recibe el mapa de columnas presentes si la
+    /// fila lo lleva.
+    fn put(&self, columns: &mut [Vec<u8>], r: usize, valid: &mut [u16]);
+
+    fn seal(
+        theta: usize,
+        index: usize,
+        rows: usize,
+        columns: Vec<Vec<u8>>,
+        valid: &[u16],
+    ) -> SealedRowGroup;
+}
+
 enum State {
     Empty,
     Open {
         columns: Vec<Vec<u8>>,
+        /// Por fila, qué columnas tienen valor; vacío en la familia S.
+        valid: Vec<u16>,
         filled: usize,
     },
     Sealed,
@@ -137,10 +171,10 @@ impl OutTable {
     ///
     /// Toma el lock de cada row group de salida una vez por tramo de filas contiguas, no
     /// por fila. Las filas de `rows` deben venir ordenadas por evento.
-    pub fn write(
+    pub fn write<R: OutRow>(
         &self,
         theta: usize,
-        rows: &[(u64, Row)],
+        rows: &[(u64, R)],
     ) -> Result<Vec<SealedRowGroup>, OutputError> {
         let mut sealed = Vec::new();
         let mut i = 0;
@@ -162,29 +196,38 @@ impl OutTable {
         Ok(sealed)
     }
 
-    fn fill(
+    fn fill<R: OutRow>(
         &self,
         theta: usize,
         j: usize,
         first: usize,
-        run: &[(u64, Row)],
+        run: &[(u64, R)],
     ) -> Result<Option<SealedRowGroup>, OutputError> {
         let slot = &self.slots[theta][j];
         let base = self.starts[theta][j];
         let mut state = slot.state.lock().unwrap_or_else(PoisonError::into_inner);
         if matches!(*state, State::Empty) {
-            let columns = COLUMNS
-                .iter()
-                .map(|spec| vec![0u8; slot.size * spec.bytes()])
-                .collect();
-            *state = State::Open { columns, filled: 0 };
+            *state = State::Open {
+                columns: R::columns(slot.size),
+                valid: if R::TRACKS_VALID {
+                    vec![0; slot.size]
+                } else {
+                    Vec::new()
+                },
+                filled: 0,
+            };
         }
-        let State::Open { columns, filled } = &mut *state else {
+        let State::Open {
+            columns,
+            valid,
+            filled,
+        } = &mut *state
+        else {
             return Err(OutputError::Overfull { theta, index: j });
         };
         debug_assert!(first as u64 == run[0].0 - base);
         for (event, row) in run {
-            put(columns, (event - base) as usize, row);
+            row.put(columns, (event - base) as usize, valid);
         }
         *filled += run.len();
         if *filled > slot.size {
@@ -193,15 +236,99 @@ impl OutTable {
         if *filled < slot.size {
             return Ok(None);
         }
-        let State::Open { columns, .. } = std::mem::replace(&mut *state, State::Sealed) else {
+        let State::Open { columns, valid, .. } = std::mem::replace(&mut *state, State::Sealed)
+        else {
             unreachable!("el estado era Open");
         };
         drop(state);
-        Ok(Some(seal(theta, j, slot.size, columns)))
+        Ok(Some(R::seal(theta, j, slot.size, columns, &valid)))
     }
 }
 
-fn put(columns: &mut [Vec<u8>], r: usize, row: &Row) {
+impl OutRow for Row {
+    const TRACKS_VALID: bool = false;
+
+    fn columns(size: usize) -> Vec<Vec<u8>> {
+        COLUMNS
+            .iter()
+            .map(|spec| vec![0u8; size * spec.bytes()])
+            .collect()
+    }
+
+    fn put(&self, columns: &mut [Vec<u8>], r: usize, _valid: &mut [u16]) {
+        put_summary(columns, r, self);
+    }
+
+    fn seal(
+        theta: usize,
+        index: usize,
+        rows: usize,
+        columns: Vec<Vec<u8>>,
+        _valid: &[u16],
+    ) -> SealedRowGroup {
+        seal_summary(theta, index, rows, columns)
+    }
+}
+
+impl OutRow for PathRow {
+    const TRACKS_VALID: bool = true;
+
+    fn columns(size: usize) -> Vec<Vec<u8>> {
+        PATH_COLUMNS
+            .iter()
+            .map(|spec| vec![0u8; size * spec.bytes()])
+            .collect()
+    }
+
+    fn put(&self, columns: &mut [Vec<u8>], r: usize, valid: &mut [u16]) {
+        for (column, value) in columns.iter_mut().zip(self.cells) {
+            column[r * 8..r * 8 + 8].copy_from_slice(&value.to_le_bytes());
+        }
+        valid[r] = self.valid;
+    }
+
+    fn seal(
+        theta: usize,
+        index: usize,
+        rows: usize,
+        columns: Vec<Vec<u8>>,
+        valid: &[u16],
+    ) -> SealedRowGroup {
+        debug_assert_eq!(columns.len(), PATH_WIDTH);
+        let masks = PATH_COLUMNS
+            .iter()
+            .enumerate()
+            .map(|(c, spec)| {
+                if !spec.nullable {
+                    return None;
+                }
+                let mut bits = vec![0u8; rows.div_ceil(8)];
+                let mut present = 0;
+                for (r, row) in valid.iter().enumerate() {
+                    if (row >> c) & 1 == 1 {
+                        bits[r >> 3] |= 1 << (r & 7);
+                        present += 1;
+                    }
+                }
+                (present < rows).then_some(ColumnMask {
+                    bits,
+                    null_count: rows - present,
+                })
+            })
+            .collect();
+        SealedRowGroup {
+            theta,
+            index,
+            rows,
+            columns,
+            validity: None,
+            null_count: 0,
+            masks,
+        }
+    }
+}
+
+fn put_summary(columns: &mut [Vec<u8>], r: usize, row: &Row) {
     for (c, spec) in COLUMNS.iter().enumerate() {
         let value = row[c];
         if spec.wide {
@@ -213,7 +340,7 @@ fn put(columns: &mut [Vec<u8>], r: usize, row: &Row) {
     }
 }
 
-fn seal(theta: usize, index: usize, rows: usize, columns: Vec<Vec<u8>>) -> SealedRowGroup {
+fn seal_summary(theta: usize, index: usize, rows: usize, columns: Vec<Vec<u8>>) -> SealedRowGroup {
     debug_assert_eq!(columns.len(), WIDTH);
     let mut validity = vec![0u8; rows.div_ceil(8)];
     let mut valid = 0;
@@ -231,6 +358,7 @@ fn seal(theta: usize, index: usize, rows: usize, columns: Vec<Vec<u8>>) -> Seale
         columns,
         validity: (null_count > 0).then_some(validity),
         null_count,
+        masks: Vec::new(),
     }
 }
 
@@ -268,6 +396,56 @@ impl Delivery {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::layout::path_col;
+
+    fn path_row(id: i64, valid: &[usize]) -> PathRow {
+        let mut cells = [0i64; PATH_WIDTH];
+        cells[path_col::CONFIRM_AGG_TRADE_ID] = id;
+        cells[path_col::C_REALIZED_VAR] = 2.5f64.to_bits() as i64;
+        PathRow {
+            cells,
+            valid: valid.iter().fold(0, |mask, c| mask | 1 << c),
+            ticks: 1,
+        }
+    }
+
+    #[test]
+    fn a_path_row_group_carries_one_mask_per_nullable_column() {
+        let table = OutTable::new(&[vec![3]]);
+        let required = [
+            path_col::CONFIRM_AGG_TRADE_ID,
+            path_col::C_REALIZED_VAR,
+            path_col::C_TORTUOSITY,
+            path_col::C_MAX_GAP,
+        ];
+        let with = |extra: &[usize]| [&required[..], extra].concat();
+        let sealed = table
+            .write(
+                0,
+                &[
+                    (
+                        2,
+                        path_row(30, &with(&[path_col::OS_MAX_GAP, path_col::C_T25])),
+                    ),
+                    (0, path_row(10, &with(&[path_col::OS_MAX_GAP]))),
+                    (1, path_row(20, &with(&[path_col::OS_MAX_GAP]))),
+                ],
+            )
+            .unwrap();
+        let sealed = &sealed[0];
+        assert!(sealed.validity.is_none() && sealed.null_count == 0);
+        // `os_max_gap` está en las tres filas: sin mapa. `c_t25` solo en la 2.
+        assert!(sealed.masks[path_col::OS_MAX_GAP].is_none());
+        let mask = sealed.masks[path_col::C_T25].as_ref().unwrap();
+        assert_eq!((mask.bits.as_slice(), mask.null_count), (&[0b100u8][..], 2));
+        // Una columna no nulable nunca trae mapa.
+        assert!(sealed.masks[path_col::C_MAX_GAP].is_none());
+        let ids: Vec<i64> = sealed.columns[path_col::CONFIRM_AGG_TRADE_ID]
+            .chunks_exact(8)
+            .map(|b| i64::from_le_bytes(b.try_into().unwrap()))
+            .collect();
+        assert_eq!(ids, [10, 20, 30]);
+    }
 
     fn row(ticks: i64, overshoot: i64) -> Row {
         let mut row = [0i64; WIDTH];
@@ -338,6 +516,7 @@ mod tests {
             columns: vec![],
             validity: None,
             null_count: 0,
+            masks: Vec::new(),
         };
         delivery.insert(sealed(0, 1));
         delivery.insert(sealed(1, 0));

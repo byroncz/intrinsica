@@ -37,7 +37,8 @@ por parámetro; ver `l1_ingest.write.output_writer`.
 `ContentHasher` elige el camino de cada columna por su esquema, no por el lote,
 para que el hash no dependa de cómo se parta la serie:
 
-1. **Entero, decimal o booleano no nulable:** los bytes de sus valores.
+1. **Entero, decimal, booleano o float64 no nulable:** los bytes de sus valores
+   (en float64, 8 bytes little-endian por valor, vista del buffer sin copia).
 2. **Entero, decimal o booleano nulable:** el `repr` de Python de cada celda más
    `\0` (`Decimal('12.50000000')`, `-3`, `True`, `None`), porque el buffer de un
    valor nulo no está definido. Se construye por columna completa con Arrow, sin
@@ -45,7 +46,20 @@ para que el hash no dependa de cómo se parta la serie:
    `binary_replace_slice` y `None\0` en los nulos. El resultado es un solo buffer
    que se entrega a SHA-256 de una vez y se libera al terminar el `update`
    (ITSC-359).
-3. **Texto y cualquier otro tipo:** valor a valor, con `repr` de Python.
+3. **float64 nulable:** una celda de 9 bytes por fila: `\x01` más los 8 bytes del
+   valor, o nueve ceros si es nulo. El ancho fijo separa un nulo de cualquier
+   valor, `0.0` incluido. Se construye por columna completa con Arrow (vista
+   `binary(8)` del buffer, prefijo con `binary_replace_slice` y ceros en los
+   nulos), sin pasar por el texto, que no es un contrato de Arrow para los
+   flotantes.
+4. **Texto y cualquier otro tipo (float32 incluido):** valor a valor, con `repr`
+   de Python.
+
+float64 se hashea por sus bits: NaN e infinitos no fallan y dan sus bytes crudos,
+sin canonizar (`0.0` y `-0.0` dan digests distintos, y dos NaN con payload
+distinto también). L3 nunca los produce. `HASHER_VERSION` no sube por este camino:
+ninguna huella publicada tiene columnas float64 y el digest de los demás tipos no
+cambia.
 
 **Por qué el digest no cambió.** El camino 2 produce los mismos bytes que el
 bucle `digest.update(repr(value).encode() + b"\0")` que lo precedía, y SHA-256

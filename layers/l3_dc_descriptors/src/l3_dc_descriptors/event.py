@@ -14,7 +14,8 @@ from l3_dc_descriptors.errors import L2StateInconsistent
 from l3_dc_descriptors.phase import PhaseSummary, close_phase, scaled
 from l3_dc_descriptors.schema import COLUMN, WIDTH
 
-# Las siete columnas de L2 que el resumidor usa (§7.1).
+# Las ocho columnas de L2 que L3 usa (§7.1). `reference_price` es el ancla de la fase de
+# confirmación de la familia T; S no la lee.
 EVENT_COLUMNS = (
     "reference_agg_trade_id",
     "confirm_agg_trade_id",
@@ -23,6 +24,7 @@ EVENT_COLUMNS = (
     "direction",
     "confirm_price",
     "extreme_price",
+    "reference_price",
 )
 
 

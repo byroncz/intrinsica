@@ -19,6 +19,7 @@ pub mod engine;
 pub mod input;
 pub mod layout;
 pub mod output;
+pub mod path;
 pub mod phase;
 
 pub use arith::divide_half_even;
@@ -30,6 +31,10 @@ pub use engine::{
 pub use input::{
     Boundaries, EventBatch, EventIn, InputError, KeyColumns, Region, RowGroupInput, TickColumns,
 };
-pub use layout::{col, ColumnSpec, Row, COLUMNS, LIMIT, WIDTH};
-pub use output::SealedRowGroup;
+pub use layout::{
+    col, path_col, ColumnSpec, Family, PathRow, Row, COLUMNS, LIMIT, PATH_COLUMNS, PATH_WIDTH,
+    WIDTH,
+};
+pub use output::{ColumnMask, SealedRowGroup};
+pub use path::{close_path, PathAcc, PhasePath};
 pub use phase::{EventAcc, InstantAcc, PhaseAcc, TickError};

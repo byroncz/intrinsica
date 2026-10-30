@@ -731,11 +731,15 @@ fn the_contract_of_push_and_finish() {
             thetas: vec![],
             threads: 1,
             row_groups: vec![],
+            family: Default::default(),
+            silence_us: 0,
         },
         Config {
             thetas: vec![1, 2],
             threads: 1,
             row_groups: vec![vec![1]],
+            family: Default::default(),
+            silence_us: 0,
         },
     ] {
         assert!(matches!(
@@ -804,6 +808,7 @@ fn the_events_of_l2_must_be_ordered_and_have_prices_that_fit() {
         region(vec![1]),
         region(wide(5, 1)),
         region(wide(5, 0)),
+        region(wide(4, 0)),
     )
     .unwrap();
     match engine.push_boundaries(0, batch) {

@@ -8,8 +8,8 @@
 
 use crate::buffers::view;
 use dc_descriptors::{
-    BoundaryKind, Config, Engine as CoreEngine, EngineError, EventBatch, EventErrorKind,
-    KeyColumns, Region, RowGroupInput, SealedRowGroup, TickColumns, COLUMNS,
+    BoundaryKind, Config, Engine as CoreEngine, EngineError, EventBatch, EventErrorKind, Family,
+    KeyColumns, Region, RowGroupInput, SealedRowGroup, TickColumns,
 };
 use pyo3::buffer::PyBuffer;
 use pyo3::create_exception;
@@ -70,7 +70,7 @@ fn pin(column: &Bound<'_, PyAny>, offset: usize) -> PyResult<Region<Pinned>> {
     })
 }
 
-/// Un lote de filas consecutivas de `events.parquet` de L2 de un θ: sus siete columnas como
+/// Un lote de filas consecutivas de `events.parquet` de L2 de un θ: sus ocho columnas como
 /// `(memoryview de bytes del Buffer de Arrow, offset del Array)`, del mismo largo `rows`.
 /// Es cualquier objeto con estos atributos (la capa usa un `NamedTuple`).
 #[derive(FromPyObject)]
@@ -85,6 +85,8 @@ struct PyBatch<'py> {
     /// `decimal128`.
     confirm_price: (Bound<'py, PyAny>, usize),
     extreme_price: (Bound<'py, PyAny>, usize),
+    /// `decimal128`; el ancla de la fase de confirmación de la familia T.
+    reference_price: (Bound<'py, PyAny>, usize),
 }
 
 impl PyBatch<'_> {
@@ -98,6 +100,7 @@ impl PyBatch<'_> {
             pin(&self.direction.0, self.direction.1)?,
             pin(&self.confirm_price.0, self.confirm_price.1)?,
             pin(&self.extreme_price.0, self.extreme_price.1)?,
+            pin(&self.reference_price.0, self.reference_price.1)?,
         )
         .map_err(|e| to_py_error(e.into()))
     }
@@ -164,24 +167,42 @@ type PyStats = (u64, u64, u64, Option<i64>, Option<i64>);
 /// `thetas` son `round(θ × 10⁸)` en el orden en que se reportan los errores; `threads`
 /// son los hilos nativos (por defecto, los núcleos disponibles); `schema` son las
 /// columnas de datos de salida como `(nombre, bytes por valor, nulable)`, que el motor
-/// comprueba contra las suyas; `row_groups[t]` son las filas de cada row group de salida
-/// del θ `t` (el esqueleto de L2).
+/// comprueba contra las de su familia; `row_groups[t]` son las filas de cada row group de
+/// salida del θ `t` (el esqueleto de L2 o, en `path`, el de `summaries.parquet`); `family`
+/// es `"summaries"` (por defecto) o `"path"`, y `silence_us` el umbral de silencio de `path`
+/// en µs (`summaries` no lo usa).
 #[pyclass(module = "dc_pyo3")]
 pub struct Engine {
     inner: Option<CoreEngine<Pinned>>,
+    family: Family,
 }
 
 #[pymethods]
 impl Engine {
     #[new]
-    #[pyo3(signature = (thetas, schema, row_groups, threads=None))]
+    #[pyo3(signature = (thetas, schema, row_groups, threads=None, family="summaries", silence_us=0))]
     fn new(
         thetas: Vec<i64>,
         schema: Vec<(String, usize, bool)>,
         row_groups: Vec<Vec<usize>>,
         threads: Option<usize>,
+        family: &str,
+        silence_us: i64,
     ) -> PyResult<Self> {
-        let wanted: Vec<_> = COLUMNS
+        let family = match family {
+            "summaries" => Family::Summaries,
+            "path" => Family::Path,
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "la familia {other:?} no existe: summaries o path"
+                )))
+            }
+        };
+        if silence_us < 0 {
+            return Err(PyValueError::new_err("silence_us no puede ser negativo"));
+        }
+        let wanted: Vec<_> = family
+            .columns()
             .iter()
             .map(|c| (c.name.to_owned(), c.bytes(), c.nullable))
             .collect();
@@ -198,9 +219,14 @@ impl Engine {
             thetas,
             threads,
             row_groups,
+            family,
+            silence_us,
         })
         .map_err(to_py_error)?;
-        Ok(Self { inner: Some(inner) })
+        Ok(Self {
+            inner: Some(inner),
+            family,
+        })
     }
 
     /// Agrega un lote de filas de L2 de los eventos del θ en la posición `theta`, detrás
@@ -299,8 +325,12 @@ impl Engine {
     /// El siguiente row group de salida sellado, o `None`: `(theta, index, rows,
     /// columns, validity, null_count)`. `theta` es la posición del θ en `thetas` e
     /// `index` la del row group de salida; cada θ sale en orden de `index`. `columns` son
-    /// las 18 columnas de datos (`SealedColumn`, en el orden del esquema) y `validity` el
-    /// mapa de bits de las filas con overshoot, o `None` si todas lo tienen.
+    /// las columnas de datos de la familia (`SealedColumn`, en el orden del esquema).
+    ///
+    /// En `summaries` (18 columnas) `validity` es el mapa de bits de las filas con
+    /// overshoot, o `None` si todas lo tienen. En `path` (14 columnas) `validity` es una
+    /// lista con una entrada por columna: `(mapa de bits, nulos)` si la columna tiene
+    /// nulos y `None` si no (también si no es nulable), y `null_count` suma los nulos.
     fn pop_sealed<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyAny>>> {
         let Some(sealed) = self.engine()?.pop_sealed().map_err(to_py_error)? else {
             return Ok(None);
@@ -312,22 +342,32 @@ impl Engine {
             columns,
             validity,
             null_count,
+            masks,
         } = sealed;
         let columns = columns
             .into_iter()
             .map(|data| Py::new(py, SealedColumn { data }))
             .collect::<PyResult<Vec<_>>>()?;
+        let columns = PyList::new(py, columns)?;
+        if self.family == Family::Path {
+            let nulls: usize = masks.iter().flatten().map(|mask| mask.null_count).sum();
+            let masks = masks
+                .into_iter()
+                .map(|mask| {
+                    mask.map(|mask| {
+                        Py::new(py, SealedColumn { data: mask.bits })
+                            .map(|bits| (bits, mask.null_count))
+                    })
+                    .transpose()
+                })
+                .collect::<PyResult<Vec<_>>>()?;
+            let tuple = (theta, index, rows, columns, PyList::new(py, masks)?, nulls);
+            return Ok(Some(tuple.into_pyobject(py)?.into_any()));
+        }
         let validity = validity
             .map(|data| Py::new(py, SealedColumn { data }))
             .transpose()?;
-        let tuple = (
-            theta,
-            index,
-            rows,
-            PyList::new(py, columns)?,
-            validity,
-            null_count,
-        );
+        let tuple = (theta, index, rows, columns, validity, null_count);
         Ok(Some(tuple.into_pyobject(py)?.into_any()))
     }
 
@@ -471,6 +511,10 @@ fn to_py_error(error: EngineError) -> PyErr {
                     }
                     EventErrorKind::NotionalOverflow { phase } => {
                         kind("notional_overflow");
+                        set("phase", phase.text().into_pyobject(py).unwrap().into_any());
+                    }
+                    EventErrorKind::PathOverflow { phase } => {
+                        kind("path_overflow");
                         set("phase", phase.text().into_pyobject(py).unwrap().into_any());
                     }
                     EventErrorKind::Invariant { field, got, wanted } => {

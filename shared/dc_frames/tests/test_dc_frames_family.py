@@ -43,9 +43,11 @@ def partition(tmp_path):
     )
 
 
-def write(path, skeleton, batches=None, schema=FAMILY_SCHEMA, version=VERSION):
+def write(
+    path, skeleton, batches=None, schema=FAMILY_SCHEMA, version=VERSION, metadata=None
+):
     batches = family_batches(skeleton) if batches is None else batches
-    with FamilyWriter(path, schema, version, skeleton) as writer:
+    with FamilyWriter(path, schema, version, skeleton, metadata=metadata) as writer:
         for batch in batches:
             writer.write_row_group(batch)
         return writer.commit()
@@ -94,6 +96,42 @@ def test_physical_properties(partition):
     sorting = meta.row_group(0).sorting_columns
     assert [(s.column_index, s.descending) for s in sorting] == [(1, False)]
     assert pq.read_schema(summaries).equals(FAMILY_SCHEMA)
+
+
+def test_the_file_carries_only_state_version_without_extra_metadata(partition):
+    events, summaries, _ = partition
+    write(summaries, events, version="2.3.4")
+    footer = pq.read_metadata(summaries).metadata
+    assert footer[b"state_version"] == b"2.3.4"
+    assert b"silence_us" not in footer
+
+
+def test_extra_metadata_goes_to_the_footer_next_to_state_version(partition):
+    events, summaries, family = partition
+    write(summaries, events)
+    digest = write(
+        family("path"), summaries, version="2.3.4", metadata={"silence_us": "10000000"}
+    )
+    footer = pq.read_metadata(family("path")).metadata
+    assert footer[b"state_version"] == b"2.3.4"
+    assert footer[b"silence_us"] == b"10000000"
+    # Los metadatos no son contenido lógico: el hash es el de las mismas filas sin ellos.
+    assert digest == write(family("plain"), summaries)
+    assert digest == content_hash(pq.read_table(family("path")))
+    assert pq.read_schema(family("path")).equals(FAMILY_SCHEMA)
+
+
+def test_extra_metadata_is_validated(partition):
+    events, summaries, _ = partition
+    for bad, match in [
+        ({"state_version": "9.9.9"}, "repite"),
+        ({"silence_us": 10_000_000}, "str"),
+        ({1: "x"}, "str"),
+        ({"silence_us": None}, "str"),
+    ]:
+        with pytest.raises(ValueError, match=match):
+            FamilyWriter(summaries, FAMILY_SCHEMA, VERSION, events, metadata=bad)
+    assert not os.path.exists(summaries)
 
 
 def test_the_content_hash_is_stable_across_writes(partition):

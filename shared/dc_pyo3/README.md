@@ -97,7 +97,9 @@ solo buffers y errores. El modelo (ítems, casillas, fusión) y el contrato de e
 en el README del crate.
 
 ```python
-engine = dc_pyo3.Engine(thetas, schema, row_groups, threads=None)
+engine = dc_pyo3.Engine(
+    thetas, schema, row_groups, threads=None, family="summaries", silence_us=0
+)
 engine.push_boundaries(theta, batch)  # por lotes, por delante de los row groups
 engine.needed(theta)  # primer evento del θ sin cerrar
 engine.push(row_group_id, rows, ids, time, price, quantity, sold, before_month)
@@ -112,8 +114,10 @@ stats = (
 engine.close()
 ```
 
-- `schema` son las 18 columnas de datos como `(nombre, bytes por valor, nulable)`; el motor
-  las compara con las suyas y falla con `ValueError` si el esquema de la capa cambió.
+- `schema` son las columnas de datos de la familia (18 en `summaries`, 14 en `path`) como
+  `(nombre, bytes por valor, nulable)`; el motor las compara con las suyas y falla con
+  `ValueError` si el esquema de la capa cambió. `family` es `"summaries"` o `"path"` (la
+  trayectoria, ADR-L3-17) y `silence_us` el umbral de silencio de `path` en µs.
   `row_groups[t]` son las filas de cada row group de salida del θ `t` (el esqueleto de L2),
   y van en el constructor y no en cada `push` porque no cambian por row group.
 - **Ticks sin copia.** `ids`, `time`, `price`, `quantity` y `sold` son `(memoryview de bytes del
@@ -121,7 +125,7 @@ engine.close()
   group (`inflight()` baja) y lo suelta sin tomar el GIL: PyO3 difiere el `decref`. Los
   buffers deben ser inmutables, como los de Arrow.
 - **`push_boundaries(theta, batch)`**: un lote de filas consecutivas de `events.parquet` de
-  L2 del θ, detrás de los anteriores, antes o después de empezar los `push`; es cualquier
+  L2 del θ (ocho columnas, con `reference_price`), detrás de los anteriores, antes o después de empezar los `push`; es cualquier
   objeto con los atributos de `EventBatch` (ver `.pyi`; la capa usa un `NamedTuple`) y sus
   columnas van como `(memoryview de bytes del buffer, offset)`, **sin copia**. El lote de un
   evento debe llegar antes que el row group que lo toca: si no, `push` lanza
@@ -134,9 +138,11 @@ engine.close()
   el row group es de un mes anterior al de los eventos. Un row group espera a que se empuje
   el anterior; `locate` devuelve `(índice, (R, C, E), starts_before, ends_after)` por evento
   de un row group sin empujarlo, para comparar con el lector.
-- **Salida sin copia.** `columns` son 18 `SealedColumn`: objetos de solo lectura con
-  protocolo de buffer que poseen la memoria del motor. `pyarrow.py_buffer(column)` los
-  envuelve sin copiar, y `validity` es el mapa de bits de las columnas `os_*`, o `None`.
+- **Salida sin copia.** `columns` son los `SealedColumn` de la familia: objetos de solo lectura
+  con protocolo de buffer que poseen la memoria del motor. `pyarrow.py_buffer(column)` los
+  envuelve sin copiar. En `summaries`, `validity` es el mapa de bits de las columnas `os_*`, o
+  `None`. En `path`, `validity` es una lista con una entrada por columna, `(mapa de bits,
+  nulos)` si la columna tiene nulos y `None` si no; `null_count` suma los nulos.
 - **Errores.** `DescriptorError` (subclase de `ValueError`) con `kind` y, según el caso,
   `theta` (posición), `event`, `confirm_agg_trade_id`, `phase`, `field`, `got`, `wanted` y, en
   `boundary`, `reason`, `bounds`, `low` y `high`.

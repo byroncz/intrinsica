@@ -124,6 +124,18 @@ impl Ev {
     pub fn confirm_time(&self, s: &Series) -> i64 {
         s.time[self.c - 1]
     }
+
+    /// El precio del tick `R` (o del primero de la serie, si `R` es el id 0 de antes de
+    /// ella) si queda del lado de `confirm_price` que dice la dirección; si no, un precio
+    /// consistente con ella. Solo lo lee la familia T.
+    pub fn reference_price(&self, s: &Series) -> i64 {
+        let tick = s.price[self.r.saturating_sub(1)];
+        if (self.confirm_price - tick) * self.direction > 0 {
+            tick
+        } else {
+            self.confirm_price - self.direction * 1_000
+        }
+    }
 }
 
 /// Eventos encadenados (`E_i = R_{i+1}`) que cumplen los invariantes de §7.2 por
@@ -418,6 +430,7 @@ pub fn watched_batches(
                 },
                 prices(&|ev| ev.confirm_price),
                 prices(&|ev| ev.extreme_price),
+                prices(&|ev| ev.reference_price(s)),
             )
             .expect("buffers completos"),
         );
@@ -611,6 +624,8 @@ pub fn engine(threads: usize, sizes: &[Vec<usize>]) -> Engine<Shared> {
         thetas: (0..sizes.len() as i64).map(|t| 100_000 * (t + 1)).collect(),
         threads,
         row_groups: sizes.to_vec(),
+        family: dc_descriptors::Family::Summaries,
+        silence_us: 0,
     })
     .expect("configuración válida")
 }

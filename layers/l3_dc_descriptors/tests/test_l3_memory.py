@@ -438,7 +438,7 @@ DENSE_GROUP_TICKS = 450_000
 DENSE_TICKS_PER_EVENT = 3
 # Lo que cuesta una casilla de salida abierta (las 18 columnas de `ENGINE_SCHEMA`).
 SLOT_BYTES = 240
-# Menos que un row group (2,4 M de eventos × 305 B): cada uno avanza solo.
+# Menos que un row group (2,4 M de eventos × 321 B): cada uno avanza solo.
 DENSE_CAP = 120 * (1 << 20)
 # Un solo hilo del motor, más lento que el lector: con K = 4 solo, el lector empuja los row groups
 # uno tras otro y a veces sus casillas se acumulan (hasta 4,35 M de eventos abiertos, 1,8 row
@@ -800,7 +800,7 @@ def test_the_periodic_trim_lowers_the_peak_by_part_of_the_free_memory_glibc_held
 
 
 # ITSC-376. Con el lote por defecto (1 M) y el tope por defecto (768 MiB) un tramo cabe solo
-# bajo el tope: el estimador ya no cuenta las fronteras que `cover` trae por delante a 305 B.
+# bajo el tope: el estimador ya no cuenta las fronteras que `cover` trae por delante a 321 B.
 def test_the_default_lot_fits_under_the_default_cap_and_does_not_warn(dense_runs):
     run = dense_runs["defaults"]
     assert run["lot_events"] == 1_000_000 and run["lots"] > DENSE_GROUPS, run

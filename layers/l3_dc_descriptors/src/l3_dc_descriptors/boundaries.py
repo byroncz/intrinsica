@@ -12,10 +12,10 @@ lotes en un pool de E/S, `L2_AHEAD` por delante de quien los consume, así que l
 leen en paralelo y el hilo principal casi nunca espera. Lo retenido por θ es el caché
 comprimido del tramo en curso más `L2_AHEAD + 1` lotes decodificados (≈ 2 MiB cada uno).
 
-Los lotes traen las siete columnas que el motor usa más `theta` (`EVENT_FILE_COLUMNS`) y se
+Los lotes traen las ocho columnas que el motor usa más `theta` (`EVENT_FILE_COLUMNS`) y se
 decodifican una sola vez. El hilo que los lee los pasa por `L2Events.tap` (ADR-L3-16,
 ITSC-365): anota la huella de las claves de cada row group (el esqueleto con que el escritor
-comprueba lo que el motor selló, sin releer el archivo) y entrega al motor solo las siete que
+comprueba lo que el motor selló, sin releer el archivo) y entrega al motor solo las ocho que
 usa. El linaje ya no se calcula aquí: L2 publica el `content_hash` junto al archivo y la
 compuerta lo lee (ITSC-368); las otras cuatro columnas de L2 (tiempos y precios de la
 referencia) no se decodifican.
@@ -43,9 +43,9 @@ from l3_dc_descriptors.timing import ReadMeter
 # 2021-01) por lectura. Lo que ITSC-362 midió: la latencia por viaje, no el ancho de banda,
 # era el límite (1 335 lecturas de ≈ 126 ms para 610 MB).
 L2_LOT_BYTES = 8 << 20
-# Eventos por lote que se entrega al motor: ≈ 2 MiB decodificados (65 B por evento).
+# Eventos por lote que se entrega al motor: ≈ 2,5 MiB decodificados (81 B por evento).
 L2_BATCH_ROWS = 32_768
-# Las columnas que se decodifican de `events.parquet`: las siete que usa el motor y `theta`,
+# Las columnas que se decodifican de `events.parquet`: las ocho que usa el motor y `theta`,
 # que el esqueleto compara contra la partición. `EventFile` agrega por su cuenta las que
 # siempre lee (las tres fronteras y `confirm_time`, que ya están en `EVENT_COLUMNS`).
 EVENT_FILE_COLUMNS = (*EVENT_COLUMNS, "theta")
@@ -58,11 +58,12 @@ L2_TYPES = MappingProxyType(
         "direction": pa.int8(),
         "confirm_price": DECIMAL,
         "extreme_price": DECIMAL,
+        "reference_price": DECIMAL,
     }
 )
-# Bytes de las siete columnas de fronteras de un evento, que el motor retiene hasta cerrarlo: cuatro
-# `int64`, un `int8` y dos `decimal128`.
-BOUNDARY_ROW_BYTES = 4 * 8 + 1 + 2 * 16
+# Bytes de las ocho columnas de fronteras de un evento, que el motor retiene hasta cerrarlo: cuatro
+# `int64`, un `int8` y tres `decimal128`.
+BOUNDARY_ROW_BYTES = 4 * 8 + 1 + 3 * 16
 # Lotes que `BatchStream` trae por delante de quien los consume, por θ.
 L2_AHEAD = 2
 
@@ -114,7 +115,7 @@ class L2Events:
         self._same_theta = True
 
     def tap(self, batch: pa.RecordBatch) -> pa.RecordBatch:
-        """Observa un lote con las columnas de `EVENT_FILE_COLUMNS` y devuelve las siete que
+        """Observa un lote con las columnas de `EVENT_FILE_COLUMNS` y devuelve las ocho que
         el motor usa.
         """
         ids = _ids(batch.column("confirm_agg_trade_id"))

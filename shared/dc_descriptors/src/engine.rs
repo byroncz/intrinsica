@@ -37,8 +37,9 @@ use crate::close::{close_event, EventError, EventErrorKind};
 use crate::input::{
     Boundaries, EventBatch, EventIn, InputError, KeyColumns, RowGroupInput, TickColumns,
 };
-use crate::layout::{col, Row};
+use crate::layout::{col, Family, PathRow, Row};
 use crate::output::{Delivery, OutTable, OutputError, SealedRowGroup};
+use crate::path::{accumulate, close_path, PathAcc, Reach};
 use crate::phase::{aggregate, EventAcc, TickError};
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fmt;
@@ -59,6 +60,11 @@ pub struct Config {
     pub threads: usize,
     /// Por θ, las filas de cada row group de salida (el esqueleto de L2).
     pub row_groups: Vec<Vec<usize>>,
+    /// La familia que el motor calcula: `summaries` (S) o `path` (T).
+    pub family: Family,
+    /// El umbral de silencio de la familia T en µs: un hueco entre ticks de una fase cuenta
+    /// como inactividad si es mayor. S no lo usa.
+    pub silence_us: i64,
 }
 
 /// Por qué el motor falló.
@@ -250,6 +256,83 @@ struct Partial {
     merged: u64,
     first_group: Option<u64>,
     last_group: Option<u64>,
+}
+
+/// Un tramo de un evento de la familia T que cruza row groups, o varios ya unidos: cubre los
+/// row groups de ordinal `first` a `last`, ambos incluidos, y guarda el estado de borde.
+struct Run {
+    first: u64,
+    last: u64,
+    acc: PathAcc,
+}
+
+/// El almacén de un evento de T que cruza row groups (ADR-L3-17): corridas de tramos de
+/// ordinales consecutivos, en orden de ordinal y sin solaparse. Un tramo nuevo se une solo a
+/// la corrida que termina en el ordinal anterior (detrás) y a la que empieza en el siguiente
+/// (delante); si ninguna lo toca, abre otra. Es O(corridas), nunca O(ticks).
+#[derive(Default)]
+struct Runs {
+    runs: Vec<Run>,
+    /// El row group del tramo que no empieza antes del suyo (donde está `R`).
+    first_group: Option<u64>,
+    /// El row group del tramo que no termina después del suyo (donde está `E`).
+    last_group: Option<u64>,
+}
+
+impl Runs {
+    /// Agrega el tramo del row group `group`. Devuelve el evento entero cuando la corrida
+    /// única va del row group de `R` al de `E`, y un error si el tramo contradice a los que
+    /// ya están (un ordinal repetido o fuera del rango del evento).
+    fn add(
+        &mut self,
+        group: u64,
+        acc: PathAcc,
+        starts_before: bool,
+        ends_after: bool,
+        silence_us: i64,
+    ) -> Result<Option<(PathAcc, u64)>, String> {
+        if !starts_before {
+            self.first_group = Some(group);
+        }
+        if !ends_after {
+            self.last_group = Some(group);
+        }
+        if self.first_group.is_some_and(|first| group < first)
+            || self.last_group.is_some_and(|last| group > last)
+        {
+            return Err(format!(
+                "el tramo del row group {group} cae fuera del rango {:?}..{:?} del evento",
+                self.first_group, self.last_group
+            ));
+        }
+        let at = self.runs.partition_point(|run| run.last < group);
+        if self.runs.get(at).is_some_and(|run| run.first <= group) {
+            return Err(format!("el row group {group} ya aportó su tramo al evento"));
+        }
+        let mut merged = Run {
+            first: group,
+            last: group,
+            acc,
+        };
+        if self.runs.get(at).is_some_and(|run| run.first == group + 1) {
+            let behind = self.runs.remove(at);
+            merged.acc.merge(&behind.acc, silence_us);
+            merged.last = behind.last;
+        }
+        if at > 0 && self.runs[at - 1].last + 1 == group {
+            let ahead = &mut self.runs[at - 1];
+            ahead.acc.merge(&merged.acc, silence_us);
+            ahead.last = merged.last;
+        } else {
+            self.runs.insert(at, merged);
+        }
+        match (self.runs.as_slice(), self.first_group, self.last_group) {
+            ([run], Some(first), Some(last)) if run.first == first && run.last == last => {
+                Ok(Some((run.acc, last)))
+            }
+            _ => Ok(None),
+        }
+    }
 }
 
 struct Job<B> {
@@ -462,6 +545,10 @@ struct Shared<B> {
     active: Vec<usize>,
     order: Mutex<Order<B>>,
     partials: Vec<Mutex<HashMap<u64, Partial>>>,
+    /// Lo mismo para la familia T: las corridas de tramos de cada evento abierto.
+    runs: Vec<Mutex<HashMap<u64, Runs>>>,
+    family: Family,
+    silence_us: i64,
     stats: Vec<Mutex<ThetaStats>>,
     failure: Mutex<Option<Failure>>,
     failed: AtomicBool,
@@ -510,6 +597,9 @@ impl<B: AsRef<[u8]> + Send + Sync + 'static> Engine<B> {
                 held: BTreeMap::new(),
             }),
             partials: (0..thetas).map(|_| Mutex::new(HashMap::new())).collect(),
+            runs: (0..thetas).map(|_| Mutex::new(HashMap::new())).collect(),
+            family: config.family,
+            silence_us: config.silence_us,
             stats: (0..thetas).map(|_| Mutex::default()).collect(),
             failure: Mutex::new(None),
             failed: AtomicBool::new(false),
@@ -701,7 +791,10 @@ impl<B: AsRef<[u8]> + Send + Sync + 'static> Engine<B> {
         }
         for theta in 0..self.shared.thetas {
             let missing = self.shared.out.missing(theta);
-            if missing > 0 || !lock(&self.shared.partials[theta]).is_empty() {
+            if missing > 0
+                || !lock(&self.shared.partials[theta]).is_empty()
+                || !lock(&self.shared.runs[theta]).is_empty()
+            {
                 return Err(EngineError::Incomplete {
                     theta,
                     missing,
@@ -856,6 +949,9 @@ impl<B: AsRef<[u8]> + Send + Sync + 'static> Shared<B> {
     /// empieza antes (`starts_before`) y uno con `E` después termina después
     /// (`ends_after`): sus parciales se fusionan con los de los otros row groups.
     fn process(&self, job: &Job<B>, theta: usize) -> Result<(), Box<Failure>> {
+        if self.family == Family::Path {
+            return self.process_path(job, theta);
+        }
         let fail = |group: u64, event: u64, error: EngineError| {
             Box::new(Failure {
                 key: (group, theta, event),
@@ -981,25 +1077,156 @@ impl<B: AsRef<[u8]> + Send + Sync + 'static> Shared<B> {
                 delivery.insert(row_group);
             }
         }
-        self.close_events(theta, &done);
+        self.close_events(theta, done.iter().map(|(index, _)| *index));
         Ok(())
+    }
+
+    /// Un ítem de la familia T: como `process`, pero los tramos de un evento que cruza row
+    /// groups no se suman en cualquier orden. Cada uno entra al almacén de corridas del θ
+    /// (`Runs`) y se une solo a su vecino de ordinal; el ítem que deja una única corrida del
+    /// row group de `R` al de `E` cierra el evento.
+    fn process_path(&self, job: &Job<B>, theta: usize) -> Result<(), Box<Failure>> {
+        let fail = |group: u64, event: u64, error: EngineError| {
+            Box::new(Failure {
+                key: (group, theta, event),
+                error,
+            })
+        };
+        let event_error = |group: u64, event: u64, input: &EventIn, kind: EventErrorKind| {
+            fail(
+                group,
+                event,
+                EngineError::Event(EventError {
+                    theta,
+                    event,
+                    confirm_agg_trade_id: input.confirm,
+                    kind,
+                }),
+            )
+        };
+        let located = locate_events(
+            theta,
+            &read(&self.bounds[theta]),
+            job.ticks.keys(),
+            job.prev_high,
+        )
+        .map_err(|e| fail(job.id, located_event(&e), e))?;
+        if located.is_empty() {
+            return Ok(());
+        }
+        let first = located[0].index;
+        let mut done: Vec<(u64, PathRow)> = Vec::with_capacity(located.len());
+        let mut crossing: Vec<(usize, PathAcc)> = Vec::new();
+        let mut before_month = 0u64;
+        for (k, at) in located.iter().enumerate() {
+            let (index, event, positions) = (at.index, &at.event, &at.positions);
+            let acc = self
+                .aggregate_path(&job.ticks, event, positions)
+                .map_err(|e| fail(job.id, index, EngineError::Ticks(e)))?;
+            if job.before_month {
+                before_month += (positions[2] - positions[0]) as u64;
+            }
+            if at.starts_before || at.ends_after {
+                crossing.push((k, acc));
+            } else {
+                let row = close_path(&acc, event)
+                    .map_err(|kind| event_error(job.id, index, event, kind))?;
+                done.push((index, row));
+            }
+        }
+        if !crossing.is_empty() {
+            let mut completed = Vec::new();
+            {
+                let mut store = lock(&self.runs[theta]);
+                for (k, acc) in crossing {
+                    let at = &located[k];
+                    let index = at.index;
+                    let runs = store.entry(index).or_default();
+                    let outcome = runs
+                        .add(
+                            job.id,
+                            acc,
+                            at.starts_before,
+                            at.ends_after,
+                            self.silence_us,
+                        )
+                        .map_err(|message| {
+                            fail(
+                                job.id,
+                                index,
+                                EngineError::Internal(format!(
+                                    "evento {index} del θ {theta}: {message}"
+                                )),
+                            )
+                        })?;
+                    if let Some((acc, last_group)) = outcome {
+                        store.remove(&index);
+                        completed.push((k, index, acc, last_group));
+                    }
+                }
+            }
+            for (k, index, acc, last_group) in completed {
+                let event = &located[k].event;
+                let row = close_path(&acc, event)
+                    .map_err(|kind| event_error(last_group, index, event, kind))?;
+                done.push((index, row));
+            }
+        }
+        done.sort_unstable_by_key(|(index, _)| *index);
+        let closed_ticks: u64 = done.iter().map(|(_, row)| row.ticks).sum();
+        let sealed = self.out.write(theta, &done).map_err(|e| match e {
+            OutputError::Beyond { event, rows } => {
+                fail(job.id, event, EngineError::Skeleton { theta, event, rows })
+            }
+            e @ OutputError::Overfull { .. } => {
+                fail(job.id, first, EngineError::Internal(e.to_string()))
+            }
+        })?;
+        {
+            let mut stats = lock(&self.stats[theta]);
+            stats.rows += done.len() as u64;
+            stats.closed_ticks += closed_ticks;
+            stats.before_month += before_month;
+        }
+        if !sealed.is_empty() {
+            let mut delivery = lock(&self.delivery);
+            for row_group in sealed {
+                delivery.insert(row_group);
+            }
+        }
+        self.close_events(theta, done.iter().map(|(index, _)| *index));
+        Ok(())
+    }
+
+    fn aggregate_path(
+        &self,
+        ticks: &TickColumns<B>,
+        event: &EventIn,
+        positions: &[usize; 3],
+    ) -> Result<PathAcc, TickError> {
+        let [r, c, e] = *positions;
+        let reach = Reach::of(event);
+        let (confirmation, levels) = accumulate(ticks, r, c, self.silence_us, Some(&reach))?;
+        let (overshoot, _) = accumulate(ticks, c, e, self.silence_us, None)?;
+        Ok(PathAcc {
+            confirmation,
+            overshoot,
+            levels,
+        })
     }
 
     /// Las filas de `done` (ordenadas por evento) ya están en sus casillas: avanza la
     /// marca de cerrados del θ y suelta los lotes de fronteras que quedaron enteros antes
     /// de ella. Sus buffers se liberan fuera de los locks.
-    fn close_events(&self, theta: usize, done: &[(u64, Row)]) {
+    fn close_events(&self, theta: usize, done: impl Iterator<Item = u64>) {
         let watermark = {
             let mut closed = lock(&self.closed[theta]);
             let before = closed.watermark;
-            let mut i = 0;
-            while i < done.len() {
-                let start = done[i].0;
+            let mut done = done.peekable();
+            while let Some(start) = done.next() {
                 let mut end = start + 1;
-                i += 1;
-                while i < done.len() && done[i].0 == end {
+                while done.next_if_eq(&end).is_some() {
                     end += 1;
-                    i += 1;
                 }
                 closed.close(start, end);
             }
