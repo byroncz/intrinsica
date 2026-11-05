@@ -253,7 +253,11 @@ pub fn accumulate<B: AsRef<[u8]>>(
 }
 
 /// Camino frío: distingue un precio negativo de uno que no cabe en 63 bits.
-fn classify<B: AsRef<[u8]>>(ticks: &TickColumns<B>, start: usize, end: usize) -> TickError {
+pub(crate) fn classify<B: AsRef<[u8]>>(
+    ticks: &TickColumns<B>,
+    start: usize,
+    end: usize,
+) -> TickError {
     let negative = ticks
         .price_bytes(start, end)
         .chunks_exact(16)
@@ -265,7 +269,7 @@ fn classify<B: AsRef<[u8]>>(ticks: &TickColumns<B>, start: usize, end: usize) ->
     }
 }
 
-fn invariant(
+pub(crate) fn invariant(
     field: &'static str,
     got: impl TryInto<i128>,
     wanted: impl Into<String>,

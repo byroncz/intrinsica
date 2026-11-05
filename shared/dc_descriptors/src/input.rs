@@ -173,8 +173,9 @@ fn read_i64<B: AsRef<[u8]>>(region: &Region<B>, i: usize) -> i64 {
     )
 }
 
-/// Una fila de L2 de un evento (TRD-L3 §7.1): las ocho columnas que usa L3. `reference_price`
-/// es el ancla de la fase de confirmación de la familia T; S no la lee.
+/// Una fila de L2 de un evento (TRD-L3 §7.1): las diez columnas que usa L3. `reference_price`
+/// es el ancla de la fase de confirmación de la familia T; `reference_time` y `extreme_time`,
+/// junto con los precios, anclan y cierran las fases de la familia A. S no lee ninguna de las tres.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EventIn {
     pub reference: i64,
@@ -185,11 +186,13 @@ pub struct EventIn {
     pub confirm_price: i64,
     pub extreme_price: i64,
     pub reference_price: i64,
+    pub reference_time: i64,
+    pub extreme_time: i64,
 }
 
 /// Un lote de filas consecutivas de `events.parquet` de L2 de un θ (un row group o un tramo
-/// de uno), en el layout de Arrow: `reference`,
-/// `confirm`, `confirm_time` y `extreme` `int64`, `direction` `int8` y los tres precios
+/// de uno), en el layout de Arrow: `reference`, `confirm`, `confirm_time`, `extreme`,
+/// `reference_time` y `extreme_time` `int64`, `direction` `int8` y los tres precios
 /// (`confirm_price`, `extreme_price` y `reference_price`) `decimal128` (16 bytes, el entero sin
 /// escalar, que cabe en `i64` por contrato de L2).
 #[derive(Debug)]
@@ -203,6 +206,8 @@ pub struct EventBatch<B> {
     confirm_price: Region<B>,
     extreme_price: Region<B>,
     reference_price: Region<B>,
+    reference_time: Region<B>,
+    extreme_time: Region<B>,
 }
 
 impl<B: AsRef<[u8]>> EventBatch<B> {
@@ -218,6 +223,8 @@ impl<B: AsRef<[u8]>> EventBatch<B> {
         confirm_price: Region<B>,
         extreme_price: Region<B>,
         reference_price: Region<B>,
+        reference_time: Region<B>,
+        extreme_time: Region<B>,
     ) -> Result<Self, InputError> {
         for (name, region, width) in [
             ("reference_agg_trade_id", &reference, 8),
@@ -228,6 +235,8 @@ impl<B: AsRef<[u8]>> EventBatch<B> {
             ("confirm_price", &confirm_price, 16),
             ("extreme_price", &extreme_price, 16),
             ("reference_price", &reference_price, 16),
+            ("reference_time", &reference_time, 8),
+            ("extreme_time", &extreme_time, 8),
         ] {
             check(name, region, rows, region.offset * width, rows * width)?;
         }
@@ -241,6 +250,8 @@ impl<B: AsRef<[u8]>> EventBatch<B> {
             confirm_price,
             extreme_price,
             reference_price,
+            reference_time,
+            extreme_time,
         })
     }
 
@@ -267,6 +278,8 @@ impl<B: AsRef<[u8]>> EventBatch<B> {
             confirm_price: Self::price(&self.confirm_price, i, "confirm_price")?,
             extreme_price: Self::price(&self.extreme_price, i, "extreme_price")?,
             reference_price: Self::price(&self.reference_price, i, "reference_price")?,
+            reference_time: read_i64(&self.reference_time, i),
+            extreme_time: read_i64(&self.extreme_time, i),
         })
     }
 }

@@ -34,11 +34,12 @@
 //! una vez por ítem, los de las fronteras y la marca de cerrados de su θ.
 
 use crate::close::{close_event, EventError, EventErrorKind};
+use crate::fit::{accumulate as accumulate_fit, close_fit, FitAcc, Frame};
 use crate::input::{
     Boundaries, EventBatch, EventIn, InputError, KeyColumns, RowGroupInput, TickColumns,
 };
-use crate::layout::{col, Family, PathRow, Row};
-use crate::output::{Delivery, OutTable, OutputError, SealedRowGroup};
+use crate::layout::{col, Family, FitRow, PathRow, Row};
+use crate::output::{Delivery, OutRow, OutTable, OutputError, SealedRowGroup};
 use crate::path::{accumulate, close_path, PathAcc, Reach};
 use crate::phase::{aggregate, EventAcc, TickError};
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
@@ -60,7 +61,7 @@ pub struct Config {
     pub threads: usize,
     /// Por θ, las filas de cada row group de salida (el esqueleto de L2).
     pub row_groups: Vec<Vec<usize>>,
-    /// La familia que el motor calcula: `summaries` (S) o `path` (T).
+    /// La familia que el motor calcula: `summaries` (S), `path` (T) o `fit` (A).
     pub family: Family,
     /// El umbral de silencio de la familia T en µs: un hueco entre ticks de una fase cuenta
     /// como inactividad si es mayor. S no lo usa.
@@ -251,8 +252,28 @@ struct Failure {
     error: EngineError,
 }
 
-struct Partial {
-    acc: EventAcc,
+/// Lo que se puede fusionar con otro tramo de la misma fase en cualquier orden: los agregados
+/// de S y los momentos de A.
+trait Join {
+    fn join(&mut self, other: &Self);
+}
+
+impl Join for EventAcc {
+    fn join(&mut self, other: &Self) {
+        self.merge(other);
+    }
+}
+
+impl Join for FitAcc {
+    fn join(&mut self, other: &Self) {
+        self.merge(other);
+    }
+}
+
+/// El almacén de un evento que cruza row groups en las familias que se fusionan en cualquier
+/// orden (S y A): el agregado de los tramos que llegaron y cuántos son.
+struct Partial<A> {
+    acc: A,
     merged: u64,
     first_group: Option<u64>,
     last_group: Option<u64>,
@@ -544,7 +565,9 @@ struct Shared<B> {
     /// Los θ con al menos una fila en el esqueleto; un ítem es uno de ellos.
     active: Vec<usize>,
     order: Mutex<Order<B>>,
-    partials: Vec<Mutex<HashMap<u64, Partial>>>,
+    partials: Vec<Mutex<HashMap<u64, Partial<EventAcc>>>>,
+    /// Lo mismo para la familia A: los momentos de cada evento abierto.
+    fit_partials: Vec<Mutex<HashMap<u64, Partial<FitAcc>>>>,
     /// Lo mismo para la familia T: las corridas de tramos de cada evento abierto.
     runs: Vec<Mutex<HashMap<u64, Runs>>>,
     family: Family,
@@ -597,6 +620,7 @@ impl<B: AsRef<[u8]> + Send + Sync + 'static> Engine<B> {
                 held: BTreeMap::new(),
             }),
             partials: (0..thetas).map(|_| Mutex::new(HashMap::new())).collect(),
+            fit_partials: (0..thetas).map(|_| Mutex::new(HashMap::new())).collect(),
             runs: (0..thetas).map(|_| Mutex::new(HashMap::new())).collect(),
             family: config.family,
             silence_us: config.silence_us,
@@ -793,6 +817,7 @@ impl<B: AsRef<[u8]> + Send + Sync + 'static> Engine<B> {
             let missing = self.shared.out.missing(theta);
             if missing > 0
                 || !lock(&self.shared.partials[theta]).is_empty()
+                || !lock(&self.shared.fit_partials[theta]).is_empty()
                 || !lock(&self.shared.runs[theta]).is_empty()
             {
                 return Err(EngineError::Incomplete {
@@ -949,9 +974,43 @@ impl<B: AsRef<[u8]> + Send + Sync + 'static> Shared<B> {
     /// empieza antes (`starts_before`) y uno con `E` después termina después
     /// (`ends_after`): sus parciales se fusionan con los de los otros row groups.
     fn process(&self, job: &Job<B>, theta: usize) -> Result<(), Box<Failure>> {
-        if self.family == Family::Path {
-            return self.process_path(job, theta);
+        match self.family {
+            Family::Summaries => self.process_merged(
+                job,
+                theta,
+                &self.partials[theta],
+                |ticks, event, positions| self.aggregate_event(ticks, event, positions),
+                close_event,
+                |row: &Row| (row[col::C_TICKS] + row[col::OS_TICKS]) as u64,
+            ),
+            Family::Path => self.process_path(job, theta),
+            Family::Fit => self.process_merged(
+                job,
+                theta,
+                &self.fit_partials[theta],
+                |ticks, event, positions| self.aggregate_fit(ticks, event, positions),
+                close_fit,
+                |row: &FitRow| row.ticks,
+            ),
         }
+    }
+
+    /// El ítem de las familias que se fusionan en cualquier orden (S y A): cierra en el ítem
+    /// los eventos que caben en el row group y deja el resto en el almacén de su θ, donde cada
+    /// ítem fusiona su tramo; el que completa los parciales cierra el evento.
+    fn process_merged<A, R>(
+        &self,
+        job: &Job<B>,
+        theta: usize,
+        store: &Mutex<HashMap<u64, Partial<A>>>,
+        aggregate: impl Fn(&TickColumns<B>, &EventIn, &[usize; 3]) -> Result<A, TickError>,
+        close: impl Fn(&A, &EventIn) -> Result<R, EventErrorKind>,
+        closed_ticks_of: impl Fn(&R) -> u64,
+    ) -> Result<(), Box<Failure>>
+    where
+        A: Copy + Default + Join,
+        R: OutRow,
+    {
         let fail = |group: u64, event: u64, error: EngineError| {
             Box::new(Failure {
                 key: (group, theta, event),
@@ -981,13 +1040,12 @@ impl<B: AsRef<[u8]> + Send + Sync + 'static> Shared<B> {
             return Ok(());
         }
         let first = located[0].index;
-        let mut done: Vec<(u64, Row)> = Vec::with_capacity(located.len());
-        let mut crossing: Vec<(usize, EventAcc)> = Vec::new();
+        let mut done: Vec<(u64, R)> = Vec::with_capacity(located.len());
+        let mut crossing: Vec<(usize, A)> = Vec::new();
         let mut before_month = 0u64;
         for (k, at) in located.iter().enumerate() {
             let (index, event, positions) = (at.index, &at.event, &at.positions);
-            let acc = self
-                .aggregate_event(&job.ticks, event, positions)
+            let acc = aggregate(&job.ticks, event, positions)
                 .map_err(|e| fail(job.id, index, EngineError::Ticks(e)))?;
             if job.before_month {
                 before_month += (positions[2] - positions[0]) as u64;
@@ -995,25 +1053,25 @@ impl<B: AsRef<[u8]> + Send + Sync + 'static> Shared<B> {
             if at.starts_before || at.ends_after {
                 crossing.push((k, acc));
             } else {
-                let row = close_event(&acc, event)
-                    .map_err(|kind| event_error(job.id, index, event, kind))?;
+                let row =
+                    close(&acc, event).map_err(|kind| event_error(job.id, index, event, kind))?;
                 done.push((index, row));
             }
         }
         if !crossing.is_empty() {
             let mut completed = Vec::new();
             {
-                let mut store = lock(&self.partials[theta]);
+                let mut store = lock(store);
                 for (k, acc) in crossing {
                     let at = &located[k];
                     let index = at.index;
                     let partial = store.entry(index).or_insert_with(|| Partial {
-                        acc: EventAcc::default(),
+                        acc: A::default(),
                         merged: 0,
                         first_group: None,
                         last_group: None,
                     });
-                    partial.acc.merge(&acc);
+                    partial.acc.join(&acc);
                     partial.merged += 1;
                     if !at.starts_before {
                         partial.first_group = Some(job.id);
@@ -1047,16 +1105,13 @@ impl<B: AsRef<[u8]> + Send + Sync + 'static> Shared<B> {
             }
             for (k, index, acc, last_group) in completed {
                 let event = &located[k].event;
-                let row = close_event(&acc, event)
+                let row = close(&acc, event)
                     .map_err(|kind| event_error(last_group, index, event, kind))?;
                 done.push((index, row));
             }
         }
         done.sort_unstable_by_key(|(index, _)| *index);
-        let closed_ticks: u64 = done
-            .iter()
-            .map(|(_, row)| (row[col::C_TICKS] + row[col::OS_TICKS]) as u64)
-            .sum();
+        let closed_ticks: u64 = done.iter().map(|(_, row)| closed_ticks_of(row)).sum();
         let sealed = self.out.write(theta, &done).map_err(|e| match e {
             OutputError::Beyond { event, rows } => {
                 fail(job.id, event, EngineError::Skeleton { theta, event, rows })
@@ -1196,6 +1251,16 @@ impl<B: AsRef<[u8]> + Send + Sync + 'static> Shared<B> {
         }
         self.close_events(theta, done.iter().map(|(index, _)| *index));
         Ok(())
+    }
+
+    fn aggregate_fit(
+        &self,
+        ticks: &TickColumns<B>,
+        event: &EventIn,
+        positions: &[usize; 3],
+    ) -> Result<FitAcc, TickError> {
+        let [r, c, e] = *positions;
+        accumulate_fit(ticks, (r, c, e), &Frame::of(event))
     }
 
     fn aggregate_path(

@@ -1,5 +1,5 @@
-"""Esquema de `summaries.parquet` (TRD-L3 §7.2) y de `path.parquet` (TRD-L3 §7.2.1), y su
-codificación en Arrow.
+"""Esquema de `summaries.parquet` (TRD-L3 §7.2), de `path.parquet` (TRD-L3 §7.2.1) y de
+`fit.parquet` (TRD-L3 §7.2.2), y su codificación en Arrow.
 
 Las filas se arman en un buffer de NumPy por columna, con los decimales en su escala
 (10⁻⁸): el valor de 64 bits es la palabra baja del decimal de 128 bits. Al llenar un row
@@ -18,6 +18,10 @@ FAMILY = "summaries"
 PATH_FAMILY = "path"
 PATH_STATE_VERSION = "1.0.0"
 SILENCE_US = 10_000_000
+# La familia A (forma): su archivo y su versión de estado. No tiene parámetros: el pie de
+# Parquet lleva solo `state_version`.
+FIT_FAMILY = "fit"
+FIT_STATE_VERSION = "1.0.0"
 
 DECIMAL = pa.decimal128(18, 8)
 THETA = pa.decimal128(9, 8)
@@ -73,6 +77,27 @@ PATH_SCHEMA = pa.schema(
         pa.field("theta", THETA, nullable=False),
         pa.field("confirm_agg_trade_id", pa.int64(), nullable=False),
         *(pa.field(name, kind, nullable=null) for name, kind, null in _PATH_COLUMNS),
+    ]
+)
+# Los 9 registros de `fit.parquet` tras las claves, todos DOUBLE nulables: los `*_slope` y
+# `*_accel` de una fase con menos de dos ticks o con todos en el mismo `t`, y los `os_*` de un
+# overshoot vacío, son nulos (TRD-L3 §7.2.2).
+_FIT_COLUMNS = (
+    ("c_slope", pa.float64(), True),
+    ("os_slope", pa.float64(), True),
+    ("ev_slope", pa.float64(), True),
+    ("c_accel", pa.float64(), True),
+    ("os_accel", pa.float64(), True),
+    ("ev_accel", pa.float64(), True),
+    ("c_jump_share", pa.float64(), True),
+    ("os_jump_share", pa.float64(), True),
+    ("ev_jump_share", pa.float64(), True),
+)
+FIT_SCHEMA = pa.schema(
+    [
+        pa.field("theta", THETA, nullable=False),
+        pa.field("confirm_agg_trade_id", pa.int64(), nullable=False),
+        *(pa.field(name, kind, nullable=null) for name, kind, null in _FIT_COLUMNS),
     ]
 )
 WIDTH = len(_COLUMNS)

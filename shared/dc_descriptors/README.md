@@ -2,9 +2,10 @@
 
 Motor de agregación de L3 (ITSC-358, [ADR-L3-16](../../docs/TRD/l3.md)): calcula los
 descriptores por evento DC sin pasar por el intérprete de Python. Python orquesta, Arrow
-transporta, Rust calcula. Tiene dos familias (`Config.family`): `summaries`
-(`summaries.parquet`, la familia S) y `path` (`path.parquet`, la familia T, ITSC-393,
-[ADR-L3-17](../../docs/TRD/l3.md)).
+transporta, Rust calcula. Tiene tres familias (`Config.family`): `summaries`
+(`summaries.parquet`, la familia S), `path` (`path.parquet`, la familia T, ITSC-393,
+[ADR-L3-17](../../docs/TRD/l3.md)) y `fit` (`fit.parquet`, la familia A, ITSC-399,
+[ADR-L3-18](../../docs/TRD/l3.md)).
 
 Es un crate sin libpython (`cargo test` no necesita Python). Los bindings viven en
 [`dc_pyo3`](../dc_pyo3/README.md) (`dc_pyo3.Engine`). Pertenece al workspace de Cargo; no
@@ -22,7 +23,7 @@ push(row group k) ──► cola de ítems (θ₀,k) (θ₁,k) … (θ₄₉,k) 
                       row group de salida lleno ──► sellado ──► pop_sealed()
 ```
 
-- **Familias.** El motor calcula una familia por instancia (`Config.family`). Las dos usan
+- **Familias.** El motor calcula una familia por instancia (`Config.family`). Las tres usan
   los mismos ítems, casillas, ubicación de fronteras y sellado; cambian el acumulador, el
   cierre y las columnas de salida:
 
@@ -30,11 +31,12 @@ push(row group k) ──► cola de ítems (θ₀,k) (θ₁,k) … (θ₄₉,k) 
   |---|---|---|---|
   | `Family::Summaries` (por defecto) | `summaries.parquet` | 18 (`COLUMNS`) | uno por row group, en cualquier orden |
   | `Family::Path` | `path.parquet` | 14 (`PATH_COLUMNS`: la clave y T-01 a T-13) | corridas de row groups vecinos, fusión ordenada |
+  | `Family::Fit` | `fit.parquet` | 10 (`FIT_COLUMNS`: la clave y A-01 a A-09) | uno por row group, en cualquier orden (momentos aditivos) |
 
   La familia T usa además `Config.silence_us` (µs): un hueco entre ticks de una fase cuenta
   como inactividad si es estrictamente mayor. S no lo usa. Los registros de T, sus fórmulas y
   su regla de nulos están en [`docs/data-contracts.md`](../../docs/data-contracts.md) y en
-  TRD-L3 §7.2.1.
+  TRD-L3 §7.2.1. Los de A, en el mismo documento y en TRD-L3 §7.2.2.
 
 - **Fronteras.** `push_boundaries` agrega un lote de filas de L2 de un θ detrás de los
   anteriores, antes o después de empezar los `push`. El lote de un evento debe llegar antes
@@ -84,6 +86,26 @@ push(row group k) ──► cola de ítems (θ₀,k) (θ₁,k) … (θ₄₉,k) 
   resultado no depende del tamaño de tramo ni de los hilos. Error absoluto por término
   ≤ 2⁻⁹⁷; una suma que no cabe en 128 bits es un error de fase (`PathOverflow`), nunca un
   valor truncado. Tortuosidad y autocorrelación son una sola división `f64` de dos enteros.
+- **Momentos de A.** La familia A (`src/fit.rs`) lleva, por evento, tres acumuladores
+  (`FitAcc`): la confirmación `c`, el overshoot `os` y el evento entero `ev`, cada uno en sus
+  coordenadas `τ = (t − t₀)/(t_fin − t₀)`, `y = (p − p₀)/(p_fin − p₀)` con el ancla y el
+  cierre de L2 (`Frame::of`: `c` de `(reference_time, p_R)` a `(confirm_time, p_C)`, `os` de
+  `(confirm_time, p_C)` a `(extreme_time, p_E)`, `ev` de `(reference_time, p_R)` a
+  `(extreme_time, p_E)` con todos los ticks). `Moments` guarda `n`, `Σ τ^k` (k = 1..4),
+  `Σ τ^k·y` (k = 0..2), el rango de `t`, el rango de los `t > t₀` y `p_prev` (el tick de
+  mayor `(t, agg_trade_id)` con `t` anterior al cierre). Cada término se calcula en `f64` y
+  se cuantiza **una vez** a punto fijo `i128` de escala 2⁻⁸⁰ (no 2⁻⁹⁶: en el overshoot `|y|`
+  llega a miles); la suma es comprobada y un desborde es `FitOverflow`, nunca un valor. La
+  fusión es suma de momentos, máximo de `p_prev` y unión de rangos: asociativa y
+  conmutativa, con el almacén de S (`Partial<FitAcc>`, sin corridas). Unos 450 B por evento
+  abierto.
+- **Cierre de A.** `close_fit` multiplica los momentos en enteros de 256 bits exactos
+  (`Wide`, `src/arith.rs`) y solo divide en `f64`: pendiente `b·s·10⁶/(p_R·Δt)` con
+  `b = (n·S₁y − S₁·Sy)/(n·S₂ − S₁²)`, aceleración
+  `(S₂y·S₂ − S₁y·S₃)/(S₄·S₂ − S₃²)` y `(p_fin − p_prev)/(p_fin − p_0)`. Nulos: `os_*` con el
+  overshoot vacío; pendiente con menos de 2 ticks o todos en el mismo `t`; aceleración,
+  además, con `t_fin = t₀`, `p_fin = p₀` o un solo `τ` positivo distinto; salto con
+  `p_fin = p₀`. Valida `reference_time ≤ confirm_time ≤ extreme_time`.
 - **Cierre de T.** `close_path` suma el paso del ancla (`reference_price` en la confirmación,
   `confirm_price` en el overshoot) al primer tick de cada fase y deriva los 13 registros
   con la regla de nulos del contrato. Solo comprueba lo que necesita para no producir
@@ -113,10 +135,10 @@ push(row group k) ──► cola de ítems (θ₀,k) (θ₁,k) … (θ₄₉,k) 
   así las búsquedas sobre los eventos en mano dan lo mismo que sobre todos. Lo retenido va
   de la marca al último lote entregado: O(lote + eventos abiertos de los row groups en
   vuelo), no O(eventos del mes); un evento largo abierto en la marca ancla los lotes
-  entregados detrás de él (**81 bytes por evento**, antes 65: `R`, `C`, `confirm_time` y
-  `E` de 8 bytes, `direction` de 1 y tres `decimal128` de 16: `confirm_price`,
-  `extreme_price` y `reference_price`; son 81 y no 73 porque `reference_price` llega como
-  `decimal128` de Arrow y no se copia). Los buffers de
+  entregados detrás de él (**97 bytes por evento**, antes 81 y 65: `R`, `C`, `confirm_time`,
+  `E`, `reference_time` y `extreme_time` de 8 bytes, `direction` de 1 y tres `decimal128` de
+  16: `confirm_price`, `extreme_price` y `reference_price`; son 97 y no 89 porque los precios
+  llegan como `decimal128` de Arrow y no se copian). Los buffers de
   salida se reservan al llegar la primera fila de su row group y se entregan al sellar.
 
 ## API
@@ -126,16 +148,18 @@ let engine = Engine::<B>::new(Config {
     thetas,      // round(θ × 10⁸), en el orden en que se reportan los errores
     threads,     // hilos nativos
     row_groups,  // por θ, las filas de cada row group de salida
-    family,      // Family::Summaries (por defecto) o Family::Path
+    family,      // Family::Summaries (por defecto), Family::Path o Family::Fit
     silence_us,  // umbral de silencio de la familia T, en µs (S no lo usa)
 })?;
 // Por lotes, en orden y sin copiar: filas consecutivas de events.parquet de L2 del θ, por
 // delante del row group que las toca (antes o después de empezar los push).
 engine.push_boundaries(theta, EventBatch::new(rows, reference, confirm, confirm_time,
                                               extreme, direction, confirm_price,
-                                              extreme_price, reference_price)?)?;
-// reference_price (último argumento, la octava columna de L2) es el ancla de la confirmación
-// de T: decimal128 de 16 bytes, sin copia. S no la lee, pero se entrega siempre.
+                                              extreme_price, reference_price,
+                                              reference_time, extreme_time)?)?;
+// reference_price es el ancla de la confirmación de T (decimal128 de 16 bytes, sin copia);
+// reference_time y extreme_time (int64) anclan y cierran las fases de A. S no lee ninguna de
+// las tres, pero se entregan siempre: son diez columnas de L2.
 engine.needed(theta)?;  // primer evento del θ sin cerrar: leer L2 por delante, y no más
 engine.push(RowGroupInput {
     id,            // ordinal del row group entre los que entrega el lector: 0, 1, 2, …
@@ -196,6 +220,14 @@ almacén de corridas quede vacío al terminar, los eventos y ticks inválidos (s
 valor) y un oráculo ingenuo en `f64` sobre series aleatorias que, además, no cambia con los
 cortes, el orden de `push` ni con 1 y 4 hilos. Las pruebas unitarias de `src/path.rs`
 cubren la fusión de vecinos en cualquier asociación y la cuantización por término.
+
+`tests/fit.rs` prueba la familia A: los 9 registros calculados a mano (fase de un tick, dos
+ticks en el mismo `t`, overshoot vacío, `t_fin = t₀`, `p_fin = p₀`, trayectoria lineal con
+pendiente exacta y aceleración 0, parabólica con aceleración exacta, `jump_share = 1`), un
+evento de tres row groups con los mismos bits en **todos** los órdenes de `push`, un row group
+intermedio sin ticks del evento, `R` como último tick de un row group y un oráculo ingenuo
+sobre series aleatorias con 1 y 4 hilos. Las pruebas unitarias de `src/fit.rs` y `src/arith.rs`
+cubren la fusión en cualquier orden, `p_prev`, los nulos y los enteros de 256 bits.
 
 `tests/engine.rs` compara el motor de S con un oráculo ingenuo (suma tick a tick con otra
 fórmula de redondeo) con 1 y 4 hilos, en órdenes de `push` barajados y con las fronteras en

@@ -3,7 +3,8 @@
 Es lo que el orquestador (ITSC-358 es solo el motor) hará con más cuidado: entrega al motor
 las fronteras de L2 de cada θ, lee los row groups del lector, los empuja y escribe lo que
 sella. Aquí el lago es chico, así que se materializan todos los row groups y se puede
-empujar en cualquier orden. `path_native` hace lo mismo para la familia T (`path.parquet`).
+empujar en cualquier orden. `path_native` y `fit_native` hacen lo mismo para las familias T
+(`path.parquet`) y A (`fit.parquet`).
 """
 
 import random
@@ -22,6 +23,9 @@ from l3_dc_descriptors.event import EVENT_COLUMNS
 from l3_dc_descriptors.reconcile import L1Month, reconcile
 from l3_dc_descriptors.schema import (
     FAMILY,
+    FIT_FAMILY,
+    FIT_SCHEMA,
+    FIT_STATE_VERSION,
     PATH_FAMILY,
     PATH_SCHEMA,
     PATH_STATE_VERSION,
@@ -112,13 +116,18 @@ def _run(
     """La pasada del motor sobre un mes para una familia: escribe cada row group sellado
     con un `FamilyWriter` (que `stack` cierra) y devuelve `(θ, escritores, estadísticas)`.
     Falta el `commit` de cada escritor. `summaries` se escribe contra `events.parquet` de L2;
-    `path`, contra el `summaries.parquet` del mes, con `silence_us` en sus metadatos.
+    `path` y `fit`, contra el `summaries.parquet` del mes (`path`, con `silence_us` en sus
+    metadatos; `fit`, solo con `state_version`).
     """
     key = DEFAULT_KEY
     values = [Decimal(t) for t in thetas]
     is_path = family == PATH_FAMILY
-    schema = PATH_SCHEMA if is_path else SUMMARIES_SCHEMA
-    version = PATH_STATE_VERSION if is_path else STATE_VERSION
+    derived = family != FAMILY
+    schema, version = {
+        FAMILY: (SUMMARIES_SCHEMA, STATE_VERSION),
+        PATH_FAMILY: (PATH_SCHEMA, PATH_STATE_VERSION),
+        FIT_FAMILY: (FIT_SCHEMA, FIT_STATE_VERSION),
+    }[family]
     extra = {"silence_us": str(SILENCE_US)} if is_path else None
     writers = [
         stack.enter_context(
@@ -127,7 +136,7 @@ def _run(
                 schema,
                 version,
                 family_path(l3_root, key, text, month, FAMILY)
-                if is_path
+                if derived
                 else l2_path(l2_root, key, text, month),
                 metadata=extra,
             )
@@ -180,7 +189,9 @@ def _run(
 
 
 class PathResult(NamedTuple):
-    """Lo que deja `path_native` de un θ: el archivo, sus filas y su `content_hash`."""
+    """Lo que deja `path_native` o `fit_native` de un θ: el archivo, sus filas y su
+    `content_hash`.
+    """
 
     path: str
     rows: int
@@ -208,6 +219,66 @@ def path_native(
     sin él, el mismo motor a secas, para un lago sin carry-over. Un `summaries.parquet` que
     ya existe no se toca.
     """
+    return _derived_native(
+        PATH_FAMILY,
+        l1_root,
+        l2_root,
+        l3_root,
+        month,
+        thetas,
+        series_start=series_start,
+        threads=threads,
+        order=order,
+        seed=seed,
+        lot=lot,
+    )
+
+
+def fit_native(
+    l1_root,
+    l2_root,
+    l3_root,
+    month: Month,
+    thetas: Sequence[str],
+    *,
+    series_start: Month | None = None,
+    threads: int = 4,
+    order: str | Sequence[int] = "forward",
+    seed: int = 0,
+    lot: int | None = None,
+) -> dict[Decimal, PathResult]:
+    """La familia A (`fit.parquet`) de un mes por el motor nativo, con las mismas opciones y
+    el mismo esqueleto que `path_native`: S primero, si falta.
+    """
+    return _derived_native(
+        FIT_FAMILY,
+        l1_root,
+        l2_root,
+        l3_root,
+        month,
+        thetas,
+        series_start=series_start,
+        threads=threads,
+        order=order,
+        seed=seed,
+        lot=lot,
+    )
+
+
+def _derived_native(
+    family: str,
+    l1_root,
+    l2_root,
+    l3_root,
+    month: Month,
+    thetas: Sequence[str],
+    *,
+    series_start: Month | None,
+    threads: int,
+    order: str | Sequence[int],
+    seed: int,
+    lot: int | None,
+) -> dict[Decimal, PathResult]:
     key = DEFAULT_KEY
     l1_root, l2_root, l3_root = str(l1_root), str(l2_root), str(l3_root)
     missing = [
@@ -248,7 +319,7 @@ def path_native(
     with ExitStack() as stack:
         values, writers, stats = _run(
             stack,
-            PATH_FAMILY,
+            family,
             l1_root,
             l2_root,
             l3_root,

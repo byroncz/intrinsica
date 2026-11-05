@@ -70,7 +70,7 @@ fn pin(column: &Bound<'_, PyAny>, offset: usize) -> PyResult<Region<Pinned>> {
     })
 }
 
-/// Un lote de filas consecutivas de `events.parquet` de L2 de un θ: sus ocho columnas como
+/// Un lote de filas consecutivas de `events.parquet` de L2 de un θ: sus diez columnas como
 /// `(memoryview de bytes del Buffer de Arrow, offset del Array)`, del mismo largo `rows`.
 /// Es cualquier objeto con estos atributos (la capa usa un `NamedTuple`).
 #[derive(FromPyObject)]
@@ -87,6 +87,10 @@ struct PyBatch<'py> {
     extreme_price: (Bound<'py, PyAny>, usize),
     /// `decimal128`; el ancla de la fase de confirmación de la familia T.
     reference_price: (Bound<'py, PyAny>, usize),
+    /// `int64`; el ancla en el tiempo de las fases de la familia A.
+    reference_time: (Bound<'py, PyAny>, usize),
+    /// `int64`; el cierre en el tiempo de las fases `os` y `ev` de la familia A.
+    extreme_time: (Bound<'py, PyAny>, usize),
 }
 
 impl PyBatch<'_> {
@@ -101,6 +105,8 @@ impl PyBatch<'_> {
             pin(&self.confirm_price.0, self.confirm_price.1)?,
             pin(&self.extreme_price.0, self.extreme_price.1)?,
             pin(&self.reference_price.0, self.reference_price.1)?,
+            pin(&self.reference_time.0, self.reference_time.1)?,
+            pin(&self.extreme_time.0, self.extreme_time.1)?,
         )
         .map_err(|e| to_py_error(e.into()))
     }
@@ -168,9 +174,9 @@ type PyStats = (u64, u64, u64, Option<i64>, Option<i64>);
 /// son los hilos nativos (por defecto, los núcleos disponibles); `schema` son las
 /// columnas de datos de salida como `(nombre, bytes por valor, nulable)`, que el motor
 /// comprueba contra las de su familia; `row_groups[t]` son las filas de cada row group de
-/// salida del θ `t` (el esqueleto de L2 o, en `path`, el de `summaries.parquet`); `family`
-/// es `"summaries"` (por defecto) o `"path"`, y `silence_us` el umbral de silencio de `path`
-/// en µs (`summaries` no lo usa).
+/// salida del θ `t` (el esqueleto de L2 o, en `path` y `fit`, el de `summaries.parquet`);
+/// `family` es `"summaries"` (por defecto), `"path"` o `"fit"`, y `silence_us` el umbral de
+/// silencio de `path` en µs (`summaries` y `fit` no lo usan).
 #[pyclass(module = "dc_pyo3")]
 pub struct Engine {
     inner: Option<CoreEngine<Pinned>>,
@@ -192,9 +198,10 @@ impl Engine {
         let family = match family {
             "summaries" => Family::Summaries,
             "path" => Family::Path,
+            "fit" => Family::Fit,
             other => {
                 return Err(PyValueError::new_err(format!(
-                    "la familia {other:?} no existe: summaries o path"
+                    "la familia {other:?} no existe: summaries, path o fit"
                 )))
             }
         };
@@ -328,8 +335,8 @@ impl Engine {
     /// las columnas de datos de la familia (`SealedColumn`, en el orden del esquema).
     ///
     /// En `summaries` (18 columnas) `validity` es el mapa de bits de las filas con
-    /// overshoot, o `None` si todas lo tienen. En `path` (14 columnas) `validity` es una
-    /// lista con una entrada por columna: `(mapa de bits, nulos)` si la columna tiene
+    /// overshoot, o `None` si todas lo tienen. En `path` (14 columnas) y `fit` (10) `validity`
+    /// es una lista con una entrada por columna: `(mapa de bits, nulos)` si la columna tiene
     /// nulos y `None` si no (también si no es nulable), y `null_count` suma los nulos.
     fn pop_sealed<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyAny>>> {
         let Some(sealed) = self.engine()?.pop_sealed().map_err(to_py_error)? else {
@@ -349,7 +356,7 @@ impl Engine {
             .map(|data| Py::new(py, SealedColumn { data }))
             .collect::<PyResult<Vec<_>>>()?;
         let columns = PyList::new(py, columns)?;
-        if self.family == Family::Path {
+        if self.family != Family::Summaries {
             let nulls: usize = masks.iter().flatten().map(|mask| mask.null_count).sum();
             let masks = masks
                 .into_iter()
@@ -515,6 +522,10 @@ fn to_py_error(error: EngineError) -> PyErr {
                     }
                     EventErrorKind::PathOverflow { phase } => {
                         kind("path_overflow");
+                        set("phase", phase.text().into_pyobject(py).unwrap().into_any());
+                    }
+                    EventErrorKind::FitOverflow { phase } => {
+                        kind("fit_overflow");
                         set("phase", phase.text().into_pyobject(py).unwrap().into_any());
                     }
                     EventErrorKind::Invariant { field, got, wanted } => {

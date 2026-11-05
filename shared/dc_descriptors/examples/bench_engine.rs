@@ -1,7 +1,8 @@
 //! Mide el motor sobre una serie sintética: `cargo run --release -p dc_descriptors
 //! --example bench_engine -- [ticks] [row_group] [thetas] [hilos...]`.
 //!
-//! Imprime, por número de hilos, la pared, los ns por tick y θ y la fracción de la cola.
+//! Imprime, por número de hilos, la pared, los ns por tick y θ y la fracción de la cola. La
+//! variable de entorno `FAMILY` (`summaries`, `path` o `fit`) elige la familia.
 #[path = "../tests/common/mod.rs"]
 mod common;
 
@@ -41,7 +42,12 @@ fn main() {
 
     for threads in threads {
         // Las filas de L2 se arman antes de medir: aquí solo cuenta el motor.
-        let engine = engine(threads, &sizes);
+        let family = match std::env::var("FAMILY").as_deref() {
+            Ok("path") => dc_descriptors::Family::Path,
+            Ok("fit") => dc_descriptors::Family::Fit,
+            _ => dc_descriptors::Family::Summaries,
+        };
+        let engine = engine_of(family, threads, &sizes);
         for t in 0..thetas {
             for batch in batches(&series, &events[t], &sizes[t]) {
                 engine.push_boundaries(t, batch).expect("push_boundaries");

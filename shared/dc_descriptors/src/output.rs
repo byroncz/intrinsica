@@ -6,7 +6,10 @@
 //! reservan al llegar la primera fila de su row group y se entregan, con su dueño, al
 //! llenarse la última: el motor no conserva nada de un row group sellado.
 
-use crate::layout::{col, PathRow, Row, COLUMNS, PATH_COLUMNS, PATH_WIDTH, WIDTH};
+use crate::layout::{
+    col, ColumnSpec, FitRow, PathRow, Row, COLUMNS, FIT_COLUMNS, FIT_WIDTH, PATH_COLUMNS,
+    PATH_WIDTH, WIDTH,
+};
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
 use std::sync::{Mutex, PoisonError};
@@ -14,7 +17,7 @@ use std::sync::{Mutex, PoisonError};
 /// Un row group de salida lleno: `columns[c]` es la columna `c` en el layout de Arrow
 /// (`decimal128` de 16 bytes o `int64` de 8, little-endian). Si algún `os_ticks` es 0,
 /// `validity` es el mapa de bits de las filas con overshoot (las columnas `os_*`
-/// nulables son nulas en el resto). Un row group de `path.parquet` no usa `validity`: cada
+/// nulables son nulas en el resto). Un row group de `path.parquet` o de `fit.parquet` no usa `validity`: cada
 /// columna nulable trae su propio mapa en `masks[columna]` (`None` si no es nulable o no
 /// tiene nulos).
 #[derive(Debug)]
@@ -274,16 +277,11 @@ impl OutRow for PathRow {
     const TRACKS_VALID: bool = true;
 
     fn columns(size: usize) -> Vec<Vec<u8>> {
-        PATH_COLUMNS
-            .iter()
-            .map(|spec| vec![0u8; size * spec.bytes()])
-            .collect()
+        zeroed(&PATH_COLUMNS, size)
     }
 
     fn put(&self, columns: &mut [Vec<u8>], r: usize, valid: &mut [u16]) {
-        for (column, value) in columns.iter_mut().zip(self.cells) {
-            column[r * 8..r * 8 + 8].copy_from_slice(&value.to_le_bytes());
-        }
+        put_cells(columns, r, &self.cells);
         valid[r] = self.valid;
     }
 
@@ -295,36 +293,88 @@ impl OutRow for PathRow {
         valid: &[u16],
     ) -> SealedRowGroup {
         debug_assert_eq!(columns.len(), PATH_WIDTH);
-        let masks = PATH_COLUMNS
-            .iter()
-            .enumerate()
-            .map(|(c, spec)| {
-                if !spec.nullable {
-                    return None;
+        seal_masked(theta, index, rows, columns, valid, &PATH_COLUMNS)
+    }
+}
+
+impl OutRow for FitRow {
+    const TRACKS_VALID: bool = true;
+
+    fn columns(size: usize) -> Vec<Vec<u8>> {
+        zeroed(&FIT_COLUMNS, size)
+    }
+
+    fn put(&self, columns: &mut [Vec<u8>], r: usize, valid: &mut [u16]) {
+        put_cells(columns, r, &self.cells);
+        valid[r] = self.valid;
+    }
+
+    fn seal(
+        theta: usize,
+        index: usize,
+        rows: usize,
+        columns: Vec<Vec<u8>>,
+        valid: &[u16],
+    ) -> SealedRowGroup {
+        debug_assert_eq!(columns.len(), FIT_WIDTH);
+        seal_masked(theta, index, rows, columns, valid, &FIT_COLUMNS)
+    }
+}
+
+/// Los buffers en cero de un row group de `size` filas.
+fn zeroed(specs: &[ColumnSpec], size: usize) -> Vec<Vec<u8>> {
+    specs
+        .iter()
+        .map(|spec| vec![0u8; size * spec.bytes()])
+        .collect()
+}
+
+/// Copia las celdas de una fila de 8 bytes por columna (`path` y `fit`) a su casilla.
+fn put_cells(columns: &mut [Vec<u8>], r: usize, cells: &[i64]) {
+    for (column, value) in columns.iter_mut().zip(cells) {
+        column[r * 8..r * 8 + 8].copy_from_slice(&value.to_le_bytes());
+    }
+}
+
+/// Sella un row group de `path` o `fit`: un mapa de validez por columna nulable (`None` si
+/// no tiene nulos).
+fn seal_masked(
+    theta: usize,
+    index: usize,
+    rows: usize,
+    columns: Vec<Vec<u8>>,
+    valid: &[u16],
+    specs: &[ColumnSpec],
+) -> SealedRowGroup {
+    let masks = specs
+        .iter()
+        .enumerate()
+        .map(|(c, spec)| {
+            if !spec.nullable {
+                return None;
+            }
+            let mut bits = vec![0u8; rows.div_ceil(8)];
+            let mut present = 0;
+            for (r, row) in valid.iter().enumerate() {
+                if (row >> c) & 1 == 1 {
+                    bits[r >> 3] |= 1 << (r & 7);
+                    present += 1;
                 }
-                let mut bits = vec![0u8; rows.div_ceil(8)];
-                let mut present = 0;
-                for (r, row) in valid.iter().enumerate() {
-                    if (row >> c) & 1 == 1 {
-                        bits[r >> 3] |= 1 << (r & 7);
-                        present += 1;
-                    }
-                }
-                (present < rows).then_some(ColumnMask {
-                    bits,
-                    null_count: rows - present,
-                })
+            }
+            (present < rows).then_some(ColumnMask {
+                bits,
+                null_count: rows - present,
             })
-            .collect();
-        SealedRowGroup {
-            theta,
-            index,
-            rows,
-            columns,
-            validity: None,
-            null_count: 0,
-            masks,
-        }
+        })
+        .collect();
+    SealedRowGroup {
+        theta,
+        index,
+        rows,
+        columns,
+        validity: None,
+        null_count: 0,
+        masks,
     }
 }
 
