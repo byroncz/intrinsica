@@ -344,7 +344,7 @@ comprueba al escribir que iguala la suma de `quantity` de sus ticks.
 
 Lo escribe la imagen `l3_dc_descriptors` (`python -m l3_dc_descriptors --mode
 backfill|monthly`, [TRD-L3 §8](TRD/l3.md#8-pipeline-interno-y-modos-de-ejecución)),
-con `--family summaries` (la predeterminada) o `--family path` (la familia T, ITSC-394). Lee `L3_LANDING_ROOT` (L1) y
+con `--family summaries` (la predeterminada), `--family path` (la familia T, ITSC-394) o `--family fit` (la familia A, ITSC-400). Lee `L3_LANDING_ROOT` (L1) y
 `L3_EVENTS_ROOT` (L2), escribe bajo `L3_SUMMARIES_ROOT` y deja sus hallazgos en
 `L3_DQ_ROOT`. El catálogo de θ no es de L3: `L3_THETAS_URI` (o `--thetas-uri`) apunta al
 mismo objeto `l2/thetas.yaml` que usa L2, y sin él la corrida termina con código 2.
@@ -365,14 +365,14 @@ L2: un mes sin `events.parquet` y `carry_over.parquet` de L2 no se procesa
 (`l2_input_missing`). Por eso cambiar `STATE_VERSION` o el esquema hace que el siguiente
 `backfill` reescriba la serie del θ sin `--force`.
 
-La frontera es **por familia**: `path.parquet` tiene la suya, y la de una familia distinta de
-`summaries` **nunca supera la de `summaries`** del mismo θ, porque repite su esqueleto. Una
-corrida de `--family path` no toca `summaries.parquet`, y la frontera de `summaries` no mira
-`path.parquet`. `--family path` solo escribe un mes si `summaries.parquet` de ese `(θ, mes)`
-existe; si no, el θ sale del rango con `family_skeleton_missing` y la corrida termina con
+La frontera es **por familia**: `path.parquet` y `fit.parquet` tienen la suya, y la de una
+familia distinta de `summaries` **nunca supera la de `summaries`** del mismo θ, porque repite su
+esqueleto. Una corrida de `--family path` o `--family fit` no toca `summaries.parquet` ni el archivo
+de la otra familia, y la frontera de `summaries` no mira los de las demás. `--family path` y
+`--family fit` solo escriben un mes si `summaries.parquet` de ese `(θ, mes)` existe; si no, el θ sale del rango con `family_skeleton_missing` y la corrida termina con
 código 1. La compuerta lee además el pie de `summaries.parquet`: sus filas por row group deben
-ser las de `events.parquet` (si no, `family_skeleton_mismatch`). `path` no concilia ticks ni
-lee carry-overs: ya lo hizo la pasada de `summaries`.
+ser las de `events.parquet` (si no, `family_skeleton_mismatch`). `path` y `fit` no concilian
+ticks ni leen carry-overs: ya lo hizo la pasada de `summaries`.
 
 ### Leer
 
@@ -561,10 +561,11 @@ solo la conversión y la división final.
   diccionario, `sorting_columns` por `confirm_agg_trade_id`, mismos row groups). El
   `content_hash` lo calcula `pyutils.ContentHasher`, que hashea las columnas `double`
   por los bits de cada valor (sin `NaN` ni `inf`, porque L3 no los produce).
-- **Quién lo escribe**: el motor de agregación (`Config.family = fit`) calcula las
-  filas y el `FamilyWriter` las repite sobre el esqueleto de `summaries.parquet`. La
-  CLI de L3 gana `--family fit` en una versión posterior (ITSC-400); su frontera por θ
-  será la de «Quién lo escribe y hasta dónde llegó».
+- **Quién lo escribe**: la CLI de L3 con `--family fit` (ITSC-400), después de la de
+  `summaries`: el motor de agregación (`Config.family = fit`) calcula las filas y el
+  `FamilyWriter` las repite sobre el esqueleto de `summaries.parquet` de la partición, con
+  `state_version` como único metadato. Su frontera por θ es la de «Quién lo escribe y hasta
+  dónde llegó».
 - **Leer**: se une con `summaries.parquet` por `(theta, confirm_agg_trade_id)`; la unión
   es 1:1 y también por posición.
 
@@ -894,8 +895,8 @@ mismo que traen las excepciones del resumidor, de las que sale la mayoría de lo
   En `backfill`, antes de procesar el mes, detiene el rango de ese θ (los demás siguen) y
   la corrida termina con código 1. También lo lanza la compuerta de entrada si falta el
   `carry_over.parquet` del mes anterior.
-- **`family_skeleton_missing`** (`error`, `fail`): una familia distinta de `summaries` (hoy
-  `path`) no encontró `summaries.parquet` de `(θ, mes)`, su esqueleto (`details.theta`,
+- **`family_skeleton_missing`** (`error`, `fail`): una familia distinta de `summaries` (`path`
+  o `fit`) no encontró `summaries.parquet` de `(θ, mes)`, su esqueleto (`details.theta`,
   `details.month`, `details.family`, `details.file` = `summaries.parquet`). Detiene el rango de
   ese θ (los demás siguen) y la corrida termina con código 1. Se resuelve corriendo antes la
   pasada de `summaries`.
@@ -928,7 +929,7 @@ mismo que traen las excepciones del resumidor, de las que sale la mayoría de lo
   Código 2, sin escribir datos; `year` y `month` son los del primer mes que iba a procesar.
 - **`theta_behind_frontier`** (`warning`, `fail`): `monthly` no procesó un θ
   (`details.theta`, `details.frontier` en `YYYY-MM` o `null`, `details.reason`,
-  `details.family`: `summaries` o `path`, la pasada mensual que lo dejó rezagado, ITSC-396). `reason` es
+  `details.family`: `summaries`, `path` o `fit`, la pasada mensual que lo dejó rezagado, ITSC-396). `reason` es
   `l2_missing` si L2 no tiene el mes de ese θ, `summaries_missing` si la familia no es
   `summaries` y falta `summaries.parquet` del mes, y `l3_frontier` si la serie de L3 de la familia
   no llega al mes previo (se agregó al catálogo sin backfill, o tiene un hueco); si pasan

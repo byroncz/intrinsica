@@ -13,6 +13,12 @@ rango con la sección siguiente.
 
 ## Cambios requeridos
 
+**ITSC-400 (imagen de L3 ≥ 0.22.0): el backfill de la familia A va después del apply.**
+Tampoco hay orden previo: la imagen nueva escribe `fit.parquet` solo con `--family fit` y no
+cambia nada de `summaries` ni de `path`. Tras el merge y el apply del stack `l3` (los lanza el
+humano), corre `l3-backfill` con `family` = `fit`, sin `from` ni `to` y con los valores por
+defecto, después del de S (ver «Backfill de la familia A»).
+
 **ITSC-394 (imagen de L3 ≥ 0.21.0): el backfill de la familia T va después del apply.**
 No hay orden previo que cumplir: la imagen nueva escribe `path.parquet` solo con `--family path`
 y no cambia nada de `summaries`. Tras el merge y el apply del stack `l3` (los lanza el humano),
@@ -112,10 +118,10 @@ orden. `l3-monthly` resume un mes.
 | `l3-monthly-path` | **No está en la lista de *Run job***: la cadena mensual lo corre solo. A mano, se lanza como `l3-monthly` con `family` = `path` | Igual que `l3-monthly` | Igual que `l3-monthly`: no lo admite |
 
 `series_start` vacío usa el del stack. `family` (solo `l3-backfill` y `l3-monthly`;
-`summaries` por defecto, o `path`) agrega `--family=<f>`; los demás jobs rechazan `path`.
+`summaries` por defecto, `path` o `fit`) agrega `--family=<f>`; los demás jobs rechazan `path` y `fit`.
 El workflow no expone `--thetas`: por *Run job* siempre corren los 50 θ del catálogo.
-La familia `path` necesita `summaries.parquet` del mes: se lanza después de la de
-`summaries` (ver «Backfill de la familia T»). No lances a mano el mismo mes y modo que Scheduler esté ejecutando,
+Las familias `path` y `fit` necesitan `summaries.parquet` del mes: se lanzan después de la de
+`summaries` (ver «Backfill de la familia T» y «Backfill de la familia A»). No lances a mano el mismo mes y modo que Scheduler esté ejecutando,
 ni dos `l3-backfill` a la vez.
 
 Al final, el run vuelca los logs de la ejecución y un resumen (estado, tareas,
@@ -206,6 +212,36 @@ Tras el apply del stack `l3` con la imagen nueva, pega en la card el resultado d
 pared total, mes más lento, `rss_peak_mib` máximo y el enlace al run (los registra la hija 4
 de ITSC-391 en TRD-L3 §10.2).
 
+### Backfill de la familia A (`fit`, ITSC-400)
+
+La familia A escribe `fit.parquet` junto a `summaries.parquet` de cada θ y mes y, como T, **repite
+su esqueleto** ([TRD-L3 §7.3](../TRD/l3.md#73-directorio-de-la-capa-y-esqueleto-común), RL3-11): va
+**después** de S. Es independiente de T: no lee `path.parquet` y puede ir antes o después. Una
+pasada de A lee L1 y L2 completas otra vez (una pasada por familia, ADR-L3-11); su pared la fija la
+lectura de ticks, así que se espera del orden de la de S (6 638 s para los 110 meses), con los
+mismos timeouts y la misma regla de arriba: una sola ejecución mientras la pared esperada no pase
+de 7 200 s.
+
+1. `l3-backfill` con `family` = `summaries` y los valores por defecto, hasta que termine con
+   código 0 (S al día).
+2. `l3-backfill` con `family` = `fit`, **sin `from` ni `to`** y con los valores por defecto:
+   la frontera de cada θ en `fit` decide desde dónde avanza.
+3. Al terminar, el *Summary* y los `unit_timing` (`details.family` = `fit`) traen la pared total,
+   el mes más lento y el `rss_peak_mib` máximo.
+
+**La frontera es por familia.** Para `fit` es el último mes de la serie contigua de `fit.parquet`
+cuyo archivo es válido (esquema `FIT_SCHEMA`, `state_version` y filas por row group iguales a
+`events.parquet`), y **nunca supera la de `summaries`**. Una corrida de `fit` no toca un byte de
+`summaries.parquet` ni de `path.parquet`, y las fronteras de S y de T no se enteran de
+`fit.parquet`. Un `fit.parquet` con otra `state_version` o esquema retrocede su frontera y el θ se
+reescribe desde ese mes. Si a un θ le falta `summaries.parquet` de un mes, sale del rango con
+`family_skeleton_missing` y la corrida termina con código 1: corre el backfill de `summaries` y
+relanza los mismos inputs.
+
+Tras el apply del stack `l3` con la imagen nueva, pega en la card el resultado del paso 2: pared
+total, mes más lento, `rss_peak_mib` máximo y el enlace al run (los registra la hija 4 de ITSC-397
+en TRD-L3 §10.2, con las cotas +10 % y +5 % sobre S, como T).
+
 ### Timeouts: la regla de TRD-L2 §10.2 con 2 vCPU (ITSC-352)
 
 La regla ([TRD-L2 §10.2](../TRD/l2.md)): `monthly` ≥ 6 × la pared del mes más pesado, y
@@ -265,7 +301,7 @@ repares un archivo de `l3/` a mano.
 | --- | --- | --- | --- |
 | `phase_quantity_mismatch` | `error` | `buy + sell` de una fase no es la suma de `quantity` de sus ticks | No debería ocurrir: es un defecto del núcleo o de los datos. Abre una card con `task-create` con `details` (θ, `confirm_agg_trade_id`, fase, los dos valores). No relances: dará lo mismo |
 | `family_skeleton_mismatch` | `error` | Un archivo de familia no repite filas, orden, claves o row groups del esqueleto | Compara `details` con `events.parquet` de L2 del mes. Si L2 cambió después, relanza el mes con `force` (ver "Relanzar un mes"). Si persiste, card |
-| `family_skeleton_missing` | `error` | Una familia distinta de `summaries` (hoy `path`) no encontró `summaries.parquet` del mes de `(θ, M)`; `details` trae `theta`, `month`, `family` y `file` | Corre `l3-backfill` con `family` = `summaries` para ese rango y relanza los mismos inputs. Ese θ salió del rango y los demás siguieron (código 1) |
+| `family_skeleton_missing` | `error` | Una familia distinta de `summaries` (`path` o `fit`) no encontró `summaries.parquet` del mes de `(θ, M)`; `details` trae `theta`, `month`, `family` y `file` | Corre `l3-backfill` con `family` = `summaries` para ese rango y relanza los mismos inputs. Ese θ salió del rango y los demás siguieron (código 1) |
 | `event_over_budget` | `warning` | Un evento supera el presupuesto de ticks (solo familias de serie completa) | `summaries` no tiene presupuesto y no lo emite. Informa; no falla la unidad |
 | `l2_input_missing` | `error` | Falta `events.parquet` o `carry_over.parquet` de `(θ, M)` | Completa L2 para ese θ y mes ([runbook de L2](operacion-l2.md)); luego relanza `l3-backfill` con los mismos inputs. Ese θ salió del rango y los demás siguieron (código 1) |
 | `l2_lineage_missing` | `error` | La partición de L2 de `(θ, M)` no tiene `content_hash.json` o no es válido; `details` trae θ, mes, archivo y `reason` | Corre el backfill del linaje ([L2](operacion-l2.md#linaje-publicado-y-su-backfill-itsc-368)), que escribe el de las particiones que no lo tienen; si el mes es nuevo (publicado por una imagen de L2 anterior a la 0.11.0), vuelve a correr el backfill. Luego relanza `l3-backfill` con los mismos inputs. L3 no recalcula el linaje por su cuenta, a propósito |
@@ -274,7 +310,7 @@ repares un archivo de `l3/` a mano.
 | `input_missing` | `error` | El mes no tiene `consolidated.parquet` ni provisionales | Corre `l1-backfill` o `l1-monthly-close` del mes ([runbook de L1](operacion-l1.md)); luego relanza |
 | `input_provisional_only` | `error` | El mes solo tiene `provisional-day=DD.parquet` | Espera el cierre de L1 (el consolidado sale el primer lunes del mes siguiente) o lanza `l1-monthly-close`; luego relanza |
 | `theta_catalog_invalid` | `error` | El catálogo no existe, no se lee o incumple TRD-L2 §7.3. Código 2, sin escribir | Corrige `manifest/l2/thetas.yaml` ([runbook de L2](operacion-l2.md#el-catálogo-de-θ)); relanza |
-| `theta_behind_frontier` | `warning` | `monthly` no procesó un θ; `details.family` es la pasada (`summaries` o `path`, ITSC-396) y `details.reason` es `l3_frontier` (la serie de L3 de la familia tiene un hueco o no existe), `l2_missing` (L2 no tiene el mes) o `summaries_missing` (familia `path` sin `summaries.parquet` del mes) | `l3_frontier`: lanza `l3-backfill` de esa familia sin `from` ni `to`, que retoma desde la frontera de cada θ. `l2_missing`: completa L2 primero. `summaries_missing`: corre el backfill de `summaries`. No falla la unidad si otros θ avanzan |
+| `theta_behind_frontier` | `warning` | `monthly` no procesó un θ; `details.family` es la pasada (`summaries`, `path` o `fit`) y `details.reason` es `l3_frontier` (la serie de L3 de la familia tiene un hueco o no existe), `l2_missing` (L2 no tiene el mes) o `summaries_missing` (familia `path` o `fit` sin `summaries.parquet` del mes) | `l3_frontier`: lanza `l3-backfill` de esa familia sin `from` ni `to`, que retoma desde la frontera de cada θ. `l2_missing`: completa L2 primero. `summaries_missing`: corre el backfill de `summaries`. No falla la unidad si otros θ avanzan |
 | `theta_config_drift` | `info` | L3 tiene particiones de un θ que ya no está en el catálogo | Informa. Quitar un θ del catálogo no borra nada; si fue un error, restáuralo |
 | `summaries_summary` | `info` | Uno por θ, mes y familia: filas, `content_hash` del archivo de la familia y de las entradas de L2 que usó | Es el linaje contra L2: sirve para comparar corridas y para detectar un mes obsoleto |
 | `unit_timing` | `info` | Uno por unidad (mes): pared, tiempo por fase, CPU efectiva y consumida (`cpu_s`, `cpu_utilization`) y bytes leídos | Es la fuente de las cifras de "Volumen y costo" |
