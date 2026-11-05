@@ -137,8 +137,8 @@ push(row group k) ──► cola de ítems (θ₀,k) (θ₁,k) … (θ₄₉,k) 
   vuelo), no O(eventos del mes); un evento largo abierto en la marca ancla los lotes
   entregados detrás de él (**97 bytes por evento**, antes 81 y 65: `R`, `C`, `confirm_time`,
   `E`, `reference_time` y `extreme_time` de 8 bytes, `direction` de 1 y tres `decimal128` de
-  16: `confirm_price`, `extreme_price` y `reference_price`; son 97 y no 89 porque los precios
-  llegan como `decimal128` de Arrow y no se copian). Los buffers de
+  16: `confirm_price`, `extreme_price` y `reference_price`; son 97 y no 73 porque los tres precios
+  llegan como `decimal128` de Arrow (16 B) y no se copian a `int64`). Los buffers de
   salida se reservan al llegar la primera fila de su row group y se entregan al sellar.
 
 ## API
