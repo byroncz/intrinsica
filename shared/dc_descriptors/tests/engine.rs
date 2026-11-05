@@ -809,6 +809,8 @@ fn the_events_of_l2_must_be_ordered_and_have_prices_that_fit() {
         region(wide(5, 1)),
         region(wide(5, 0)),
         region(wide(4, 0)),
+        ints(10),
+        ints(30),
     )
     .unwrap();
     match engine.push_boundaries(0, batch) {

@@ -19,6 +19,8 @@ use std::fmt;
 pub enum PhaseName {
     Confirmation,
     Overshoot,
+    /// El evento entero (de `R` a `E`): la tercera fase de la familia A.
+    Event,
 }
 
 impl PhaseName {
@@ -27,6 +29,7 @@ impl PhaseName {
         match self {
             Self::Confirmation => "confirmación",
             Self::Overshoot => "overshoot",
+            Self::Event => "evento",
         }
     }
 }
@@ -67,6 +70,9 @@ pub enum EventErrorKind {
     /// Una suma de la familia T no cupo (el cuadrado de un cambio de log-precio es del orden de
     /// 10³ como mucho, escalado a 2⁹⁶ en 128 bits).
     PathOverflow { phase: PhaseName },
+    /// Un momento de la familia A no cupo en 128 bits (con la escala 2⁻⁸⁰ el rango entero es de
+    /// 2⁴⁷ y un tick aporta como mucho unos miles).
+    FitOverflow { phase: PhaseName },
     /// Un invariante de §7.2 contra L2 (`l2_state_inconsistent`).
     Invariant {
         field: &'static str,
@@ -97,6 +103,11 @@ impl fmt::Display for EventErrorKind {
             Self::PathOverflow { phase } => write!(
                 f,
                 "la suma de cuadrados de log-precios de la fase {} no cabe en 128 bits",
+                phase.text()
+            ),
+            Self::FitOverflow { phase } => write!(
+                f,
+                "un momento de la familia A de la fase {} no cabe en 128 bits",
                 phase.text()
             ),
             Self::Invariant { field, got, wanted } => {

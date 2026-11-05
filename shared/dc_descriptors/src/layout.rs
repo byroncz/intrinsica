@@ -1,10 +1,11 @@
 //! Las 18 columnas de datos de `summaries.parquet` (TRD-L3 §7.2), las 14 de `path.parquet`
-//! (la clave y los 13 registros de la familia T) y la fila de un evento de cada una.
+//! (la clave y los 13 registros de la familia T), las 10 de `fit.parquet` (la clave y los 9
+//! de la familia A) y la fila de un evento de cada una.
 //!
-//! Es el contrato con `l3_dc_descriptors.schema` (`_COLUMNS` y `PATH_SCHEMA`): mismo orden,
+//! Es el contrato con `l3_dc_descriptors.schema` (`_COLUMNS`, `PATH_SCHEMA` y `FIT_SCHEMA`): mismo orden,
 //! mismos tipos. Los decimales (`DECIMAL(18,8)`) viajan sin escalar: el entero de 64 bits es
 //! la palabra baja del decimal de 128 bits y la alta es su extensión de signo. Los `DOUBLE`
-//! de `path.parquet` viajan como los 64 bits del `f64`.
+//! de `path.parquet` y `fit.parquet` viajan como los 64 bits del `f64`.
 
 /// Columnas de datos por fila (sin `theta`, que es constante por row group).
 pub const WIDTH: usize = 18;
@@ -76,13 +77,14 @@ pub const COLUMNS: [ColumnSpec; WIDTH] = [
     dec("confirm_instant_price_worst"),
 ];
 
-/// Qué familia calcula el motor: la de resumen (`summaries.parquet`, S) o la de trayectoria
-/// (`path.parquet`, T).
+/// Qué familia calcula el motor: la de resumen (`summaries.parquet`, S), la de trayectoria
+/// (`path.parquet`, T) o la de forma (`fit.parquet`, A).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Family {
     #[default]
     Summaries,
     Path,
+    Fit,
 }
 
 impl Family {
@@ -91,6 +93,7 @@ impl Family {
         match self {
             Self::Summaries => &COLUMNS,
             Self::Path => &PATH_COLUMNS,
+            Self::Fit => &FIT_COLUMNS,
         }
     }
 }
@@ -114,6 +117,36 @@ pub const PATH_COLUMNS: [ColumnSpec; PATH_WIDTH] = [
     nullable(int("c_t50")),
     nullable(int("c_t75")),
 ];
+
+/// Columnas de datos por fila de `fit.parquet` (sin `theta`): la clave y los 9 registros.
+pub const FIT_WIDTH: usize = 10;
+
+pub const FIT_COLUMNS: [ColumnSpec; FIT_WIDTH] = [
+    int("confirm_agg_trade_id"),
+    nullable(int("c_slope")),
+    nullable(int("os_slope")),
+    nullable(int("ev_slope")),
+    nullable(int("c_accel")),
+    nullable(int("os_accel")),
+    nullable(int("ev_accel")),
+    nullable(int("c_jump_share")),
+    nullable(int("os_jump_share")),
+    nullable(int("ev_jump_share")),
+];
+
+/// Posición de cada columna de `fit.parquet` en la fila.
+pub mod fit_col {
+    pub const CONFIRM_AGG_TRADE_ID: usize = 0;
+    pub const C_SLOPE: usize = 1;
+    pub const OS_SLOPE: usize = 2;
+    pub const EV_SLOPE: usize = 3;
+    pub const C_ACCEL: usize = 4;
+    pub const OS_ACCEL: usize = 5;
+    pub const EV_ACCEL: usize = 6;
+    pub const C_JUMP_SHARE: usize = 7;
+    pub const OS_JUMP_SHARE: usize = 8;
+    pub const EV_JUMP_SHARE: usize = 9;
+}
 
 /// Posición de cada columna de `path.parquet` en la fila.
 pub mod path_col {
@@ -139,6 +172,15 @@ pub mod path_col {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PathRow {
     pub cells: [i64; PATH_WIDTH],
+    pub valid: u16,
+    pub ticks: u64,
+}
+
+/// La fila de un evento de `fit.parquet`, con el mismo significado de sus campos que
+/// [`PathRow`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FitRow {
+    pub cells: [i64; FIT_WIDTH],
     pub valid: u16,
     pub ticks: u64,
 }

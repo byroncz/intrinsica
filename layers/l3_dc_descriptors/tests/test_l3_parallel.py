@@ -680,7 +680,7 @@ def test_the_unit_reports_the_open_events_it_held(lake):
     )
     assert phases.inflight_bytes == 10**9
     assert phases.inflight_events_max > 0
-    # Las fronteras que `cover` trae por delante cuestan 81 B y no 321 (ITSC-376).
+    # Las fronteras que `cover` trae por delante cuestan 97 B y no 337 (ITSC-376).
     assert (
         phases.inflight_events_max * boundaries.BOUNDARY_ROW_BYTES
         <= phases.inflight_bytes_max
@@ -691,8 +691,8 @@ def test_the_unit_reports_the_open_events_it_held(lake):
 
 
 def test_an_event_costs_its_output_row_and_its_boundaries():
-    """240 B de las 18 columnas de salida más 81 B de las ocho de fronteras de L2."""
-    assert summarize.EVENT_BYTES == 240 + 81
+    """240 B de las 18 columnas de salida más 97 B de las diez de fronteras de L2."""
+    assert summarize.EVENT_BYTES == 240 + 97
 
 
 class ClosingEngine:
@@ -802,9 +802,9 @@ def test_the_byte_cap_holds_back_a_row_group_while_the_open_events_pass_it(
     assert "L3_LOT_EVENTS" not in message
 
 
-def test_the_boundaries_cover_brought_ahead_cost_81_bytes_not_321(monkeypatch):
+def test_the_boundaries_cover_brought_ahead_cost_97_bytes_not_337(monkeypatch):
     """Los eventos que `cover` entregó por delante del tramo no tienen casilla: cuestan solo
-    sus ocho columnas de fronteras (`BOUNDARY_ROW_BYTES`).
+    sus diez columnas de fronteras (`BOUNDARY_ROW_BYTES`).
     """
     each = 1000 * summarize.EVENT_BYTES
     ahead = 400
@@ -814,7 +814,7 @@ def test_the_boundaries_cover_brought_ahead_cost_81_bytes_not_321(monkeypatch):
     )
     assert phases.inflight_events_max == 1000
     assert phases.inflight_alone_bytes_max == expected < each
-    # 600 × 321 + 400 × 81 = 225 000 B, y no los 321 000 de contar todo a 321 B: con el tope
+    # 600 × 337 + 400 × 97 = 241 000 B, y no los 337 000 de contar todo a 337 B: con el tope
     # justo sobre eso el tramo cabe solo.
     _, phases = push_fake_row_groups(monkeypatch, expected + 1, ahead=ahead)
     assert phases.inflight_alone_bytes_max == expected <= phases.inflight_bytes
@@ -826,16 +826,7 @@ def test_a_boundary_feed_counts_the_events_it_brought_ahead_of_the_covered_ids()
         push_boundaries=lambda position, entry: pushed.append(entry.rows)
     )
     references = np.arange(0, 100, 10, dtype=np.int64)  # 10 eventos: 0, 10, ..., 90
-    columns_of_l2 = (
-        "reference_agg_trade_id",
-        "confirm_agg_trade_id",
-        "confirm_time",
-        "extreme_agg_trade_id",
-        "direction",
-        "confirm_price",
-        "extreme_price",
-        "reference_price",
-    )
+    columns_of_l2 = boundaries.EVENT_COLUMNS
 
     def batches():
         for start in (0, 5):

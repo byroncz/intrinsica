@@ -67,6 +67,7 @@ batches = [
     native.EventBatch(
         min(S, n - start), column(r, start), column(c, start), column(c, start),
         column(e, start), column(direction, start), (price[0], start), (price[0], start), (price[0], start),
+        column(r, start), column(e, start),
     )
     for start in range(0, n, S)
 ]

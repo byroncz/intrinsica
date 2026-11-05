@@ -125,6 +125,15 @@ impl Ev {
         s.time[self.c - 1]
     }
 
+    /// El `transact_time` del tick `R` (o del primero de la serie, como `reference_price`).
+    pub fn reference_time(&self, s: &Series) -> i64 {
+        s.time[self.r.saturating_sub(1)]
+    }
+
+    pub fn extreme_time(&self, s: &Series) -> i64 {
+        s.time[self.e - 1]
+    }
+
     /// El precio del tick `R` (o del primero de la serie, si `R` es el id 0 de antes de
     /// ella) si queda del lado de `confirm_price` que dice la dirección; si no, un precio
     /// consistente con ella. Solo lo lee la familia T.
@@ -431,6 +440,8 @@ pub fn watched_batches(
                 prices(&|ev| ev.confirm_price),
                 prices(&|ev| ev.extreme_price),
                 prices(&|ev| ev.reference_price(s)),
+                ints(&|ev| ev.reference_time(s)),
+                ints(&|ev| ev.extreme_time(s)),
             )
             .expect("buffers completos"),
         );
@@ -620,12 +631,21 @@ impl IndexStart for SealedRowGroup {
 }
 
 pub fn engine(threads: usize, sizes: &[Vec<usize>]) -> Engine<Shared> {
+    engine_of(dc_descriptors::Family::Summaries, threads, sizes)
+}
+
+/// Como `engine`, para la familia que se pida (`Path` con un umbral de silencio de 2 ms).
+pub fn engine_of(
+    family: dc_descriptors::Family,
+    threads: usize,
+    sizes: &[Vec<usize>],
+) -> Engine<Shared> {
     Engine::new(Config {
         thetas: (0..sizes.len() as i64).map(|t| 100_000 * (t + 1)).collect(),
         threads,
         row_groups: sizes.to_vec(),
-        family: dc_descriptors::Family::Summaries,
-        silence_us: 0,
+        family,
+        silence_us: 2_000,
     })
     .expect("configuración válida")
 }

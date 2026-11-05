@@ -31,6 +31,8 @@ from l3_dc_descriptors.errors import (
 )
 from l3_dc_descriptors.schema import (
     FAMILY,
+    FIT_FAMILY,
+    FIT_SCHEMA,
     PATH_FAMILY,
     PATH_SCHEMA,
     SUMMARIES_SCHEMA,
@@ -38,11 +40,12 @@ from l3_dc_descriptors.schema import (
 from l3_dc_descriptors.timing import Retained
 
 # Las columnas de datos de cada familia como las comprueba el motor: (nombre, bytes por valor,
-# nulable). Las 18 de `summaries` y las 14 de `path`.
+# nulable). Las 18 de `summaries`, las 14 de `path` y las 10 de `fit`.
 FAMILY_SCHEMAS = MappingProxyType(
     {
         FAMILY: SUMMARIES_SCHEMA,
         PATH_FAMILY: PATH_SCHEMA,
+        FIT_FAMILY: FIT_SCHEMA,
     }
 )
 
@@ -56,6 +59,7 @@ def _engine_schema(schema: pa.Schema) -> tuple[tuple[str, int, bool], ...]:
 
 ENGINE_SCHEMA = _engine_schema(SUMMARIES_SCHEMA)
 PATH_ENGINE_SCHEMA = _engine_schema(PATH_SCHEMA)
+FIT_ENGINE_SCHEMA = _engine_schema(FIT_SCHEMA)
 
 _NAMES = ("referencia", "confirmación", "extremo")
 
@@ -75,6 +79,8 @@ class EventBatch(NamedTuple):
     confirm_price: Region
     extreme_price: Region
     reference_price: Region
+    reference_time: Region
+    extreme_time: Region
 
 
 def _bytes(array: pa.Array) -> Region:
@@ -84,7 +90,7 @@ def _bytes(array: pa.Array) -> Region:
 
 
 def event_batch(batch: pa.RecordBatch) -> EventBatch:
-    """Las ocho columnas de L2 de un lote de eventos, sin copiar."""
+    """Las diez columnas de L2 de un lote de eventos, sin copiar."""
     return EventBatch(
         batch.num_rows,
         _bytes(batch.column("reference_agg_trade_id")),
@@ -95,6 +101,8 @@ def event_batch(batch: pa.RecordBatch) -> EventBatch:
         _bytes(batch.column("confirm_price")),
         _bytes(batch.column("extreme_price")),
         _bytes(batch.column("reference_price")),
+        _bytes(batch.column("reference_time")),
+        _bytes(batch.column("extreme_time")),
     )
 
 
@@ -215,7 +223,7 @@ def new_engine(
 ) -> dc_pyo3.Engine:
     """Un motor para `thetas` (los `Decimal` de la unidad) con el esqueleto de cada uno.
 
-    `family` es `summaries` o `path`; `silence_us` es el umbral de silencio de `path`.
+    `family` es `summaries`, `path` o `fit`; `silence_us` es el umbral de silencio de `path`.
     """
     schema = _engine_schema(FAMILY_SCHEMAS[family])
     return dc_pyo3.Engine(
@@ -234,8 +242,8 @@ def to_batch(
     """Un row group de salida sellado como `RecordBatch`, sin copiar los buffers del motor.
 
     Devuelve `(posición del θ, índice del row group de salida, batch)`. En `summaries` los
-    `os_*` nulables comparten el mapa de validez del motor; en `path` cada columna nulable
-    trae el suyo (o ninguno, si no tiene nulos).
+    `os_*` nulables comparten el mapa de validez del motor; en `path` y `fit` cada columna
+    nulable trae el suyo (o ninguno, si no tiene nulos).
     """
     schema = FAMILY_SCHEMAS[family]
     position, index, rows, columns, validity, null_count = sealed
@@ -250,7 +258,7 @@ def to_batch(
     ]
     fields = list(schema)[1:]
     for i, (column, field) in enumerate(zip(columns, fields, strict=True)):
-        if family == PATH_FAMILY:
+        if family != FAMILY:
             own = validity[i] if field.nullable else None
             mask = pa.py_buffer(own[0]) if own is not None else None
             nulls = own[1] if own is not None else 0
@@ -305,6 +313,12 @@ def to_summarize_error(
                 theta,
                 event,
                 f"la suma de price·quantity de la fase {error.phase} no cabe en 128 bits",
+            )
+        case "fit_overflow":
+            return PhaseValueError(
+                theta,
+                event,
+                f"un momento de la familia A de la fase {error.phase} no cabe en 128 bits",
             )
         case "boundary":
             r, c, e = error.bounds

@@ -6,7 +6,7 @@
 //! las fronteras de cada evento en cada row group, con los ids y las mismas comprobaciones que el lector. Reparte
 //! el trabajo en ítems `(row group, θ)` que hilos nativos toman de una cola, cierra cada
 //! evento en su casilla (la fila del evento en el esqueleto) y entrega row groups de
-//! salida sellados. Las sumas son `u128` comprobadas y los parciales de un evento que
+//! salida sellados. Las sumas son `u128` comprobadas (en la familia A, `i128` de punto fijo) y los parciales de un evento que
 //! cruza row groups se fusionan en cualquier orden, así que el archivo no depende de qué
 //! hilo tomó qué ítem. El modelo está en el `README.md` del crate y en ADR-L3-16 de
 //! `docs/TRD/l3.md`.
@@ -16,24 +16,26 @@
 pub mod arith;
 pub mod close;
 pub mod engine;
+pub mod fit;
 pub mod input;
 pub mod layout;
 pub mod output;
 pub mod path;
 pub mod phase;
 
-pub use arith::divide_half_even;
+pub use arith::{divide_half_even, Wide};
 pub use close::{close_event, EventError, EventErrorKind, PhaseName};
 pub use engine::{
     locate_events, BoundaryError, BoundaryKind, Config, ConfirmTimeError, Engine, EngineError,
     Located, ThetaStats,
 };
+pub use fit::{close_fit, FitAcc, Frame, Moments};
 pub use input::{
     Boundaries, EventBatch, EventIn, InputError, KeyColumns, Region, RowGroupInput, TickColumns,
 };
 pub use layout::{
-    col, path_col, ColumnSpec, Family, PathRow, Row, COLUMNS, LIMIT, PATH_COLUMNS, PATH_WIDTH,
-    WIDTH,
+    col, fit_col, path_col, ColumnSpec, Family, FitRow, PathRow, Row, COLUMNS, FIT_COLUMNS,
+    FIT_WIDTH, LIMIT, PATH_COLUMNS, PATH_WIDTH, WIDTH,
 };
 pub use output::{ColumnMask, SealedRowGroup};
 pub use path::{close_path, PathAcc, PhasePath};

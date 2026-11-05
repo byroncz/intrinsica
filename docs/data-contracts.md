@@ -272,12 +272,13 @@ events = pq.read_table(
 ## Salida Parquet de L3
 
 Contrato hacia L4: el resumen por fase de cada evento de L2 (`summaries.parquet`) y,
-sobre el mismo esqueleto, la trayectoria de cada fase (`path.parquet`), una fila por
-evento y θ en cada archivo, en la misma partición que su fila de L2. Fuente de diseño:
+sobre el mismo esqueleto, la trayectoria de cada fase (`path.parquet`) y su forma
+(`fit.parquet`), una fila por evento y θ en cada archivo, en la misma partición que su fila de L2. Fuente de diseño:
 [TRD-L3 §7.2](TRD/l3.md#72-salida--summariesparquet-contrato-hacia-l4),
-[§7.2.1](TRD/l3.md#721-salida--pathparquet-familia-t) y
+[§7.2.1](TRD/l3.md#721-salida--pathparquet-familia-t),
+[§7.2.2](TRD/l3.md#722-salida--fitparquet-familia-a) y
 [§7.3](TRD/l3.md#73-directorio-de-la-capa-y-esqueleto-común). Fuente en código:
-`SUMMARIES_SCHEMA` y `PATH_SCHEMA` en
+`SUMMARIES_SCHEMA`, `PATH_SCHEMA` y `FIT_SCHEMA` en
 [`layers/l3_dc_descriptors/src/l3_dc_descriptors/schema.py`](../layers/l3_dc_descriptors/src/l3_dc_descriptors/schema.py).
 Una prueba (`layers/l3_dc_descriptors/tests/test_l3_contract_doc.py`) rompe el CI
 si las tablas se desvían del código.
@@ -481,6 +482,103 @@ con = duckdb.connect()
 wide = con.execute(
     f"SELECT * FROM read_parquet('{partition}/summaries.parquet') AS s "
     f"JOIN read_parquet('{partition}/path.parquet') AS p "
+    "USING (theta, confirm_agg_trade_id)"
+).to_arrow_table()
+```
+
+### Esquema de `fit.parquet`
+
+Familia A ([TRD-L3 §7.2.2](TRD/l3.md#722-salida--fitparquet-familia-a)): la forma
+de cada fase, en coordenadas normalizadas por los extremos de L2. Tiene las mismas
+filas, en el mismo orden y con los mismos row groups que `summaries.parquet` de la
+partición, así que se une 1:1 por `(theta, confirm_agg_trade_id)`. Si falta el
+`summaries.parquet` del mes, `fit.parquet` no se escribe.
+
+Se miden tres fases: la confirmación `c` (ticks de `(R, C]`), el overshoot `os`
+(ticks de `(C, E]`) y el evento `ev` (todos los ticks de `(R, E]`). Cada una tiene un
+**ancla** `(t_0, p_0)` y un **cierre** `(t_fin, p_fin)` que salen de la fila de L2:
+
+| Fase | Ancla `(t_0, p_0)` | Cierre `(t_fin, p_fin)` | Instante de `p_prev` |
+|---|---|---|---|
+| `c` | `(reference_time, p_R)` | `(confirm_time, p_C)` | `confirm_time` |
+| `os` | `(confirm_time, p_C)` | `(extreme_time, p_E)` | `extreme_time` |
+| `ev` | `(reference_time, p_R)` | `(extreme_time, p_E)` | `extreme_time` |
+
+`p_R = reference_price`, `p_C = confirm_price` y `p_E = extreme_price` (el entero sin
+escalar de un `DECIMAL(18,8)`). Un tick `(t, p)` de la fase es el punto
+`τ = (t − t_0) / (t_fin − t_0)`, `y = (p − p_0) / (p_fin − p_0)`.
+
+| Columna | Tipo Arrow/Parquet | Nulable | Descripción |
+|---|---|---|---|
+| `theta` | decimal128(9, 8) | no | θ del evento; clave, redundante con la partición |
+| `confirm_agg_trade_id` | int64 | no | Clave: con `theta` identifica al evento y une con su fila de `summaries.parquet` |
+| `c_slope` | double | sí | A-01. Pendiente de mínimos cuadrados con intercepto de `y` sobre `τ` en la confirmación, en fracción de `p_R` por segundo |
+| `os_slope` | double | sí | A-02. Lo mismo en el overshoot; nula si `os_ticks = 0` |
+| `ev_slope` | double | sí | A-03. Lo mismo en el evento entero |
+| `c_accel` | double | sí | A-04. Coeficiente `a` del ajuste `y = a·τ² + b·τ` sin intercepto en la confirmación |
+| `os_accel` | double | sí | A-05. Lo mismo en el overshoot; nula si `os_ticks = 0` |
+| `ev_accel` | double | sí | A-06. Lo mismo en el evento entero |
+| `c_jump_share` | double | sí | A-07. `(p_fin − p_prev) / (p_fin − p_0)` de la confirmación; vale 1 si ningún tick es anterior a `confirm_time` |
+| `os_jump_share` | double | sí | A-08. Lo mismo en el overshoot; nula si `os_ticks = 0` |
+| `ev_jump_share` | double | sí | A-09. Lo mismo en el evento entero |
+
+La **regla de nulos** es exacta, nada más es nulo: todas las `os_*` con `os_ticks = 0`;
+las `*_slope` con menos de dos ticks en la fase o con todos en el mismo
+`transact_time` (o `t_fin = t_0`); las `*_accel`, además, con `t_fin = t_0`, con
+`p_fin = p_0`, cuando todos los ticks con `t > t_0` comparten el mismo `t` (la
+regresión de dos parámetros no tiene solución) y cuando el sistema normal es
+numéricamente singular tras cuantizar (`det ≤ 0`); las `*_jump_share` con `p_fin = p_0`.
+Las columnas nunca guardan `±inf` ni `NaN`.
+
+### Fórmulas de `fit.parquet`
+
+- **Momentos.** Por fase: `n`, `Σ τ^k` (k = 1..4), `Σ τ^k·y` (k = 0..2) y `p_prev`.
+  Cada término se calcula en `f64`, se cuantiza **una sola vez** a un entero de punto
+  fijo (escala 2⁻⁸⁰, `i128`, redondeo al más cercano) y los enteros se suman exactos.
+  El resultado no depende de cómo se partan los ticks en tramos ni del número de
+  hilos. Error absoluto por término ≤ 2⁻⁸¹. La escala es 2⁻⁸⁰ y no 2⁻⁹⁶ porque en el
+  overshoot `|y|` puede llegar a miles. Un término o una suma que no cabe es un error
+  de fase (`fit_overflow`), nunca un valor truncado.
+- **`p_prev`.** El precio del tick de mayor `(transact_time, agg_trade_id)` entre los
+  de la fase con `transact_time` estrictamente anterior al instante de la tabla de
+  arriba; `p_0` si no hay ninguno.
+- **`*_slope`.** Con `S₁ = Στ`, `S₂ = Στ²`, `Sy = Σy` y `S₁y = Στ·y`:
+  `b = (n·S₁y − S₁·Sy) / (n·S₂ − S₁²)`; `slope = b · s · 10⁶ / (p_R · (t_fin − t_0))`
+  con `s = p_fin − p_0` y `t_fin − t_0` en µs. Es la pendiente de `p / p_R` contra
+  `t` en segundos. Si `p_fin = p_0` se usa `s = p_0` solo en esta cuenta.
+- **`*_accel`.** Con `S₃ = Στ³`, `S₄ = Στ⁴` y `S₂y = Στ²·y`:
+  `a = (S₂y·S₂ − S₁y·S₃) / (S₄·S₂ − S₃²)`.
+- **`*_jump_share`.** `(p_fin − p_prev) / (p_fin − p_0)`.
+
+Los productos de momentos se hacen en enteros de 256 bits exactos; en `f64` quedan
+solo la conversión y la división final.
+
+### Metadatos y lectura de `fit.parquet`
+
+- **Metadatos del archivo**: `state_version = "1.0.0"` y ningún otro: la familia no
+  tiene parámetros. No entran en el `content_hash`.
+- **Disposición física**: la de `summaries.parquet` (misma partición, ZSTD nivel 3, sin
+  diccionario, `sorting_columns` por `confirm_agg_trade_id`, mismos row groups). El
+  `content_hash` lo calcula `pyutils.ContentHasher`, que hashea las columnas `double`
+  por los bits de cada valor (sin `NaN` ni `inf`, porque L3 no los produce).
+- **Quién lo escribe**: el motor de agregación (`Config.family = fit`) calcula las
+  filas y el `FamilyWriter` las repite sobre el esqueleto de `summaries.parquet`. La
+  CLI de L3 gana `--family fit` en una versión posterior (ITSC-400); su frontera por θ
+  será la de «Quién lo escribe y hasta dónde llegó».
+- **Leer**: se une con `summaries.parquet` por `(theta, confirm_agg_trade_id)`; la unión
+  es 1:1 y también por posición.
+
+```python
+import duckdb
+
+partition = (
+    "<raíz L3>/provider=binance/market=spot/asset=BTCUSDT"
+    "/theta=0.00010000/year=2020/month=01"
+)
+con = duckdb.connect()
+wide = con.execute(
+    f"SELECT * FROM read_parquet('{partition}/summaries.parquet') AS s "
+    f"JOIN read_parquet('{partition}/fit.parquet') AS f "
     "USING (theta, confirm_agg_trade_id)"
 ).to_arrow_table()
 ```
@@ -894,8 +992,8 @@ mismo que traen las excepciones del resumidor, de las que sale la mayoría de lo
   `rss_after_trim_mib`, el `VmRSS` del proceso justo antes y después de devolver la memoria al kernel
   al cerrar la unidad (desde la 2.5.0 del TRD-L3); `inflight_bytes` (el tope de bytes de eventos
   abiertos, `L3_INFLIGHT_BYTES`), `inflight_events_max`, `inflight_bytes_max` (el máximo de
-  eventos entregados al motor que aún no cerraron y ese máximo en bytes, a 321 B por evento y a 81 B
-  (305 B y 65 B hasta el TRD-L3 2.12.1) los que `cover` trajo por delante del último tramo; puede pasar del tope hasta en un tramo, porque
+  eventos entregados al motor que aún no cerraron y ese máximo en bytes, a 337 B por evento y a 97 B
+  (321 B y 81 B del TRD-L3 2.13.0 al 2.15.0; 305 B y 65 B hasta el 2.12.1) los que `cover` trajo por delante del último tramo; puede pasar del tope hasta en un tramo, porque
   el tope se mira antes de empujar) e `inflight_alone_bytes_max` (lo mismo
   para los tramos que entraron a un motor vacío: si pasa del tope, un solo tramo lo superó)
   y `spawn_s` (lo que tardó en arrancar el proceso hijo de la unidad; `null`

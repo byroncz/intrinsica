@@ -89,8 +89,8 @@ class FanOut:
 class DescriptorError(ValueError):
     """Un fallo del motor de L3. `kind` dice cuál: `input`, `ticks`, `internal`,
     `skeleton`, `incomplete`, `boundary`, `confirm_time`, `direction`, `invariant`,
-    `quantity_too_large`, `no_quantity`, `notional_overflow` o `path_overflow`. Según el caso trae `theta`
-    (posición), `event`, `confirm_agg_trade_id`, `phase`, `field`, `got`, `wanted`, `rows`,
+    `quantity_too_large`, `no_quantity`, `notional_overflow`, `path_overflow` o `fit_overflow`.
+    Según el caso trae `theta` (posición), `event`, `confirm_agg_trade_id`, `phase`, `field`, `got`, `wanted`, `rows`,
     `missing` o `expected`. `boundary` (una frontera de un evento que no es un tick de L1)
     trae además `reason` (`not_a_tick` o `unseen`), `bounds` (`R`, `C`, `E`), `low` y
     `high` (primer y último id del row group); `field` es la columna de L2 de la frontera.
@@ -109,7 +109,8 @@ class EventBatch(Protocol):
     """Un lote de filas consecutivas de `events.parquet` de L2 de un θ (cualquier objeto
     con estos atributos): `rows` y, por columna, `(bytes del buffer, offset)` en el layout
     de Arrow.
-    `reference`, `confirm`, `confirm_time` y `extreme` son `int64`; `direction`, `int8`;
+    `reference`, `confirm`, `confirm_time`, `extreme`, `reference_time` y `extreme_time` son
+    `int64`; `direction`, `int8`;
     los precios (`confirm_price`, `extreme_price` y `reference_price`), `decimal128`."""
 
     rows: int
@@ -121,11 +122,13 @@ class EventBatch(Protocol):
     confirm_price: tuple[memoryview, int]
     extreme_price: tuple[memoryview, int]
     reference_price: tuple[memoryview, int]
+    reference_time: tuple[memoryview, int]
+    extreme_time: tuple[memoryview, int]
 
 # (rows, closed_ticks, before_month, first_reference, last_extreme)
 type Stats = tuple[int, int, int, int | None, int | None]
 # (theta, index, rows, columns, validity, null_count). En `summaries`, `validity` es el mapa de
-# las filas con overshoot (o `None`); en `path`, una lista con una entrada por columna:
+# las filas con overshoot (o `None`); en `path` y `fit`, una lista con una entrada por columna:
 # `(mapa de bits, nulos)` si la columna tiene nulos y `None` si no.
 type Sealed = tuple[
     int,

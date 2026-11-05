@@ -14,8 +14,9 @@ from l3_dc_descriptors.errors import L2StateInconsistent
 from l3_dc_descriptors.phase import PhaseSummary, close_phase, scaled
 from l3_dc_descriptors.schema import COLUMN, WIDTH
 
-# Las ocho columnas de L2 que L3 usa (§7.1). `reference_price` es el ancla de la fase de
-# confirmación de la familia T; S no la lee.
+# Las diez columnas de L2 que L3 usa (§7.1). `reference_price` es el ancla de la fase de
+# confirmación de la familia T; `reference_time` y `extreme_time` anclan y cierran las fases de
+# la familia A (ADR-L3-18). S no lee ninguna de las tres.
 EVENT_COLUMNS = (
     "reference_agg_trade_id",
     "confirm_agg_trade_id",
@@ -25,6 +26,8 @@ EVENT_COLUMNS = (
     "confirm_price",
     "extreme_price",
     "reference_price",
+    "reference_time",
+    "extreme_time",
 )
 
 
