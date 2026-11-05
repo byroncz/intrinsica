@@ -354,7 +354,7 @@ fn slope(m: &Moments, f: &Frame, reference_price: i64) -> Result<Option<f64>, To
 
 /// El coeficiente `a` del ajuste `y = a·τ² + b·τ` sin intercepto, desde los momentos. Nulo
 /// donde la pendiente lo es, con `t_fin = t₀`, con `p_fin = p₀` y con el sistema singular: un
-/// solo `τ` positivo distinto.
+/// solo `τ` positivo distinto, o `det ≤ 0` tras cuantizar (lo decide `quotient`).
 fn acceleration(m: &Moments, f: &Frame) -> Result<Option<f64>, TooBig> {
     let distinct = m.later.is_some_and(|(low, high)| low < high);
     if !f.usable

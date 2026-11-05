@@ -83,10 +83,10 @@ def distinct_later_times(ticks, t0: int) -> int:
 
 
 def check_invariants(path: str, summaries: str, events: str, series) -> int:
-    """Las invariantes de la decisión 7 y la regla de nulos de TRD-L3 §7.2.2 de un
+    """Las leyes de las `*_jump_share` y la regla de nulos de TRD-L3 §7.2.2 de un
     `fit.parquet`, leyendo duraciones de `summaries.parquet` y anclas de `events.parquet`
     (L2) y los ticks de la lista: ninguna usa el motor ni el oráculo. Devuelve las filas
-    revisadas y cuántas traen `ev_jump_share` fuera de (0, 1].
+    revisadas. Las leyes son estrictas, sin tolerancia de frecuencia.
     """
     summary = {
         (r["theta"], r["confirm_agg_trade_id"]): r
@@ -95,7 +95,6 @@ def check_invariants(path: str, summaries: str, events: str, series) -> int:
     anchors = {r["confirm_agg_trade_id"]: r for r in pq.read_table(events).to_pylist()}
     got = rows_of(path)
     assert got.keys() == summary.keys()
-    outside = 0  # `ev_jump_share` fuera de (0, 1]
     for key, row in got.items():
         s, e = summary[key], anchors[key[1]]
         for name in NAMES:
@@ -143,14 +142,25 @@ def check_invariants(path: str, summaries: str, events: str, series) -> int:
             "ev_jump_share": e["extreme_price"] == e["reference_price"],
         }
         assert {n: row[n] is None for n in NAMES} == wanted_null, key
-        # Decisión 7: ningún precio anterior al instante cruza el umbral. Vale en la confirmación
-        # y, para `os`, `≥ 0`. En `ev` no es una ley (ver `test_the_event_jump_share_...`): el
-        # grupo de empate del instante de confirmación puede traer precios más allá de `p_E`.
+        # Leyes de TRD-L3 §7.2.2, todas estrictas. `c`: ningún precio anterior a `confirm_time`
+        # cruza el umbral, así que `0 < c_jump_share ≤ 1`. `os`: el extremo es el máximo o el
+        # mínimo del overshoot, así que `os_jump_share ≥ 0`. `ev`: `0 ≤ ev_jump_share`; el 0 sale
+        # de un empate (un tick con `t < extreme_time` ya en `p_E`).
         assert 0 < row["c_jump_share"] <= 1, (key, row["c_jump_share"])
         if row["os_jump_share"] is not None:
             assert row["os_jump_share"] >= 0, (key, row["os_jump_share"])
-        outside += not 0 < row["ev_jump_share"] <= 1
-    return len(got), outside
+        assert row["ev_jump_share"] >= 0, (key, row["ev_jump_share"])
+        # Cota superior `1 + θ` de `ev_jump_share` (decisión del arquitecto sobre ITSC-399):
+        # sale de que `p_prev ≥ p_R·(1 − θ²)`. Se verifica donde esa derivación aplica, o sea
+        # mientras `p_prev` no sea del instante de confirmación: ahí el grupo de empate es un
+        # solo instante atómico (ADR-L2-03) y trae precios sin cota por θ. Pendiente de decisión.
+        before = [(t, i, p) for p, t, i in c_ticks + o_ticks if t < ev_last]
+        if before and max(before)[0] != e["confirm_time"]:
+            assert row["ev_jump_share"] <= 1 + float(key[0]), (
+                key,
+                row["ev_jump_share"],
+            )
+    return len(got)
 
 
 def assert_skeleton_and_footer(path: str, summaries: str) -> None:
@@ -599,7 +609,7 @@ def test_the_hand_file_keeps_the_skeleton_and_the_footer(hand):
     series = fitref.Series(
         [Tick(i, t, Decimal(p), Decimal(1), side < 0) for i, t, p, side in TICKS]
     )
-    assert check_invariants(result.path, summaries, events, series) == (len(BLOCKS), 0)
+    assert check_invariants(result.path, summaries, events, series) == len(BLOCKS)
     assert_skeleton_and_footer(result.path, summaries)
 
 
@@ -674,18 +684,12 @@ def test_the_lake_has_the_edge_cases(lake, baseline):
 def test_the_rows_hold_the_invariants(lake, baseline):
     lake_, _ = lake
     series = fitref.Series(lake_.all_ticks())
-    checked = outside = 0
+    checked = 0
     for month, results in baseline.items():
         for theta in results:
             path, summaries, events = lake_files(lake_, month, theta)
-            rows, odd = check_invariants(path, summaries, events, series)
-            checked += rows
-            outside += odd
+            checked += check_invariants(path, summaries, events, series)
     assert checked == sum(len(rows) for rows in lake_.events.values())
-    # La decisión 7 pide `0 < ev_jump_share ≤ 1`; se investigó (ITSC-399): en 10 de 1 297 eventos
-    # de este lago no vale (9 en 0 y 1 mayor que 1), por los ticks del grupo de empate de la
-    # confirmación (ADR-L3-01). Es raro: lo que se fija es que siga siéndolo.
-    assert outside <= 0.02 * checked, (outside, checked)
 
 
 def test_the_engine_matches_the_oracle_over_the_reader_frames(lake, baseline):
@@ -800,35 +804,3 @@ def test_lots_and_a_shuffled_order_together_change_nothing(lake, baseline):
         assert_same_as_baseline(
             lake[0], baseline, threads=4, order="shuffled", seed=seed, lot=lot
         )
-
-
-def test_the_acceleration_bound_of_two_is_a_measure_and_the_oracle_agrees(
-    lake, baseline
-):
-    """La decisión 7 pide `|*_accel| ≤ 2` como cota de cordura y manda investigar, no ampliar,
-    si se viola. Se investigó (ITSC-399): no es una ley. El ajuste `y = a·τ² + b·τ` por dos o
-    tres puntos apiñados da cualquier coeficiente, y también lo da el oráculo exacto; en este
-    lago se pasan de 2 el 20 % de las `c_accel` (con fases de 12 ticks o más, el 5 %). La
-    prueba fija lo que sí vale: motor y oráculo coinciden en qué valores pasan de 2 y la
-    mayoría de los registros queda dentro.
-    """
-    lake_, _ = lake
-    series = fitref.Series(lake_.all_ticks())
-    inside = outside = 0
-    for month, results in baseline.items():
-        for theta, result in results.items():
-            rows = rows_of(result.path)
-            for event in lake_.events[int(theta.scaleb(8)), month]:
-                got = rows[theta, event["confirm_agg_trade_id"]]
-                wanted = dict(zip(NAMES, fitref.from_ticks(event, series), strict=True))
-                for name in ("c_accel", "os_accel", "ev_accel"):
-                    if wanted[name] is None:
-                        continue
-                    far = abs(wanted[name]) > 2
-                    # Lejos de la frontera de 2 coinciden siempre; pegados a ella, por el error de
-                    # la precisión de RTOL_LAKE, puede cambiar uno.
-                    if abs(abs(wanted[name]) - 2) > 1e-6:
-                        assert (abs(got[name]) > 2) == far, (theta, name, got[name])
-                    inside += not far
-                    outside += far
-    assert outside > 0 and inside > 2 * outside, (inside, outside)

@@ -525,8 +525,9 @@ escalar de un `DECIMAL(18,8)`). Un tick `(t, p)` de la fase es el punto
 La **regla de nulos** es exacta, nada más es nulo: todas las `os_*` con `os_ticks = 0`;
 las `*_slope` con menos de dos ticks en la fase o con todos en el mismo
 `transact_time` (o `t_fin = t_0`); las `*_accel`, además, con `t_fin = t_0`, con
-`p_fin = p_0` y cuando todos los ticks con `t > t_0` comparten el mismo `t` (la
-regresión de dos parámetros no tiene solución); las `*_jump_share` con `p_fin = p_0`.
+`p_fin = p_0`, cuando todos los ticks con `t > t_0` comparten el mismo `t` (la
+regresión de dos parámetros no tiene solución) y cuando el sistema normal es
+numéricamente singular tras cuantizar (`det ≤ 0`); las `*_jump_share` con `p_fin = p_0`.
 Las columnas nunca guardan `±inf` ni `NaN`.
 
 ### Fórmulas de `fit.parquet`

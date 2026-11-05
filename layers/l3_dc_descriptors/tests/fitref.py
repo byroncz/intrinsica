@@ -21,7 +21,7 @@ sistema de coordenadas, `(t₀, p₀) → (t_fin, p_fin)`, ambos de L2:
 
 Nulos: los `os_*` con el overshoot vacío; la pendiente con menos de 2 ticks o todos en el mismo
 `t` (o `t_fin = t₀`); la aceleración, además, con `t_fin = t₀`, con `p_fin = p₀` y con un solo `τ`
-positivo distinto (el sistema de 2×2 es singular); el salto, con `p_fin = p₀`.
+positivo distinto o con `det = 0` (el sistema de 2×2 es singular); el salto, con `p_fin = p₀`.
 """
 
 from bisect import bisect_right
