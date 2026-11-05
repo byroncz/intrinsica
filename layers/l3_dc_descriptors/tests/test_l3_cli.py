@@ -12,6 +12,8 @@ from frames_lake import write_carry_over
 from l3_dc_descriptors import SUMMARIES_SCHEMA, cli
 from l3_dc_descriptors.cli import UsageError, main, previous_month, resolve_range
 from l3_dc_descriptors.schema import (
+    FIT_SCHEMA,
+    FIT_STATE_VERSION,
     PATH_SCHEMA,
     PATH_STATE_VERSION,
     SILENCE_US,
@@ -234,7 +236,7 @@ def test_force_without_from_is_a_usage_error(lake, tmp_path, catalog, capsys):
     assert l3_files(lake) == []
 
 
-@pytest.mark.parametrize("family", ["fit", "", "Path"])
+@pytest.mark.parametrize("family", ["shape", "", "Path", "Fit"])
 def test_an_unknown_family_is_a_usage_error(lake, tmp_path, catalog, family, capsys):
     assert run(lake, tmp_path, catalog, *BACKFILL, "--family", family) == 2
     assert "--family" in capsys.readouterr().err
@@ -792,3 +794,92 @@ def test_the_path_family_rejects_a_summaries_file_with_other_row_groups(
     mismatch = emitted(tmp_path, "family_skeleton_mismatch")
     assert [r["details"]["theta"] for r in mismatch] == [theta_text(theta)]
     assert mismatch[0]["details"]["family"] == "path"
+
+
+def fit_file_of(lake, theta: int, month) -> Path:
+    return Path(month_dir(lake.l3, theta, month) + "/fit.parquet")
+
+
+def test_the_fit_family_writes_fit_parquet_after_summaries(lake, tmp_path, catalog):
+    assert run(lake, tmp_path, catalog, *BACKFILL) == 0
+    before = {p: p.read_bytes() for p in l3_files(lake)}
+
+    assert run(lake, tmp_path, catalog, *BACKFILL, "--family", "fit") == 0
+
+    for theta in lake.thetas:
+        for month in lake.months:
+            file = pq.ParquetFile(fit_file_of(lake, theta, month))
+            assert file.schema_arrow.remove_metadata().equals(FIT_SCHEMA)
+            meta = file.schema_arrow.metadata
+            assert meta[b"state_version"] == FIT_STATE_VERSION.encode()
+            assert b"silence_us" not in meta  # A no lleva parámetros en el pie
+            skeleton = summaries(lake, theta, month)
+            assert file.metadata.num_rows == skeleton.metadata.num_rows
+            assert [
+                file.metadata.row_group(i).num_rows
+                for i in range(file.metadata.num_row_groups)
+            ] == [
+                skeleton.metadata.row_group(i).num_rows
+                for i in range(skeleton.metadata.num_row_groups)
+            ]
+    # S no se toca: una corrida de A no cambia un byte de `summaries.parquet`.
+    assert all(p.read_bytes() == data for p, data in before.items())
+    rows = emitted(tmp_path, "summaries_summary")
+    fit_rows = [r for r in rows if r["details"]["family"] == "fit"]
+    assert len(fit_rows) == len(lake.thetas) * len(lake.months)
+    for row in fit_rows:
+        assert "unassigned_ticks" not in row["details"]
+        assert row["details"]["content_hash"]
+        assert row["details"]["l2_events_content_hash"]
+        assert row["details"]["l2_carry_over_content_hash"]
+    assert {r["details"]["family"] for r in emitted(tmp_path, "unit_timing")} == {
+        "summaries",
+        "fit",
+    }
+
+
+def test_the_fit_family_needs_summaries_parquet_of_the_month(lake, tmp_path, catalog):
+    code = run(lake, tmp_path, catalog, *BACKFILL, "--family", "fit")
+    assert code == 1
+    assert [p for p in l3_files(lake) if p.name == "fit.parquet"] == []
+    missing = emitted(tmp_path, "family_skeleton_missing")
+    assert {r["details"]["theta"] for r in missing} == {
+        theta_text(t) for t in lake.thetas
+    }
+    assert {r["details"]["file"] for r in missing} == {"summaries.parquet"}
+    assert {r["details"]["family"] for r in missing} == {"fit"}
+    assert {r["severity"] for r in missing} == {"error"}
+
+
+def test_the_fit_family_skips_a_theta_without_summaries_and_stops_its_range(
+    lake, tmp_path, catalog
+):
+    assert run(lake, tmp_path, catalog, *BACKFILL) == 0
+    lost = lake.thetas[0]
+    lost_month = lake.months[1]
+    (Path(month_dir(lake.l3, lost, lost_month)) / "summaries.parquet").unlink()
+
+    code = run(lake, tmp_path, catalog, *BACKFILL, "--family", "fit")
+
+    assert code == 1
+    assert fit_file_of(lake, lost, lake.months[0]).exists()
+    assert not fit_file_of(lake, lost, lost_month).exists()
+    others = [t for t in lake.thetas if t != lost]
+    assert all(fit_file_of(lake, t, m).exists() for t in others for m in lake.months)
+
+
+def test_the_fit_family_rejects_a_summaries_file_with_other_row_groups(
+    lake, tmp_path, catalog
+):
+    assert run(lake, tmp_path, catalog, *BACKFILL) == 0
+    theta, month = lake.thetas[0], lake.months[0]
+    file = Path(month_dir(lake.l3, theta, month)) / "summaries.parquet"
+    table = pq.read_table(file)
+    pq.write_table(table, file, row_group_size=max(1, table.num_rows // 3))
+
+    assert run(lake, tmp_path, catalog, *BACKFILL, "--family", "fit") == 1
+
+    assert not fit_file_of(lake, theta, month).exists()
+    mismatch = emitted(tmp_path, "family_skeleton_mismatch")
+    assert [r["details"]["theta"] for r in mismatch] == [theta_text(theta)]
+    assert mismatch[0]["details"]["family"] == "fit"

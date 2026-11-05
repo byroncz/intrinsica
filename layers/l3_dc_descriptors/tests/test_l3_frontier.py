@@ -338,3 +338,133 @@ def test_monthly_path_names_summaries_as_the_reason_when_the_month_has_none(
     }
     assert file_of(lake.l3, SMALL, M2, "path.parquet").exists()
     assert not file_of(lake.l3, BIG, M2, "path.parquet").exists()
+
+
+# La familia A (`fit.parquet`): su frontera sale de su propio archivo y nunca supera la de S.
+
+
+@pytest.fixture
+def fit_lake(lake):
+    for month in lake.months:
+        summarize_month(
+            lake.l1,
+            lake.l2,
+            lake.l3,
+            month,
+            lake.theta_texts,
+            series_start=M1,
+            family="fit",
+        )
+    return lake
+
+
+def fit_frontier_of(lake, theta: int = SMALL) -> int | None:
+    summaries = list_summaries(str(lake.l3), KEY)
+    listed = list_summaries(str(lake.l3), KEY, "fit")
+    result = frontiers(
+        [theta], listed, START, str(lake.l3), str(lake.l2), KEY, "fit", summaries
+    )
+    return result[theta]
+
+
+def test_a_complete_fit_series_reaches_its_last_month(fit_lake):
+    assert fit_frontier_of(fit_lake) == ordinal(M3)
+
+
+def test_the_fit_frontier_does_not_depend_on_having_the_fit_file_for_s(lake):
+    assert frontier_of(lake) == ordinal(M3)
+    assert fit_frontier_of(lake) is None
+
+
+def test_a_hole_in_the_fit_series_ends_it_before_the_hole(fit_lake):
+    file_of(fit_lake.l3, SMALL, M2, "fit.parquet").unlink()
+    assert fit_frontier_of(fit_lake) == ordinal(M1)
+    assert frontier_of(fit_lake) == ordinal(M3)
+
+
+def test_the_fit_frontier_never_passes_the_one_of_summaries(fit_lake):
+    file_of(fit_lake.l3, SMALL, M3, "summaries.parquet").unlink()
+    assert fit_frontier_of(fit_lake) == ordinal(M2)
+    assert fit_frontier_of(fit_lake, BIG) == ordinal(M3)
+
+
+@pytest.mark.parametrize(
+    ("damage", "reason"),
+    [
+        (lambda t: with_state_version(t, "0.9.0"), "state_version"),
+        (lambda t: t.drop_columns(["ev_jump_share"]), "esquema"),
+        (lambda t: t.drop_columns(["c_slope"]), "esquema"),
+    ],
+    ids=["state_version", "schema", "schema_other_column"],
+)
+def test_an_invalid_fit_file_moves_the_fit_frontier_back(fit_lake, damage, reason):
+    rewrite(file_of(fit_lake.l3, SMALL, M3, "fit.parquet"), damage)
+    problem = invalid_reason(str(fit_lake.l3), str(fit_lake.l2), KEY, SMALL, M3, "fit")
+    assert problem is not None and reason in problem
+    assert fit_frontier_of(fit_lake) == ordinal(M2)
+    # Las fronteras de S no se enteran.
+    assert frontier_of(fit_lake) == ordinal(M3)
+
+
+def test_a_summaries_copy_is_not_a_valid_fit_file(fit_lake):
+    # El mismo contenido es válido como `summaries` y no como `fit`.
+    summaries = file_of(fit_lake.l3, SMALL, M3, "summaries.parquet")
+    fit = file_of(fit_lake.l3, SMALL, M3, "fit.parquet")
+    fit.write_bytes(summaries.read_bytes())
+    problem = invalid_reason(str(fit_lake.l3), str(fit_lake.l2), KEY, SMALL, M3, "fit")
+    assert problem is not None and "esquema" in problem
+
+
+def test_other_row_groups_than_l2_are_invalid_for_fit_too(fit_lake):
+    fit = file_of(fit_lake.l3, SMALL, M3, "fit.parquet")
+    table = pq.read_table(fit)
+    pq.write_table(table, fit, row_group_size=table.num_rows)
+    problem = invalid_reason(str(fit_lake.l3), str(fit_lake.l2), KEY, SMALL, M3, "fit")
+    assert problem is not None and "row group" in problem
+    assert fit_frontier_of(fit_lake) == ordinal(M2)
+
+
+def monthly_fit(lake, tmp_path, *extra) -> int:
+    catalog = write_catalog(tmp_path / "thetas.yaml", lake.thetas)
+    argv = ["--mode", "monthly", "--series-start", "2017-08", "--family", "fit"]
+    return main([*argv, *extra], env_for(lake, tmp_path, catalog))
+
+
+def test_monthly_fit_names_the_fit_frontier_as_the_reason(lake, tmp_path):
+    # S llegó a 2017-10, A solo hizo 2017-08: A está en 2017-08 y el mes 2017-10 no es el siguiente.
+    summarize_month(
+        lake.l1, lake.l2, lake.l3, M1, lake.theta_texts, series_start=M1, family="fit"
+    )
+    others = ("summaries.parquet", "path.parquet")
+    before = {p: p.read_bytes() for n in others for p in lake.l3.rglob(n)}
+
+    assert monthly_fit(lake, tmp_path, "--from", "2017-10") == 1
+
+    rows = emitted(tmp_path, "theta_behind_frontier")
+    assert len(rows) == len(lake.thetas)
+    assert {r["details"]["reason"] for r in rows} == {"l3_frontier"}
+    assert {r["details"]["frontier"] for r in rows} == {"2017-08"}
+    assert {r["details"]["family"] for r in rows} == {"fit"}
+    assert not file_of(lake.l3, SMALL, M3, "fit.parquet").exists()
+    assert before == {p: p.read_bytes() for n in others for p in lake.l3.rglob(n)}
+
+
+def test_monthly_fit_names_summaries_as_the_reason_when_the_month_has_none(
+    lake, tmp_path
+):
+    summarize_month(
+        lake.l1, lake.l2, lake.l3, M1, lake.theta_texts, series_start=M1, family="fit"
+    )
+    file_of(lake.l3, BIG, M2, "summaries.parquet").unlink()
+
+    assert monthly_fit(lake, tmp_path, "--from", "2017-09") == 0
+
+    (row,) = emitted(tmp_path, "theta_behind_frontier")
+    assert row["details"] == {
+        "theta": theta_text(BIG),
+        "frontier": "2017-08",
+        "reason": "summaries_missing",
+        "family": "fit",
+    }
+    assert file_of(lake.l3, SMALL, M2, "fit.parquet").exists()
+    assert not file_of(lake.l3, BIG, M2, "fit.parquet").exists()

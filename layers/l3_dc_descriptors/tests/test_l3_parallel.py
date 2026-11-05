@@ -22,6 +22,7 @@ import types
 from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
 
+import fitref
 import l3_dc_descriptors
 import numpy as np
 import pathref
@@ -44,10 +45,10 @@ from l3_dc_descriptors import (
 from l3_dc_descriptors.context import RunContext, Unit
 from l3_dc_descriptors.cpu import CpuLimit
 from l3_dc_descriptors.pipeline import process_unit
-from l3_dc_descriptors.schema import PATH_SCHEMA
+from l3_dc_descriptors.schema import FIT_SCHEMA, PATH_SCHEMA
 from l3_dc_descriptors.timing import BusyClock, Phases, ReadMeter
 from l3_lake import M1, M2, build_lake, fixture_ticks, month_cuts
-from native_driver import path_native
+from native_driver import fit_native, path_native
 
 ENGINE_THREADS = (1, 2, 4)
 READERS = (1, 2)
@@ -1661,5 +1662,195 @@ def test_an_unknown_family_is_refused(lake):
             M1,
             lake.theta_texts,
             series_start=M1,
+            family="shape",
+        )
+
+
+# La pasada de la familia A (`--family fit`): mismas tablas y mismo `content_hash` que la
+# referencia con cualquier hilo, lector, escritor, lote y tamaño de lote de fronteras.
+
+
+def run_fit(lake, **options) -> dict:
+    """Los resultados y las tablas de `fit.parquet` de todos los meses (con `summaries.parquet`
+    ya escrito por la referencia de S).
+    """
+    results, tables = {}, {}
+    for month in lake.months:
+        results[month] = summarize_month(
+            lake.l1,
+            lake.l2,
+            lake.l3,
+            month,
+            lake.theta_texts,
+            series_start=M1,
+            family="fit",
+            **options,
+        )
+        for theta, result in results[month].items():
+            tables[month, theta] = pq.read_table(result.path, schema=FIT_SCHEMA)
+    return {"results": results, "tables": tables}
+
+
+@pytest.fixture(scope="module")
+def fit_reference(lake, reference):
+    """La referencia de A: `native_driver.fit_native` sobre el `summaries.parquet` de la
+    referencia de S, que queda escrito en el lago.
+    """
+    results, tables = {}, {}
+    for month in lake.months:
+        results[month] = fit_native(lake.l1, lake.l2, lake.l3, month, lake.theta_texts)
+        for theta, result in results[month].items():
+            tables[month, theta] = pq.read_table(result.path, schema=FIT_SCHEMA)
+    return {"results": results, "tables": tables}
+
+
+def test_the_fit_reference_is_the_oracle(lake, fit_reference):
+    """La referencia de A es el oráculo `fitref` sobre el lector de `dc_frames`: nulos exactos,
+    DOUBLE a 1e-7 relativo (ADR-L3-18, «Precisión»; ver `RTOL_LAKE` en test_l3_fit.py).
+    """
+    compared = 0
+    for month in lake.months:
+        wanted = fitref.from_lake(lake.l1, lake.l2, month, lake.theta_texts)
+        got = {
+            (row["theta"], row["confirm_agg_trade_id"]): row
+            for (m, _), table in fit_reference["tables"].items()
+            if m == month
+            for row in table.to_pylist()
+        }
+        assert got.keys() == wanted.keys()
+        for key, values in wanted.items():
+            for name, value in zip(fitref.COLUMNS, values, strict=True):
+                if value is None:
+                    assert got[key][name] is None, (key, name)
+                else:
+                    assert math.isclose(
+                        got[key][name], value, rel_tol=1e-7, abs_tol=1e-12
+                    ), (key, name)
+        compared += len(got)
+    assert compared > 0
+
+
+@pytest.mark.parametrize(("engine_threads", "readers", "inflight", "writers"), KNOBS)
+def test_the_fit_pass_gives_the_same_table_and_hash_with_any_knobs(
+    lake, fit_reference, engine_threads, readers, inflight, writers
+):
+    got = run_fit(
+        lake,
+        threads=4,
+        engine_threads=engine_threads,
+        readers=readers,
+        inflight=inflight,
+        writers=writers,
+    )
+    assert_same_path(got, fit_reference)
+    assert l3_threads() == []
+
+
+@pytest.mark.parametrize("threads", [1, 2, 50])
+def test_the_fit_pass_does_not_depend_on_the_io_pool(lake, fit_reference, threads):
+    assert_same_path(run_fit(lake, threads=threads), fit_reference)
+
+
+@pytest.mark.parametrize("lot_events", [1, 5, 10, 25, 100])
+@pytest.mark.parametrize(
+    ("engine_threads", "readers", "inflight", "writers"), [(1, 1, 1, 1), (4, 2, 4, 4)]
+)
+def test_the_fit_pass_gives_the_same_result_in_lots(
+    lake, fit_reference, lot_events, engine_threads, readers, inflight, writers
+):
+    """Con tramos de pocos ticks hay eventos que cruzan tramos y row groups: la fusión
+    asociativa de A (ADR-L3-18) da la misma tabla y el mismo `content_hash` que sin corte.
+    """
+    got = run_fit(
+        lake,
+        threads=4,
+        engine_threads=engine_threads,
+        readers=readers,
+        inflight=inflight,
+        writers=writers,
+        lot_events=lot_events,
+    )
+    assert_same_path(got, fit_reference)
+
+
+@pytest.mark.parametrize(
+    ("engine_threads", "readers", "inflight", "writers"),
+    [(1, 1, 1, 1), (2, 2, 4, 1), (4, 1, 4, 4), (4, 2, 1, 4)],
+)
+def test_the_fit_pass_gives_the_same_result_with_boundaries_in_lots_of_three(
+    lake, fit_reference, tiny_l2, engine_threads, readers, inflight, writers
+):
+    got = run_fit(
+        lake,
+        threads=4,
+        engine_threads=engine_threads,
+        readers=readers,
+        inflight=inflight,
+        writers=writers,
+    )
+    assert_same_path(got, fit_reference)
+    assert_same_path(
+        run_fit(lake, engine_threads=4, inflight=4, lot_events=3), fit_reference
+    )
+
+
+def test_a_fit_run_does_not_change_a_byte_of_summaries_or_path(
+    lake, path_reference, fit_reference
+):
+    files = sorted(
+        [*lake.l3.rglob("summaries.parquet"), *lake.l3.rglob("path.parquet")]
+    )
+    assert len(files) == 2 * len(lake.thetas) * len(lake.months)
+    before = {f: f.read_bytes() for f in files}
+    run_fit(lake, engine_threads=2, lot_events=10)
+    assert {f: f.read_bytes() for f in files} == before
+
+
+def test_the_fit_pass_reports_the_lineage_of_l2_like_summaries(
+    lake, reference, fit_reference
+):
+    for month, per_theta in fit_reference["results"].items():
+        got = summarize_month(
+            lake.l1,
+            lake.l2,
+            lake.l3,
+            month,
+            lake.theta_texts,
+            series_start=M1,
             family="fit",
         )
+        for theta, result in got.items():
+            assert result.l2_events_content_hash == (
+                reference["results"][month][theta].l2_events_content_hash
+            )
+            assert result.l2_carry_over_content_hash == (
+                reference["results"][month][theta].l2_carry_over_content_hash
+            )
+            assert result.reconciliation is None  # A no concilia: ya lo hizo S
+            assert result.content_hash == per_theta[theta].content_hash
+
+
+def test_the_fit_pass_without_summaries_fails_without_publishing(lake, fit_reference):
+    theta = lake.theta_texts[0]
+    target = lake.l3 / (
+        "provider=binance/market=spot/asset=BTCUSDT/"
+        f"theta={theta}/year={M1[0]}/month={M1[1]:02d}"
+    )
+    hidden = target / "summaries.hidden"
+    (target / "summaries.parquet").rename(hidden)
+    before = (target / "fit.parquet").read_bytes()
+    try:
+        with pytest.raises(FramesInputError, match="summaries"):
+            summarize_month(
+                lake.l1,
+                lake.l2,
+                lake.l3,
+                M1,
+                lake.theta_texts,
+                series_start=M1,
+                family="fit",
+            )
+    finally:
+        hidden.rename(target / "summaries.parquet")
+    assert (target / "fit.parquet").read_bytes() == before
+    assert l3_threads() == []

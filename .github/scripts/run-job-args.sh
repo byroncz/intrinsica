@@ -10,9 +10,10 @@
 #   script, args: solo ops-script (ITSC-298); los demás jobs los ignoran
 #   viz-tiles (ITSC-307) y viz-render (ITSC-310) rechazan series_start, script y
 #   args; to igual a from se omite
-#   family (ITSC-394): solo l3-backfill y l3-monthly; agrega --family=<f> (summaries o
-#   path). El workflow la pasa siempre, con summaries por defecto, así que en los demás
-#   jobs vacío y summaries son "sin familia" y cualquier otro valor se rechaza con 2
+#   family (ITSC-394, ITSC-400): solo l3-backfill y l3-monthly; agrega --family=<f>
+#   (summaries, path o fit). El workflow la pasa siempre, con summaries por defecto, así
+#   que en los demás jobs vacío y summaries son "sin familia" y cualquier otro valor se
+#   rechaza con 2
 #
 # --to se omite si es igual a from, salvo en l2-backfill (ITSC-292) y
 # l3-backfill (ITSC-334). En L1 la CLI asume to = from cuando falta, y la de
@@ -40,12 +41,12 @@ family=${8:-}
 
 # La familia (ITSC-394) es de L3: la CLI de los demás jobs no define --family y argparse
 # saldría con 2 dentro de Cloud Run. `summaries` es el valor por defecto del workflow y no
-# cuenta como pedir una familia; en L3 solo existen summaries y path.
+# cuenta como pedir una familia; en L3 solo existen summaries, path y fit.
 if [[ "$job" == l3-backfill || "$job" == l3-monthly ]]; then
   case "$family" in
-    "" | summaries | path) ;;
+    "" | summaries | path | fit) ;;
     *)
-      echo "run-job-args: family '$family' no existe: summaries o path" >&2
+      echo "run-job-args: family '$family' no existe: summaries, path o fit" >&2
       exit 2
       ;;
   esac
