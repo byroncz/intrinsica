@@ -28,6 +28,7 @@ from frames_lake import (
     write_carry_over,
     write_l2,
 )
+from l3_dc_descriptors.summarize import EVENT_BYTES
 
 ROW_GROUP = 100_000
 # Bytes de un row group decodificado: id, tiempo, precio y cantidad (8 + 8 + 16 + 16 B).
@@ -446,6 +447,8 @@ DENSE_TICKS_PER_EVENT = 3
 DENSE_PRICE = 10**8 + 1
 # Lo que cuesta una casilla de salida abierta (las 18 columnas de `ENGINE_SCHEMA`).
 SLOT_BYTES = 240
+# Casilla abierta más su frontera (97 B, ITSC-399): lo que el estimador de la unidad cuenta por evento.
+assert EVENT_BYTES == SLOT_BYTES + 97
 # Menos que un row group (2,4 M de eventos × 337 B): cada uno avanza solo.
 DENSE_CAP = 120 * (1 << 20)
 # Un solo hilo del motor, más lento que el lector: con K = 4 solo, el lector empuja los row groups
@@ -652,7 +655,7 @@ def test_a_lot_bounds_the_open_events_to_the_lot_not_to_the_row_group(dense_runs
     assert lot <= LOT_EVENTS + ahead + 10 * DENSE_THETAS, dense_runs["lots_one"]
     assert lot < one_group / 3, dense_runs
     # Con K = 4 y el tope de bytes caben varios tramos, pero no más que el tope y un tramo.
-    cap_events = DENSE_CAP // (SLOT_BYTES + 65)
+    cap_events = DENSE_CAP // EVENT_BYTES
     assert dense_runs["lots"]["inflight_events_max"] <= (
         cap_events + LOT_EVENTS + ahead + 10 * DENSE_THETAS
     ), dense_runs["lots"]
@@ -686,7 +689,7 @@ def test_the_path_family_does_not_raise_the_peak_rss_over_summaries(dense_runs):
 
 def test_the_path_family_stays_under_the_same_caps_as_summaries(dense_runs):
     ahead = DENSE_THETAS * LOT_BATCH_ROWS
-    cap_events = DENSE_CAP // (SLOT_BYTES + 65)
+    cap_events = DENSE_CAP // EVENT_BYTES
     path = dense_runs["lots_path"]
     assert path["lot_events"] == LOT_EVENTS and path["lots"] > 10 * DENSE_GROUPS, path
     # Los mismos topes de las pruebas de lotes: un tramo a la vez, y nunca más que el tope y un tramo.
@@ -714,7 +717,7 @@ def test_the_fit_family_does_not_raise_the_peak_rss_over_summaries(dense_runs):
 
 def test_the_fit_family_stays_under_the_same_caps_as_summaries(dense_runs):
     ahead = DENSE_THETAS * LOT_BATCH_ROWS
-    cap_events = DENSE_CAP // (SLOT_BYTES + 65)
+    cap_events = DENSE_CAP // EVENT_BYTES
     fit = dense_runs["lots_fit"]
     assert fit["lot_events"] == LOT_EVENTS and fit["lots"] > 10 * DENSE_GROUPS, fit
     assert fit["inflight_events_max"] <= (
