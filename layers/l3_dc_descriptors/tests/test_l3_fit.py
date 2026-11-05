@@ -150,10 +150,11 @@ def check_invariants(path: str, summaries: str, events: str, series) -> int:
         if row["os_jump_share"] is not None:
             assert row["os_jump_share"] >= 0, (key, row["os_jump_share"])
         assert row["ev_jump_share"] >= 0, (key, row["ev_jump_share"])
-        # Cota superior `1 + θ` de `ev_jump_share` (decisión del arquitecto sobre ITSC-399):
-        # sale de que `p_prev ≥ p_R·(1 − θ²)`. Se verifica donde esa derivación aplica, o sea
-        # mientras `p_prev` no sea del instante de confirmación: ahí el grupo de empate es un
-        # solo instante atómico (ADR-L2-03) y trae precios sin cota por θ. Pendiente de decisión.
+        # Cota superior `1 + θ` de `ev_jump_share` (decisión del arquitecto sobre ITSC-399,
+        # opción (a)): sale de que `p_prev ≥ p_R·(1 − θ²)` y vale solo si `p_prev` no es del
+        # instante de confirmación. Ese instante es un solo grupo de empate (ADR-L2-03), sin
+        # orden de precios ni cota por θ; ahí solo vale `ev_jump_share ≥ 0` (arriba). En el lago,
+        # 7160 con θ = 0,001 vale 1,474 por eso (TRD-L3 §7.2.2).
         before = [(t, i, p) for p, t, i in c_ticks + o_ticks if t < ev_last]
         if before and max(before)[0] != e["confirm_time"]:
             assert row["ev_jump_share"] <= 1 + float(key[0]), (
