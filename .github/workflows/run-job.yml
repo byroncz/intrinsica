@@ -16,8 +16,8 @@
 # l3-backfill va en una sola tarea que recorre el rango y la frontera de cada θ
 # decide desde dónde avanza (from vacío); l3-monthly resume un mes (vacío, el mes
 # anterior; lo decide la CLI) y no admite to distinto de from ni force. Ambos
-# admiten series_start y family (ITSC-394: summaries o path; el backfill de path va
-# después del de summaries, que escribe el esqueleto de cada mes).
+# admiten series_start y family (ITSC-394, ITSC-400: summaries, path o fit; los backfills
+# de path y de fit van después del de summaries, que escribe el esqueleto de cada mes).
 # La cadena mensual corre además el job l3-monthly-path (ITSC-396: --mode monthly
 # --family path, después de l3-monthly). No está en la lista: a mano, la pasada de T
 # se lanza como l3-monthly con family = path, que da los mismos argumentos.
@@ -78,11 +78,12 @@ on:
         type: string
         required: false
       family:
-        description: "Solo l3-backfill y l3-monthly: familia de descriptores que se escribe. summaries (por defecto) o path (la familia T, necesita summaries.parquet del mes: corre antes el backfill de summaries). Los demás jobs la rechazan si no es summaries"
+        description: "Solo l3-backfill y l3-monthly: familia de descriptores que se escribe. summaries (por defecto), path (la familia T) o fit (la familia A); path y fit necesitan summaries.parquet del mes: corre antes el backfill de summaries. Los demás jobs la rechazan si no es summaries"
         type: choice
         options:
           - summaries
           - path
+          - fit
         default: summaries
         required: false
       script:

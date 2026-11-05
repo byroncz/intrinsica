@@ -243,6 +243,20 @@ def test_l3_monthly_family_path():
     )
 
 
+def test_l3_backfill_family_fit_va_al_final():
+    assert (
+        args("l3-backfill", "", "", "", "", "", "", "fit")
+        == "--mode,backfill,--family=fit"
+    )
+
+
+def test_l3_monthly_family_fit():
+    assert (
+        args("l3-monthly", "2023-03", "2023-03", "", "", "", "", "fit")
+        == "--mode,monthly,--from=2023-03,--family=fit"
+    )
+
+
 @pytest.mark.parametrize("job", ["l3-backfill", "l3-monthly"])
 def test_l3_family_summaries_se_pasa_explicita(job):
     modo = job.split("-", 1)[1]
@@ -258,7 +272,7 @@ def test_l3_sin_family_no_agrega_la_opcion(job):
 
 
 @pytest.mark.parametrize("job", ["l3-backfill", "l3-monthly"])
-@pytest.mark.parametrize("family", ["fit", "Path", "path,fit"])
+@pytest.mark.parametrize("family", ["shape", "Path", "path,fit", "Fit"])
 def test_l3_rechaza_una_familia_que_no_existe(job, family):
     with pytest.raises(subprocess.CalledProcessError) as error:
         args(job, "", "", "", "", "", "", family)
@@ -279,9 +293,10 @@ def test_l3_rechaza_una_familia_que_no_existe(job, family):
         "ops-script",
     ],
 )
-def test_los_demas_jobs_rechazan_family_path(job):
+@pytest.mark.parametrize("family", ["path", "fit"])
+def test_los_demas_jobs_rechazan_family_path_y_fit(job, family):
     with pytest.raises(subprocess.CalledProcessError) as error:
-        args(job, "", "", "", "", "", "", "path")
+        args(job, "", "", "", "", "", "", family)
     assert error.value.returncode == 2
 
 
