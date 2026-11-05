@@ -875,7 +875,7 @@ se decodifican a lo sumo 2 row groups más que con 1, al final.
 
 ## Scripts de operación
 
-Seis scripts de `layers/ops_tools/scripts/`, para el job `ops-script`
+Siete scripts de `layers/ops_tools/scripts/`, para el job `ops-script`
 ([runbook de operación ad hoc](operacion-ops.md)). Se suben a
 `gs://<proyecto>-ops/scripts/` y se lanzan con `job` = `ops-script`. Todos solo
 leen, toman las raíces del proyecto de `OPS_RESULTS_URI` y también aceptan rutas
@@ -889,6 +889,7 @@ locales (`uv run`).
 | `l3_derived_check.py` | Prueba la vista `derived` (familia D) sobre un θ y un mes: resumen por columna, conteo de banderas e invariantes en un CSV | `--theta 0.00098052 --month 2026-09` |
 | `l3_gap_probe.py` | Mide los huecos entre ticks consecutivos de L1 en un mes (cuantiles, máximo y conteos por umbral, con los huecos entre row groups) para fijar `silence_us` de la familia T | `--month 2018-02` |
 | `l3_path_check.py` | Prueba `path.parquet` (familia T) contra `summaries.parquet` sobre un θ y un mes: resumen por columna, esqueleto, invariantes y regla de nulos en un CSV | `--theta 0.00098052 --month 2023-03` |
+| `l3_fit_bridge_probe.py` | Sonda de la familia A (ITSC-397): compara `c_accel` y `c_jump_share` observados con 20 puentes brownianos por evento sobre un θ y un mes; da D de Kolmogorov-Smirnov y el veredicto `sigue\|retirada` | `--theta 0.00098052 --month 2023-03` |
 
 ```bash
 gcloud storage cp layers/ops_tools/scripts/l3_check_month.py \
@@ -1274,6 +1275,90 @@ quedó en `results/ops-script-pd47c/l3_path_check_2023-03_0.00098052.csv`.
 | Mes | θ | `state_version` | `silence_us` | Filas | Violaciones | Pared | Run |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | 2023-03 | `0.00098052` | 1.0.0 | 10 000 000 | 36 239 | 0 | 2,4 s | [41052835807](https://github.com/byroncz/intrinsica/actions/runs/41052835807) |
+
+### `l3_fit_bridge_probe.py`
+
+Decide si la familia A (Forma, Épica ITSC-397) vale la pena construirla (ITSC-398). Sobre **un θ y un
+mes** reales calcula, de cada evento, `c_accel` y `c_jump_share` observados y los compara con los mismos
+registros sobre 20 puentes brownianos simulados por evento. Si `c_accel` observado se distribuye igual
+que el de un puente, la forma de la trayectoria no dice nada que `c_realized_var` y el tiempo no digan, y
+la familia se retira. **No importa ninguna capa** (una importación cambiaría `uv.lock`).
+
+```bash
+gcloud storage cp layers/ops_tools/scripts/l3_fit_bridge_probe.py \
+  gs://<proyecto>-ops/scripts/l3_fit_bridge_probe.py
+```
+
+| `args` | Efecto |
+| --- | --- |
+| `--theta 0.00098052 --month 2023-03` | Obligatorios: un θ (8 decimales como máximo) y un mes `YYYY-MM` |
+| `--l1-root`, `--l2-root`, `--l3-root` | Otras raíces, también locales (por defecto `gs://<proyecto>-landing/l1`, `-dc-events/l2` y `-dc-descriptors/l3`) |
+| `--provider`, `--market`, `--asset` | Otra serie (por defecto `binance`, `spot`, `BTCUSDT`) |
+| `--bridges 20` | Puentes por evento |
+| `--seed` | Semilla del generador de NumPy (por defecto la fija del script, `397398`) |
+| `--out` | Otra ruta del CSV; una ruta que termina en `/` es un directorio |
+
+**Qué mide.** En la fase de confirmación `(R, C]` de cada evento, con `τ = (t − t_R) / (t_C − t_R)` y
+`y = (p − p_R) / (p_C − p_R)` (el ancla y el cierre salen de `events.parquet`):
+
+- `c_accel`: coeficiente `a` del ajuste `y = a·τ² + b·τ` sin intercepto, por mínimos cuadrados. Positivo
+  si el recorrido se concentra al final de la fase; cercano a 0 si es parejo.
+- `c_jump_share`: `(p_C − p_prev) / (p_C − p_R)`, con `p_prev` el último tick con `t < confirm_time`.
+  Cuánto del recorrido hace el último instante.
+- **El puente**, por evento: `n = c_ticks` (`summaries.parquet`), `σ² = c_realized_var / n`
+  (`path.parquet`) y `ℓ_k = ℓ_R + (ℓ_C − ℓ_R)·k/n + σ·(W_k − (k/n)·W_n)`, con `W` un paseo gaussiano
+  estándar, en los **tiempos reales** de los ticks: así la comparación aísla la forma del precio de la
+  del reloj. Mismo `--seed`, mismos archivos y mismos argumentos dan el mismo CSV, byte a byte.
+- Un evento con `c_accel` nulo (menos de 2 ticks, todos en el mismo `t`, o `t_C = t_R`) queda fuera de
+  las dos muestras y se cuenta en `excluidos`. También el que arranca en el mes anterior y no cabe
+  entero en el L1 del mes (a lo sumo uno por mes y θ).
+
+**D (cómo leerla).** Es la distancia de Kolmogorov-Smirnov: el mayor desfase vertical entre las
+distribuciones acumuladas empíricas observada y simulada, `sup |F_obs − F_sim|`, de 0 (idénticas) a 1
+(sin solapamiento). Es un tamaño del efecto, no un valor p: con decenas de miles de eventos, hasta una
+diferencia irrelevante sería «significativa». El umbral se fijó **antes de medir** (decisión 1 de la
+Épica): **`D_accel ≥ 0,10` → `veredicto=sigue`** (siguen las hijas 2 a 5); **`D_accel < 0,10` →
+`retirada`** (la familia A no se construye). `D_jump` se reporta para interpretar, pero no decide.
+Referencia de la prueba local: con trayectorias de forma `D_accel ≈ 0,92`; con puentes puros ≈ 0,03.
+
+**El CSV** (`l3_fit_bridge_probe_<mes>_<θ>.csv`, en `results/<ejecución>/`) tiene el encabezado
+`registro,fuente,medida,valor`:
+
+- Por cada `registro` (`c_accel`, `c_jump_share`) y `fuente` (`observado`, `simulado`): las medidas
+  `p1`, `p5`, `p10`, `p25`, `p50`, `p75`, `p90`, `p95` y `p99` (rango más cercano: con N valores, el
+  que ocupa el lugar ⌈N·q⌉ al ordenarlos) y `N` (observado: eventos medidos; simulado: puentes·N).
+- Por cada `registro`, con `fuente=ambas`: `D`.
+- Con `registro` y `fuente` vacíos: `excluidos`, `puentes` y `semilla`.
+
+**Última línea:** `fit probe: mes=… theta=… eventos=… excluidos=… puentes=… semilla=… D_accel=…
+D_jump=… pared_s=… veredicto=sigue|retirada|fallo`. `eventos` son los N de las muestras. Con
+`veredicto=fallo` lo que no se pudo medir sale `-`.
+
+**Códigos:** **0** si midió (con `sigue` o con `retirada`: ambos son resultados); **1** si falta alguno
+de los cuatro archivos, la lectura falla, los archivos no cuadran entre sí (otro número de filas o de
+ticks, otro `confirm_agg_trade_id`, eventos más allá de los ticks del mes) o no queda ningún evento
+medible; **2** por uso (`--theta` o `--month` ausentes o inválidos, `--bridges` o `--seed` no enteros o
+`--bridges` menor que 1, sin las tres raíces ni `OPS_RESULTS_URI`, `--out` `gs://` fuera de
+`results/`). Si el CSV no se puede escribir, la sonda sale con **0** y lo avisa con
+`no se guardó la tabla en …`. Solo lee; lo único que escribe es el CSV.
+
+**Memoria.** Los ticks se leen un row group a la vez (`agg_trade_id`, `transact_time` y `price`) y los
+tres archivos por evento en lotes de 32 768 filas; el estado del evento abierto son unos pocos KB. Lo
+único que crece con el mes son los resultados, necesarios para que D y los cuantiles sean exactos:
+≈ 336 B por evento con 20 puentes (≈ 12 MB para los 36 239 eventos de 2023-03).
+
+**Cómo correrla.** Necesita `events.parquet` de L2 y `summaries.parquet` y `path.parquet` de L3 del θ y
+el mes (backfill de T), más el `consolidated.parquet` del mes. *Actions → Run job*: `job` = `ops-script`,
+`script` = `gs://<proyecto>-ops/scripts/l3_fit_bridge_probe.py` (la URI completa), `args` =
+`--theta 0.00098052 --month 2023-03`. Las corridas las lanza y aprueba el humano; pega la última línea y
+los cuantiles en ITSC-398. El veredicto lo escribe el arquitecto en la Épica ITSC-397, sección
+«Veredicto de la sonda».
+
+**Corrida real (ITSC-398): pendiente.**
+
+| Mes | θ | Eventos | Excluidos | `D_accel` | `D_jump` | Pared | Veredicto | Run |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 2023-03 | `0.00098052` | pendiente | pendiente | pendiente | pendiente | pendiente | pendiente | pendiente |
 
 ### La trampa del 403 por prefijo
 
