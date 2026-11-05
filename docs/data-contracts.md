@@ -944,8 +944,8 @@ mismo que traen las excepciones del resumidor, de las que sale la mayoría de lo
   `summaries.parquet`, `l2_events_content_hash` y `l2_carry_over_content_hash` (los de las
   entradas de L2 que usó, leídos de su `content_hash.json` desde la 2.4.0 del TRD-L3 y
   no recalculados; son los mismos que L2 registra en su `events_summary`, que es donde
-  se comparan) y, solo en `summaries`, `unassigned_ticks` (`U_M` de la conciliación; `path` no concilia y
-  no lo publica). `family` es `summaries` o `path` y `content_hash` es el del archivo de esa
+  se comparan) y, solo en `summaries`, `unassigned_ticks` (`U_M` de la conciliación; `path` y `fit` no concilian
+  y no lo publican). `family` es `summaries`, `path` o `fit` y `content_hash` es el del archivo de esa
   familia. Es la huella de la
   corrida y el linaje contra L2: si L2 se reprocesa y cambia, estos hashes ya no coinciden
   con los suyos y el mes está obsoleto (`--force --from <mes> --thetas <θ>`).
