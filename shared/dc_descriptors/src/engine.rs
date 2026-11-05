@@ -1320,3 +1320,18 @@ impl<B: AsRef<[u8]> + Send + Sync + 'static> Shared<B> {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::mem::size_of;
+
+    /// Lo que pesa un evento abierto de la familia A en el almacén de un θ (ADR-L3-18,
+    /// «Memoria»): la cifra que el TRD y el README citan se mide aquí, no se calcula a mano.
+    #[test]
+    fn an_open_event_of_family_a_weighs_what_the_docs_say() {
+        assert_eq!(size_of::<crate::fit::Moments>(), 208);
+        assert_eq!(size_of::<FitAcc>(), 624);
+        assert_eq!(size_of::<Partial<FitAcc>>(), 672);
+    }
+}

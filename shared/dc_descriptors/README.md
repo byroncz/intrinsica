@@ -97,8 +97,8 @@ push(row group k) ──► cola de ítems (θ₀,k) (θ₁,k) … (θ₄₉,k) 
   se cuantiza **una vez** a punto fijo `i128` de escala 2⁻⁸⁰ (no 2⁻⁹⁶: en el overshoot `|y|`
   llega a miles); la suma es comprobada y un desborde es `FitOverflow`, nunca un valor. La
   fusión es suma de momentos, máximo de `p_prev` y unión de rangos: asociativa y
-  conmutativa, con el almacén de S (`Partial<FitAcc>`, sin corridas). Unos 450 B por evento
-  abierto.
+  conmutativa, con el almacén de S (`Partial<FitAcc>`, sin corridas). 672 B por evento
+  abierto (`size_of::<Partial<FitAcc>>()`, fijado por una prueba de `engine.rs`).
 - **Cierre de A.** `close_fit` multiplica los momentos en enteros de 256 bits exactos
   (`Wide`, `src/arith.rs`) y solo divide en `f64`: pendiente `b·s·10⁶/(p_R·Δt)` con
   `b = (n·S₁y − S₁·Sy)/(n·S₂ − S₁²)`, aceleración
