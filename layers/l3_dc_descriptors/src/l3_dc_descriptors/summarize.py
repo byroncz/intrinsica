@@ -124,6 +124,9 @@ from l3_dc_descriptors.reconcile import (
 )
 from l3_dc_descriptors.schema import (
     FAMILY,
+    FIT_FAMILY,
+    FIT_SCHEMA,
+    FIT_STATE_VERSION,
     PATH_FAMILY,
     PATH_SCHEMA,
     PATH_STATE_VERSION,
@@ -197,6 +200,7 @@ _OUTPUT = MappingProxyType(
             PATH_STATE_VERSION,
             MappingProxyType({"silence_us": str(SILENCE_US)}),
         ),
+        FIT_FAMILY: (FIT_SCHEMA, FIT_STATE_VERSION, None),
     }
 )
 
@@ -418,9 +422,9 @@ def _open_writer(
 ):
     """El `FamilyWriter` de la familia del θ, ya abierto (su temporal creado).
 
-    El esqueleto en RAM es el mismo en las dos familias: `path.parquet` repite el de
-    `summaries.parquet`, que repitió el de `events.parquet` al escribirse (la compuerta
-    comprueba sus filas por row group, `_path_gate`).
+    El esqueleto en RAM es el mismo en las tres familias: `path.parquet` y `fit.parquet` repiten
+    el de `summaries.parquet`, que repitió el de `events.parquet` al escribirse (la compuerta
+    comprueba sus filas por row group, `_skeleton_gate`).
     """
     schema, version, metadata = _OUTPUT[family]
     writer = FamilyWriter(
@@ -489,18 +493,19 @@ def _read_gate(
     return carry, read_lineage(l2_root, key, text, month), previous
 
 
-def _path_gate(
+def _skeleton_gate(
     l2_root: str,
     l3_root: str,
     key: tuple[str, str, str],
     month: Month,
     text: str,
     row_groups: list[int],
+    family: str,
 ):
-    """La compuerta de entrada de la familia T de un θ (§7.3, §9.2): `summaries.parquet` del mes
-    existe y sus filas por row group son las de `events.parquet`, y la huella de L2.
+    """La compuerta de entrada de las familias T y A de un θ (§7.3, §9.2): `summaries.parquet`
+    del mes existe y sus filas por row group son las de `events.parquet`, y la huella de L2.
 
-    Devuelve lo mismo que `_read_gate`; T no concilia ticks, así que no lee carry-overs
+    Devuelve lo mismo que `_read_gate`; T y A no concilian ticks, así que no leen carry-overs
     (`carry` es `None` y la dirección previa, 0). Sin `summaries.parquet` falla con
     `FramesInputError`: la CLI no lanza el mes sin él, así que solo ocurre si desaparece
     entre el listado y la unidad.
@@ -512,7 +517,7 @@ def _path_gate(
         raise SkeletonMismatch(
             text,
             month,
-            PATH_FAMILY,
+            family,
             f"sus filas por row group no son las de events.parquet: {FAMILY}.parquet "
             f"tiene {len(sizes)} row groups con {sum(sizes)} filas y events.parquet "
             f"{len(row_groups)} con {sum(row_groups)}",
@@ -721,9 +726,10 @@ def summarize_month(
 ) -> dict[Decimal, ThetaResult]:
     """Escribe el archivo de la `family` del mes para cada θ y devuelve lo que dejó de cada uno.
 
-    `family` es `summaries` (S, `summaries.parquet`) o `path` (T, `path.parquet`). T corre la
-    misma pasada con el motor de T (`SILENCE_US`), repite el esqueleto de `summaries.parquet`
-    del mes, que debe existir (§7.3), y no concilia ticks: ya los conciliaba S.
+    `family` es `summaries` (S, `summaries.parquet`), `path` (T, `path.parquet`) o `fit` (A,
+    `fit.parquet`). T y A corren la misma pasada con su motor (T con `SILENCE_US`; A, sin
+    parámetros), repiten el esqueleto de `summaries.parquet` del mes, que debe existir (§7.3),
+    y no concilian ticks: ya los conciliaba S.
 
     Los eventos son los que cierran en `month` (la partición de L2); sus ticks pueden
     estar en meses anteriores de L1, que el lector relee. `series_start` es el primer mes
@@ -785,7 +791,8 @@ def summarize_month(
         raise ValueError(f"familia {family!r}: debe ser una de {sorted(_OUTPUT)}")
     if lot_events is not None and lot_events < 0:
         raise ValueError(f"lot_events {lot_events} debe ser al menos 0")
-    is_path = family == PATH_FAMILY
+    # T y A no concilian y su esqueleto es el de `summaries.parquet`; solo T lleva silencio.
+    follows_summaries = family != FAMILY
     threads = _workers(threads, len(values))
     phases.threads = threads
     # Sin pool de E/S (`threads` 1) todo va en serie: tampoco hay pool de metadatos.
@@ -830,8 +837,17 @@ def summarize_month(
         # escritores, que se esperan al escribir el primer row group sellado de cada θ.
         for item, text in zip(inputs, texts, strict=True):
             gate = (
-                (_path_gate, l2_root, l3_root, key, month, text, item.events.row_groups)
-                if is_path
+                (
+                    _skeleton_gate,
+                    l2_root,
+                    l3_root,
+                    key,
+                    month,
+                    text,
+                    item.events.row_groups,
+                    family,
+                )
+                if follows_summaries
                 else (_read_gate, l2_root, key, month, series_start, text)
             )
             item.gate = _submit(meta, _timed, phases.carry_gate, *gate)
@@ -856,7 +872,7 @@ def summarize_month(
             [item.events.row_groups for item in inputs],
             phases.engine_threads,
             family,
-            SILENCE_US if is_path else 0,
+            SILENCE_US if family == PATH_FAMILY else 0,
         )
         stack.callback(engine.close)
         phases.engine_build_s += time.perf_counter() - built
@@ -884,7 +900,7 @@ def summarize_month(
         extremes = [_require_statistics(f, "extreme_agg_trade_id") for f in files]
         # Los ids hasta los que la conciliación cuenta ticks, con lo que se sabe antes de
         # leer L1; si el motor encuentra otros, `count_up_to` decodifica como siempre.
-        if not is_path:
+        if not follows_summaries:
             l1.watch(_reconciliation_targets(inputs, references, extremes))
         # La densidad del mes (eventos de los θ por tick de L1) fija el tramo: con los pies de
         # L2 y de L1, sin leer datos.
@@ -965,7 +981,7 @@ def summarize_month(
             pool,
             lambda i: (
                 None
-                if is_path
+                if follows_summaries
                 else reconcile(
                     l1,
                     theta=texts[i],

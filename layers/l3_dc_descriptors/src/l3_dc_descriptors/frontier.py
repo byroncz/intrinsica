@@ -32,6 +32,9 @@ from pyutils import resolve_fs
 from l3_dc_descriptors.l2 import CARRY_OVER, EVENTS
 from l3_dc_descriptors.schema import (
     FAMILY,
+    FIT_FAMILY,
+    FIT_SCHEMA,
+    FIT_STATE_VERSION,
     PATH_FAMILY,
     PATH_SCHEMA,
     PATH_STATE_VERSION,
@@ -49,6 +52,7 @@ _CONTRACTS = MappingProxyType(
     {
         FAMILY: (SUMMARIES_SCHEMA, STATE_VERSION),
         PATH_FAMILY: (PATH_SCHEMA, PATH_STATE_VERSION),
+        FIT_FAMILY: (FIT_SCHEMA, FIT_STATE_VERSION),
     }
 )
 
@@ -100,7 +104,7 @@ def list_partitions(
 
 
 def family_file(family: str) -> str:
-    """El archivo de la familia en la partición: `summaries.parquet`, `path.parquet`."""
+    """El archivo de la familia en la partición: `summaries.parquet`, `path.parquet`, `fit.parquet`."""
     return f"{family}.parquet"
 
 
