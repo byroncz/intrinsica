@@ -114,10 +114,10 @@ stats = (
 engine.close()
 ```
 
-- `schema` son las columnas de datos de la familia (18 en `summaries`, 14 en `path`) como
+- `schema` son las columnas de datos de la familia (18 en `summaries`, 14 en `path`, 10 en `fit`) como
   `(nombre, bytes por valor, nulable)`; el motor las compara con las suyas y falla con
-  `ValueError` si el esquema de la capa cambió. `family` es `"summaries"` o `"path"` (la
-  trayectoria, ADR-L3-17) y `silence_us` el umbral de silencio de `path` en µs.
+  `ValueError` si el esquema de la capa cambió. `family` es `"summaries"`, `"path"` (la
+  trayectoria, ADR-L3-17) o `"fit"` (la forma, ADR-L3-18) y `silence_us` el umbral de silencio de `path` en µs.
   `row_groups[t]` son las filas de cada row group de salida del θ `t` (el esqueleto de L2),
   y van en el constructor y no en cada `push` porque no cambian por row group.
 - **Ticks sin copia.** `ids`, `time`, `price`, `quantity` y `sold` son `(memoryview de bytes del
@@ -125,7 +125,7 @@ engine.close()
   group (`inflight()` baja) y lo suelta sin tomar el GIL: PyO3 difiere el `decref`. Los
   buffers deben ser inmutables, como los de Arrow.
 - **`push_boundaries(theta, batch)`**: un lote de filas consecutivas de `events.parquet` de
-  L2 del θ (ocho columnas, con `reference_price`), detrás de los anteriores, antes o después de empezar los `push`; es cualquier
+  L2 del θ (diez columnas: con `reference_price` para T y `reference_time` y `extreme_time` para A), detrás de los anteriores, antes o después de empezar los `push`; es cualquier
   objeto con los atributos de `EventBatch` (ver `.pyi`; la capa usa un `NamedTuple`) y sus
   columnas van como `(memoryview de bytes del buffer, offset)`, **sin copia**. El lote de un
   evento debe llegar antes que el row group que lo toca: si no, `push` lanza
@@ -141,10 +141,10 @@ engine.close()
 - **Salida sin copia.** `columns` son los `SealedColumn` de la familia: objetos de solo lectura
   con protocolo de buffer que poseen la memoria del motor. `pyarrow.py_buffer(column)` los
   envuelve sin copiar. En `summaries`, `validity` es el mapa de bits de las columnas `os_*`, o
-  `None`. En `path`, `validity` es una lista con una entrada por columna, `(mapa de bits,
+  `None`. En `path` y `fit`, `validity` es una lista con una entrada por columna, `(mapa de bits,
   nulos)` si la columna tiene nulos y `None` si no; `null_count` suma los nulos.
 - **Errores.** `DescriptorError` (subclase de `ValueError`) con `kind` y, según el caso,
-  `theta` (posición), `event`, `confirm_agg_trade_id`, `phase`, `field`, `got`, `wanted` y, en
+  `theta` (posición), `event`, `confirm_agg_trade_id`, `phase`, `field`, `got`, `wanted` (`kind` `fit_overflow` en un momento de `fit` que no cupo) y, en
   `boundary`, `reason`, `bounds`, `low` y `high`.
   `l3_dc_descriptors.native.to_summarize_error` los convierte en las excepciones tipadas
   de L3.
