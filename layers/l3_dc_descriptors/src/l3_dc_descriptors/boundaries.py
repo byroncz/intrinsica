@@ -17,8 +17,8 @@ decodifican una sola vez. El hilo que los lee los pasa por `L2Events.tap` (ADR-L
 ITSC-365): anota la huella de las claves de cada row group (el esqueleto con que el escritor
 comprueba lo que el motor selló, sin releer el archivo) y entrega al motor solo las diez que
 usa. El linaje ya no se calcula aquí: L2 publica el `content_hash` junto al archivo y la
-compuerta lo lee (ITSC-368); las otras cuatro columnas de L2 (tiempos y precios de la
-referencia) no se decodifican.
+compuerta lo lee (ITSC-368). El motor usa todas las columnas de `events.parquet` salvo
+`theta`, que solo identifica la partición.
 """
 
 import hashlib

@@ -62,7 +62,7 @@ columnas de `ENGINE_SCHEMA`) y 97 B de las fronteras de L2 que el motor retiene 
 (seis `int64`, un `int8` y tres `decimal128`; con `reference_time` y `extreme_time` de ITSC-399, antes 81 B y 321 B desde ITSC-393, y 65 B y 305 B antes). Los
 que `cover` trajo por delante del último tramo empujado (`BoundaryFeed.ahead`, eventos cuya
 referencia pasa del último id cubierto) aún no tienen casilla y cuestan solo los 97 B; desde ITSC-376
-así se cuentan, y antes se contaban a 337 B (entonces 65 B y 305 B). 768 MiB son ≈ 2,4 M de eventos de 337 B. Un row group de un mes normal trae ≈ 0,6 M de eventos y 2017-12 trae
+así se cuentan, y antes se contaban a la tarifa entera (entonces 305 B). 768 MiB son ≈ 2,4 M de eventos de 337 B. Un row group de un mes normal trae ≈ 0,6 M de eventos y 2017-12 trae
 4,5 M: sin este tope, con K = 4 caben los tres row groups del mes y la unidad picó a 3 545 MiB. Un
 tramo que por sí solo pasa del tope avanza igual (avisa una vez; `inflight_alone_bytes_max` >
 `inflight_bytes` en `unit_timing`); el aviso dice qué tramo trajo cuántos eventos y que la unidad
