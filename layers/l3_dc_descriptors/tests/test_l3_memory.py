@@ -570,6 +570,8 @@ def dense_runs(tmp_path_factory) -> dict[str, dict]:
         # La familia T sobre lo que acaba de escribir S con las mismas opciones (ITSC-394): su
         # `summaries.parquet` es el esqueleto, así que va en la misma carpeta que la corrida de S.
         ("lots_path", DENSE_CAP, {**cut, "family": "path", "skeleton": "lots"}),
+        # La familia A, igual que T: sobre el `summaries.parquet` de la corrida `lots` (ITSC-400).
+        ("lots_fit", DENSE_CAP, {**cut, "family": "fit", "skeleton": "lots"}),
     ):
         out = subprocess.run(
             [
@@ -693,6 +695,33 @@ def test_the_path_family_stays_under_the_same_caps_as_summaries(dense_runs):
     ), path
     assert path["inflight_alone_bytes_max"] <= path["inflight_bytes"] == DENSE_CAP, path
     assert path["warned"] is False, path
+
+
+# ITSC-400. La familia A corre la misma unidad sobre el `summaries.parquet` de la corrida de S
+# (`lots_fit` contra `lots`, las mismas opciones), con el estimador a 97 B por frontera (ITSC-399).
+# El estado de A es por evento abierto (sumas de momentos), no por tick: el pico no debe subir. La
+# relación se afirma, no un MiB: en 20 pares bajo carga (8 procesos ocupando CPU en 10 núcleos) A quedó entre 0,82 y 0,97 veces el pico de S (S 1 026 a 1 105 MiB, A 878 a 993); sus eventos abiertos fueron 456 755 a 463 005 y `inflight_alone_bytes_max` 36,5 MB (S, hasta 39,8 MB). El tope es 1,05, el mismo de T.
+FIT_MAX_RISE = 0.05
+
+
+def test_the_fit_family_does_not_raise_the_peak_rss_over_summaries(dense_runs):
+    summaries, fit = dense_runs["lots"], dense_runs["lots_fit"]
+    assert fit["events"] == summaries["events"], dense_runs
+    assert fit["rss_peak_mib"] <= (1 + FIT_MAX_RISE) * summaries["rss_peak_mib"], (
+        dense_runs
+    )
+
+
+def test_the_fit_family_stays_under_the_same_caps_as_summaries(dense_runs):
+    ahead = DENSE_THETAS * LOT_BATCH_ROWS
+    cap_events = DENSE_CAP // (SLOT_BYTES + 65)
+    fit = dense_runs["lots_fit"]
+    assert fit["lot_events"] == LOT_EVENTS and fit["lots"] > 10 * DENSE_GROUPS, fit
+    assert fit["inflight_events_max"] <= (
+        cap_events + LOT_EVENTS + ahead + 10 * DENSE_THETAS
+    ), fit
+    assert fit["inflight_alone_bytes_max"] <= fit["inflight_bytes"] == DENSE_CAP, fit
+    assert fit["warned"] is False, fit
 
 
 # ITSC-375. La composición del RSS en el pico y al cierre. Ninguna aserción es un MiB absoluto
