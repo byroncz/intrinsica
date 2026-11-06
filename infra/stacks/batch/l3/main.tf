@@ -93,7 +93,9 @@ module "layer" {
     # Actualización (ITSC-402): 36 000 s, para que un backfill completo de la
     # familia A quepa en una ejecución. A mide 27 556 s en total (ITSC-401, TRD-L3
     # §10.2), 2,5 veces los 10 800 s de arriba, que se dimensionaron para S. 36 000 s
-    # son 1,3 veces esa suma, bajo el tope de 86 400 s del módulo. La espera de
+    # son 1,3 veces esa suma, bajo el tope de 86 400 s del módulo. Es menos que el
+    # 1,5 de la regla (el mínimo serían 41 334 s): excepción que decidió el
+    # arquitecto el 2026-11-06 (TRD-L3 v2.17.2). La espera de
     # run-job.yml muere a las 6 h (21 600 s) mientras la ejecución sigue en Cloud
     # Run: el runbook explica cómo seguirla.
     backfill = { timeout = 36000, access = local.access }

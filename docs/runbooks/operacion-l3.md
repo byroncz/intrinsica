@@ -173,15 +173,18 @@ El detalle de cada run está en [infra/README.md](../../infra/README.md#stack-l3
 **Aviso (ITSC-402).** `l3-backfill` sube a `timeoutSeconds: 36000` para que un backfill completo
 de la familia A (27 556 s) quepa en una ejecución. La espera de *Run job* sigue muriendo a las 6 h
 mientras la ejecución continúa en Cloud Run: cómo seguirla y leer sus `unit_timing` está en
-«Backfill de la familia A». Lo que sigue se dimensionó con los 10 800 s anteriores y vale para S y T.
+«Backfill de la familia A». Los rangos de la tabla de arriba se fijaron con el timeout de
+10 800 s y valen para S y T.
 
 **Regla para un backfill futuro de la serie completa** (por ejemplo, al agregar
 una familia): manda el timeout de `l3-backfill` (10 800 s hasta ITSC-402; 36 000 s ahora), no las 6 h del run de Actions.
-Basta una ejecución mientras la pared esperada del job no pase de **7 200 s**, el umbral de
-margen de «Timeouts» (10 800 ÷ 1,5). Si pasa, fija cada rango por su **pared estimada**, no
-por su número de meses, con cada rango bajo 7 200 s. Con el núcleo nuevo a 2 vCPU la serie
+Basta una ejecución mientras la pared esperada del job no pase de **24 000 s**, el umbral de
+margen de «Timeouts» (36 000 ÷ 1,5). Si pasa, fija cada rango por su **pared estimada**, no
+por su número de meses, con cada rango bajo 24 000 s. Con el núcleo nuevo a 2 vCPU la serie
 suma 6 556 s de `wall_s` para `summaries.parquet` (job 6 638 s, ITSC-378): una familia
-≈ 1,08 veces más lenta ya pasa los 7 200 s, y una ≈ 1,63 veces más lenta agota el timeout.
+≈ 3,7 veces más lenta ya pasa los 24 000 s, y una ≈ 5,4 veces más lenta agota el timeout. La
+familia A (27 556 s, ×4,15 sobre S) ya pasa el umbral: el timeout la cubre 1,3 veces, menos que
+el 1,5 de la regla (decisión del arquitecto, 2026-11-06; ver «Timeouts»).
 Estima cada mes con el ajuste de
 [TRD-L3 §10.2](../TRD/l3.md#102-dimensionamiento--hipótesis-de-partida-y-primera-medición)
 (`wall_s` ≈ 68 s + 0,038 s por millón de ticks + 24,9 s por millón de eventos; es del
@@ -208,7 +211,7 @@ esqueleto** ([TRD-L3 §7.3](../TRD/l3.md#73-directorio-de-la-capa-y-esqueleto-co
 va **después** de S. Una pasada de T lee L1 y L2 completas otra vez (una pasada por familia,
 ADR-L3-11); su pared la fija la lectura de ticks, así que se espera del orden de la de S
 (6 638 s para los 110 meses), con los mismos timeouts y la misma regla de arriba: una sola
-ejecución mientras la pared esperada no pase de 7 200 s.
+ejecución mientras la pared esperada no pase de 24 000 s.
 
 1. `l3-backfill` con `family` = `summaries` y los valores por defecto, hasta que termine con
    código 0 (S al día).
@@ -235,10 +238,9 @@ de ITSC-391 en TRD-L3 §10.2).
 La familia A escribe `fit.parquet` junto a `summaries.parquet` de cada θ y mes y, como T, **repite
 su esqueleto** ([TRD-L3 §7.3](../TRD/l3.md#73-directorio-de-la-capa-y-esqueleto-común), RL3-11): va
 **después** de S. Es independiente de T: no lee `path.parquet` y puede ir antes o después. Una
-pasada de A lee L1 y L2 completas otra vez (una pasada por familia, ADR-L3-11); su pared la fija la
-lectura de ticks, así que se espera del orden de la de S (6 638 s para los 110 meses), con los
-mismos timeouts y la misma regla de arriba: una sola ejecución mientras la pared esperada no pase
-de 7 200 s.
+pasada de A lee L1 y L2 completas otra vez (una pasada por familia, ADR-L3-11). Se esperaba del
+orden de la de S (6 638 s para los 110 meses), pero ITSC-401 midió **27 556 s** (×4,15; la pasada de
+A es limitada por CPU), y por eso `l3-backfill` sube a 36 000 s (ver el aviso de abajo).
 
 1. `l3-backfill` con `family` = `summaries` y los valores por defecto, hasta que termine con
    código 0 (S al día).
@@ -283,11 +285,12 @@ No lo relances: dos `l3-backfill` a la vez escriben las mismas particiones.
    gcloud logging read 'resource.type="cloud_run_job"
      AND resource.labels.job_name="l3-backfill"
      AND labels."run.googleapis.com/execution_name"="<ejecución>"
-     AND textPayload:"familia=fit"' \
-     --project <proyecto> --limit=1000 --format='value(textPayload)' |
+     AND (textPayload:"familia=fit" OR jsonPayload.message:"familia=fit")' \
+     --project <proyecto> --freshness=7d --limit=1000 \
+     --format='value(textPayload,jsonPayload.message)' |
      awk '{ for (i = 1; i <= NF; i++) {
               if ($i ~ /^wall_s=/) { split($i, a, "="); s += a[2]; n++
-                                     if (a[2] > m) { m = a[2]; mes = $2 } }
+                                     if (a[2] > m) { m = a[2]; mes = $2; sub(/:$/, "", mes) } }
               if ($i ~ /^rss_peak_mib=/) { split($i, a, "="); if (a[2] > r) r = a[2] } }
             }
           END { printf "%d meses, Σ wall_s = %.0f s, más lento %s (%.0f s), rss_peak_mib máx = %.0f\n", n, s, mes, m, r }'
@@ -297,7 +300,8 @@ No lo relances: dos `l3-backfill` a la vez escriben las mismas particiones.
    `l3_compare_runs.py --timing` los lee de ahí.
 3. Cuando la ejecución termine con éxito, corre `l3-backfill` con `family` = `fit` otra vez, sin
    `from` ni `to`: debe salir con código 0, sin escrituras ("todo al día"). Si murió por el
-   timeout, la frontera retoma donde quedó: relanza el paso 2 de arriba.
+   timeout, la frontera retoma donde quedó: relanza `l3-backfill` con `family` = `fit`, sin
+   `from` ni `to` (el paso 2 de la primera lista de esta sección, no el 2 de esta).
 
 La pasada mensual de A (`l3-monthly-fit`) tiene su propio timeout de 7 500 s, 6 veces el mes más
 lento de A (2023-03, 1 240 s). Los 1 200 s de `l3-monthly` no alcanzarían para ese mes.
@@ -316,16 +320,21 @@ estimadas (por 1,16). ITSC-378 las reemplazó por el backfill completo de 110 me
 (imagen 0.19.0, valores por defecto, 2026-10-25): 2022-11 midió 183,7 s y el job 6 638 s
 (Σ `wall_s` 6 556 s).
 
-| Job | Desplegado hasta el apply de ITSC-352 | Definitivo | Cuenta (medida) |
-| --- | --- | --- | --- |
-| `l3-monthly` | 10 800 s | **1 200 s** | 6 × 183,7 = 1 102 s: 6,5 × |
-| `l3-backfill` | 86 400 s | **10 800 s** | 1,5 × 6 638 = 9 957 s: 1,63 × |
+| Job | Desplegado hasta el apply de ITSC-352 | Definitivo (ITSC-352) | Vigente con ITSC-402 | Cuenta (medida) |
+| --- | --- | --- | --- | --- |
+| `l3-monthly` | 10 800 s | 1 200 s | **1 200 s** | 6 × 183,7 = 1 102 s: 6,5 × |
+| `l3-monthly-path` | (no existía) | (los de `l3-monthly`) | **1 200 s** | los de `l3-monthly` |
+| `l3-monthly-fit` | (no existía) | (no existía) | **7 500 s** | 6 × 1 240 (2023-03, A) = 7 440 s: 6,0 × |
+| `l3-backfill` | 86 400 s | 10 800 s | **36 000 s** | S: 1,5 × 6 638 = 9 957 s (1,63 × con 10 800 s); A: 27 556 s medidos, 1,3 × con 36 000 s |
 
-Los valores nuevos **los aplica el humano** con el `apply` del stack `l3`; hasta entonces rigen
-los desplegados, que sobran. Las dos reglas de subida: si 2022-11 pasa de 200 s, sube
-`l3-monthly`; si un backfill completo pasa de 7 200 s (el margen baja de 1,5 ×), `l3-backfill`
-sube a **14 400 s** en el siguiente PR de infra. Mientras ninguna se cumpla, nadie los sube «por
-si acaso». Si un job termina por timeout con estos valores, mira primero `unit_timing` del mes:
+Los valores de ITSC-402 **los aplica el humano** con el `apply` del stack `l3`; hasta entonces rigen
+los desplegados. La regla de subida de `l3-monthly` no cambia: si 2022-11 pasa de 200 s, sube.
+La de `l3-backfill` es la misma, con el timeout nuevo: si un backfill completo pasa de **24 000 s**
+(36 000 ÷ 1,5, el margen de 1,5 ×), sube en el siguiente PR de infra. La familia A ya la
+supera (27 556 s, un margen de 1,3 ×): es una excepción que decidió el arquitecto el 2026-11-06
+al fijar los 36 000 s, y 36 000 s sigue bajo el tope de 86 400 s. Para `l3-monthly-fit` el umbral
+es 1 250 s en el mes más lento (7 500 ÷ 6); 2023-03 ya está en 1 240 s. Mientras ninguna se
+cumpla, nadie los sube «por si acaso». Si un job termina por timeout con estos valores, mira primero `unit_timing` del mes:
 una unidad que pasa de 3 × su pared habitual es un hallazgo, no una razón para subir el timeout.
 
 **Línea base por mes.** La tabla de los 110 meses de ese backfill (`wall_s`, `cpu_utilization`,
@@ -353,7 +362,8 @@ causa en el log de la ejecución:
   «El asignador».
 - **Timeout**: la tarea se corta sin mensaje de memoria. El de `l3-monthly` es de
   1 200 s desde el apply de ITSC-352 (10 800 s antes; 6,5 veces la pared medida del mes más
-  lento a 2 vCPU, 183,7 s en 2022-11, ITSC-378; ver «Timeouts»).
+  lento a 2 vCPU, 183,7 s en 2022-11, ITSC-378); el de `l3-monthly-fit`, de 7 500 s, y el de
+  `l3-backfill`, de 36 000 s desde ITSC-402 (ver «Timeouts»).
 - **Un hallazgo `error`**: lee su `check_type` en la tabla siguiente.
 
 Los 17 `check_type` de [TRD-L3 §9.3](../TRD/l3.md#93-tipos-de-chequeo-check_type),

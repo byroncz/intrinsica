@@ -525,9 +525,10 @@ el criterio 26 (e) de TRD-L3 §13). Y la del núcleo original sobre los 110 mese
 (ITSC-335): 1 267 MiB. Sin OOM en ninguna.
 Timeouts con la regla de TRD-L2 §10.2, confirmados por ese backfill: `l3-monthly`
 1 200 s (6,5 veces la pared de 2022-11, el mes más lento, 183,7 s) y `l3-backfill`
-10 800 s (1,63 veces los 6 638 s del job). Si un backfill completo pasa de 7 200 s, el
-margen baja de 1,5 veces y `l3-backfill` sube a 14 400 s en el siguiente PR de infra;
-mientras tanto no se sube. Decisión y cifras en
+10 800 s (1,63 veces los 6 638 s del job; ITSC-402 lo sube a 36 000 s, ver «Timeouts de
+la familia A»). Si un backfill completo pasa de 24 000 s (36 000 ÷ 1,5), el margen baja de
+1,5 veces y `l3-backfill` sube en el siguiente PR de infra; mientras tanto no se sube.
+Decisión y cifras en
 [TRD-L3 §10.2](../docs/TRD/l3.md#102-dimensionamiento--hipótesis-de-partida-y-primera-medición).
 El backfill completo cuesta ≈ 13 100 vCPU-s y 26 200 GiB-s medidos (ITSC-378; ≈ 0,29 USD
 de lista), el 7 % del cupo gratuito mensual de Cloud Run **si L3 corriera aislado**:
@@ -585,12 +586,12 @@ se suma dos veces.
 
 **Regla para un backfill futuro de la serie completa** (por ejemplo, al agregar una
 familia): manda el timeout de `l3-backfill`, no las 6 h del run de Actions. Esos 10 800 s
-subieron a 36 000 s en ITSC-402 (ver «Timeouts de la familia A»); lo que sigue es el
-razonamiento original sobre S y T.
-Basta una ejecución mientras la pared esperada del job no pase de **7 200 s**
-(10 800 ÷ 1,5, el margen de los timeouts de arriba). Si pasa, fija cada rango por su
-**pared estimada**, no por su número de meses, con cada rango bajo 7 200 s. Con el
-núcleo nuevo a 2 vCPU la serie suma 6 556 s de `wall_s` (job 6 638 s, ITSC-378).
+subieron a 36 000 s en ITSC-402 (ver «Timeouts de la familia A»).
+Basta una ejecución mientras la pared esperada del job no pase de **24 000 s**
+(36 000 ÷ 1,5, el margen de los timeouts de arriba). Si pasa, fija cada rango por su
+**pared estimada**, no por su número de meses, con cada rango bajo 24 000 s. Con el
+núcleo nuevo a 2 vCPU la serie suma 6 556 s de `wall_s` (job 6 638 s, ITSC-378) para S;
+la familia A suma 27 556 s (ITSC-401) y ya pasa el umbral.
 Estima cada mes con el ajuste de
 [TRD-L3 §10.2](../docs/TRD/l3.md#102-dimensionamiento--hipótesis-de-partida-y-primera-medición)
 o con los `unit_timing` de `dq-findings/l3/`. El número de meses no sirve de medida;
@@ -600,17 +601,19 @@ con el **núcleo original** (ITSC-335), los 41 meses de 2017-08 a 2020-12 promed
 que cubriera 2020-2022 habría rondado 7 h. El detalle de la regla está en el
 [runbook de operación de L3](../docs/runbooks/operacion-l3.md#backfill-histórico-por-rangos).
 
-**Timeouts de la familia A (ITSC-402).** Dos cambios en el stack `l3`, ambos con la
-regla de TRD-L2 §10.2 sobre la pared medida de A en ITSC-401
+**Timeouts de la familia A (ITSC-402).** Dos cambios en el stack `l3`, sobre la pared
+medida de A en ITSC-401
 ([TRD-L3 §10.2](../docs/TRD/l3.md#102-dimensionamiento--hipótesis-de-partida-y-primera-medición)):
 
-- `l3-monthly-fit`: **7 500 s**, 6 veces el mes más lento de A (2023-03, 1 240 s).
-  Los 1 200 s de `l3-monthly` ya no alcanzan: ese mes de A los supera solo.
+- `l3-monthly-fit`: **7 500 s**, 6 veces el mes más lento de A (2023-03, 1 240 s), con la
+  regla de TRD-L2 §10.2. Los 1 200 s de `l3-monthly` ya no alcanzan: ese mes de A los
+  supera solo.
 - `l3-backfill`: **36 000 s** (antes 10 800 s), para que un backfill completo de A
   quepa en una ejecución. A suma 27 556 s medidos, 2,5 veces los 10 800 s que se
   fijaron para S; 36 000 s son 1,3 veces esa suma y quedan bajo el tope de 86 400 s
-  del módulo. Con 10 800 s habría hecho falta partir el backfill de A en rangos de
-  menos de 7 200 s cada uno.
+  del módulo. **No cumple el 1,5 × de la regla** (el mínimo serían 41 334 s): es una
+  excepción que decidió el arquitecto el 2026-11-06. Con 10 800 s habría hecho falta
+  partir el backfill de A en rangos de menos de 7 200 s cada uno.
 
 Consecuencia: la espera de *Run job* muere a las 6 h (21 600 s) y un backfill de A
 dura más. El run de Actions falla por tiempo de espera, pero **la ejecución sigue en
