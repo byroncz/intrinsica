@@ -11,8 +11,17 @@ Invariantes (TRD-L3 §7.2.2; las desigualdades con tolerancia 1e-9 por el redond
   - esqueleto: filas de `fit` = filas de `summaries`; unión 1:1 por `(theta,
     confirm_agg_trade_id)` con `summaries` y con `events` (sin huérfanas ni claves repetidas);
     mismos row groups y mismas filas por row group según los pies de `fit` y `summaries`;
-  - leyes de una fila (decisión 7 de la Épica ITSC-397, corregida el 2026-11-05): `0 <
-    c_jump_share ≤ 1`, `os_jump_share ≥ 0`, `ev_jump_share ≥ 0`;
+  - leyes de una fila (decisión 7 de la Épica ITSC-397, corregida el 2026-11-06): `0 <
+    c_jump_share ≤ 1`, `os_jump_share ≥ 0` y las cuatro leyes de `ev_jump_share`, por caso y
+    decidibles con `summaries` y `events` (TRD-L3 §7.2.2, «Leyes de una fila de A»):
+      · (1) `os_ticks = 0`: `ev_jump_share = c_jump_share`;
+      · (2) `os_ticks > 0` y `os_duration > 0`: `0 ≤ ev_jump_share ≤ 1 + θ`;
+      · (3) `os_ticks > 0`, `os_duration = 0` y `extreme_time = confirm_time`: `0 <
+        ev_jump_share ≤ 1 + θ`;
+      · (4) `os_ticks > 0`, `os_duration = 0` y `extreme_time > confirm_time`: `p_prev` es un
+        tick del instante de confirmación, así que `(p_E − confirm_instant_price_best) /
+        (p_E − p_R) ≤ ev_jump_share ≤ (p_E − confirm_instant_price_worst) / (p_E − p_R)`
+        (la misma fórmula vale en un upturn y en un downturn); puede ser negativo;
   - la regla de nulos, una invariante por columna, con lo que `summaries` y `events` permiten
     decidir. Fases: `c` = (`reference_time`, `confirm_time`), `os` = (`confirm_time`,
     `extreme_time`), `ev` = (`reference_time`, `extreme_time`); `ticks` = `c_ticks`, `os_ticks`,
@@ -31,8 +40,8 @@ suma a `violaciones`:
   - `accel_sin_explicar_*`: un `*_accel` nulo con `*_slope` no nulo, ticks suficientes, tiempos
     distintos y `p_fin ≠ p_0`; lo explican un solo `τ` positivo distinto o la singularidad
     numérica del sistema normal tras cuantizar (`det ≤ 0`). Esperado: cerca de 0;
-  - `ev_jump_share_fuera_de_cota`: `ev_jump_share > 1 + θ`; ADR-L2-03 lo permite cuando `p_prev`
-    es del instante de confirmación (grupo de empate sin orden) y la sonda no ve los ticks;
+  - `ev_caso_1_*` a `ev_caso_4_*`: cuántos eventos caen en cada caso de las leyes de
+    `ev_jump_share` (los cuatro casos parten todas las filas);
   - `abs_*_accel_mayor_2`: filas con `|*_accel| > 2` y su fracción; `|a| ≤ 2` no es una ley
     (TRD-L3 §7.2.2, «Lo que no es una ley»).
 
@@ -248,6 +257,48 @@ def jump_is_null(phase: str) -> str:
     return f"{p['pf']} = {p['p0']}{empty}"
 
 
+# Los cuatro casos de `ev_jump_share` (TRD-L3 §7.2.2), con las filas de `events` (e) y de
+# `summaries` (s). Parten todas las filas por `os_ticks`, `os_duration` y `extreme_time`.
+EV_CASES = {
+    "1_sin_overshoot": "s.os_ticks = 0",
+    "2_overshoot_con_duracion": "s.os_ticks > 0 AND s.os_duration > 0",
+    "3_overshoot_en_el_instante": (
+        "s.os_ticks > 0 AND s.os_duration = 0 AND e.extreme_time = e.confirm_time"
+    ),
+    "4_instante_de_confirmacion": (
+        "s.os_ticks > 0 AND s.os_duration = 0 AND e.extreme_time > e.confirm_time"
+    ),
+}
+
+
+def ev_jump_share_laws(theta: str) -> dict[str, str]:
+    """Una invariante por caso de `ev_jump_share`. Solo mira filas con el valor no nulo: la
+    regla de nulos ya dice cuándo debe serlo. Los precios son DECIMAL; la razón va en DOUBLE.
+    """
+    ev = "f.ev_jump_share"
+    span = "(e.extreme_price - e.reference_price)::DOUBLE"
+    lower = f"(e.extreme_price - s.confirm_instant_price_best)::DOUBLE / {span}"
+    upper = f"(e.extreme_price - s.confirm_instant_price_worst)::DOUBLE / {span}"
+    bound = f"1 + {theta}::DOUBLE + {TOL}"
+    cases = list(EV_CASES.values())
+    return {
+        "ev_jump_share_caso_1": v(
+            f"({cases[0]}) AND {ev} IS NOT NULL AND f.c_jump_share IS NOT NULL "
+            f"AND abs({ev} - f.c_jump_share) > {TOL}"
+        ),
+        "ev_jump_share_caso_2": v(
+            f"({cases[1]}) AND {ev} IS NOT NULL AND ({ev} < -{TOL} OR {ev} > {bound})"
+        ),
+        "ev_jump_share_caso_3": v(
+            f"({cases[2]}) AND {ev} IS NOT NULL AND ({ev} <= 0 OR {ev} > {bound})"
+        ),
+        "ev_jump_share_caso_4": v(
+            f"({cases[3]}) AND {ev} IS NOT NULL AND e.extreme_price <> e.reference_price "
+            f"AND ({ev} < {lower} - {TOL} OR {ev} > {upper} + {TOL})"
+        ),
+    }
+
+
 def join_query(theta: str) -> str:
     """Invariantes e informativas que cruzan `fit` con `summaries` y `events`, en una pasada."""
     items = {
@@ -255,7 +306,7 @@ def join_query(theta: str) -> str:
         "sin_events": "count(*) FILTER (WHERE e.confirm_agg_trade_id IS NULL)",
         "c_jump_share_en_0_1": v(f"f.c_jump_share <= 0 OR f.c_jump_share > 1 + {TOL}"),
         "os_jump_share_no_negativo": v(f"f.os_jump_share < -{TOL}"),
-        "ev_jump_share_no_negativo": v(f"f.ev_jump_share < -{TOL}"),
+        **ev_jump_share_laws(theta),
     }
     for phase in PHASES:
         items[f"nulos_{phase}_slope"] = v(
@@ -278,9 +329,8 @@ def join_query(theta: str) -> str:
             f"f.{phase}_accel IS NULL AND f.{phase}_slope IS NOT NULL "
             f"AND NOT ({accel_is_null(phase)})"
         )
-    items["info_ev_jump_share_fuera_de_cota"] = v(
-        f"f.ev_jump_share > 1 + {theta}::DOUBLE + {TOL}"
-    )
+    for name, case in EV_CASES.items():
+        items[f"info_ev_caso_{name}"] = v(case)
     select = ", ".join(f"{expr} AS {name}" for name, expr in items.items())
     return (
         f"SELECT {select} FROM fit AS f "

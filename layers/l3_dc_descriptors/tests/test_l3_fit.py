@@ -82,6 +82,35 @@ def distinct_later_times(ticks, t0: int) -> int:
     return len({t for _, t, _ in ticks if t > t0})
 
 
+def check_ev_jump_share_laws(key, row, s, e, ticks) -> None:
+    """Las cuatro leyes de `ev_jump_share` (TRD-L3 §7.2.2) de una fila con el valor no nulo.
+
+    `ticks` son los `(precio, t, id)` de `(R, E]`. `p_prev` es el precio del tick de mayor
+    `(t, id)` con `t < extreme_time`, o `p_R` si no hay.
+    """
+    ev, theta = row["ev_jump_share"], float(key[0])
+    p_r, p_e = float(e["reference_price"]), float(e["extreme_price"])
+    if s["os_ticks"] == 0:  # (1) la fase `ev` es la fase `c`
+        assert ev == pytest.approx(row["c_jump_share"], abs=1e-9, rel=0), (key, ev)
+    elif s["os_duration"] > 0:  # (2)
+        assert -1e-9 <= ev <= 1 + theta + 1e-9, (key, ev)
+    elif e["extreme_time"] == e["confirm_time"]:  # (3)
+        assert 0 < ev <= 1 + theta + 1e-9, (key, ev)
+    else:  # (4) `p_prev` es del instante de confirmación
+        span = p_e - p_r
+        low = (p_e - float(s["confirm_instant_price_best"])) / span
+        high = (p_e - float(s["confirm_instant_price_worst"])) / span
+        assert low - 1e-9 <= ev <= high + 1e-9, (key, ev, low, high)
+        earlier = [(t, i, p) for p, t, i in ticks if t < e["extreme_time"]]
+        p_prev = float(max(earlier)[2]) / 1e8 if earlier else p_r  # ticks en 1e-8
+        worst, best = (
+            float(s["confirm_instant_price_worst"]),
+            float(s["confirm_instant_price_best"]),
+        )
+        assert min(worst, best) <= p_prev <= max(worst, best), (key, p_prev)
+        assert ev == pytest.approx((p_e - p_prev) / span, rel=1e-9, abs=1e-12), key
+
+
 def check_invariants(path: str, summaries: str, events: str, series) -> int:
     """Las leyes de las `*_jump_share` y la regla de nulos de TRD-L3 §7.2.2 de un
     `fit.parquet`, leyendo duraciones de `summaries.parquet` y anclas de `events.parquet`
@@ -144,23 +173,15 @@ def check_invariants(path: str, summaries: str, events: str, series) -> int:
         assert {n: row[n] is None for n in NAMES} == wanted_null, key
         # Leyes de TRD-L3 §7.2.2, todas estrictas. `c`: ningún precio anterior a `confirm_time`
         # cruza el umbral, así que `0 < c_jump_share ≤ 1`. `os`: el extremo es el máximo o el
-        # mínimo del overshoot, así que `os_jump_share ≥ 0`. `ev`: `0 ≤ ev_jump_share`; el 0 sale
-        # de un empate (un tick con `t < extreme_time` ya en `p_E`).
+        # mínimo del overshoot, así que `os_jump_share ≥ 0`.
         assert 0 < row["c_jump_share"] <= 1, (key, row["c_jump_share"])
         if row["os_jump_share"] is not None:
             assert row["os_jump_share"] >= 0, (key, row["os_jump_share"])
-        assert row["ev_jump_share"] >= 0, (key, row["ev_jump_share"])
-        # Cota superior `1 + θ` de `ev_jump_share` (decisión del arquitecto sobre ITSC-399,
-        # opción (a)): sale de que `p_prev ≥ p_R·(1 − θ²)` y vale solo si `p_prev` no es del
-        # instante de confirmación. Ese instante es un solo grupo de empate (ADR-L2-03), sin
-        # orden de precios ni cota por θ; ahí solo vale `ev_jump_share ≥ 0` (arriba). En el lago,
-        # 7160 con θ = 0,001 vale 1,474 por eso (TRD-L3 §7.2.2).
-        before = [(t, i, p) for p, t, i in c_ticks + o_ticks if t < ev_last]
-        if before and max(before)[0] != e["confirm_time"]:
-            assert row["ev_jump_share"] <= 1 + float(key[0]), (
-                key,
-                row["ev_jump_share"],
-            )
+        # `ev`: cuatro leyes por caso (decisión del arquitecto del 2026-11-06). Se deciden con
+        # `summaries` y `events`, como la sonda `l3_fit_check.py`, y el caso 4 además se
+        # comprueba con el `p_prev` que dan los ticks.
+        if row["ev_jump_share"] is not None:
+            check_ev_jump_share_laws(key, row, s, e, c_ticks + o_ticks)
     return len(got)
 
 

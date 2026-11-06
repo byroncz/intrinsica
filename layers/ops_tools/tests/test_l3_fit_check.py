@@ -51,7 +51,7 @@ INVARIANTS = [
     "row_groups_iguales",
     "c_jump_share_en_0_1",
     "os_jump_share_no_negativo",
-    "ev_jump_share_no_negativo",
+    *(f"ev_jump_share_caso_{n}" for n in (1, 2, 3, 4)),
     *(f"nulos_{p}_slope" for p in ("c", "os", "ev")),
     *(f"nulos_{p}_accel" for p in ("c", "os", "ev")),
     *(f"nulos_{p}_jump_share" for p in ("c", "os", "ev")),
@@ -60,7 +60,10 @@ INVARIANTS = [
 INFORMATIVE = [
     *(f"mismo_t_{p}_slope" for p in ("c", "os", "ev")),
     *(f"accel_sin_explicar_{p}_accel" for p in ("c", "os", "ev")),
-    "ev_jump_share_fuera_de_cota",
+    "ev_caso_1_sin_overshoot",
+    "ev_caso_2_overshoot_con_duracion",
+    "ev_caso_3_overshoot_en_el_instante",
+    "ev_caso_4_instante_de_confirmacion",
     *(f"abs_{c}_mayor_2" for c in ("c_accel", "os_accel", "ev_accel")),
 ]
 LAST_LINE = re.compile(
@@ -320,7 +323,8 @@ def test_row_groups_distintos_con_las_mismas_filas_dan_violacion(
 
 @pytest.mark.parametrize("value", [0.0, -0.5, 1.5])
 def test_c_jump_share_fuera_de_0_1_da_violacion(check, lake, tmp_path, capsys, value):
-    alter(file(lake, "fit.parquet"), "c_jump_share", set_at(0, value))
+    index = first(lake, lambda f, s, e: s["os_ticks"] > 0)  # fuera del caso 1 (ev = c)
+    alter(file(lake, "fit.parquet"), "c_jump_share", set_at(index, value))
     out = tmp_path / "salida.csv"
     assert check.main(argv(lake, out)) == 1
     capsys.readouterr()
@@ -329,42 +333,146 @@ def test_c_jump_share_fuera_de_0_1_da_violacion(check, lake, tmp_path, capsys, v
     assert sum(got.values()) == 1
 
 
-def test_jump_share_negativo_de_overshoot_y_de_evento_da_violacion(
-    check, lake, tmp_path, capsys
-):
+def case_of(s: dict, e: dict) -> int:
+    """El caso de `ev_jump_share` de una fila (TRD-L3 §7.2.2), decidido como la sonda."""
+    if s["os_ticks"] == 0:
+        return 1
+    if s["os_duration"] > 0:
+        return 2
+    return 3 if e["extreme_time"] == e["confirm_time"] else 4
+
+
+def test_os_jump_share_negativo_da_violacion(check, lake, tmp_path, capsys):
     index = first(lake, lambda f, s, e: f["os_jump_share"] is not None)
     alter(file(lake, "fit.parquet"), "os_jump_share", set_at(index, -0.1))
-    alter(file(lake, "fit.parquet"), "ev_jump_share", set_at(index, -0.1))
     out = tmp_path / "salida.csv"
     assert check.main(argv(lake, out)) == 1
     capsys.readouterr()
     got = violations(read_csv(out))
     assert got["os_jump_share_no_negativo"] == 1
-    assert got["ev_jump_share_no_negativo"] == 1
-    assert sum(got.values()) == 2
+    assert sum(got.values()) == 1
 
 
-def test_ev_jump_share_sobre_1_mas_theta_es_informativo_y_no_violacion(
+def test_los_casos_de_ev_jump_share_cuentan_todas_las_filas(
     check, lake, tmp_path, capsys
 ):
-    alter(file(lake, "fit.parquet"), "ev_jump_share", set_at(0, 1.5))
-    out = tmp_path / "salida.csv"
-    assert check.main(argv(lake, out)) == 0
-    assert last_line(capsys)["violaciones"] == "0"
-    rows = read_csv(out)
-    assert informative(rows)["ev_jump_share_fuera_de_cota"] == 1
-    assert set(violations(rows).values()) == {0}
-
-
-def test_ev_jump_share_dentro_de_1_mas_theta_no_cuenta_como_fuera_de_cota(
-    check, lake, tmp_path, capsys
-):
-    # 1 + θ = 1,0025: un valor entre 1 y 1 + θ está dentro de la cota.
-    alter(file(lake, "fit.parquet"), "ev_jump_share", set_at(0, 1.002))
     out = tmp_path / "salida.csv"
     assert check.main(argv(lake, out)) == 0
     capsys.readouterr()
-    assert informative(read_csv(out))["ev_jump_share_fuera_de_cota"] == 0
+    got = informative(read_csv(out))
+    cases = [got[name] for name in INFORMATIVE if name.startswith("ev_caso_")]
+    expected = [0, 0, 0, 0]
+    for _, s, e in joined(lake):
+        expected[case_of(s, e) - 1] += 1
+    assert cases == expected
+    assert sum(cases) == len(joined(lake))
+    # El lago ejerce los casos 1, 2 y 4; el 3 se ejerce más abajo con un archivo alterado.
+    assert cases[0] > 0 and cases[1] > 0 and cases[3] > 0
+
+
+def test_caso_1_ev_distinto_de_c_da_violacion(check, lake, tmp_path, capsys):
+    index = first(lake, lambda f, s, e: case_of(s, e) == 1)
+    alter(file(lake, "fit.parquet"), "c_jump_share", set_at(index, 0.9))
+    alter(file(lake, "fit.parquet"), "ev_jump_share", set_at(index, 0.5))
+    out = tmp_path / "salida.csv"
+    assert check.main(argv(lake, out)) == 1
+    capsys.readouterr()
+    got = violations(read_csv(out))
+    assert got["ev_jump_share_caso_1"] == 1
+    assert sum(got.values()) == 1
+
+
+@pytest.mark.parametrize("value", [-0.5, 1.5])
+def test_caso_2_ev_fuera_de_0_y_1_mas_theta_da_violacion(
+    check, lake, tmp_path, capsys, value
+):
+    index = first(lake, lambda f, s, e: case_of(s, e) == 2)
+    alter(file(lake, "fit.parquet"), "ev_jump_share", set_at(index, value))
+    out = tmp_path / "salida.csv"
+    assert check.main(argv(lake, out)) == 1
+    capsys.readouterr()
+    got = violations(read_csv(out))
+    assert got["ev_jump_share_caso_2"] == 1
+    assert sum(got.values()) == 1
+
+
+def test_caso_2_ev_entre_1_y_1_mas_theta_no_es_violacion(check, lake, tmp_path, capsys):
+    # 1 + θ = 1,0025: un valor entre 1 y 1 + θ está dentro de la cota.
+    index = first(lake, lambda f, s, e: case_of(s, e) == 2)
+    alter(file(lake, "fit.parquet"), "ev_jump_share", set_at(index, 1.002))
+    out = tmp_path / "salida.csv"
+    assert check.main(argv(lake, out)) == 0
+    capsys.readouterr()
+    assert set(violations(read_csv(out)).values()) == {0}
+
+
+def bounds_of_case_4(s: dict, e: dict) -> tuple[float, float]:
+    """Cotas de la ley 4: (p_E − best)/(p_E − p_R) y (p_E − worst)/(p_E − p_R)."""
+    span = float(e["extreme_price"] - e["reference_price"])
+    return (
+        float(e["extreme_price"] - s["confirm_instant_price_best"]) / span,
+        float(e["extreme_price"] - s["confirm_instant_price_worst"]) / span,
+    )
+
+
+def test_caso_4_ev_dentro_de_las_cotas_del_instante_puede_ser_negativo(
+    check, lake, tmp_path, capsys
+):
+    index = first(
+        lake,
+        lambda f, s, e: case_of(s, e) == 4 and f["ev_jump_share"] is not None,
+    )
+    _, s, e = joined(lake)[index]
+    low, high = bounds_of_case_4(s, e)
+    assert low <= high
+    # Los extremos exactos de las cotas son válidos aunque el valor sea negativo.
+    for value in (low, high, (low + high) / 2):
+        alter(file(lake, "fit.parquet"), "ev_jump_share", set_at(index, value))
+        out = tmp_path / "salida.csv"
+        assert check.main(argv(lake, out)) == 0, value
+        capsys.readouterr()
+        assert set(violations(read_csv(out)).values()) == {0}
+
+
+def test_caso_4_ev_fuera_de_las_cotas_del_instante_da_violacion(
+    check, lake, tmp_path, capsys
+):
+    index = first(
+        lake,
+        lambda f, s, e: case_of(s, e) == 4 and f["ev_jump_share"] is not None,
+    )
+    _, s, e = joined(lake)[index]
+    low, high = bounds_of_case_4(s, e)
+    for value in (low - 0.5, high + 0.5):
+        alter(file(lake, "fit.parquet"), "ev_jump_share", set_at(index, value))
+        out = tmp_path / "salida.csv"
+        assert check.main(argv(lake, out)) == 1, value
+        capsys.readouterr()
+        got = violations(read_csv(out))
+        assert got["ev_jump_share_caso_4"] == 1
+        assert sum(got.values()) == 1
+
+
+@pytest.mark.parametrize(("value", "bad"), [(0.0, 1), (0.5, 0), (1.5, 1)])
+def test_caso_3_ev_estrictamente_entre_0_y_1_mas_theta(
+    check, lake, tmp_path, capsys, value, bad
+):
+    """El lago no trae el caso 3: se fabrica con un caso 2 al que se le pone
+    `os_duration = 0` (summaries) y `extreme_time = confirm_time` (events). Las demás
+    invariantes pueden saltar por la alteración; aquí solo importa la del caso 3.
+    """
+    index = first(lake, lambda f, s, e: case_of(s, e) == 2)
+    alter(file(lake, "summaries.parquet"), "os_duration", set_at(index, 0))
+    events = file(lake, "events.parquet")
+    column = pq.read_table(events)["confirm_time"].to_pylist()
+    alter(events, "extreme_time", set_at(index, column[index]))
+    alter(file(lake, "fit.parquet"), "ev_jump_share", set_at(index, value))
+    out = tmp_path / "salida.csv"
+    check.main(argv(lake, out))
+    capsys.readouterr()
+    rows = read_csv(out)
+    assert violations(rows)["ev_jump_share_caso_3"] == bad
+    assert informative(rows)["ev_caso_3_overshoot_en_el_instante"] == 1
 
 
 def test_accel_sobre_2_es_informativo_y_no_violacion(check, lake, tmp_path, capsys):

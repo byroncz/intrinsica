@@ -1434,8 +1434,16 @@ cosa medida:
   - **Esqueleto:** filas de `fit` = filas de `summaries`; unión 1:1 por `(theta, confirm_agg_trade_id)`
     con `summaries` (`union_1a1`) y con `events` (`union_events_1a1`), sin huérfanas ni claves
     repetidas; mismos row groups y filas por row group según los pies de `fit` y `summaries`.
-  - **Leyes de una fila** (decisión 7 de la Épica, corregida el 2026-11-05): `0 < c_jump_share ≤ 1`,
-    `os_jump_share ≥ 0` y `ev_jump_share ≥ 0`.
+  - **Leyes de una fila** (decisión 7 de la Épica, corregida el 2026-11-06): `0 < c_jump_share ≤ 1`,
+    `os_jump_share ≥ 0` y cuatro leyes de `ev_jump_share`, una invariante por caso
+    (`ev_jump_share_caso_1` a `_4`), que `summaries` y `events` permiten decidir
+    ([TRD-L3 §7.2.2](../TRD/l3.md#722-salida--fitparquet-familia-a)): (1) `os_ticks = 0`:
+    `ev_jump_share = c_jump_share`; (2) `os_ticks > 0` y `os_duration > 0`: `0 ≤ ev_jump_share ≤ 1 + θ`;
+    (3) `os_ticks > 0`, `os_duration = 0` y `extreme_time = confirm_time`: `0 < ev_jump_share ≤ 1 + θ`;
+    (4) `os_ticks > 0`, `os_duration = 0` y `extreme_time > confirm_time`: `ev_jump_share` entre
+    `(p_E − confirm_instant_price_best)/(p_E − p_R)` y `(p_E − confirm_instant_price_worst)/(p_E − p_R)`
+    (puede ser negativo). La primera versión de la sonda exigía `ev_jump_share ≥ 0` siempre; en 2023-03
+    dio 240 violaciones, todas de esa ley, porque estaba mal derivada y no por un error del motor.
   - **Regla de nulos**, una invariante `nulos_<columna>` por cada `*_slope`, `*_accel` y `*_jump_share`:
     - `*_jump_share` es nula **exactamente** cuando `p_fin = p_0` de su fase (y, en `os`, con
       `os_ticks = 0`); nula donde no toca o no nula donde toca es violación.
@@ -1453,9 +1461,9 @@ cosa medida:
     tiempos distintos y `p_fin ≠ p_0`. Lo explican un único `τ` positivo distinto o la singularidad
     numérica del sistema normal tras cuantizar (`det ≤ 0`), que `summaries` no permite predecir.
     Esperado: cerca de 0.
-  - `ev_jump_share_fuera_de_cota`: filas con `ev_jump_share > 1 + θ`. ADR-L2-03 lo permite cuando `p_prev`
-    es del instante de confirmación (un grupo de empate sin orden entre sus precios), y la sonda no sabe
-    de qué instante es. Esperado: casi 0 ([TRD-L3 §7.2.2](../TRD/l3.md#722-salida--fitparquet-familia-a)).
+  - `ev_caso_{1_sin_overshoot,2_overshoot_con_duracion,3_overshoot_en_el_instante,4_instante_de_confirmacion}`:
+    cuántos eventos caen en cada caso de las leyes de `ev_jump_share`. Los cuatro casos parten todas las
+    filas, así que suman `filas`.
   - `abs_{c,os,ev}_accel_mayor_2`: filas con `|*_accel| > 2` y su `fraccion` sobre las no nulas.
     `|a| ≤ 2` **no es una ley**: el ajuste de dos parámetros sobre pocos ticks apiñados da cualquier
     coeficiente. Si la fracción cambia mucho entre meses, es una señal para mirar, no un fallo.
@@ -1479,11 +1487,15 @@ retienen los valores de las 9 columnas.
 completa: `run-job-tasks.sh` rechaza otra cosa con código 2), `args` = `--theta <θ> --month <mes>`. Las
 corridas las lanza y aprueba el humano; pega la última línea en ITSC-401.
 
-**Corrida real (ITSC-401): pendiente.** Se llena con la última línea que el humano pegue en la card.
+**Corrida real (ITSC-401).** La primera corrida (ley `ev_jump_share ≥ 0` siempre) dio 240 violaciones, las
+240 de esa ley; las otras 16 invariantes dieron 0. El arquitecto corrigió la ley (cuatro casos) el
+2026-11-06 y la sonda cambió con ella. **Falta la segunda corrida**, que el humano pega en la card y con la
+que se llena la fila; se espera `violaciones=0`.
 
-| Mes | θ | `state_version` | Filas | Violaciones | `mismo_t` | Pared | Run |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| 2023-03 | `0.00098052` | pendiente | pendiente | pendiente | pendiente | pendiente | pendiente |
+| Corrida | Mes | θ | `state_version` | Filas | Violaciones | `mismo_t` | Pared | Run |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 (ley antigua) | 2023-03 | `0.00098052` | no pegada | 36 239 | 240 (`ev_jump_share_no_negativo`) | 2 191 | 4,3 s | [42147884536](https://github.com/byroncz/intrinsica/actions/runs/42147884536) |
+| 2 (cuatro leyes) | 2023-03 | `0.00098052` | pendiente | pendiente | pendiente | pendiente | pendiente | pendiente |
 
 ### La trampa del 403 por prefijo
 
