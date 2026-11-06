@@ -525,8 +525,8 @@ el criterio 26 (e) de TRD-L3 §13). Y la del núcleo original sobre los 110 mese
 (ITSC-335): 1 267 MiB. Sin OOM en ninguna.
 Timeouts con la regla de TRD-L2 §10.2, confirmados por ese backfill: `l3-monthly`
 1 200 s (6,5 veces la pared de 2022-11, el mes más lento, 183,7 s) y `l3-backfill`
-10 800 s (1,63 veces los 6 638 s del job; ITSC-402 lo sube a 36 000 s, ver «Timeouts de
-la familia A»). Si un backfill completo pasa de 24 000 s (36 000 ÷ 1,5), el margen baja de
+10 800 s (1,63 veces los 6 638 s del job; ITSC-402 lo sube a 43 200 s, ver «Timeouts de
+la familia A»). Si un backfill completo pasa de 28 800 s (43 200 ÷ 1,5), el margen baja de
 1,5 veces y `l3-backfill` sube en el siguiente PR de infra; mientras tanto no se sube.
 Decisión y cifras en
 [TRD-L3 §10.2](../docs/TRD/l3.md#102-dimensionamiento--hipótesis-de-partida-y-primera-medición).
@@ -586,12 +586,12 @@ se suma dos veces.
 
 **Regla para un backfill futuro de la serie completa** (por ejemplo, al agregar una
 familia): manda el timeout de `l3-backfill`, no las 6 h del run de Actions. Esos 10 800 s
-subieron a 36 000 s en ITSC-402 (ver «Timeouts de la familia A»).
-Basta una ejecución mientras la pared esperada del job no pase de **24 000 s**
-(36 000 ÷ 1,5, el margen de los timeouts de arriba). Si pasa, fija cada rango por su
-**pared estimada**, no por su número de meses, con cada rango bajo 24 000 s. Con el
+subieron a 43 200 s en ITSC-402 (ver «Timeouts de la familia A»).
+Basta una ejecución mientras la pared esperada del job no pase de **28 800 s**
+(43 200 ÷ 1,5, el margen de los timeouts de arriba). Si pasa, fija cada rango por su
+**pared estimada**, no por su número de meses, con cada rango bajo 28 800 s. Con el
 núcleo nuevo a 2 vCPU la serie suma 6 556 s de `wall_s` (job 6 638 s, ITSC-378) para S;
-la familia A suma 27 556 s (ITSC-401) y ya pasa el umbral.
+la familia A suma 27 556 s (ITSC-401) y queda bajo el umbral, con poco margen.
 Estima cada mes con el ajuste de
 [TRD-L3 §10.2](../docs/TRD/l3.md#102-dimensionamiento--hipótesis-de-partida-y-primera-medición)
 o con los `unit_timing` de `dq-findings/l3/`. El número de meses no sirve de medida;
@@ -605,15 +605,15 @@ que cubriera 2020-2022 habría rondado 7 h. El detalle de la regla está en el
 medida de A en ITSC-401
 ([TRD-L3 §10.2](../docs/TRD/l3.md#102-dimensionamiento--hipótesis-de-partida-y-primera-medición)):
 
-- `l3-monthly-fit`: **7 500 s**, 6 veces el mes más lento de A (2023-03, 1 240 s), con la
+- `l3-monthly-fit`: **7 500 s**, 6,05 veces el mes más lento de A (2023-03, 1 240 s), con la
   regla de TRD-L2 §10.2. Los 1 200 s de `l3-monthly` ya no alcanzan: ese mes de A los
   supera solo.
-- `l3-backfill`: **36 000 s** (antes 10 800 s), para que un backfill completo de A
+- `l3-backfill`: **43 200 s** (12 h; antes 10 800 s), para que un backfill completo de A
   quepa en una ejecución. A suma 27 556 s medidos, 2,5 veces los 10 800 s que se
-  fijaron para S; 36 000 s son 1,3 veces esa suma y quedan bajo el tope de 86 400 s
-  del módulo. **No cumple el 1,5 × de la regla** (el mínimo serían 41 334 s): es una
-  excepción que decidió el arquitecto el 2026-11-06. Con 10 800 s habría hecho falta
-  partir el backfill de A en rangos de menos de 7 200 s cada uno.
+  fijaron para S. La regla de TRD-L2 §10.2 pide al menos 1,5 veces esa suma (41 334 s):
+  43 200 s la cumplen con 1,57 veces y quedan bajo el tope de 86 400 s del módulo
+  (decisión del arquitecto, 2026-11-06). Con 10 800 s habría hecho falta partir el
+  backfill de A en rangos de menos de 7 200 s cada uno.
 
 Consecuencia: la espera de *Run job* muere a las 6 h (21 600 s) y un backfill de A
 dura más. El run de Actions falla por tiempo de espera, pero **la ejecución sigue en
@@ -674,7 +674,7 @@ workflow espera (el `run.invoker` sobre `l3-monthly` ya existía).
 
 En el PR de ITSC-402, el plan de `l3` crea solo el job `l3-monthly-fit` con su
 service account y sus bindings, y cambia `timeout` de `l3-backfill` (10 800 s a
-36 000 s); la imagen no cambia, porque no se toca código de la capa. El plan de `l1`
+43 200 s); la imagen no cambia, porque no se toca código de la capa. El plan de `l1`
 muestra solo el workflow `l1-run-job` con la cadena nueva y dos bindings nuevos:
 `run.invoker` sobre `l3-monthly-fit` y `run.viewer` sobre `l3-monthly-path`, que ahora
 el workflow espera (el `run.invoker` sobre `l3-monthly-path` ya existía). Cualquier otro
