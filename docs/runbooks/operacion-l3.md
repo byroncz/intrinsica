@@ -1439,7 +1439,8 @@ cosa medida:
     (`ev_jump_share_caso_1` a `_4`), que `summaries` y `events` permiten decidir
     ([TRD-L3 §7.2.2](../TRD/l3.md#722-salida--fitparquet-familia-a)): (1) `os_ticks = 0`:
     `ev_jump_share = c_jump_share`; (2) `os_ticks > 0` y `os_duration > 0`: `0 ≤ ev_jump_share ≤ 1 + θ`;
-    (3) `os_ticks > 0`, `os_duration = 0` y `extreme_time = confirm_time`: `0 < ev_jump_share ≤ 1 + θ`;
+    (3) `os_ticks > 0`, `os_duration = 0` y `extreme_time = confirm_time`: `0 < ev_jump_share ≤ 1 + θ`
+    (imposible por ADR-L3-01, que pone el instante de confirmación entero en la fase `c`; queda como guarda);
     (4) `os_ticks > 0`, `os_duration = 0` y `extreme_time > confirm_time`: `ev_jump_share` entre
     `(p_E − confirm_instant_price_best)/(p_E − p_R)` y `(p_E − confirm_instant_price_worst)/(p_E − p_R)`
     (puede ser negativo). La primera versión de la sonda exigía `ev_jump_share ≥ 0` siempre; en 2023-03
@@ -1489,13 +1490,17 @@ corridas las lanza y aprueba el humano; pega la última línea en ITSC-401.
 
 **Corrida real (ITSC-401).** La primera corrida (ley `ev_jump_share ≥ 0` siempre) dio 240 violaciones, las
 240 de esa ley; las otras 16 invariantes dieron 0. El arquitecto corrigió la ley (cuatro casos) el
-2026-11-06 y la sonda cambió con ella. **Falta la segunda corrida**, que el humano pega en la card y con la
-que se llena la fila; se espera `violaciones=0`.
+2026-11-06 y la sonda cambió con ella. La segunda corrida dio `violaciones=0`, con las 20 invariantes en 0.
+Eventos por caso de `ev_jump_share`: 2 706 (caso 1), 32 278 (caso 2), 0 (caso 3) y 1 255 (caso 4). El caso 3
+queda en 0 porque no puede darse (ADR-L3-01 pone el instante de confirmación entero en la fase `c`): es una
+guarda, y un valor mayor que 0 sería un defecto del motor o de L2. Informativos de la segunda corrida:
+`mismo_t` 1 083 / 595 / 513 (`c`, `os`, `ev`), `accel_sin_explicar` 159 / 0 / 116 y `|a| > 2` en
+1 566 / 8 749 / 1 365 filas. El CSV quedó en `results/ops-script-x8xqb/l3_fit_check_2023-03_0.00098052.csv`.
 
 | Corrida | Mes | θ | `state_version` | Filas | Violaciones | `mismo_t` | Pared | Run |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | 1 (ley antigua) | 2023-03 | `0.00098052` | no pegada | 36 239 | 240 (`ev_jump_share_no_negativo`) | 2 191 | 4,3 s | [42147884536](https://github.com/byroncz/intrinsica/actions/runs/42147884536) |
-| 2 (cuatro leyes) | 2023-03 | `0.00098052` | pendiente | pendiente | pendiente | pendiente | pendiente | pendiente |
+| 2 (cuatro leyes) | 2023-03 | `0.00098052` | 1.0.0 | 36 239 | 0 | 2 191 | 4,1 s | [42242276494](https://github.com/byroncz/intrinsica/actions/runs/42242276494) |
 
 ### La trampa del 403 por prefijo
 

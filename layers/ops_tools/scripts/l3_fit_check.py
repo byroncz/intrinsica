@@ -147,7 +147,6 @@ CSV_HEADER = [
     "fraccion",
 ]
 BOTH = "s.confirm_agg_trade_id IS NOT NULL AND e.confirm_agg_trade_id IS NOT NULL"
-KEY = "(theta, confirm_agg_trade_id)"
 
 
 def log(message: str) -> None:
