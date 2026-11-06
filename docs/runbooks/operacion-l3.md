@@ -926,6 +926,7 @@ locales (`uv run`).
 | `l3_gap_probe.py` | Mide los huecos entre ticks consecutivos de L1 en un mes (cuantiles, máximo y conteos por umbral, con los huecos entre row groups) para fijar `silence_us` de la familia T | `--month 2018-02` |
 | `l3_path_check.py` | Prueba `path.parquet` (familia T) contra `summaries.parquet` sobre un θ y un mes: resumen por columna, esqueleto, invariantes y regla de nulos en un CSV | `--theta 0.00098052 --month 2023-03` |
 | `l3_fit_bridge_probe.py` | Sonda de la familia A (ITSC-397): compara `c_accel` y `c_jump_share` observados con 20 puentes brownianos por evento sobre un θ y un mes; da D de Kolmogorov-Smirnov y el veredicto `sigue\|retirada` | `--theta 0.00098052 --month 2023-03` |
+| `l3_fit_check.py` | Prueba `fit.parquet` (familia A) contra `summaries.parquet` y `events.parquet` sobre un θ y un mes: resumen por columna, esqueleto, invariantes, regla de nulos y cifras informativas en un CSV | `--theta 0.00098052 --month 2023-03` |
 
 ```bash
 gcloud storage cp layers/ops_tools/scripts/l3_check_month.py \
@@ -1390,11 +1391,116 @@ el mes (backfill de T), más el `consolidated.parquet` del mes. *Actions → Run
 los cuantiles en ITSC-398. El veredicto lo escribe el arquitecto en la Épica ITSC-397, sección
 «Veredicto de la sonda».
 
-**Corrida real (ITSC-398): pendiente.**
+**Corrida real (ITSC-398, 2026-11-05).** `D_accel` = 0,278658, por encima del umbral de 0,10: la forma
+de la trayectoria no es la de un puente, así que `veredicto=sigue`. El veredicto completo y su lectura
+están en la Épica ITSC-397, sección «Veredicto de la sonda».
 
 | Mes | θ | Eventos | Excluidos | `D_accel` | `D_jump` | Pared | Veredicto | Run |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 2023-03 | `0.00098052` | pendiente | pendiente | pendiente | pendiente | pendiente | pendiente | pendiente |
+| 2023-03 | `0.00098052` | 34 207 | 2 032 | 0,278658 | 0,408690 | 120,9 s | sigue | [41951296143](https://github.com/byroncz/intrinsica/actions/runs/41951296143) |
+
+### `l3_fit_check.py`
+
+Prueba `fit.parquet` (familia A, [contrato](../data-contracts.md#esquema-de-fitparquet); [TRD-L3 §7.2.2](../TRD/l3.md#722-salida--fitparquet-familia-a))
+sobre **un θ y un mes** reales (ITSC-401). Abre el `fit.parquet` y el `summaries.parquet` de L3 y el
+`events.parquet` de L2 de esa partición por su ruta completa, los registra en DuckDB como datasets de
+PyArrow y cuenta todo con consultas de agregación: ninguna fila pasa por Python. `state_version` sale de
+los metadatos de `fit.parquet`, leídos con PyArrow. **No importa ninguna capa** (una importación
+cambiaría `uv.lock`). Necesita `events.parquet` porque la regla de nulos de A depende del ancla y el
+cierre de cada fase, que son datos de L2 (`reference_time`, `confirm_time`, `extreme_time` y los tres
+precios).
+
+```bash
+gcloud storage cp layers/ops_tools/scripts/l3_fit_check.py \
+  gs://<proyecto>-ops/scripts/l3_fit_check.py
+```
+
+| `args` | Efecto |
+| --- | --- |
+| `--theta 0.00098052 --month 2023-03` | Obligatorios: un θ (8 decimales como máximo) y un mes `YYYY-MM` |
+| `--summaries-root` | Otra raíz de L3, también local, donde viven `fit.parquet` y `summaries.parquet` (por defecto `gs://<proyecto>-dc-descriptors/l3`) |
+| `--l2-root` | Otra raíz de L2, también local, para `events.parquet` (por defecto `gs://<proyecto>-dc-events/l2`) |
+| `--provider`, `--market`, `--asset` | Otra serie (por defecto `binance`, `spot`, `BTCUSDT`) |
+| `--out` | Otra ruta del CSV; una ruta que termina en `/` es un directorio |
+
+**El CSV** (`l3_fit_check_<mes>_<θ>.csv`, en `results/<ejecución>/`) tiene el encabezado
+`seccion,columna,filas,nulos,min,mediana,max,q01,q05,q95,q99,violaciones,conteo,fraccion` y una fila por
+cosa medida:
+
+- `columna`: las 9 columnas de datos de A (A-01 a A-09), con `filas`, `nulos`, `min`, `mediana` y `max`;
+  las tres `*_accel` traen además los cuantiles 1, 5, 95 y 99 %.
+- `invariante`: una fila por invariante con sus `violaciones` (0 es lo esperado), con tolerancia 1e-9 por
+  el redondeo de `DOUBLE`:
+  - **Esqueleto:** filas de `fit` = filas de `summaries`; unión 1:1 por `(theta, confirm_agg_trade_id)`
+    con `summaries` (`union_1a1`) y con `events` (`union_events_1a1`), sin huérfanas ni claves
+    repetidas; mismos row groups y filas por row group según los pies de `fit` y `summaries`.
+  - **Leyes de una fila** (decisión 7 de la Épica, corregida el 2026-11-06): `0 < c_jump_share ≤ 1`,
+    `os_jump_share ≥ 0` y cuatro leyes de `ev_jump_share`, una invariante por caso
+    (`ev_jump_share_caso_1` a `_4`), que `summaries` y `events` permiten decidir
+    ([TRD-L3 §7.2.2](../TRD/l3.md#722-salida--fitparquet-familia-a)): (1) `os_ticks = 0`:
+    `ev_jump_share = c_jump_share`; (2) `os_ticks > 0` y `os_duration > 0`: `0 ≤ ev_jump_share ≤ 1 + θ`;
+    (3) `os_ticks > 0`, `os_duration = 0` y `extreme_time = confirm_time`: `0 < ev_jump_share ≤ 1 + θ`
+    (imposible por ADR-L3-01, que pone el instante de confirmación entero en la fase `c`; queda como guarda);
+    (4) `os_ticks > 0`, `os_duration = 0` y `extreme_time > confirm_time`: `ev_jump_share` entre
+    `(p_E − confirm_instant_price_best)/(p_E − p_R)` y `(p_E − confirm_instant_price_worst)/(p_E − p_R)`
+    (puede ser negativo). La primera versión de la sonda exigía `ev_jump_share ≥ 0` siempre; en 2023-03
+    dio 240 violaciones, todas de esa ley, porque estaba mal derivada y no por un error del motor.
+  - **Regla de nulos**, una invariante `nulos_<columna>` por cada `*_slope`, `*_accel` y `*_jump_share`:
+    - `*_jump_share` es nula **exactamente** cuando `p_fin = p_0` de su fase (y, en `os`, con
+      `os_ticks = 0`); nula donde no toca o no nula donde toca es violación.
+    - `*_slope` es nula si la fase tiene menos de dos ticks (`c_ticks`, `os_ticks` o su suma) o si el
+      cierre cae en el instante del ancla (`confirm_time = reference_time`, `extreme_time =
+      confirm_time` o `extreme_time = reference_time`). Una `*_slope` **no nula** donde la regla manda
+      nula es violación.
+    - `*_accel`, además, si `p_fin = p_0`. Misma lectura.
+  - **`doubles_finitos`:** ni `±inf` ni `NaN` en las nueve columnas.
+- `informativo`: cifras que **no** suman a `violaciones`, porque la sonda no ve los ticks:
+  - `mismo_t_{c,os,ev}_slope`: una `*_slope` nula con ticks suficientes y tiempos distintos. Es el caso
+    «todos los ticks en el mismo `transact_time`»: no se puede decidir sin los ticks, así que se cuenta
+    aparte. Su suma es el `mismo_t` de la última línea.
+  - `accel_sin_explicar_{c,os,ev}_accel`: una `*_accel` nula con `*_slope` no nula, ticks suficientes,
+    tiempos distintos y `p_fin ≠ p_0`. Lo explican un único `τ` positivo distinto o la singularidad
+    numérica del sistema normal tras cuantizar (`det ≤ 0`), que `summaries` no permite predecir.
+    Esperado: cerca de 0.
+  - `ev_caso_{1_sin_overshoot,2_overshoot_con_duracion,3_overshoot_en_el_instante,4_instante_de_confirmacion}`:
+    cuántos eventos caen en cada caso de las leyes de `ev_jump_share`. Los cuatro casos parten todas las
+    filas, así que suman `filas`.
+  - `abs_{c,os,ev}_accel_mayor_2`: filas con `|*_accel| > 2` y su `fraccion` sobre las no nulas.
+    `|a| ≤ 2` **no es una ley**: el ajuste de dos parámetros sobre pocos ticks apiñados da cualquier
+    coeficiente. Si la fracción cambia mucho entre meses, es una señal para mirar, no un fallo.
+
+**Última línea:** `fit check: mes=… theta=… state_version=… filas=… violaciones=… mismo_t=… pared_s=…
+veredicto=ok|violaciones|fallo`. `violaciones` suma todas las invariantes y ninguna cifra informativa.
+Con `veredicto=fallo` (falta un archivo, no se lee un pie o DuckDB falla) lo que no se pudo medir sale `-`.
+
+**Códigos:** **0** sin violaciones; **1** con violaciones, sin alguno de los tres archivos, si un pie no
+se lee o si DuckDB falla; **2** por uso (`--theta` o `--month` ausentes o inválidos, sin las dos raíces ni
+`OPS_RESULTS_URI`, `--out` `gs://` fuera de `results/`). Si el CSV no se puede escribir, la sonda sale
+con **0** (si no hay violaciones) y lo avisa en el log con `no se guardó la tabla en …`. Una violación
+**nunca se tolera**: es un defecto del motor de A o del dato de entrada; abre una card de bug con la
+línea.
+
+**Memoria.** Un θ y un mes por corrida: el pico es O(partición), porque las medianas y los cuantiles
+retienen los valores de las 9 columnas.
+
+**Cómo correrla.** Necesita `fit.parquet` del θ y el mes, o sea el backfill de A de ITSC-400.
+*Actions → Run job*: `job` = `ops-script`, `script` = `gs://<proyecto>-ops/scripts/l3_fit_check.py` (la URI
+completa: `run-job-tasks.sh` rechaza otra cosa con código 2), `args` = `--theta <θ> --month <mes>`. Las
+corridas las lanza y aprueba el humano; pega la última línea en ITSC-401.
+
+**Corrida real (ITSC-401).** La primera corrida (ley `ev_jump_share ≥ 0` siempre) dio 240 violaciones, las
+240 de esa ley; las otras 16 invariantes dieron 0. El arquitecto corrigió la ley (cuatro casos) el
+2026-11-06 y la sonda cambió con ella. La segunda corrida dio `violaciones=0`, con las 20 invariantes en 0.
+Eventos por caso de `ev_jump_share`: 2 706 (caso 1), 32 278 (caso 2), 0 (caso 3) y 1 255 (caso 4). El caso 3
+queda en 0 porque no puede darse (ADR-L3-01 pone el instante de confirmación entero en la fase `c`): es una
+guarda, y un valor mayor que 0 sería un defecto del motor o de L2. Informativos de la segunda corrida:
+`mismo_t` 1 083 / 595 / 513 (`c`, `os`, `ev`), `accel_sin_explicar` 159 / 0 / 116 y `|a| > 2` en
+1 566 / 8 749 / 1 365 filas. El CSV quedó en `results/ops-script-x8xqb/l3_fit_check_2023-03_0.00098052.csv`.
+
+| Corrida | Mes | θ | `state_version` | Filas | Violaciones | `mismo_t` | Pared | Run |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 (ley antigua) | 2023-03 | `0.00098052` | no pegada | 36 239 | 240 (`ev_jump_share_no_negativo`) | 2 191 | 4,3 s | [42147884536](https://github.com/byroncz/intrinsica/actions/runs/42147884536) |
+| 2 (cuatro leyes) | 2023-03 | `0.00098052` | 1.0.0 | 36 239 | 0 | 2 191 | 4,1 s | [42242276494](https://github.com/byroncz/intrinsica/actions/runs/42242276494) |
 
 ### La trampa del 403 por prefijo
 
