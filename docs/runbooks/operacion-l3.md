@@ -48,9 +48,9 @@ dispara y aprueba el humano:
    `ops-script` el permiso de **crear** `content_hash.json` bajo `l2/` de
    `dc-events` (nada más: no pisa ni borra); el de `l2`, la imagen que lo escribe
    en los meses nuevos.
-3. **Backfill del linaje** con `ops-script`: sube y lanza
+3. **Backfill del linaje** con `ops-script`: lanza
    [`l2_backfill_lineage.py`](operacion-l2.md#linaje-publicado-y-su-backfill-itsc-368)
-   (la guía paso a paso está en el runbook de L2). Antes, con `--dry-run`, mira que
+   (el apply de `ops` ya lo publicó en `scripts/`; la guía paso a paso está en el runbook de L2). Antes, con `--dry-run`, mira que
    no haya discrepancias. La última línea dice cuántas particiones escribió y cuántas ya existían: su suma
    debe ser la de L2 (50 θ por cada mes publicado), sin discrepancias, errores ni
    particiones incompletas.
@@ -980,7 +980,7 @@ primera prueba. Cada lector de más cuesta ≈ 48 MB de RSS (≈ 1,8 × mientras
 ### Sonda del lector con `readers` (ITSC-362)
 
 Los agentes no lanzan jobs: las dos corridas las lanza el humano con `ops-script`, después de
-subir el script (`gcloud storage cp layers/ops_tools/scripts/l3_probe_reader.py
+que el apply del stack `ops` lo publique (verifica con `gcloud storage ls
 gs://<proyecto>-ops/scripts/l3_probe_reader.py`). Se pide `--sin-contar-io` porque envolver el
 archivo para contar bytes serializa las lecturas (cada lectura toma el candado del archivo de
 Python) y taparía lo que se quiere medir:
@@ -1003,8 +1003,8 @@ se decodifican a lo sumo 2 row groups más que con 1, al final.
 ## Scripts de operación
 
 Siete scripts de `layers/ops_tools/scripts/`, para el job `ops-script`
-([runbook de operación ad hoc](operacion-ops.md)). Se suben a
-`gs://<proyecto>-ops/scripts/` y se lanzan con `job` = `ops-script`. Todos solo
+([runbook de operación ad hoc](operacion-ops.md)). El apply del stack `ops` los publica en
+`gs://<proyecto>-ops/scripts/` (ya no se suben a mano) y se lanzan con `job` = `ops-script`. Todos solo
 leen, toman las raíces del proyecto de `OPS_RESULTS_URI` y también aceptan rutas
 locales (`uv run`).
 
@@ -1019,10 +1019,8 @@ locales (`uv run`).
 | `l3_fit_bridge_probe.py` | Sonda de la familia A (ITSC-397): compara `c_accel` y `c_jump_share` observados con 20 puentes brownianos por evento sobre un θ y un mes; da D de Kolmogorov-Smirnov y el veredicto `sigue\|retirada` | `--theta 0.00098052 --month 2023-03` |
 | `l3_fit_check.py` | Prueba `fit.parquet` (familia A) contra `summaries.parquet` y `events.parquet` sobre un θ y un mes: resumen por columna, esqueleto, invariantes, regla de nulos y cifras informativas en un CSV | `--theta 0.00098052 --month 2023-03` |
 
-```bash
-gcloud storage cp layers/ops_tools/scripts/l3_check_month.py \
-  gs://<proyecto>-ops/scripts/l3_check_month.py
-```
+El apply del stack `ops` publica todos estos scripts en `scripts/`; verifica con
+`gcloud storage ls gs://<proyecto>-ops/scripts/`.
 
 ### `l3_check_month.py`
 
@@ -1145,8 +1143,8 @@ jobs:
    de T5 (`MALLOC_MMAP_THRESHOLD_=16384`, `MALLOC_TRIM_THRESHOLD_=131072`) fue el rodeo de ITSC-364
    cuando la imagen anterior moría por memoria, y ya no hace falta. El backfill completo con los
    valores por defecto y 2 vCPU ya se corrió (ITSC-378, 6 638 s; ver «Timeouts» arriba).
-2. Sube el script y lanza `ops-script` (`gcloud storage cp
-   layers/ops_tools/scripts/l3_compare_runs.py gs://<proyecto>-ops/scripts/l3_compare_runs.py`),
+2. Lanza `ops-script` (el apply del stack `ops` publica el script; verifica con `gcloud storage ls
+   gs://<proyecto>-ops/scripts/l3_compare_runs.py`),
    con las fechas de ITSC-335 como base y las del paso 1 como nueva:
 
    ```
@@ -1188,16 +1186,10 @@ todo con consultas de agregación: ninguna fila pasa por Python. **No importa `d
 imagen de `ops_tools` no lo trae e importarlo cambiaría `uv.lock`; por eso el `.sql` se sube
 aparte y `derived_version` sale de su primera línea (`-- derived_version: X.Y.Z`).
 
-Se suben **dos** archivos a `scripts/` (el `.sql` es de lectura, como el script):
-
-```bash
-gcloud storage cp layers/ops_tools/scripts/l3_derived_check.py \
-  gs://<proyecto>-ops/scripts/l3_derived_check.py
-gcloud storage cp shared/dc_views/src/dc_views/derived.sql \
-  gs://<proyecto>-ops/scripts/derived.sql
-```
-
-Si cambias `derived.sql`, vuelve a subirlo: la sonda usa la copia de `scripts/`, no la del repo.
+Hacen falta **dos** archivos en `scripts/` (el `.sql` es de lectura, como el script). El apply del
+stack `ops` publica los dos; verifica con `gcloud storage ls gs://<proyecto>-ops/scripts/`.
+Si cambias `derived.sql`, el siguiente apply de `ops` lo actualiza (un cambio en esa ruta dispara el
+Deploy): la sonda usa la copia de `scripts/`, no la del repo.
 
 | `args` | Efecto |
 | --- | --- |
@@ -1261,10 +1253,8 @@ real lo midió en 33,5 h y lo cierra un tick del 2018-02-09 10:00 UTC (tabla de 
 **No importa ninguna capa** (una importación cambiaría `uv.lock`) y abre el archivo por su
 ruta completa, por la [trampa del 403](#la-trampa-del-403-por-prefijo).
 
-```bash
-gcloud storage cp layers/ops_tools/scripts/l3_gap_probe.py \
-  gs://<proyecto>-ops/scripts/l3_gap_probe.py
-```
+El apply del stack `ops` lo publica en `scripts/`; verifica con
+`gcloud storage ls gs://<proyecto>-ops/scripts/l3_gap_probe.py`.
 
 | `args` | Efecto |
 | --- | --- |
@@ -1328,10 +1318,8 @@ los metadatos de `path.parquet`, leídos con PyArrow. **No importa ninguna capa*
 cambiaría `uv.lock`). A diferencia de `l3_derived_check.py`, no necesita un `.sql` ni `events.parquet`
 de L2: todo lo que cruza sale de `summaries.parquet`.
 
-```bash
-gcloud storage cp layers/ops_tools/scripts/l3_path_check.py \
-  gs://<proyecto>-ops/scripts/l3_path_check.py
-```
+El apply del stack `ops` lo publica en `scripts/`; verifica con
+`gcloud storage ls gs://<proyecto>-ops/scripts/l3_path_check.py`.
 
 | `args` | Efecto |
 | --- | --- |
@@ -1412,10 +1400,8 @@ registros sobre 20 puentes brownianos simulados por evento. Si `c_accel` observa
 que el de un puente, la forma de la trayectoria no dice nada que `c_realized_var` y el tiempo no digan, y
 la familia se retira. **No importa ninguna capa** (una importación cambiaría `uv.lock`).
 
-```bash
-gcloud storage cp layers/ops_tools/scripts/l3_fit_bridge_probe.py \
-  gs://<proyecto>-ops/scripts/l3_fit_bridge_probe.py
-```
+El apply del stack `ops` lo publica en `scripts/`; verifica con
+`gcloud storage ls gs://<proyecto>-ops/scripts/l3_fit_bridge_probe.py`.
 
 | `args` | Efecto |
 | --- | --- |
@@ -1501,10 +1487,8 @@ cambiaría `uv.lock`). Necesita `events.parquet` porque la regla de nulos de A d
 cierre de cada fase, que son datos de L2 (`reference_time`, `confirm_time`, `extreme_time` y los tres
 precios).
 
-```bash
-gcloud storage cp layers/ops_tools/scripts/l3_fit_check.py \
-  gs://<proyecto>-ops/scripts/l3_fit_check.py
-```
+El apply del stack `ops` lo publica en `scripts/`; verifica con
+`gcloud storage ls gs://<proyecto>-ops/scripts/l3_fit_check.py`.
 
 | `args` | Efecto |
 | --- | --- |
