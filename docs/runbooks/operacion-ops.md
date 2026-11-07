@@ -284,10 +284,10 @@ entradas.
 
   | Medición | `args` |
   | --- | --- |
-  | Un θ (`θ_min`, uno intermedio y `θ_max`: tres runs) | `--theta 0.00100000 --from 2023-03` |
+  | Un θ (`θ_min`, uno intermedio y `θ_max`: tres runs) | `--theta 0.00098052 --from 2023-03` |
   | Los 50 θ en una pasada (modo chunks, el de L3) | `--theta all --from 2023-03` |
   | Los 50 θ en modo evento, con presupuesto | `--theta all --from 2023-03 --modo evento` |
-  | Un θ en modo evento con otro presupuesto | `--theta 0.00100000 --from 2023-03 --modo evento --max-event-ticks 50000000` |
+  | Un θ en modo evento con otro presupuesto | `--theta 0.00098052 --from 2023-03 --modo evento --max-event-ticks 50000000` |
 
   Banderas de ITSC-362 (el lector con `pre_buffer` y `readers`):
 

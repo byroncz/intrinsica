@@ -395,7 +395,7 @@ originales (`test_ops_script_originals.py`) contra el lago de fixtures.
 
   ```text
   script = gs://intrinsica-dc-ops/scripts/viz_check_day.py
-  args   = --theta 0.01 --day 2026-09-30 --window 12:30-13:00 --w 1024
+  args   = --theta 0.00098052 --day 2026-09-30 --window 12:30-13:00 --w 1024
   ```
 
   Un valor mayor que 0 en `barra ≥ θ contra el estado` es un defecto real; las

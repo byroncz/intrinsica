@@ -65,7 +65,7 @@ errores del lector, y porque `pyutils` no sabe nada de L3.
 ```python
 from dc_frames import read_frames
 
-for event in read_frames("0.00100000", l1_root, l2_root, (2023, 3), (2023, 3)):
+for event in read_frames("0.00098052", l1_root, l2_root, (2023, 3), (2023, 3)):
     prices = event.confirmation.price  # pa.Array decimal128(18, 8)
 ```
 
@@ -315,8 +315,8 @@ group.
 from dc_frames import FamilyWriter, family_path, l2_path
 
 key = ("binance", "spot", "BTCUSDT")
-events = l2_path(l2_root, key, "0.00100000", (2023, 3))
-summaries = family_path(l3_root, key, "0.00100000", (2023, 3), "summaries")
+events = l2_path(l2_root, key, "0.00098052", (2023, 3))
+summaries = family_path(l3_root, key, "0.00098052", (2023, 3), "summaries")
 
 with FamilyWriter(summaries, SCHEMA, "1.0.0", events) as writer:
     print(writer.row_groups)  # filas de cada row group que se espera

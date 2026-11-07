@@ -7,7 +7,7 @@ segundo y, por θ, eventos y ticks por fase. Al final compara con los umbrales y
 1 si alguno no se cumple o si el lector falla.
 
 Args:
-  --theta 0.00100000 | a,b,c | all   (obligatorio; `all` toma los θ que tienen L2 en
+  --theta 0.00098052 | a,b,c | all   (obligatorio; `all` toma los θ que tienen L2 en
                                       todo el rango)
   --from YYYY-MM --to YYYY-MM        (meses de L2, inclusivos; `--to` por defecto = `--from`)
   --l1-root gs://<proyecto>-landing/l1    (por defecto, los del proyecto según
