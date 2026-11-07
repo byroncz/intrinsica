@@ -754,9 +754,11 @@ Orden de apply, todo por el humano:
    Actions"): crea el bucket y da a `deploy-github` `bucketIamAdmin` sobre él.
    Desde ITSC-406 también le da `objectAdmin` sobre `scripts/` (`deploy_ops_scripts`): **`data`
    va antes que `ops`**, porque sin ese rol el apply de `ops` falla con 403 al subir los objetos.
-   Sin este apply, el plan de `ops` falla: el output `buckets` de `data` aún
-   no trae `ops`. Por eso el check `stack (ops)` del PR está en rojo hasta
-   entonces, y es esperado. Aplica `data` con el checkout de la rama del PR,
+   Sin el apply que crea el bucket `ops`, el plan de `ops` falla: el output `buckets` de `data` aún
+   no trae `ops`. Por eso el check `stack (ops)` del PR de la creación inicial estuvo en rojo
+   hasta entonces, y era esperado. Ojo: con el bucket ya creado, el plan de `ops` sale en verde
+   aunque falte `deploy_ops_scripts` (planear objetos nuevos no llama a GCS), así que solo el
+   apply da el 403. Aplicar `data` primero es una regla que el plan no comprueba. Aplica `data` con el checkout de la rama del PR,
    antes de aprobar (`main` aún no tiene el bucket `ops`); luego re-ejecuta
    `stack (ops)`. Su plan (la service account, ocho bindings y el job) es la
    evidencia de que `ops` crea solo eso.
