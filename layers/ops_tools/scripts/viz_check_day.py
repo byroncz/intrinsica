@@ -8,7 +8,7 @@ estado, (4) resumen del día: columnas cuya forma contradice el color y por qué
 y (0) invariantes de L2 sobre todos los eventos del mes.
 Solo usa la librería estándar y pyarrow (la imagen ops-script no trae numpy).
 
-Uso (ops-script): --theta 0.01 --day 2026-09-30 --window 12:30-13:00 --w 1024
+Uso (ops-script): --theta 0.00098052 --day 2026-09-30 --window 12:30-13:00 --w 1024
 """
 import argparse
 import datetime as dt
@@ -35,7 +35,7 @@ def hms(us, day0):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--project", default="intrinsica-dc")
-    ap.add_argument("--theta", required=True, help="p. ej. 0.01")
+    ap.add_argument("--theta", required=True, help="p. ej. 0.00098052")
     ap.add_argument("--day", default="2026-09-30")
     ap.add_argument("--window", default="12:30-13:00")
     ap.add_argument("--w", type=int, default=1024, help="columnas del nivel (128..4096)")
