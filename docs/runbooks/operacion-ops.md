@@ -23,8 +23,9 @@ No es una capa de datos: no escribe en el lago y no tiene scheduler.
    gcloud storage ls gs://<proyecto>-ops/scripts/
    ```
 
-   Un cambio en `docs/runbooks/ops-scripts/` o en `derived.sql` también dispara ese
-   Deploy (los de `layers/ops_tools/scripts/` ya lo hacen al subir `ops_tools/VERSION`).
+   Un cambio en `docs/runbooks/ops-scripts/` también dispara ese Deploy (los de
+   `layers/ops_tools/scripts/` ya lo hacen al subir `ops_tools/VERSION`; `derived.sql`, bajo
+   `shared/`, sube la `VERSION` de todas las capas y también lo dispara).
    Si el script que necesitas no aparece, el apply aún no corrió: apruébalo en
    *Actions → Terraform* antes de lanzar.
 

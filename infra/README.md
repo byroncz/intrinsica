@@ -740,9 +740,11 @@ scripts de partida están en el
   muestra un cambio cuando cambia el archivo. El escritor es `deploy-github`, no el job:
   `roles/storage.objectAdmin` en `data` (`deploy_ops_scripts`) con una condición IAM que lo
   limita al prefijo `scripts/` (no toca `results/` ni otro bucket); `ops-script` conserva solo
-  lectura. Un cambio en `docs/runbooks/ops-scripts/` o en `derived.sql` no sube ninguna
-  `VERSION`, así que `terraform.yml` también selecciona `ops` por esas rutas; los de
-  `layers/ops_tools/scripts/` ya lo hacen al subir `ops_tools/VERSION`. Borrar un script del repo
+  lectura. Un cambio en `docs/runbooks/ops-scripts/` no sube ninguna
+  `VERSION`, así que `terraform.yml` también selecciona `ops` por esa ruta; los de
+  `layers/ops_tools/scripts/` ya lo hacen al subir `ops_tools/VERSION`. `derived.sql` vive bajo
+  `shared/`: cambiarlo ya obliga a subir la `VERSION` de todas las capas (`ops_tools` incluida),
+  y `terraform.yml` lo mantiene como disparador extra por seguridad. Borrar un script del repo
   borra su objeto en el siguiente apply (el versionado conserva la generación 90 días). Un objeto
   que no está en el repo (un script desechable subido a mano) no lo gestiona Terraform y no se toca.
 
