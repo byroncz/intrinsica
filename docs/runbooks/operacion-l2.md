@@ -281,9 +281,8 @@ Los meses publicados antes de la 0.11.0 no lo tienen. Se cubren una vez con
 ([runbook](operacion-ops.md)), **antes del apply de L3** ([Cambios requeridos de
 L3](operacion-l3.md#cambios-requeridos)):
 
-1. Tras el apply de `ops` (que da el permiso de crear `content_hash.json`), sube el
-   script: `gcloud storage cp layers/ops_tools/scripts/l2_backfill_lineage.py
-   gs://<proyecto>-ops/scripts/`.
+1. Tras el apply de `ops` (que da el permiso de crear `content_hash.json` y publica el
+   script), verifica con `gcloud storage ls gs://<proyecto>-ops/scripts/l2_backfill_lineage.py`.
 2. Lánzalo primero en seco: *Run job*, `job` = `ops-script`, `script` =
    `gs://<proyecto>-ops/scripts/l2_backfill_lineage.py`, `args` = `--dry-run`.
    Verifica la muestra y cuenta, sin escribir.

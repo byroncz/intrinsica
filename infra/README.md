@@ -730,11 +730,28 @@ scripts de partida están en el
   (`layers/ops_tools/`, versión en su `VERSION`).
 - `deploy-github` recibe `bucketIamAdmin` sobre el bucket `ops`, como sobre
   los demás, para fijar el IAM por prefijo.
+- **Publicación de los scripts (ITSC-406).** El apply de `ops` crea un
+  `google_storage_bucket_object` por archivo de `layers/ops_tools/scripts/*.py`,
+  `docs/runbooks/ops-scripts/*.py` y `shared/dc_views/src/dc_views/derived.sql`, bajo
+  `scripts/<nombre>` del bucket `ops` (el nombre es el que pide `script` en `run-job.yml`). Así
+  `scripts/` queda igual que `main` y se acabó el `gcloud storage cp` a mano tras cada merge.
+  Usa `content = file(...)`: el provider de Google no tiene `source_hash` y su `detect_md5hash`
+  espera MD5 en base64 (`filemd5` da hex y dejaría un diff en cada plan), así que el plan solo
+  muestra un cambio cuando cambia el archivo. El escritor es `deploy-github`, no el job:
+  `roles/storage.objectAdmin` en `data` (`deploy_ops_scripts`) con una condición IAM que lo
+  limita al prefijo `scripts/` (no toca `results/` ni otro bucket); `ops-script` conserva solo
+  lectura. Un cambio en `docs/runbooks/ops-scripts/` o en `derived.sql` no sube ninguna
+  `VERSION`, así que `terraform.yml` también selecciona `ops` por esas rutas; los de
+  `layers/ops_tools/scripts/` ya lo hacen al subir `ops_tools/VERSION`. Borrar un script del repo
+  borra su objeto en el siguiente apply (el versionado conserva la generación 90 días). Un objeto
+  que no está en el repo (un script desechable subido a mano) no lo gestiona Terraform y no se toca.
 
 Orden de apply, todo por el humano:
 
 1. `data` desde Cloud Shell (ver "Habilitar el despliegue desde GitHub
    Actions"): crea el bucket y da a `deploy-github` `bucketIamAdmin` sobre él.
+   Desde ITSC-406 también le da `objectAdmin` sobre `scripts/` (`deploy_ops_scripts`): **`data`
+   va antes que `ops`**, porque sin ese rol el apply de `ops` falla con 403 al subir los objetos.
    Sin este apply, el plan de `ops` falla: el output `buckets` de `data` aún
    no trae `ops`. Por eso el check `stack (ops)` del PR está en rojo hasta
    entonces, y es esperado. Aplica `data` con el checkout de la rama del PR,
@@ -745,8 +762,12 @@ Orden de apply, todo por el humano:
    `layers/ops_tools/VERSION`), el run *Terraform* deja el `apply` de `ops`
    esperando; no se aprueba antes porque el apply falla si el tag aún no existe.
 3. Aprobar en *Review deployments*. El plan debe mostrar solo la service
-   account, sus bindings (siete de lectura y uno de escritura) y el job.
-4. Correr la prueba de permisos del runbook (`permisos.py`).
+   account, sus bindings (siete de lectura y uno de escritura) y el job. Desde
+   ITSC-406 también muestra un objeto por script de `scripts/`; el primer apply sube los 15 de
+   `ops_tools`, los 4 de `docs/runbooks/ops-scripts/` y `derived.sql`, y los ya existentes
+   quedan con el mismo contenido y una generación nueva.
+4. Verificar con `gcloud storage ls gs://<proyecto>-ops/scripts/` y correr la prueba de permisos del
+   runbook (`permisos.py`).
 
 Un cambio de código de `ops_tools` sube su `VERSION` y se despliega como
 cualquier capa (ver "Desplegar un cambio de capa").

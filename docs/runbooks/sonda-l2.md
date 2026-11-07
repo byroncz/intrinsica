@@ -678,11 +678,8 @@ conteos son exactos.
 
 1. Sube el script desde Cloud Shell, con el checkout al día:
 
-   ```bash
-   git pull
-   gcloud storage cp layers/ops_tools/scripts/l2_event_durations.py \
-     gs://<proyecto>-ops/scripts/l2_event_durations.py
-   ```
+   El apply del stack `ops` lo publica; verifica con
+   `gcloud storage ls gs://<proyecto>-ops/scripts/l2_event_durations.py`.
 
 2. Lanza *Actions → Run job* (rama `main`) con `job` = `ops-script`:
 

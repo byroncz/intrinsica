@@ -13,16 +13,23 @@ No es una capa de datos: no escribe en el lago y no tiene scheduler.
 
 ## Los tres pasos
 
-1. **Sube el script** desde Cloud Shell. Los scripts de este runbook están en el
-   repo (`docs/runbooks/ops-scripts/`); con el checkout al día:
+1. **Los scripts del repo ya están en el bucket.** El apply del stack `ops` publica en
+   `gs://<proyecto>-ops/scripts/` cada archivo de `layers/ops_tools/scripts/`
+   (`*.py`), de `docs/runbooks/ops-scripts/` (`*.py`) y `derived.sql` de
+   `shared/dc_views/src/dc_views/`, con el nombre del archivo. Tras un merge que los
+   cambia, el Deploy de `ops` los deja iguales a `main`; verifica con:
 
    ```bash
-   git pull
-   gcloud storage cp docs/runbooks/ops-scripts/seam_l2.py \
-     gs://<proyecto>-ops/scripts/seam_l2.py
+   gcloud storage ls gs://<proyecto>-ops/scripts/
    ```
 
-   Para uno nuevo, sin repo de por medio:
+   Un cambio en `docs/runbooks/ops-scripts/` o en `derived.sql` también dispara ese
+   Deploy (los de `layers/ops_tools/scripts/` ya lo hacen al subir `ops_tools/VERSION`).
+   Si el script que necesitas no aparece, el apply aún no corrió: apruébalo en
+   *Actions → Terraform* antes de lanzar.
+
+   **Única subida manual**: un script que no vive en el repo (uno desechable). Desde
+   Cloud Shell:
 
    ```bash
    cat > mi_script.py <<'EOF'
@@ -31,8 +38,8 @@ No es una capa de datos: no escribe en el lago y no tiene scheduler.
    gcloud storage cp mi_script.py gs://<proyecto>-ops/scripts/mi_script.py
    ```
 
-   La ruta es fija y se sobrescribe: subir de nuevo el mismo nombre reemplaza al
-   anterior (el bucket conserva las versiones, ver "Trazabilidad").
+   Ese objeto no lo gestiona Terraform y no lo toca el apply. Si ya vive en el repo,
+   no lo subas a mano: el siguiente apply de `ops` lo sobrescribe.
 
 2. **Lánzalo.** *Actions → Run job* (rama `main`):
 
@@ -128,6 +135,10 @@ y `roles/storage.objectCreator` (solo crear) en `results/`. Sin roles de IAM, si
 | `<proyecto>-ops` | `scripts/` | lectura |
 | `<proyecto>-ops` | `results/` | solo crear objetos nuevos |
 
+El escritor de `scripts/` no es esta service account sino `deploy-github`: `roles/storage.objectAdmin`
+con condición IAM al prefijo `scripts/` del bucket (stack `data`, `deploy.tf`), para que el apply
+de `ops` publique los scripts del repo (ITSC-406). El job solo lee ahí.
+
 La única escritura permitida en el lago es crear `content_hash.json` bajo `l2/` de
 `dc-events` (`objectCreator` con condición por nombre: no pisa ni borra, y un
 Parquet o un `content_hash.json` ya publicado da 403). Cualquier otra escritura (el
@@ -144,11 +155,8 @@ landing, dc-events y `tiles/` de viz, puede crear en `results/`, y recibe 403 al
 pisar un objeto de `results/`, escribir en `scripts/` o en cualquiera de los cinco
 buckets del lago (landing, dc-events, dq-findings, manifest y viz).
 
-```bash
-gcloud storage cp docs/runbooks/ops-scripts/permisos.py gs://<proyecto>-ops/scripts/permisos.py
-```
-
-Lánzalo con `script` = ese URI y sin `args`. Esperas la línea final
+`permisos.py` ya está en `scripts/` (lo publica el apply de `ops`; verifica con
+`gcloud storage ls gs://<proyecto>-ops/scripts/permisos.py`). Lánzalo con `script` = ese URI y sin `args`. Esperas la línea final
 `permisos: 13 de 13 como se esperaba` y el código de salida 0. Una línea `FALLO`
 dice qué permiso no es el esperado; si una escritura que debía dar 403 tuvo
 éxito, el script deja un objeto `ops-permisos-*` en ese bucket: bórralo y
@@ -171,9 +179,10 @@ Si un script necesita más, no es ad hoc: es código de una capa, con su sonda.
 
 ## Trazabilidad sin git
 
-El script se sube a una ruta fija y se sobrescribe; lo que fija qué corrió es:
+El script vive en una ruta fija y se sobrescribe (el apply de `ops` lo publica desde `main`);
+lo que fija qué corrió es:
 
-- El bucket tiene **versionado**: cada subida es una *generation* nueva y las
+- El bucket tiene **versionado**: cada publicación es una *generation* nueva y las
   versiones no vigentes de `scripts/` se conservan 90 días. La vigente no vence.
 - El job imprime URI, generation, SHA-256 y el contenido completo antes de
   ejecutar, y el resumen los repite. Descarga el objeto atado a esa generation:
@@ -270,8 +279,8 @@ Dos scripts de `layers/ops_tools/scripts/` que miden el criterio de aceptación 
 lector `shared/dc_frames` ([TRD-L3 §10.3, ADR-L3-09](../TRD/l3.md)). La imagen trae
 `dc_frames` desde `ops_tools` 0.2.0 y su modo por chunks (`chunks=True`,
 `max_event_ticks`) desde la 0.3.0: sin esa versión desplegada, el `import` o la sonda fallan.
-Súbelos como cualquier script (`gcloud storage cp layers/ops_tools/scripts/<script>.py
-gs://<proyecto>-ops/scripts/`) y lánzalos con `job` = `ops-script`. Ambos solo leen, toman
+El apply de `ops` los publica en `scripts/` (verifica con `gcloud storage ls
+gs://<proyecto>-ops/scripts/`); lánzalos con `job` = `ops-script`. Ambos solo leen, toman
 las raíces de L1 y L2 del proyecto desde `OPS_RESULTS_URI` y listan los θ de L2 de forma
 recursiva por `events.parquet`, porque en GCS los directorios `theta=` no existen como
 entradas.
@@ -371,11 +380,17 @@ Orden, todo por el humano (detalle en
 [infra/README.md](../../infra/README.md#stack-ops-scripts-de-operación)):
 
 1. Aplicar `data` desde Cloud Shell: crea el bucket `<proyecto>-ops` y da a
-   `deploy-github` el permiso de IAM sobre él. Hazlo con el checkout de la
+   `deploy-github` el permiso de IAM sobre él. Desde ITSC-406 también le da
+   `roles/storage.objectAdmin` sobre `scripts/` de ese bucket (`deploy_ops_scripts`). Hazlo con el checkout de la
    rama del PR, antes de aprobar: hasta entonces el check `stack (ops)` está en
    rojo (el plan no encuentra el bucket `ops` en el estado de `data`). Tras el
    apply, re-ejecuta `stack (ops)`; su plan es la evidencia de lo que `ops`
    crea.
 2. Esperar a que el run de CI en `main` publique `ops_tools:<versión>`.
-3. *Actions → Terraform* → `ops` → `apply`.
-4. Subir los scripts y lanzar la prueba de extremo a extremo.
+3. *Actions → Terraform* → `ops` → `apply`. **Va después de `data`**: sin el rol
+   `deploy_ops_scripts`, el apply de `ops` falla con 403 al subir los objetos de `scripts/`. El primer
+   apply sube todos los scripts del repo (los de `ops_tools`, los de `docs/runbooks/ops-scripts/` y
+   `derived.sql`); los que ya estaban con el mismo contenido quedan iguales en contenido, pero cada
+   objeto gana una generación nueva (las anteriores se conservan 90 días).
+4. Comprobar los scripts con `gcloud storage ls gs://<proyecto>-ops/scripts/` (el apply del paso 3 los
+   publica; ya no se suben a mano) y lanzar la prueba de extremo a extremo.

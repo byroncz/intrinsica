@@ -458,15 +458,9 @@ mkdir dia && gcloud storage cp \
 **Copia a GCS.** Los scripts que corren como `ops-script` viven en
 `gs://intrinsica-dc-ops/scripts/` (el bucket tiene versionado, ver
 [operacion-ops](operacion-ops.md#trazabilidad-sin-git)); el repo es la fuente y el
-bucket, la copia que el job lee. Tras cambiarlos en una card (o la primera vez, para
-los dos de `tiles/`):
-
-```bash
-gcloud storage cp layers/ops_tools/scripts/viz_check_day.py gs://intrinsica-dc-ops/scripts/viz_check_day.py
-gcloud storage cp layers/ops_tools/scripts/viz_probe_ticks.py gs://intrinsica-dc-ops/scripts/viz_probe_ticks.py
-gcloud storage cp layers/ops_tools/scripts/viz_check_page.py gs://intrinsica-dc-ops/scripts/viz_check_page.py
-gcloud storage cp layers/ops_tools/scripts/viz_probe_page.py gs://intrinsica-dc-ops/scripts/viz_probe_page.py
-```
+bucket, la copia que el job lee. El apply del stack `ops` los publica tras cada merge que
+sube `ops_tools/VERSION`; verifica con
+`gcloud storage ls gs://intrinsica-dc-ops/scripts/`.
 
 ## Proyección del histórico
 

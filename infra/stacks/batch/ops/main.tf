@@ -28,6 +28,29 @@ locals {
     (local.buckets["viz"])            = { role = "roles/storage.objectViewer", prefixes = ["tiles/"] }
     (local.ops)                       = { role = "roles/storage.objectViewer", prefixes = ["scripts/"] }
   }
+
+  # Los scripts que corre ops-script, publicados desde el repo (ITSC-406): el apply de este
+  # stack deja scripts/ igual que main. La clave es el nombre del archivo, el mismo que pide
+  # `script` en run-job.yml (gs://<proyecto>-ops/scripts/<nombre>). Tres orígenes: las sondas
+  # de ops_tools, los scripts de los runbooks y el SQL de L3 que lee la sonda derivada.
+  repo_root = "${path.module}/../../../.."
+  script_sources = [
+    { dir = "layers/ops_tools/scripts", pattern = "*.py", type = "text/x-python" },
+    { dir = "docs/runbooks/ops-scripts", pattern = "*.py", type = "text/x-python" },
+    { dir = "shared/dc_views/src/dc_views", pattern = "derived.sql", type = "application/sql" },
+  ]
+  script_entries = flatten([
+    for src in local.script_sources : [
+      for f in fileset("${local.repo_root}/${src.dir}", src.pattern) : {
+        name = f
+        path = "${local.repo_root}/${src.dir}/${f}"
+        type = src.type
+      }
+    ]
+  ])
+  # Dos orígenes con el mismo nombre hacen fallar el plan (clave duplicada en el objeto) en
+  # vez de dejar que uno pise al otro en silencio.
+  scripts = { for e in local.script_entries : e.name => e }
 }
 
 provider "google" {
@@ -100,4 +123,20 @@ resource "google_storage_bucket_iam_member" "lineage_creator" {
     description = "Creación de content_hash.json solo bajo l2/ (backfill del linaje, ITSC-368)"
     expression  = "resource.name.startsWith(\"projects/_/buckets/${local.buckets["dc-events"]}/objects/l2/\") && resource.name.endsWith(\"/content_hash.json\")"
   }
+}
+
+# Publica los scripts de ops-script (ITSC-406). El escritor es deploy-github, con
+# objectAdmin acotado a scripts/ en el stack data (deploy.tf); el job ops-script solo lee.
+# `content` y no `source` + hash: el provider de Google no tiene source_hash, y su
+# detect_md5hash espera MD5 en base64 (filemd5 devuelve hex, daría un diff en cada plan). Con
+# `content` el plan solo muestra un cambio cuando cambia el archivo. Borrar un script del
+# repo borra su objeto en el próximo apply (el versionado del bucket conserva la generación
+# anterior 90 días).
+resource "google_storage_bucket_object" "script" {
+  for_each = local.scripts
+
+  bucket       = local.ops
+  name         = "scripts/${each.key}"
+  content      = file(each.value.path)
+  content_type = each.value.type
 }

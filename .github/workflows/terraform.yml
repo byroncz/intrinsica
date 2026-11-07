@@ -22,6 +22,8 @@ on:
     paths:
       - "infra/**"
       - "layers/*/VERSION" # el stack de la capa deriva el tag de la imagen de este archivo
+      - "docs/runbooks/ops-scripts/**" # el stack ops publica estos scripts en el bucket ops (ITSC-406)
+      - "shared/dc_views/src/dc_views/derived.sql" # ídem: lo lee la sonda derivada
       - ".github/workflows/terraform.yml"
       - ".github/workflows/_terraform-stack.yml"
   workflow_run:
@@ -94,8 +96,12 @@ jobs:
             selected="$layers"
           else
             # layers/<capa>/VERSION -> stack <capa> sin el sufijo (l1_ingest -> l1)
+            # Los scripts de docs/runbooks/ops-scripts/ y derived.sql no suben ninguna VERSION
+            # y el stack ops los publica en el bucket ops (ITSC-406): cambiarlos selecciona ops.
+            # Los de layers/ops_tools/scripts/ ya entran por ops_tools/VERSION.
             stacks="$( { grep -E '^infra/stacks/batch/[^/]+/' <<< "$changed" | cut -d/ -f4; \
-              grep -E '^layers/[^/]+/VERSION$' <<< "$changed" | cut -d/ -f2 | cut -d_ -f1; } | sort -u)"
+              grep -E '^layers/[^/]+/VERSION$' <<< "$changed" | cut -d/ -f2 | cut -d_ -f1; \
+              grep -qE '^(docs/runbooks/ops-scripts/|shared/dc_views/src/dc_views/derived\.sql$)' <<< "$changed" && echo ops; } | sort -u)"
             selected="$(grep -Fxf <(echo "$layers") <<< "$stacks" || true)"
           fi
           matrix="$(jq -Rsc 'split("\n") | map(select(. != ""))' <<< "$selected")"
