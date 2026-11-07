@@ -332,7 +332,7 @@ bordes se comparan contra el último evento de **cualquier** mes anterior, así
 que un mes sin eventos no oculta una costura rota. Desde Cloud Shell, con
 pyarrow instalado. Con la landing completa son ~5.400 bordes y tarda ~13 min:
 una sesión de Cloud Shell no es fiable para eso. El mismo chequeo está en
-[`ops-scripts/seam_l2.py`](ops-scripts/seam_l2.py): súbelo y lánzalo con el job
+[`ops-scripts/seam_l2.py`](ops-scripts/seam_l2.py): lo publica el apply de `ops`; lánzalo con el job
 `ops-script` ([runbook](operacion-ops.md)), que sigue sin ti y deja la salida en
 el resumen del run. Así se ejecutó la primera vez.
 

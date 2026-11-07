@@ -1,6 +1,6 @@
 # Runbook: operación ad hoc con el job `ops-script`
 
-`ops-script` corre un script Python que tú subes a GCS, dentro de Cloud Run y
+`ops-script` corre un script Python que está en GCS (el apply de `ops` publica los del repo; solo subes a mano los que no viven en él), dentro de Cloud Run y
 cerca del lago, lanzado y monitoreado desde *Actions → Run job*. Reemplaza las
 verificaciones que antes se corrían en Cloud Shell (escaneo de pies Parquet,
 seam-check, comparación de hashes): allí la sesión se cae, la VM se apaga si te

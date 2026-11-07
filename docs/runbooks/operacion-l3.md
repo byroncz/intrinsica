@@ -48,9 +48,9 @@ dispara y aprueba el humano:
    `ops-script` el permiso de **crear** `content_hash.json` bajo `l2/` de
    `dc-events` (nada más: no pisa ni borra); el de `l2`, la imagen que lo escribe
    en los meses nuevos.
-3. **Backfill del linaje** con `ops-script`: sube y lanza
+3. **Backfill del linaje** con `ops-script`: lanza
    [`l2_backfill_lineage.py`](operacion-l2.md#linaje-publicado-y-su-backfill-itsc-368)
-   (la guía paso a paso está en el runbook de L2). Antes, con `--dry-run`, mira que
+   (el apply de `ops` ya lo publicó en `scripts/`; la guía paso a paso está en el runbook de L2). Antes, con `--dry-run`, mira que
    no haya discrepancias. La última línea dice cuántas particiones escribió y cuántas ya existían: su suma
    debe ser la de L2 (50 θ por cada mes publicado), sin discrepancias, errores ni
    particiones incompletas.
