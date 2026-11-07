@@ -230,3 +230,20 @@ resource "google_storage_bucket_iam_member" "deploy_thetas_seed" {
     expression  = "resource.name == \"projects/_/buckets/${google_storage_bucket.manifest.name}/objects/l2/thetas.yaml\""
   }
 }
+
+# Publicar los scripts de ops-script (stack ops, ITSC-406): crear, pisar y borrar objetos
+# bajo scripts/ del bucket ops. El job ops-script solo lee ahí; el escritor es esta
+# identidad. La condición deja fuera results/ (donde escribe el job) y cualquier otro
+# prefijo del bucket. Se aplica antes que el stack ops: sin este rol, subir los objetos
+# falla con 403.
+resource "google_storage_bucket_iam_member" "deploy_ops_scripts" {
+  bucket = google_storage_bucket.ops.name
+  role   = "roles/storage.objectAdmin"
+  member = local.deploy_member
+
+  condition {
+    title       = "deploy-ops-scripts"
+    description = "deploy-github publica los scripts de ops-script solo bajo scripts/"
+    expression  = "resource.name.startsWith(\"projects/_/buckets/${google_storage_bucket.ops.name}/objects/scripts/\")"
+  }
+}

@@ -676,13 +676,10 @@ lector). Solo lee `events.parquet` de L2, un archivo a la vez; no escribe en el
 lago. Mediana y p99 son aproximados (error relativo <= 0,25 %); máximos y
 conteos son exactos.
 
-1. Sube el script desde Cloud Shell, con el checkout al día:
+1. Comprueba que el script está publicado:
 
-   ```bash
-   git pull
-   gcloud storage cp layers/ops_tools/scripts/l2_event_durations.py \
-     gs://<proyecto>-ops/scripts/l2_event_durations.py
-   ```
+   El apply del stack `ops` lo publica; verifica con
+   `gcloud storage ls gs://<proyecto>-ops/scripts/l2_event_durations.py`.
 
 2. Lanza *Actions → Run job* (rama `main`) con `job` = `ops-script`:
 
@@ -728,8 +725,8 @@ Los conteos son exactos, no salen del histograma de mediana y p99 (sus bins de
 tamaños que ya están en memoria y se sueltan con él. No hay segunda pasada ni
 eventos retenidos; el pico de memoria no cambia. Un evento que mide exactamente
 el umbral cuenta (`>=`). Pega las cinco líneas de umbral y la tabla en la card
-ITSC-339. Hay que volver a subir el script a `gs://<proyecto>-ops/scripts/`
-(paso 1) antes de lanzar.
+ITSC-339. El script nuevo llega a `gs://<proyecto>-ops/scripts/` con el apply de
+`ops` tras el merge (paso 1); verifica que está antes de lanzar.
 
 En local: `uv run layers/ops_tools/scripts/l2_event_durations.py --events-root
 <raíz L2 hive> --out /tmp/o.csv`. Sale con 1 si no hay eventos, y con `FALLO` si
