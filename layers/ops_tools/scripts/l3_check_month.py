@@ -17,7 +17,7 @@ limbos de 22 bits para que ningún producto ni suma desborde `int64`.
 
 Args:
   --month YYYY-MM                    (obligatorio; la partición de L2 y de L3)
-  --thetas 0.00100000,0.00250000 | all   (por defecto, el catálogo de `--catalog`; `all` toma
+  --thetas 0.00098052,0.00250000 | all   (por defecto, el catálogo de `--catalog`; `all` toma
                                       los θ que tienen `summaries.parquet` del mes en L3)
   --catalog gs://<proyecto>-manifest/l2/thetas.yaml   (el catálogo único de θ; también local)
   --l1-root gs://<proyecto>-landing/l1          (por defecto, los del proyecto según
