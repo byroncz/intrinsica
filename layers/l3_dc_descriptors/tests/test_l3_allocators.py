@@ -2,8 +2,10 @@
 (ITSC-366, ITSC-367); `unit_timing` lo registra (prueba en test_l3_timing).
 """
 
+import itertools
 import logging
 import os
+import threading
 import time
 
 import pytest
@@ -226,25 +228,47 @@ def test_a_sample_survives_an_engine_that_already_closed():
     assert memory.take_sample(time.perf_counter(), closed).engine_inflight is None
 
 
-def test_the_sampler_keeps_the_sample_of_the_highest_rss_and_stops_with_the_unit():
-    import pyarrow as pa
+def test_the_sampler_keeps_the_sample_of_the_highest_rss_and_stops_with_the_unit(
+    monkeypatch,
+):
+    """El RSS lo dicta un guion, no el reloj ni el estado del proceso (ITSC-408).
 
-    sampler = memory.MemorySampler(0.01)
-    sampler.inflight = lambda: 7
+    Con el RSS real, un proceso que ya retiene memoria de otras pruebas no sube por encima
+    de la primera muestra al reservar búferes, y el pico queda donde cayó el primer tick.
+    Aquí cada tick lee el siguiente valor del guion: el máximo está en el segundo, y los dos
+    siguientes lo igualan o lo bajan. Cada muestra completa se reconoce por el valor que
+    devuelve `inflight`, que cuenta cuántas se tomaron.
+    """
+    mib = 1 << 20
+    script = [100 * mib, 300 * mib, 200 * mib, 300 * mib, 50 * mib]
+    reads = iter(script)
+    consumed = threading.Event()
+
+    def scripted_rss() -> int:
+        try:
+            return next(reads)
+        except StopIteration:
+            consumed.set()
+            return 50 * mib
+
+    full_samples = itertools.count(1)
+    monkeypatch.setattr(memory, "rss_bytes", scripted_rss)
+    sampler = memory.MemorySampler(0.001, trim_rss_mib=0)
+    sampler.inflight = lambda: next(full_samples)
     sampler.start()
-    held = [pa.allocate_buffer(32 << 20) for _ in range(4)]
-    for buffer in held:  # toca las páginas para que cuenten en el RSS
-        buffer.to_pybytes()
-    time.sleep(0.15)
+    # Sin plazo asertado: el Event espera al guion, y el timeout solo evita colgar el CI.
+    assert consumed.wait(timeout=30), "el muestreador no leyó todo el guion"
     sampler.stop()
-    ticks = sampler.ticks
+
     assert not sampler._thread.is_alive()
-    assert ticks >= 2
-    assert sampler.peak is not None and sampler.peak.engine_inflight == 7
-    assert sampler.peak.arrow >= 4 * (32 << 20)
-    time.sleep(0.05)
-    assert sampler.ticks == ticks  # parado: no sigue muestreando
-    del held
+    ticks = sampler.ticks
+    assert ticks > len(script)  # leyó todo el guion y siguió un tick más
+    # Solo el RSS que supera al máximo visto dispara una muestra completa: 100 y 300.
+    assert sampler.peak is not None
+    assert sampler.peak.rss == 300 * mib
+    assert sampler.peak.engine_inflight == 2
+    assert next(full_samples) == 3  # ni 200 ni el segundo 300 tomaron otra
+    assert sampler.ticks == ticks  # parado: el hilo ya no corre, no sigue muestreando
 
 
 # ITSC-376: el trim por marca de agua del muestreador.
