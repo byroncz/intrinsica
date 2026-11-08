@@ -189,8 +189,8 @@ EVENT_BYTES = MappingProxyType(
 # Tope de bytes de eventos entregados al motor que aún no cerraron (ITSC-372): lo que la unidad
 # retiene crece con los eventos en vuelo, no con los row groups, y un mes denso (2017-12:
 # 4,5 M de eventos por row group) llena el motor con K = 4 aunque solo haya tres. 768 MiB son
-# ≈ 2,4 M de eventos de S (337 B; 1,1 M de A, 769 B): cabe el row group de un mes normal (≈ 0,6 M de eventos) con
-# varios por delante, y un mes denso entra de a uno.
+# ≈ 2,4 M de eventos de S (337 B), ≈ 1,0 M de A (769 B) y ≈ 2,2 M de T (369 B): cabe el row group de
+# un mes normal (≈ 0,6 M de eventos) con varios por delante, y un mes denso entra de a uno.
 DEFAULT_INFLIGHT_BYTES = 768 << 20
 # Eventos que cabe en un tramo (ITSC-373). El tope de arriba no acota lo que entra de a uno: un
 # row group de L1 de un mes denso (2017-12: 5,76 M de eventos en ≈ 0,94 M de ticks) pasa solo
