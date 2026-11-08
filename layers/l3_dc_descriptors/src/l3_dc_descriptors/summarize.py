@@ -168,8 +168,9 @@ DEFAULT_WRITERS = 12
 PENDING_PER_WRITER = 3
 # Bytes que cuesta un evento abierto, por familia (ITSC-407): el estado que el motor guarda de él
 # más sus diez columnas de fronteras de L2, que retiene hasta cerrarlo (`BOUNDARY_ROW_BYTES`, 97 B).
-# Una sola cifra para todas cobraba a A y a T lo que cuesta S. La fuente de verdad son los
-# `size_of` del test de `shared/dc_descriptors/src/engine.rs`; `test_l3_event_bytes.py` comprueba
+# Una sola cifra para todas cobraba a A y a T lo que cuesta S. La fuente de verdad de A y T son los
+# `size_of` del test de `shared/dc_descriptors/src/engine.rs`; la de S es `ENGINE_SCHEMA`, que no es
+# un `size_of` (`Partial<EventAcc>`, el almacén de S, mide 272 B). `test_l3_event_bytes.py` comprueba
 # que estas constantes coinciden con ellos.
 #  - `summaries` (S): la fila de salida (las 18 columnas de `ENGINE_SCHEMA`, 240 B): 337 B.
 #  - `fit` (A): `Partial<FitAcc>`, 672 B: 769 B.

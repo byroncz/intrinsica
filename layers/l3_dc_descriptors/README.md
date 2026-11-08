@@ -60,13 +60,16 @@ nuevo mientras haya algún row group en el motor y los bytes de eventos abiertos
 ya cerraron (`Engine.needed`), por θ. **Un evento abierto cuesta una cifra por familia
 (ITSC-407)**: el estado que el motor guarda de él más los 97 B de las fronteras de L2 que retiene
 hasta cerrarlo (seis `int64`, un `int8` y tres `decimal128`; con `reference_time` y `extreme_time`
-de ITSC-399, antes 81 B). La fuente de verdad son los `size_of` del test de
-`shared/dc_descriptors/src/engine.rs`; `EVENT_BYTES` en `summarize.py` (un mapa por familia) los
-repite y `tests/test_l3_event_bytes.py` comprueba que coinciden.
+de ITSC-399, antes 81 B). La fuente de verdad de A y T son los `size_of` del test de
+`shared/dc_descriptors/src/engine.rs`; la de S es la fila de salida (`native.ENGINE_SCHEMA`, 240 B),
+que no es un `size_of`: el almacén de S en el motor, `Partial<EventAcc>`, mide 272 B (el mismo test lo
+fija), así que un evento de S que cruza row groups pesa más de 240 B. La cifra de S se mantiene en
+337 B (decisión de la card). `EVENT_BYTES` en `summarize.py` (un mapa por familia) repite las cifras y
+`tests/test_l3_event_bytes.py` comprueba que coinciden.
 
 | Familia | Estado abierto | + fronteras | `EVENT_BYTES` | 768 MiB son ≈ | 1 M de eventos |
 |---|---|---|---|---|---|
-| `summaries` (S) | 240 B (la fila de salida, 18 columnas de `ENGINE_SCHEMA`) | 97 B | **337 B** | 2,4 M de eventos | ≈ 337 MB |
+| `summaries` (S) | 240 B (la fila de salida, 18 columnas de `ENGINE_SCHEMA`; no es un `size_of`) | 97 B | **337 B** | 2,4 M de eventos | ≈ 337 MB |
 | `fit` (A) | 672 B (`Partial<FitAcc>`) | 97 B | **769 B** | 1,0 M de eventos | ≈ 769 MB |
 | `path` (T) | 272 B (una `Run`) | 97 B | **369 B** (cota inferior) | 2,2 M de eventos | ≈ 369 MB |
 

@@ -1,7 +1,8 @@
 """La cifra de bytes por evento abierto de cada familia (ITSC-407).
 
-La fuente de verdad son los `size_of` que fija el test de `engine.rs`; las constantes de
-`summarize.py` y las cifras de la documentación tienen que coincidir con ellos.
+La fuente de verdad de A y T son los `size_of` que fija el test de `engine.rs`; la de S es la fila
+de salida de `ENGINE_SCHEMA`. Las constantes de `summarize.py` y las cifras de la documentación
+tienen que coincidir con ellas.
 """
 
 import re
@@ -9,7 +10,7 @@ import types
 from pathlib import Path
 
 import pytest
-from l3_dc_descriptors import summarize
+from l3_dc_descriptors import native, summarize
 from l3_dc_descriptors.boundaries import BOUNDARY_ROW_BYTES
 from l3_dc_descriptors.schema import FAMILY, FIT_FAMILY, PATH_FAMILY
 
@@ -29,6 +30,14 @@ def rust_size(type_name: str) -> int:
 def test_the_constants_are_the_sizes_the_rust_test_pins():
     assert summarize.FIT_STATE_BYTES == rust_size("Partial<FitAcc>") == 672
     assert summarize.PATH_STATE_BYTES == rust_size("Run") == 272
+
+
+def test_the_store_of_s_is_pinned_apart_from_the_figure_it_is_charged():
+    # S se cobra por su fila de salida (240 B), no por su almacén: `Partial<EventAcc>` mide 272 B.
+    # Las dos cifras quedan fijadas aquí para que el 272 de `engine.rs` no quede huérfano.
+    assert rust_size("Partial<EventAcc>") == 272
+    assert sum(width for _, width, _ in native.ENGINE_SCHEMA) == 240
+    assert summarize.EVENT_BYTES[FAMILY] == 240 + BOUNDARY_ROW_BYTES == 337
 
 
 def test_each_family_pays_its_state_plus_the_boundary_row():
