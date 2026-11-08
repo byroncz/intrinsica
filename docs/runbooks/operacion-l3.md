@@ -867,7 +867,7 @@ subiendo la memoria del job. Con el valor
 por defecto (1 M de eventos ≈ 337 MB en S, ≈ 769 MB en A y ≈ 369 MB en T, contra un tope de 805 MB) un tramo cabe con holgura en S y T y casi justo en A (ITSC-407: el tope se mira antes de empujar, así que caben a lo más `⌊tope ÷ (lote × cifra)⌋ + 1` tramos: 3 en S, 2 en A y 3 en T; antes A contaba a 337 B y admitía 3. `inflight_bytes_max` de la unidad de A sube con la cifra correcta y el pico de RSS no debe cambiar), y las
 fronteras de L2 que `cover` trae por delante (hasta ≈ 1,6 M de eventos con 50 θ) se cuentan a 97 B,
 lo que valen (ITSC-376, hoy 97 B con ITSC-399; antes de ITSC-376 se contaban a la tarifa entera (305 B entonces) e inflaban `inflight_alone_bytes_max`; las cifras de ITSC-376 son de cuando valían 65 B y 305 B; las de ITSC-393 en adelante, 81 B y 321 B): el aviso
-no debe salir en ningún mes, y si sale es una señal real. `lot_events`
+no debe salir en S ni en T, y ahí si sale es una señal real. **En A puede salir** en los meses cuyo row group se parte en tramos de 1 M (ITSC-407): el lote ya ocupa 769 de los 805 MB del tope, y el aviso suma lo que sigue abierto de tramos anteriores y las fronteras que `cover` trae por delante, con un margen de ≈ 36 MB (un tramo ≈ 5 % más denso que la media basta); ahí no es una señal de falla y no hay que actuar. Ajustar el lote por familia es trabajo de otra card. `lot_events`
 es el lote con que corrió (0 si no hay corte), `lot_ticks` el tamaño de tramo en ticks (`null` sin
 corte) y `lots` los tramos empujados: en un mes normal `lots` es `row_groups_month` (más los de
 meses anteriores que el lector entrega) y en uno denso es mayor. Con `L3_PROFILE=1` el perfil es del

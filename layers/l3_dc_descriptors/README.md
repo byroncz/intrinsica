@@ -85,8 +85,8 @@ Un row group de un mes normal trae ≈ 0,6 M de eventos y 2017-12 trae
 tramo que por sí solo pasa del tope avanza igual (avisa una vez; `inflight_alone_bytes_max` >
 `inflight_bytes` en `unit_timing`); el aviso dice qué tramo trajo cuántos eventos y que la unidad
 avanza. Con el lote por defecto (1 M de eventos: ≈ 337 MB en S, ≈ 769 MB en A y ≈ 369 MB en T) y el
-tope por defecto no debe salir en ningún mes: en A el lote ocupa 769 de los 805 MB del tope. El tope se mira antes de empujar: entran a lo más
-`⌊tope ÷ (lote × cifra)⌋ + 1` tramos de 1 M (3 en S, 2 en A, 3 en T; antes A admitía 3 por contarse a 337 B). Si sale,
+tope por defecto no debe salir en S ni en T; **en A sí puede salir** en los meses cuyo row group se parte en tramos de 1 M, y ahí no es una señal de falla: el lote ya ocupa 769 de los 805 MB del tope y el aviso suma además lo que sigue abierto de tramos anteriores y las fronteras que `cover` trae por delante (97 B cada una; hasta ≈ 1,6 M de eventos, ≈ 155 MB). El margen es de ≈ 36 MB: basta un tramo ≈ 5 % más denso que la media del mes para que salga. El tope se mira antes de empujar: entran a lo más
+`⌊tope ÷ (lote × cifra)⌋ + 1` tramos de 1 M (3 en S, 2 en A, 3 en T; antes A admitía 3 por contarse a 337 B). En S y T, si sale,
 un tramo solo pasa de 768 MiB, y se arregla con un lote más chico (`L3_LOT_EVENTS`: el tramo sale de
 la densidad media del mes y uno localmente denso puede pasar del tope) o con más memoria en el job. El tope se mira
 antes de empujar, así que `inflight_bytes_max` puede pasar de `inflight_bytes` hasta en un tramo sin
