@@ -28,7 +28,10 @@ from frames_lake import (
     write_carry_over,
     write_l2,
 )
-from l3_dc_descriptors.summarize import EVENT_BYTES
+from l3_dc_descriptors.schema import FAMILY
+from l3_dc_descriptors.summarize import EVENT_BYTES as EVENT_BYTES_BY_FAMILY
+
+EVENT_BYTES = EVENT_BYTES_BY_FAMILY[FAMILY]
 
 ROW_GROUP = 100_000
 # Bytes de un row group decodificado: id, tiempo, precio y cantidad (8 + 8 + 16 + 16 B).
