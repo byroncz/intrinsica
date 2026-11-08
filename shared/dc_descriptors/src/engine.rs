@@ -1333,5 +1333,7 @@ mod tests {
         assert_eq!(size_of::<crate::fit::Moments>(), 208);
         assert_eq!(size_of::<FitAcc>(), 624);
         assert_eq!(size_of::<Partial<FitAcc>>(), 672);
+        assert_eq!(size_of::<Partial<EventAcc>>(), 272);
+        assert_eq!(size_of::<Run>(), 272);
     }
 }

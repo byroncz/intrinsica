@@ -166,20 +166,36 @@ DEFAULT_WRITERS = 12
 # 260 MiB). Con 8 y W = 12 serían 96 ≈ 770 MiB, y T4b (W = 12) ya pagó +467 MiB sobre T4
 # (2 331 contra 1 864).
 PENDING_PER_WRITER = 3
-# Bytes que cuesta un evento abierto: su fila de salida (las 18 columnas de `ENGINE_SCHEMA`, 240 B)
-# más sus diez columnas de fronteras de L2, que el motor retiene hasta cerrarlo (97 B).
-EVENT_BYTES = sum(width for _, width, _ in native.ENGINE_SCHEMA) + BOUNDARY_ROW_BYTES
+# Bytes que cuesta un evento abierto, por familia (ITSC-407): el estado que el motor guarda de él
+# más sus diez columnas de fronteras de L2, que retiene hasta cerrarlo (`BOUNDARY_ROW_BYTES`, 97 B).
+# Una sola cifra para todas cobraba a A y a T lo que cuesta S. La fuente de verdad son los
+# `size_of` del test de `shared/dc_descriptors/src/engine.rs`; `test_l3_event_bytes.py` comprueba
+# que estas constantes coinciden con ellos.
+#  - `summaries` (S): la fila de salida (las 18 columnas de `ENGINE_SCHEMA`, 240 B): 337 B.
+#  - `fit` (A): `Partial<FitAcc>`, 672 B: 769 B.
+#  - `path` (T): una `Run` de `Runs`, 272 B: 369 B. T guarda una `Run` por cada tramo suelto de un
+#    evento que cruza row groups (fusión ordenada, ADR-L3-17), así que su estado no es fijo: la
+#    cifra toma una corrida por evento y es una cota inferior declarada.
+FIT_STATE_BYTES = 672
+PATH_STATE_BYTES = 272
+EVENT_BYTES = MappingProxyType(
+    {
+        FAMILY: sum(width for _, width, _ in native.ENGINE_SCHEMA) + BOUNDARY_ROW_BYTES,
+        FIT_FAMILY: FIT_STATE_BYTES + BOUNDARY_ROW_BYTES,
+        PATH_FAMILY: PATH_STATE_BYTES + BOUNDARY_ROW_BYTES,
+    }
+)
 # Tope de bytes de eventos entregados al motor que aún no cerraron (ITSC-372): lo que la unidad
 # retiene crece con los eventos en vuelo, no con los row groups, y un mes denso (2017-12:
 # 4,5 M de eventos por row group) llena el motor con K = 4 aunque solo haya tres. 768 MiB son
-# ≈ 2,6 M de eventos de 305 B: cabe el row group de un mes normal (≈ 0,6 M de eventos) con
+# ≈ 2,4 M de eventos de S (337 B; 1,1 M de A, 769 B): cabe el row group de un mes normal (≈ 0,6 M de eventos) con
 # varios por delante, y un mes denso entra de a uno.
 DEFAULT_INFLIGHT_BYTES = 768 << 20
 # Eventos que cabe en un tramo (ITSC-373). El tope de arriba no acota lo que entra de a uno: un
 # row group de L1 de un mes denso (2017-12: 5,76 M de eventos en ≈ 0,94 M de ticks) pasa solo
 # del tope. Cada row group se parte en tramos de a lo más N ticks, con N = LOT_EVENTS / densidad
 # del mes (eventos por tick), así que un tramo trae ≈ LOT_EVENTS eventos con cualquier densidad.
-# 1 M de eventos son ≈ 305 MB de casillas abiertas y fronteras (EVENT_BYTES), bajo el tope por
+# 1 M de eventos de S son ≈ 337 MB de casillas abiertas y fronteras (EVENT_BYTES[family]), bajo el tope por
 # defecto con holgura. ITSC-375 probó 2,5 M para ahorrar CPU y midió lo contrario: 2017-12 subió de
 # 2 681 a 2 802 MiB de pico y 2018-01 de 2 987 a 3 272 MiB con la misma CPU (55,9 contra 56,5 s;
 # 103,6 contra 104,3 s), porque con 2,5 M conviven dos tramos en el motor y los eventos abiertos
@@ -562,21 +578,22 @@ def _check(collector: Collector, sink: SealedWriters, inputs: Sequence[_Input]) 
 
 
 def _unclosed(
-    engine: dc_pyo3.Engine, feeds: Sequence[native.BoundaryFeed]
+    engine: dc_pyo3.Engine, feeds: Sequence[native.BoundaryFeed], family: str
 ) -> tuple[int, int]:
     """Eventos cuyas fronteras el motor tiene y que aún no cerraron, y los bytes que cuestan.
 
     Los eventos son los entregados menos el índice del primero que no cerró
     (`Engine.needed`), por θ. Los que `cover` entregó por delante del último row group
     empujado (`BoundaryFeed.ahead`) no tienen casilla todavía y cuestan solo sus fronteras
-    (`BOUNDARY_ROW_BYTES`, 97 B); el resto, `EVENT_BYTES` (337 B). Cota superior de lo abierto.
+    (`BOUNDARY_ROW_BYTES`, 97 B); el resto, `EVENT_BYTES[family]` (337 B en S, 769 B en A y 369 B en T, que es cota
+    inferior: ver `EVENT_BYTES`). Cota superior de lo abierto en S y A.
     """
     events = ahead = 0
     for feed in feeds:
         events += feed.delivered - engine.needed(feed.position)
         ahead += feed.ahead
     ahead = min(ahead, events)
-    return events, (events - ahead) * EVENT_BYTES + ahead * BOUNDARY_ROW_BYTES
+    return events, (events - ahead) * EVENT_BYTES[family] + ahead * BOUNDARY_ROW_BYTES
 
 
 def _lot_ticks(lot_events: int, events: int, ticks: int) -> int | None:
@@ -626,6 +643,7 @@ def _push_all(
     month: Month,
     phases: Phases,
     l1: L1Month,
+    family: str = FAMILY,
 ) -> int:
     """Empuja al motor los tramos de los row groups de L1, cada uno con las fronteras que toca.
 
@@ -654,7 +672,10 @@ def _push_all(
         return (
             open_groups >= phases.inflight
             or sink.pending >= limit
-            or (open_groups > 0 and _unclosed(engine, feeds)[1] > phases.inflight_bytes)
+            or (
+                open_groups > 0
+                and _unclosed(engine, feeds, family)[1] > phases.inflight_bytes
+            )
         )
 
     while True:
@@ -682,7 +703,7 @@ def _push_all(
         pushed += 1
         phases.lots = pushed
         phases.inflight_max = max(phases.inflight_max, engine.inflight())
-        events, held_bytes = _unclosed(engine, feeds)
+        events, held_bytes = _unclosed(engine, feeds, family)
         phases.inflight_events_max = max(phases.inflight_events_max, events)
         phases.inflight_bytes_max = max(phases.inflight_bytes_max, held_bytes)
         if alone:
@@ -954,6 +975,7 @@ def summarize_month(
                     month,
                     phases,
                     l1,
+                    family,
                 )
                 phases.items = pushed * sum(1 for f in files if any(f.rows))
             # Completa la lectura de L2: el esqueleto de cada archivo cubre todos sus row

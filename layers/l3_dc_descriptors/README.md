@@ -57,16 +57,33 @@ margen del job: con el asignador de la imagen (ver «Memoria») el RSS medido es
 **Memoria acotada por los eventos en vuelo (ITSC-372):** el orquestador tampoco empuja un row group
 nuevo mientras haya algún row group en el motor y los bytes de eventos abiertos pasen de
 `L3_INFLIGHT_BYTES`. Los eventos abiertos son los que `BoundaryFeed` entregó al motor menos los que
-ya cerraron (`Engine.needed`), por θ. Un evento cuesta 337 B: 240 B de la fila de salida (las 18
-columnas de `ENGINE_SCHEMA`) y 97 B de las fronteras de L2 que el motor retiene hasta cerrarlo
-(seis `int64`, un `int8` y tres `decimal128`; con `reference_time` y `extreme_time` de ITSC-399, antes 81 B y 321 B desde ITSC-393, y 65 B y 305 B antes). Los
-que `cover` trajo por delante del último tramo empujado (`BoundaryFeed.ahead`, eventos cuya
-referencia pasa del último id cubierto) aún no tienen casilla y cuestan solo los 97 B; desde ITSC-376
-así se cuentan, y antes se contaban a la tarifa entera (entonces 305 B). 768 MiB son ≈ 2,4 M de eventos de 337 B. Un row group de un mes normal trae ≈ 0,6 M de eventos y 2017-12 trae
+ya cerraron (`Engine.needed`), por θ. **Un evento abierto cuesta una cifra por familia
+(ITSC-407)**: el estado que el motor guarda de él más los 97 B de las fronteras de L2 que retiene
+hasta cerrarlo (seis `int64`, un `int8` y tres `decimal128`; con `reference_time` y `extreme_time`
+de ITSC-399, antes 81 B). La fuente de verdad son los `size_of` del test de
+`shared/dc_descriptors/src/engine.rs`; `EVENT_BYTES` en `summarize.py` (un mapa por familia) los
+repite y `tests/test_l3_event_bytes.py` comprueba que coinciden.
+
+| Familia | Estado abierto | + fronteras | `EVENT_BYTES` | 768 MiB son ≈ | 1 M de eventos |
+|---|---|---|---|---|---|
+| `summaries` (S) | 240 B (la fila de salida, 18 columnas de `ENGINE_SCHEMA`) | 97 B | **337 B** | 2,4 M de eventos | ≈ 337 MB |
+| `fit` (A) | 672 B (`Partial<FitAcc>`) | 97 B | **769 B** | 1,0 M de eventos | ≈ 769 MB |
+| `path` (T) | 272 B (una `Run`) | 97 B | **369 B** (cota inferior) | 2,2 M de eventos | ≈ 369 MB |
+
+T guarda una `Run` por cada tramo suelto de un evento que cruza row groups (fusión ordenada,
+ADR-L3-17), así que su estado crece con los row groups que el evento cruza: el estimador toma una
+`Run` por evento y esa cifra es una **cota inferior declarada**. Antes de ITSC-407 las tres familias
+pagaban 337 B (321 B de ITSC-393 a ITSC-398 y 305 B antes): A quedaba subestimada a menos de la mitad,
+y el tope dejaba en vuelo más del doble de lo que creía. Los eventos que `cover` trajo por delante del
+último tramo empujado (`BoundaryFeed.ahead`, eventos cuya referencia pasa del último id cubierto)
+aún no tienen casilla y cuestan solo los 97 B en cualquier familia; desde ITSC-376 así se cuentan.
+Un row group de un mes normal trae ≈ 0,6 M de eventos y 2017-12 trae
 4,5 M: sin este tope, con K = 4 caben los tres row groups del mes y la unidad picó a 3 545 MiB. Un
 tramo que por sí solo pasa del tope avanza igual (avisa una vez; `inflight_alone_bytes_max` >
 `inflight_bytes` en `unit_timing`); el aviso dice qué tramo trajo cuántos eventos y que la unidad
-avanza. Con el lote por defecto (1 M ≈ 337 MB) y el tope por defecto no debe salir en ningún mes: si sale,
+avanza. Con el lote por defecto (1 M de eventos: ≈ 337 MB en S, ≈ 769 MB en A y ≈ 369 MB en T) y el
+tope por defecto no debe salir en ningún mes: en A el lote ocupa 769 de los 805 MB del tope. El tope se mira antes de empujar: entran a lo más
+`⌊tope ÷ (lote × cifra)⌋ + 1` tramos de 1 M (3 en S, 2 en A, 3 en T; antes A admitía 3 por contarse a 337 B). Si sale,
 un tramo solo pasa de 768 MiB, y se arregla con un lote más chico (`L3_LOT_EVENTS`: el tramo sale de
 la densidad media del mes y uno localmente denso puede pasar del tope) o con más memoria en el job. El tope se mira
 antes de empujar, así que `inflight_bytes_max` puede pasar de `inflight_bytes` hasta en un tramo sin
@@ -77,8 +94,8 @@ y el mes picó a 3 002 MiB aunque nunca convivieran dos row groups. Por eso `_pu
 row group en **tramos** contiguos de a lo más `N` ticks y empuja cada uno al motor como si fuera un
 row group (con su ordinal, su `cover(high)` y la bandera `before_month`). `N = floor(L3_LOT_EVENTS /
 densidad)`, con la densidad del mes = eventos de los θ (pies de L2) ÷ ticks (pie de L1), así que un
-tramo trae ≈ `L3_LOT_EVENTS` eventos con cualquier densidad. **La cuenta:** 1 M de eventos × 337 B
-(`EVENT_BYTES`; 321 B de ITSC-393 a ITSC-398 y 305 B antes) ≈ 337 MB de casillas y fronteras abiertas, bajo el tope de 768 MiB con holgura. En
+tramo trae ≈ `L3_LOT_EVENTS` eventos con cualquier densidad. **La cuenta:** 1 M de eventos × `EVENT_BYTES` de la familia
+(337 B en S, 769 B en A, 369 B en T; ITSC-407) ≈ 337 MB, 769 MB y 369 MB de casillas y fronteras abiertas, bajo el tope de 768 MiB (805 MB) con holgura en S y T y casi al límite en A. En
 2017-12 (6,1 eventos por tick) son ≈ 164 000 ticks y ≈ 6 tramos por row group. **Lo que se probó
 y qué dio:** ITSC-373 fijó 1 M y midió +38 % de CPU en los meses densos (sin aislar la causa);
 ITSC-375 subió el lote a 2,5 M para ahorrarla y midió lo contrario: 2017-12 subió de 2 681 a

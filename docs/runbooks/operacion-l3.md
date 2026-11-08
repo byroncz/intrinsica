@@ -848,8 +848,8 @@ Dos mecanismos, los dos por construcción y no por ajuste del asignador
 | Variable | Qué fija | Por defecto |
 |---|---|---|
 | `L3_UNIT_PROCESS` | `1`: cada unidad de `backfill` corre en un proceso hijo (`spawn`) y su memoria muere con ella; `0`: en el proceso de la CLI. `monthly` no la usa. Otro valor es código 2 | `1` |
-| `L3_INFLIGHT_BYTES` | Tope de bytes de eventos entregados al motor que aún no cerraron (337 B por evento; 321 B desde ITSC-393 hasta ITSC-398 y 305 B antes). Entero ≥ 1 | 805 306 368 (768 MiB, ≈ 2,4 M de eventos) |
-| `L3_LOT_EVENTS` | Eventos de un tramo: cada row group de L1 se parte en tramos de a lo más `L3_LOT_EVENTS ÷ densidad del mes` ticks (ITSC-373). Entero ≥ 0; `0` desactiva el corte | 1 000 000 (≈ 337 MB de casillas y fronteras, 321 MB de ITSC-393 a ITSC-398; ITSC-375 probó 2 500 000 y no ganó nada, ITSC-376 lo revirtió) |
+| `L3_INFLIGHT_BYTES` | Tope de bytes de eventos entregados al motor que aún no cerraron, a una cifra por familia (ITSC-407): 337 B por evento en `summaries`, 769 B en `fit` y 369 B en `path` (cota inferior: T guarda una corrida por tramo suelto de un evento que cruza row groups); antes 337 B para las tres. Entero ≥ 1 | 805 306 368 (768 MiB: ≈ 2,4 M de eventos de S, ≈ 1,0 M de A, ≈ 2,2 M de T) |
+| `L3_LOT_EVENTS` | Eventos de un tramo: cada row group de L1 se parte en tramos de a lo más `L3_LOT_EVENTS ÷ densidad del mes` ticks (ITSC-373). Entero ≥ 0; `0` desactiva el corte | 1 000 000 (≈ 337 MB de casillas y fronteras en S, ≈ 769 MB en A y ≈ 369 MB en T; ITSC-375 probó 2 500 000 y no ganó nada, ITSC-376 lo revirtió) |
 | `L3_MEMORY_SAMPLE_S` | Segundos entre ticks del hilo `l3-memory-sampler`, que lee `VmRSS` y, solo si supera su máximo, toma una muestra con `mallinfo2`. Número > 0; otro valor es código 2 (ITSC-375) | `0,25` |
 | `L3_TRIM_RSS_MIB` | Marca de agua del trim periódico (ITSC-376): en cada tick, si `VmRSS` llega a estos MiB y pasó `L3_TRIM_MIN_S`, el hilo `l3-memory-sampler` llama a `malloc_trim(0)`. Entero ≥ 0; `0` lo desactiva (queda el del cierre); otro valor es código 2 | `1024` |
 | `L3_TRIM_MIN_S` | Segundos mínimos entre dos trims periódicos. Número ≥ 0; otro valor es código 2 | `0,5` |
@@ -864,7 +864,7 @@ bytes abiertos tras empujar un tramo a un motor vacío: si pasa de `inflight_byt
 trajo más eventos que el tope (la unidad avanza igual y avisa en el log, con el tramo y los eventos
 que trajo): el pico de ese mes es ≈ ese tramo, y se arregla con un lote más chico (`L3_LOT_EVENTS`) o
 subiendo la memoria del job. Con el valor
-por defecto (1 M de eventos ≈ 337 MB contra un tope de 805 MB) un tramo cabe con holgura, y las
+por defecto (1 M de eventos ≈ 337 MB en S, ≈ 769 MB en A y ≈ 369 MB en T, contra un tope de 805 MB) un tramo cabe con holgura en S y T y casi justo en A (ITSC-407: el tope se mira antes de empujar, así que caben a lo más `⌊tope ÷ (lote × cifra)⌋ + 1` tramos: 3 en S, 2 en A y 3 en T; antes A contaba a 337 B y admitía 3. `inflight_bytes_max` de la unidad de A sube con la cifra correcta y el pico de RSS no debe cambiar), y las
 fronteras de L2 que `cover` trae por delante (hasta ≈ 1,6 M de eventos con 50 θ) se cuentan a 97 B,
 lo que valen (ITSC-376, hoy 97 B con ITSC-399; antes de ITSC-376 se contaban a la tarifa entera (305 B entonces) e inflaban `inflight_alone_bytes_max`; las cifras de ITSC-376 son de cuando valían 65 B y 305 B; las de ITSC-393 en adelante, 81 B y 321 B): el aviso
 no debe salir en ningún mes, y si sale es una señal real. `lot_events`

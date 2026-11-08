@@ -1000,8 +1000,10 @@ mismo que traen las excepciones del resumidor, de las que sale la mayoría de lo
   `rss_after_trim_mib`, el `VmRSS` del proceso justo antes y después de devolver la memoria al kernel
   al cerrar la unidad (desde la 2.5.0 del TRD-L3); `inflight_bytes` (el tope de bytes de eventos
   abiertos, `L3_INFLIGHT_BYTES`), `inflight_events_max`, `inflight_bytes_max` (el máximo de
-  eventos entregados al motor que aún no cerraron y ese máximo en bytes, a 337 B por evento y a 97 B
-  (321 B y 81 B del TRD-L3 2.13.0 al 2.15.0; 305 B y 65 B hasta el 2.12.1) los que `cover` trajo por delante del último tramo; puede pasar del tope hasta en un tramo, porque
+  eventos entregados al motor que aún no cerraron y ese máximo en bytes, a 337 B por evento en S, 769 B
+  en A y 369 B en T (una cifra por familia desde el TRD-L3 2.17.4, ITSC-407; T es cota inferior: guarda
+  una corrida por tramo suelto de un evento que cruza row groups; antes 337 B para todas, 321 B del 2.13.0
+  al 2.15.0 y 305 B hasta el 2.12.1) y a 97 B (81 B del 2.13.0 al 2.15.0; 65 B hasta el 2.12.1) los que `cover` trajo por delante del último tramo; puede pasar del tope hasta en un tramo, porque
   el tope se mira antes de empujar) e `inflight_alone_bytes_max` (lo mismo
   para los tramos que entraron a un motor vacío: si pasa del tope, un solo tramo lo superó)
   y `spawn_s` (lo que tardó en arrancar el proceso hijo de la unidad; `null`
