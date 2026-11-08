@@ -1812,6 +1812,8 @@ def test_the_byte_cap_of_each_family_changes_the_pace_not_the_result(
 ):
     """ITSC-407: la cifra por familia decide cuántos tramos entran a la vez, no qué se
     escribe: S, T y A dan el `content_hash` y las tablas de la referencia con cualquier tope.
+    Las referencias se calculan con el código del PR: la igualdad con `main` se infiere de que
+    el tope solo mueve el ritmo (con 1 B entra un tramo a la vez; con 1 GB, todos los que caben).
     """
     got = run_fit(
         lake, engine_threads=2, readers=2, inflight=4, lot_events=10, inflight_bytes=cap
