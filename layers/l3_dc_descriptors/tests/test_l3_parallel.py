@@ -45,7 +45,7 @@ from l3_dc_descriptors import (
 from l3_dc_descriptors.context import RunContext, Unit
 from l3_dc_descriptors.cpu import CpuLimit
 from l3_dc_descriptors.pipeline import process_unit
-from l3_dc_descriptors.schema import FIT_SCHEMA, PATH_SCHEMA
+from l3_dc_descriptors.schema import FAMILY, FIT_SCHEMA, PATH_SCHEMA
 from l3_dc_descriptors.timing import BusyClock, Phases, ReadMeter
 from l3_lake import M1, M2, build_lake, fixture_ticks, month_cuts
 from native_driver import fit_native, path_native
@@ -685,7 +685,7 @@ def test_the_unit_reports_the_open_events_it_held(lake):
     assert (
         phases.inflight_events_max * boundaries.BOUNDARY_ROW_BYTES
         <= phases.inflight_bytes_max
-        <= phases.inflight_events_max * summarize.EVENT_BYTES
+        <= phases.inflight_events_max * summarize.EVENT_BYTES[FAMILY]
     )
     # El primer row group siempre entra a un motor vacío.
     assert 0 < phases.inflight_alone_bytes_max <= phases.inflight_bytes_max
@@ -693,7 +693,7 @@ def test_the_unit_reports_the_open_events_it_held(lake):
 
 def test_an_event_costs_its_output_row_and_its_boundaries():
     """240 B de las 18 columnas de salida más 97 B de las diez de fronteras de L2."""
-    assert summarize.EVENT_BYTES == 240 + 97
+    assert summarize.EVENT_BYTES[FAMILY] == 240 + 97
 
 
 class ClosingEngine:
@@ -773,7 +773,7 @@ def push_fake_row_groups(
 def test_the_byte_cap_holds_back_a_row_group_while_the_open_events_pass_it(
     monkeypatch, caplog
 ):
-    each = 1000 * summarize.EVENT_BYTES
+    each = 1000 * summarize.EVENT_BYTES[FAMILY]
     # Sin tope de bytes, K = 4 deja entrar cuatro row groups a la vez.
     engine, phases = push_fake_row_groups(monkeypatch, 10**12)
     assert engine.most == 4
@@ -807,10 +807,10 @@ def test_the_boundaries_cover_brought_ahead_cost_97_bytes_not_337(monkeypatch):
     """Los eventos que `cover` entregó por delante del tramo no tienen casilla: cuestan solo
     sus diez columnas de fronteras (`BOUNDARY_ROW_BYTES`).
     """
-    each = 1000 * summarize.EVENT_BYTES
+    each = 1000 * summarize.EVENT_BYTES[FAMILY]
     ahead = 400
     _, phases = push_fake_row_groups(monkeypatch, each // 2, ahead=ahead)
-    expected = (1000 - ahead) * summarize.EVENT_BYTES + (
+    expected = (1000 - ahead) * summarize.EVENT_BYTES[FAMILY] + (
         ahead * boundaries.BOUNDARY_ROW_BYTES
     )
     assert phases.inflight_events_max == 1000
@@ -1804,6 +1804,53 @@ def test_a_fit_run_does_not_change_a_byte_of_summaries_or_path(
     before = {f: f.read_bytes() for f in files}
     run_fit(lake, engine_threads=2, lot_events=10)
     assert {f: f.read_bytes() for f in files} == before
+
+
+@pytest.mark.parametrize("cap", [1, 50_000, 10**9])
+def test_the_byte_cap_of_each_family_changes_the_pace_not_the_result(
+    lake, reference, path_reference, fit_reference, cap
+):
+    """ITSC-407: la cifra por familia decide cuántos tramos entran a la vez, no qué se
+    escribe: S, T y A dan el `content_hash` y las tablas de la referencia con cualquier tope.
+    Las referencias se calculan con el código del PR: la igualdad con `main` se infiere de que
+    el tope solo mueve el ritmo (con 1 B entra un tramo a la vez; con 1 GB, todos los que caben).
+    """
+    got = run_fit(
+        lake, engine_threads=2, readers=2, inflight=4, lot_events=10, inflight_bytes=cap
+    )
+    assert_same_path(got, fit_reference)
+    got = run_path(
+        lake, engine_threads=2, readers=2, inflight=4, lot_events=10, inflight_bytes=cap
+    )
+    assert_same_path(got, path_reference)
+    assert_same(
+        run_all(lake, threads=4, engine_threads=2, inflight=4, inflight_bytes=cap),
+        reference,
+    )
+
+
+def test_the_fit_pass_charges_the_open_events_at_the_fit_figure(lake, fit_reference):
+    phases = Phases()
+    summarize_month(
+        lake.l1,
+        lake.l2,
+        lake.l3,
+        M1,
+        lake.theta_texts,
+        series_start=M1,
+        family="fit",
+        phases=phases,
+        inflight_bytes=10**9,
+    )
+    assert phases.inflight_events_max > 0
+    fit_bytes = summarize.EVENT_BYTES["fit"]
+    assert fit_bytes == 672 + 97 > summarize.EVENT_BYTES[FAMILY]
+    assert (
+        phases.inflight_events_max * boundaries.BOUNDARY_ROW_BYTES
+        <= phases.inflight_bytes_max
+        <= phases.inflight_events_max * fit_bytes
+    )
+    assert 0 < phases.inflight_alone_bytes_max <= phases.inflight_bytes_max
 
 
 def test_the_fit_pass_reports_the_lineage_of_l2_like_summaries(

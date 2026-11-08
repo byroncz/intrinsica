@@ -778,6 +778,14 @@ def test_s_and_t_do_not_change(lake, baseline):
     )
     for theta, result in after.items():
         assert result.content_hash == summaries[month][theta].content_hash
+    # ITSC-407: la cifra de bytes por familia cambia el ritmo, no el resultado: A da su hash.
+    # `baseline` se calcula con este mismo código, así que esto muestra que A se repite. Que su
+    # hash sea el de `main` se infiere de que el único cambio en el camino de A es cuántos tramos
+    # entran a la vez, y `test_the_byte_cap_of_each_family_changes_the_pace_not_the_result`
+    # (test_l3_parallel.py) prueba que ningún tope de bytes cambia el hash ni las tablas.
+    fit_again = fit_native(lake_.l1, lake_.l2, lake_.l3, month, lake_.theta_texts)
+    for theta, result in fit_again.items():
+        assert result.content_hash == baseline[month][theta].content_hash
 
 
 def test_a_repeated_run_gives_the_same_hash_and_rows(lake, baseline):

@@ -82,9 +82,15 @@ def test_fit_doc_metadata_matches_the_code():
 
 def test_fit_doc_cites_the_boundary_bytes_of_the_code():
     from l3_dc_descriptors.boundaries import BOUNDARY_ROW_BYTES
-    from l3_dc_descriptors.summarize import EVENT_BYTES
+    from l3_dc_descriptors.schema import FAMILY, FIT_FAMILY, PATH_FAMILY
+    from l3_dc_descriptors.summarize import EVENT_BYTES as BY_FAMILY
 
     text = DOC.read_text()
     assert BOUNDARY_ROW_BYTES == 97
+    EVENT_BYTES = BY_FAMILY[FAMILY]
     assert EVENT_BYTES == 240 + BOUNDARY_ROW_BYTES
-    assert f"a {EVENT_BYTES} B por evento y a {BOUNDARY_ROW_BYTES} B" in text
+    assert (
+        f"a {BY_FAMILY[FAMILY]} B por evento en S, {BY_FAMILY[FIT_FAMILY]} B\n"
+        f"  en A y {BY_FAMILY[PATH_FAMILY]} B en T"
+    ) in text
+    assert f"y a {BOUNDARY_ROW_BYTES} B" in text
