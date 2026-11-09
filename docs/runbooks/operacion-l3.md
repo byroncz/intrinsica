@@ -1002,7 +1002,7 @@ se decodifican a lo sumo 2 row groups más que con 1, al final.
 
 ## Scripts de operación
 
-Siete scripts de `layers/ops_tools/scripts/`, para el job `ops-script`
+Nueve scripts de `layers/ops_tools/scripts/`, para el job `ops-script`
 ([runbook de operación ad hoc](operacion-ops.md)). El apply del stack `ops` los publica en
 `gs://<proyecto>-ops/scripts/` (ya no se suben a mano) y se lanzan con `job` = `ops-script`. Todos solo
 leen, toman las raíces del proyecto de `OPS_RESULTS_URI` y también aceptan rutas
@@ -1018,6 +1018,7 @@ locales (`uv run`).
 | `l3_path_check.py` | Prueba `path.parquet` (familia T) contra `summaries.parquet` sobre un θ y un mes: resumen por columna, esqueleto, invariantes y regla de nulos en un CSV | `--theta 0.00098052 --month 2023-03` |
 | `l3_fit_bridge_probe.py` | Sonda de la familia A (ITSC-397): compara `c_accel` y `c_jump_share` observados con 20 puentes brownianos por evento sobre un θ y un mes; da D de Kolmogorov-Smirnov y el veredicto `sigue\|retirada` | `--theta 0.00098052 --month 2023-03` |
 | `l3_fit_check.py` | Prueba `fit.parquet` (familia A) contra `summaries.parquet` y `events.parquet` sobre un θ y un mes: resumen por columna, esqueleto, invariantes, regla de nulos y cifras informativas en un CSV | `--theta 0.00098052 --month 2023-03` |
+| `l3_spectrum_probe.py` | Sonda doble de la familia F (ITSC-410): energía por banda de retornos y de precios por fase contra sus nulos, Haar contra Fourier, redundancia con A y T, fases bajo 16 ticks por θ y pico de ticks en vuelo desde L2; da D y ρ y el veredicto `sigue\|retirada` | `--theta 0.00098052 --month 2023-03` |
 
 El apply del stack `ops` publica todos estos scripts en `scripts/`; verifica con
 `gcloud storage ls gs://<proyecto>-ops/scripts/`.
@@ -1576,6 +1577,122 @@ guarda, y un valor mayor que 0 sería un defecto del motor o de L2. Informativos
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | 1 (ley antigua) | 2023-03 | `0.00098052` | no pegada | 36 239 | 240 (`ev_jump_share_no_negativo`) | 2 191 | 4,3 s | [42147884536](https://github.com/byroncz/intrinsica/actions/runs/42147884536) |
 | 2 (cuatro leyes) | 2023-03 | `0.00098052` | 1.0.0 | 36 239 | 0 | 2 191 | 4,1 s | [42242276494](https://github.com/byroncz/intrinsica/actions/runs/42242276494) |
+
+### `l3_spectrum_probe.py`
+
+Decide qué registros de la familia F (Frecuencia, Épica ITSC-410) valen la pena construir (ITSC-411). Sobre
+**un θ y un mes** reales calcula, de cada fase de cada evento (`c` = `(R, C]` y `os` = `(C, E]`), cuánta
+energía de la serie de ticks cae en cada una de 7 bandas de período, con dos candidatos (retornos y precios)
+y con la descomposición de Haar, y la compara con sus nulos. Si la distribución observada se parece a la del
+nulo, o repite lo que `c_accel` (A) o `c_t50` (T) ya dicen, el registro no se construye. Además estima, solo
+con L2 y L3, el pico de ticks en vuelo de los 50 θ a la vez y la fracción de fases bajo 16 ticks por θ.
+**No importa ninguna capa** (una importación cambiaría `uv.lock`).
+
+El apply del stack `ops` lo publica en `scripts/`; verifica con
+`gcloud storage ls gs://<proyecto>-ops/scripts/l3_spectrum_probe.py`.
+
+| `args` | Efecto |
+| --- | --- |
+| `--theta 0.00098052 --month 2023-03` | Obligatorios: un θ (8 decimales como máximo) y un mes `YYYY-MM` |
+| `--l1-root`, `--l2-root`, `--l3-root` | Otras raíces, también locales (por defecto `gs://<proyecto>-landing/l1`, `-dc-events/l2` y `-dc-descriptors/l3`) |
+| `--provider`, `--market`, `--asset` | Otra serie (por defecto `binance`, `spot`, `BTCUSDT`) |
+| `--nulls 20` | Nulos por fase y evento (retornos barajados y puentes brownianos) |
+| `--seed` | Semilla del generador de NumPy (por defecto la fija del script, `410411`) |
+| `--inflight-months 2017-12,2021-01,2023-03` | Meses del pico de ticks en vuelo; vacío omite ese pase |
+| `--out` | Otra ruta del CSV; una ruta que termina en `/` es un directorio |
+
+**Qué mide.** Por fase, con `n` ticks y el ancla `p_0` (`p_R` en `c`, `p_C` en `os`, como T), en tiempo-tick
+sin remuestrear:
+
+- **Retornos:** `r_k = ln(p_k / p_{k−1})`, con el primer paso desde el ancla; los retornos cero se conservan.
+  Nulo: los retornos de la fase barajados.
+- **Precios:** `(p_k − recta_k) / p_0`, con la recta del ancla (índice 0) al último tick (índice `n`). Nulo:
+  el puente browniano de ITSC-398 en los `n` ticks, con `σ² = c_realized_var / n` (`c`) o
+  `os_realized_var / os_ticks` (`os`) de `path.parquet`, llevado a precios con la misma recta.
+- **Espectro:** serie centrada, ventana de Hann periódica, `numpy.fft.rfft`, energía `|X_k|²` de los bins
+  `k = 1..⌊n/2⌋` y fracción de la energía total por banda de período `n/k`: `[2, 4)`, `[4, 8)`, `[8, 16)`,
+  `[16, 32)`, `[32, 64)`, `[64, 128)` y `128 o más` (bandas 1 a 7; suman 1). Ejemplo para entender la ventana:
+  una senoide de período 8 con `n = 64` deja 5/6 en la banda 3 y 1/6 en la 2.
+- **Haar** (decisión 2): sobre los últimos `2^⌊log₂ n⌋` retornos de la fase, centrados, energía por nivel
+  `Σ d²` con la transformada ortonormal; los niveles 1 a 6 son las escalas 2 a 64 ticks y el séptimo junta de
+  128 en adelante, alineados con las 7 bandas. Es la convención que la hija 2 escribe en el contrato.
+- **Fases excluidas** (todas contadas): menos de 16 ticks; evento con `extreme_agg_trade_id −
+  reference_agg_trade_id > 20 000 000` (sus dos fases); energía cero (todos los retornos iguales, o precios
+  sobre su recta); y el evento que arranca en el mes anterior y no cabe en el L1 del mes. Una fase `os` con
+  `os_ticks = 0` no existe y se cuenta aparte (`fases_vacias`).
+
+**Cómo leer D y ρ.** `D` es la distancia de Kolmogorov-Smirnov, `sup |F_obs − F_sim|`, de 0 (idénticas) a 1
+(sin solapamiento), de la fracción de energía en la banda más rápida (período 2 a 4, banda 1) y en la más
+lenta (128 o más, banda 7). Es un tamaño del efecto, no un valor p. `ρ` es el coeficiente de Spearman entre
+las fracciones, banda a banda: precios contra retornos, Haar contra Fourier de retornos y cada candidato
+contra `c_accel` y `c_t50`; una columna constante da `nan`, que no cuenta como redundancia. Los umbrales se
+fijaron **antes de medir** (decisión 1): **`veredicto=sigue`** si y solo si algún candidato tiene
+`D_fast ≥ 0,10` o `D_slow ≥ 0,10` sobre `c` y su |ρ| máximo contra `c_accel` y `c_t50` no pasa de 0,9; si no,
+`retirada`. Qué registros de F-01 a F-04 entran lo decide el arquitecto con las cifras, en la Épica ITSC-410
+(«Veredicto de la sonda»). `f32_err` es el mayor |fracción en f32 − fracción en f64| sobre las fases del mes
+(decisión 5: si cabe en `f32` el búfer de retornos es de 4 B por tick).
+
+**El CSV** (`l3_spectrum_probe_<mes>_<θ>.csv`, en `results/<ejecución>/`) tiene el encabezado
+`seccion,candidato,fase,banda,fuente,medida,valor`:
+
+- `cuantiles`: por `candidato` (`retornos`, `precios`, `haar`), `fase` (`c`, `os`), `banda` (1 a 7) y `fuente`
+  (`observado`, `simulado`): `p1`, `p5`, `p10`, `p25`, `p50`, `p75`, `p90`, `p95`, `p99` (rango más cercano:
+  con N valores, el que ocupa el lugar ⌈N·q⌉) y `N` (simulado: nulos·N). Los simulados se guardan en `float32`.
+- `D`: por `candidato` (`retornos`, `precios`) y `fase`, `D_fast` y `D_slow`.
+- `rho`: por par (`precios_retornos`, `haar_fourier`, `retornos_accel`, `retornos_t50`, `precios_accel`,
+  `precios_t50`), `fase` y `banda`, más `max_abs_rho` por par. Los pares con A y T son solo de `c`.
+- `f32`: `f32_err`.
+- `fases_lt16`: por θ del mes (en `fuente`, `theta=<θ>`), `eventos` y, por fase, `lt16` y `fraccion_lt16`; en
+  `os` además `vacias`. Una fase `os` vacía cuenta como bajo 16 (decisión 4: sus columnas serían nulas igual).
+- `ticks_en_vuelo`: por mes de `--inflight-months` (en `fuente`, `mes=<mes>`), `inflight_peak_ticks` y su
+  equivalente en bytes a 8 B y a 4 B por tick (`bytes_8B`, `bytes_4B`).
+- `excluidos`: `fases_cortas`, `fases_vacias` y `energia_cero` por fase (y por candidato), más
+  `eventos_sobre_presupuesto` y `evento_mes_anterior`. `muestras`: las N por fase. `config`: `nulls` y `semilla`.
+
+**Pico de ticks en vuelo** (decisión 6; no lee L1). Con `R`, `C` y `E` de `events.parquet` de todos los θ que
+tienen L2 en el mes, la fase abierta de un θ en el tick `x` es `c` si `R < x ≤ C` (cuenta `x − R`) y `os` si
+`C < x ≤ E` (cuenta `x − C`); un evento sobre el presupuesto cuenta 0 porque no guarda retornos. El pico de
+la suma sobre θ está siempre en un fin de fase, así que se recorre una mezcla ordenada de los archivos por
+lotes (estado O(θ), memoria O(lote × θ)). Es una cota superior: los ids del proveedor tienen huecos. Con el
+pico el arquitecto fija el tamaño del job de F (≤ 1 GiB: job de 4 GiB; entre 1 y 4 GiB: 8 GiB; más: plan B).
+
+**Última línea:** `spectrum probe: mes=… theta=… eventos=… D_ret_fast=… D_ret_slow=… D_price_fast=…
+D_price_slow=… rho_price_ret=… rho_haar_fourier=… rho_ret_accel=… rho_ret_t50=… rho_price_accel=…
+rho_price_t50=… f32_err=… n_lt16=… inflight_peak_ticks=… pared_s=… veredicto=sigue|retirada|fallo`. `eventos`
+son los N de `c`; cada `rho_*` es el máximo de |ρ| de las 7 bandas; `n_lt16` es el número de fases `c` del
+θ bajo 16 ticks; `inflight_peak_ticks` es el mayor de los meses. Con `veredicto=fallo` lo que no se pudo medir
+sale `-`.
+
+**Códigos:** **0** si midió (con `sigue` o con `retirada`: ambos son resultados); **1** si falta alguno de los
+archivos, la lectura falla, los archivos no cuadran entre sí (otro número de filas o de ticks, otro
+`confirm_agg_trade_id`, eventos más allá de los ticks del mes), un mes de `--inflight-months` no tiene L2 o
+no queda ningún evento medible; **2** por uso (`--theta` o `--month` ausentes o inválidos, `--nulls` o
+`--seed` no enteros o `--nulls` menor que 1, `--inflight-months` inválido, sin las tres raíces ni
+`OPS_RESULTS_URI`, `--out` `gs://` fuera de `results/`). Si el CSV no se puede escribir, la sonda sale con
+**0** y lo avisa con `no se guardó la tabla en …`. Solo lee; lo único que escribe es el CSV.
+
+**Memoria.** Los ticks se leen un row group a la vez (`agg_trade_id` y `price`) y los cuatro archivos por
+evento en lotes de 32 768 filas. El estado es la serie de la fase abierta (`n` precios en f64, a lo sumo el
+presupuesto: 160 MB), que se libera al cerrar la fase; el cálculo suma varias copias transitorias (retornos,
+serie centrada, espectro) y los nulos se generan en grupos de a lo sumo 2²⁰ valores. Medido en local: ≈ 2 ms
+por fase típica; una fase de 2 M ticks sube el pico unos 130 MiB y una de 20 M ticks (el presupuesto) llega a
+1,7 GiB (≈ 9 veces la serie), dentro de los 8 GiB del job `ops-script`. Lo único que crece con el mes son los resultados por
+evento, necesarios para que D y los cuantiles sean exactos: ≈ 3,7 KB por evento con 20 nulos (≈ 134 MB para
+los 36 239 eventos de 2023-03). El pase del pico en vuelo usa 8 192 filas por θ.
+
+**Cómo correrla.** Necesita `events.parquet` de L2, `summaries.parquet`, `path.parquet` y `fit.parquet` de L3
+del θ y el mes, el `consolidated.parquet` del mes de L1, y L2 de los meses de `--inflight-months` (los θ que
+tengan L2 en cada mes). *Actions → Run job*: `job` = `ops-script`, `script` =
+`gs://<proyecto>-ops/scripts/l3_spectrum_probe.py` (la URI completa), `args` =
+`--theta 0.00098052 --month 2023-03`. Las corridas las lanza y aprueba el humano; pega la última línea y los
+cuantiles en ITSC-411. El veredicto lo escribe el arquitecto en la Épica ITSC-410, sección «Veredicto de la
+sonda».
+
+**Corrida real (ITSC-411):** pendiente. La tabla se llena con la última línea cuando el humano la corra.
+
+| Mes | θ | Eventos | `D_ret_fast` | `D_ret_slow` | `D_price_fast` | `D_price_slow` | `f32_err` | `n_lt16` | Pico en vuelo | Pared | Veredicto | Run |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 2023-03 | `0.00098052` | pendiente | pendiente | pendiente | pendiente | pendiente | pendiente | pendiente | pendiente | pendiente | pendiente | pendiente |
 
 ### La trampa del 403 por prefijo
 
