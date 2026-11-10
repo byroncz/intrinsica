@@ -1375,7 +1375,7 @@ def csv_rows(
             for band, row in enumerate(values, start=1):
                 for other, value in enumerate(row, start=1):
                     add("rho", pair, phase, band, f"con={other}", "rho", number(value))
-        elif pair in ("loctotal_jump", "loctotal_accel", "loctotal_t50"):
+        elif pair in LOC_PAIRS_TOTAL:
             add("rho", pair, phase, "", "", "rho", number(values[0]))
         else:
             for band, value in enumerate(values, start=1):
