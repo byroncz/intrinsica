@@ -1,4 +1,4 @@
-"""Sonda doble de la familia F (Frecuencia) de L3 (ITSC-411).
+"""Sonda doble de la familia F (Frecuencia) de L3 (ITSC-411 e ITSC-416).
 
 Decide qué registros de la familia F valen la pena construir. Sobre un θ y un mes del lago mide,
 por evento y por fase (`c` = (R, C] y `os` = (C, E]), cuánta energía de la serie de ticks cae en
@@ -6,7 +6,8 @@ cada una de 7 bandas de período, con dos candidatos (decisión 1 de la Épica I
 descomposición de Haar (decisión 2), y la compara con sus nulos. El tamaño del efecto es la
 distancia de Kolmogorov-Smirnov D; nunca se reporta un valor p. Además mide la redundancia
 (Spearman) con `c_accel` (familia A) y `c_t50` (familia T), la fracción de fases bajo 16 ticks por
-θ y, solo con L2, el pico de ticks en vuelo de los 50 θ a la vez (decisión 6).
+θ y, solo con L2, el pico de ticks en vuelo de los 50 θ a la vez (decisión 6). ITSC-416 agrega la
+ubicación en el tiempo de la energía (abajo) y las redundancias que la primera corrida no midió.
 
 Series por fase, en tiempo-tick (sin remuestrear), con `n` ticks, el ancla `p_0` (`p_R` en c,
 `p_C` en os, como T) y `p_1 … p_n` los precios de los ticks:
@@ -33,6 +34,25 @@ más cercanos al cierre), centrados, se aplica la transformada de Haar ortonorma
 adelante. Alinea el nivel j con la banda j de Fourier; suman la energía total por Parseval (la
 serie centrada no deja energía en el promedio). Sin PyWavelets ni scipy.
 
+Ubicación (ITSC-416). F guarda cuánta energía hay por nivel de Haar y pierde dónde ocurre. Sobre la
+misma serie de Haar, el coeficiente de detalle `d_{j,i}` del nivel `j` (`i = 0..N_j − 1`) está en el
+centro de su bloque dentro de la fase, `t_{j,i} = (n − 2^m + (i + 0,5)·2^j) / n` con `m = ⌊log₂ n⌋`,
+en [0, 1] (0 es el comienzo de la fase y 1 el final), y el centro de masa del nivel es
+
+  loc_j = Σ t_{j,i}·d_{j,i}² / Σ d_{j,i}²
+
+(el séptimo junta los niveles de escala 128 en adelante, cada coeficiente con su posición). Es nulo
+(`nan`, y se cuenta en `nulos`) si el nivel tiene menos de 2 coeficientes o energía cero. La línea
+base es dónde ocurrió la agitación sin separar por nivel, sobre los `n` retornos,
+
+  loc_total = Σ t_k·r_k² / Σ r_k²,   t_k = (k − 0,5)/n,   k = 1..n.
+
+Si todos los niveles se mueven con `loc_total`, la ubicación por nivel no agrega nada. El nulo son
+los mismos retornos barajados de siempre: no pide números nuevos al generador, así que las cifras
+anteriores del CSV no cambian con la misma semilla. D es la de Kolmogorov-Smirnov entre observado y
+simulado sin los nulos, por nivel y fase y para `loc_total`; además se calcula D de las fracciones de
+Haar por nivel. Por evento y por fase y nulo se guardan 8 números más en `float32`.
+
 Nulos (decisión 1), `--nulls` (20) por fase y evento, con una sola semilla:
   - retornos: los retornos de la fase barajados;
   - precios: el puente browniano de ITSC-398 en los `n` ticks de la fase,
@@ -52,6 +72,12 @@ cada candidato y `c_accel` (`fit.parquet`) y `c_t50` (`path.parquet`); en la fas
 línea lleva el máximo de |ρ| de cada par. Una columna constante da ρ indefinida (`nan`), que no
 cuenta como redundancia.
 
+ITSC-416 agrega, en la fase c: `loc_j` contra `loc_total`, contra `c_jump_share` y `c_accel`
+(`fit.parquet`) y contra `c_t50`; `loc_total` contra esos tres; `loc_j` entre niveles (7 × 7). Y las
+que faltaron de la primera corrida: cada banda de Fourier de retornos y cada nivel de Haar contra
+`c_sign_autocorr` y `c_realized_var` (`path.parquet`) y `c_ticks` (`summaries.parquet`), y las bandas
+de Fourier entre sí (7 × 7). El máximo de |ρ| de una matriz no cuenta la diagonal.
+
 `f32_err` es el máximo de |fracción en f32 − fracción en f64| sobre las fases del mes y las 7
 bandas de los dos candidatos (la FFT y las sumas, enteras en f32; decisión 5).
 
@@ -59,6 +85,12 @@ Umbral (decisión 1, fijado antes de medir): `veredicto=sigue` si y solo si alg�
 (retornos o precios) tiene `D_fast ≥ 0,10` o `D_slow ≥ 0,10` sobre c y su |ρ| máximo contra
 `c_accel` y `c_t50` no pasa de 0,9; si no, `retirada`. Qué registros entran lo decide el arquitecto
 con las cifras.
+
+Regla de la ubicación (ITSC-416, fijada antes de medir): la ubicación de un nivel «pasa» si su
+`D ≥ 0,10` en c y su |ρ| máximo contra `loc_total`, `c_jump_share`, `c_accel` y `c_t50` no pasa de 0,9;
+`loc_total` «pasa» si su `D ≥ 0,10` y su |ρ| máximo contra `c_jump_share`, `c_accel` y `c_t50` no
+pasa de 0,9. Un `nan` no cuenta en ρ y no pasa en D. No cambia el `veredicto`; `locs_pasan` es cuántos
+de los 7 niveles pasan. Qué entra lo decide el arquitecto con las cifras.
 
 Exclusiones, todas contadas en el CSV: la fase con menos de 16 ticks (decisión 4), el evento sobre
 el presupuesto (`extreme_agg_trade_id − reference_agg_trade_id > 20 000 000`, decisión 6; sus dos
@@ -110,11 +142,19 @@ los resultados por evento.
 Salida: la tabla del CSV, su ruta y, como última línea, `spectrum probe: mes=… theta=… eventos=…
 D_ret_fast=… D_ret_slow=… D_price_fast=… D_price_slow=… rho_price_ret=… rho_haar_fourier=…
 rho_ret_accel=… rho_ret_t50=… rho_price_accel=… rho_price_t50=… f32_err=… n_lt16=…
-inflight_peak_ticks=… pared_s=… veredicto=sigue|retirada|fallo` (`eventos` son los N de la fase c;
-`n_lt16` el número de fases c del θ bajo 16 ticks; `inflight_peak_ticks` el mayor de los meses).
+inflight_peak_ticks=… D_haar_fast=… D_haar_slow=… D_loc_fast=… D_loc_slow=… D_loc_total=…
+rho_loc_total=… rho_loc_jump=… rho_ret_sign=… rho_ret_ticks=… locs_pasan=… pared_s=…
+veredicto=sigue|retirada|fallo` (`eventos` son los N de la fase c; `n_lt16` el número de fases c del
+θ bajo 16 ticks; `inflight_peak_ticks` el mayor de los meses; `fast` y `slow` son el nivel 1 y el 7
+en la fase c; `rho_loc_total` y `rho_loc_jump` son el máximo de |ρ| de los 7 niveles contra
+`loc_total` y `c_jump_share`; `rho_ret_sign` y `rho_ret_ticks`, el de las 7 bandas de Fourier de
+retornos contra `c_sign_autocorr` y `c_ticks`; `locs_pasan` es el número de niveles de 7 que pasan).
 
-Códigos: 0 si midió; 1 si falta alguno de los archivos, la lectura falla, los archivos no cuadran
-entre sí o no queda ningún evento medible; 2 por uso. Solo lee; lo único que escribe es el CSV.
+Los listados de GCS (θ del mes en L3 y en L2) corren antes de medir, para fallar barato: un error de
+la API sale como `veredicto=fallo`, sin traceback.
+
+Códigos: 0 si midió; 1 si falta alguno de los archivos, un listado o la lectura falla, los archivos no
+cuadran entre sí o no queda ningún evento medible; 2 por uso. Solo lee; lo único que escribe es el CSV.
 """
 
 import argparse
@@ -163,8 +203,14 @@ EVENT_COLUMNS = [
     "extreme_agg_trade_id",
 ]
 SUMMARY_COLUMNS = ["confirm_agg_trade_id", "c_ticks", "os_ticks"]
-PATH_COLUMNS = ["confirm_agg_trade_id", "c_realized_var", "os_realized_var", "c_t50"]
-FIT_COLUMNS = ["confirm_agg_trade_id", "c_accel"]
+PATH_COLUMNS = [
+    "confirm_agg_trade_id",
+    "c_realized_var",
+    "os_realized_var",
+    "c_t50",
+    "c_sign_autocorr",
+]
+FIT_COLUMNS = ["confirm_agg_trade_id", "c_accel", "c_jump_share"]
 FILES = {
     "events": EVENT_COLUMNS,
     "summaries": SUMMARY_COLUMNS,
@@ -255,12 +301,21 @@ def list_files(root: str) -> list[str]:
     """Todos los archivos bajo `root`, de forma recursiva: objetos por prefijo en GCS."""
     if not root.startswith("gs://"):
         return [str(p) for p in Path(root).rglob("*") if p.is_file()]
-    from google.cloud import storage
-
     bucket, _, prefix = root.removeprefix("gs://").partition("/")
     prefix = prefix.rstrip("/") + "/"
-    blobs = storage.Client().list_blobs(bucket, prefix=prefix)
-    return [f"gs://{bucket}/{blob.name}" for blob in blobs]
+    try:
+        return [f"gs://{bucket}/{name}" for name in gcs_names(bucket, prefix)]
+    except Exception as exc:  # noqa: BLE001 - un error de la API de GCS sale como `fallo`
+        raise InputError(
+            f"no se pudo listar {root}: {type(exc).__name__}: {exc}"
+        ) from exc
+
+
+def gcs_names(bucket: str, prefix: str) -> list[str]:
+    """Los nombres de los objetos de `gs://bucket/prefix`, listados por la API de GCS."""
+    from google.cloud import storage
+
+    return [b.name for b in storage.Client().list_blobs(bucket, prefix=prefix)]
 
 
 def thetas_of(files: list[str], month: str, name: str) -> dict[str, str]:
@@ -446,6 +501,70 @@ def haar(series: np.ndarray) -> np.ndarray:
     return result
 
 
+def haar_location(series: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Fracción de energía y centro de masa de la energía por nivel de Haar (ITSC-416).
+
+    Sobre los mismos últimos `2^m` valores, `m = ⌊log₂ n⌋`, y los mismos coeficientes de detalle
+    `d_{j,i}` que `haar`, el coeficiente `i` del nivel `j` está en el centro de su bloque dentro
+    de la fase: `t_{j,i} = (n − 2^m + (i + 0,5)·2^j) / n`, en [0, 1]. El centro de masa del nivel
+    es `Σ t·d² / Σ d²`; el séptimo junta los niveles de escala 128 en adelante, cada coeficiente
+    con su posición. Es `nan` si el nivel tiene menos de 2 coeficientes o energía cero.
+
+    `series` es `(n,)` o `(g, n)`; devuelve `(fracciones, ubicaciones)`, cada una `(7,)` o `(g, 7)`.
+    Las fracciones son las de `haar`, con la misma aritmética.
+    """
+    n = series.shape[-1]
+    length = 1 << (n.bit_length() - 1)
+    tail = series[..., n - length :]
+    flat = tail.min(axis=-1) == tail.max(axis=-1)
+    approx = tail - tail.mean(axis=-1, keepdims=True)
+    shape = series.shape[:-1]
+    energy = np.zeros((*shape, BANDS))
+    moment = np.zeros((*shape, BANDS))
+    count = np.zeros(BANDS, dtype=np.int64)
+    for level in range(1, length.bit_length()):
+        even, odd = approx[..., 0::2], approx[..., 1::2]
+        detail = (even - odd) / np.sqrt(2.0)
+        square = detail * detail
+        del detail
+        index = min(level - 1, BANDS - 1)
+        energy[..., index] += np.sum(square, axis=-1)
+        position = (n - length + (np.arange(square.shape[-1]) + 0.5) * (1 << level)) / n
+        moment[..., index] += square @ position
+        count[index] += square.shape[-1]
+        del square
+        approx = (even + odd) / np.sqrt(2.0)
+    total = energy.sum(axis=-1, keepdims=True)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        fraction = energy / total
+        location = moment / energy
+    fraction[np.broadcast_to(flat, fraction.shape[:-1])] = np.nan
+    location[..., count < 2] = np.nan
+    location[energy == 0] = np.nan
+    location[np.broadcast_to(np.asarray(flat)[..., None], location.shape)] = np.nan
+    return fraction, location
+
+
+def total_location(returns: np.ndarray) -> np.ndarray:
+    """Centro de masa de la energía de los `n` retornos, sin separar por nivel (ITSC-416).
+
+    `Σ t_k·r_k² / Σ r_k²` con `t_k = (k − 0,5)/n`, `k = 1..n`. `returns` es `(n,)` o `(g, n)`;
+    devuelve un escalar o `(g,)`, con `nan` si la energía es cero. Suma por tramos de `GROUP`
+    columnas: no copia la serie entera.
+    """
+    n = returns.shape[-1]
+    moment = np.zeros(returns.shape[:-1])
+    energy = np.zeros(returns.shape[:-1])
+    for start in range(0, n, GROUP):
+        part = returns[..., start : start + GROUP]
+        square = part * part
+        moment += square @ ((np.arange(start, start + part.shape[-1]) + 0.5) / n)
+        energy += np.sum(square, axis=-1)
+        del square
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return moment / energy
+
+
 def group_size(n: int, nulls: int) -> int:
     return max(1, min(nulls, GROUP // n))
 
@@ -456,6 +575,11 @@ class PhaseResult:
     def __init__(self, nulls: int) -> None:
         self.obs: dict[str, np.ndarray] = {}
         self.sim = {c: np.empty((nulls, BANDS), np.float32) for c in CANDIDATES}
+        # Ubicación (ITSC-416): por nivel de Haar y de toda la energía; `nan` es nulo.
+        self.loc: np.ndarray | None = None
+        self.loc_total = math.nan
+        self.loc_sim = np.empty((nulls, BANDS), np.float32)
+        self.loc_total_sim = np.empty(nulls, np.float32)
         self.f32_err = 0.0
 
 
@@ -482,7 +606,8 @@ def measure_phase(
     returns[0] = prices[0] / anchor
     np.log(returns, out=returns)
     out.obs["retornos"] = fractions(returns, window)
-    out.obs["haar"] = haar(returns)
+    out.obs["haar"], out.loc = haar_location(returns)
+    out.loc_total = float(total_location(returns))
     out.f32_err = float(
         np.abs(
             fractions(returns.astype(np.float32), window.astype(np.float32)).astype(
@@ -496,7 +621,11 @@ def measure_phase(
         block = np.tile(returns, (size, 1))
         rng.permuted(block, axis=1, out=block)
         out.sim["retornos"][start : start + size] = fractions(block, window)
-        out.sim["haar"][start : start + size] = haar(block)
+        fraction, location = haar_location(block)
+        out.sim["haar"][start : start + size] = fraction
+        out.loc_sim[start : start + size] = location
+        out.loc_total_sim[start : start + size] = total_location(block)
+        del fraction, location
         del block
     del returns
 
@@ -563,20 +692,38 @@ class Samples:
             for c in CANDIDATES
             for p in PHASES
         }
+        # Registros de las demás familias y de F, en la fase c (`nan` si el registro es nulo).
         self.accel = np.empty(capacity)
         self.t50 = np.empty(capacity)
+        self.jump = np.empty(capacity)
+        self.sign = np.empty(capacity)
+        self.rvar = np.empty(capacity)
+        self.ticks = np.empty(capacity)
+        # Ubicación (ITSC-416): 8 números por fase y por nulo (7 niveles y el total).
+        self.loc = {p: np.empty((capacity, BANDS)) for p in PHASES}
+        self.loc_total = {p: np.empty(capacity) for p in PHASES}
+        self.loc_sim = {
+            p: np.empty((capacity * nulls, BANDS), np.float32) for p in PHASES
+        }
+        self.loc_total_sim = {p: np.empty(capacity * nulls, np.float32) for p in PHASES}
         self.f32_err = 0.0
 
-    def add(self, phase: str, result: PhaseResult, accel, t50) -> None:
+    def add(self, phase: str, result: PhaseResult, extra: dict) -> None:
         i = self.n[phase]
         for candidate in CANDIDATES:
             self.obs[candidate, phase][i] = result.obs[candidate]
             self.sim[candidate, phase][i * self.nulls : (i + 1) * self.nulls] = (
                 result.sim[candidate]
             )
+        self.loc[phase][i] = result.loc
+        self.loc_total[phase][i] = result.loc_total
+        self.loc_sim[phase][i * self.nulls : (i + 1) * self.nulls] = result.loc_sim
+        self.loc_total_sim[phase][i * self.nulls : (i + 1) * self.nulls] = (
+            result.loc_total_sim
+        )
         if phase == "c":
-            self.accel[i] = np.nan if accel is None else accel
-            self.t50[i] = np.nan if t50 is None else t50
+            for name, value in extra.items():
+                getattr(self, name)[i] = np.nan if value is None else value
         self.f32_err = max(self.f32_err, result.f32_err)
         self.n[phase] = i + 1
 
@@ -585,6 +732,18 @@ class Samples:
 
     def simulated(self, candidate: str, phase: str) -> np.ndarray:
         return self.sim[candidate, phase][: self.n[phase] * self.nulls]
+
+    def observed_loc(self, phase: str) -> np.ndarray:
+        return self.loc[phase][: self.n[phase]]
+
+    def simulated_loc(self, phase: str) -> np.ndarray:
+        return self.loc_sim[phase][: self.n[phase] * self.nulls]
+
+    def observed_loc_total(self, phase: str) -> np.ndarray:
+        return self.loc_total[phase][: self.n[phase]]
+
+    def simulated_loc_total(self, phase: str) -> np.ndarray:
+        return self.loc_total_sim[phase][: self.n[phase] * self.nulls]
 
 
 def ks_distance(observed: np.ndarray, simulated: np.ndarray) -> float:
@@ -674,9 +833,134 @@ def redundancy(samples: Samples) -> dict[tuple[str, str], np.ndarray]:
 
 
 def max_abs(values: np.ndarray | None) -> float:
-    if values is None or np.isnan(values).all():
+    """Máximo de |ρ| sin contar los `nan`; en una matriz, sin la diagonal (siempre 1)."""
+    if values is None:
+        return math.nan
+    if values.ndim == 2:
+        values = values[~np.eye(len(values), dtype=bool)]
+    if np.isnan(values).all():
         return math.nan
     return float(np.nanmax(np.abs(values)))
+
+
+# ----------------------------------------------------------------------------------------------
+# Ubicación de la energía en el tiempo (ITSC-416)
+# ----------------------------------------------------------------------------------------------
+
+LOC_THRESHOLD_D = D_THRESHOLD
+LOC_PAIRS_LEVEL = ("loc_loctotal", "loc_jump", "loc_accel", "loc_t50")
+LOC_PAIRS_TOTAL = ("loctotal_jump", "loctotal_accel", "loctotal_t50")
+
+
+def finite_distance(observed: np.ndarray, simulated: np.ndarray) -> float:
+    """D entre dos muestras sin los nulos (`nan`); `nan` si alguna queda vacía.
+
+    El observado se redondea a `float32` como el simulado, que se guarda en `float32`.
+    """
+    observed = np.sort(observed[np.isfinite(observed)].astype(np.float32))
+    simulated = np.sort(simulated[np.isfinite(simulated)])
+    if not len(observed) or not len(simulated):
+        return math.nan
+    return ks_distance(observed, simulated)
+
+
+def location_distances(samples: Samples) -> dict:
+    """D por nivel y fase: de las fracciones de Haar y de loc_j; y D de loc_total.
+
+    Claves `("haar", fase)` y `("ubicacion", fase)` → lista de 7; `("ubicacion_total", fase)` →
+    un número.
+    """
+    result = {}
+    for phase in PHASES:
+        if not samples.n[phase]:
+            continue
+        result["haar", phase] = [
+            band_distance(samples, "haar", phase, b) for b in range(BANDS)
+        ]
+        observed, simulated = samples.observed_loc(phase), samples.simulated_loc(phase)
+        result["ubicacion", phase] = [
+            finite_distance(observed[:, b], simulated[:, b]) for b in range(BANDS)
+        ]
+        result["ubicacion_total", phase] = finite_distance(
+            samples.observed_loc_total(phase), samples.simulated_loc_total(phase)
+        )
+    return result
+
+
+def matrix_rho(columns: np.ndarray) -> np.ndarray:
+    """ρ de Spearman entre las 7 columnas de `columns` `(n, 7)`; matriz `(7, 7)`."""
+    size = columns.shape[1]
+    result = np.full((size, size), math.nan)
+    for a in range(size):
+        for b in range(a, size):
+            result[a, b] = result[b, a] = spearman(columns[:, a], columns[:, b])
+    return result
+
+
+def new_redundancy(samples: Samples) -> dict[tuple[str, str], np.ndarray]:
+    """ρ de la fase c que ITSC-416 agrega, por par.
+
+    Por nivel `(7,)`: `loc_j` contra `loc_total`, `c_jump_share`, `c_accel` y `c_t50`; cada banda
+    de Fourier de retornos (`retornos_*`) y cada nivel de Haar (`haar_*`) contra `c_sign_autocorr`,
+    `c_realized_var` y `c_ticks`. De `loc_total` contra los tres de A y T: `(1,)`. Matrices
+    `(7, 7)`: `loc_loc` y `retornos_retornos`.
+    """
+    n = samples.n["c"]
+    if n == 0:
+        return {}
+    loc = samples.observed_loc("c")
+    total = samples.observed_loc_total("c")
+    column = {
+        "jump": samples.jump[:n],
+        "accel": samples.accel[:n],
+        "t50": samples.t50[:n],
+        "sign": samples.sign[:n],
+        "rvar": samples.rvar[:n],
+        "ticks": samples.ticks[:n],
+    }
+    result = {("loc_loctotal", "c"): np.array([spearman(loc[:, b], total) for b in range(BANDS)])}
+    for name in ("jump", "accel", "t50"):
+        result[f"loc_{name}", "c"] = np.array(
+            [spearman(loc[:, b], column[name]) for b in range(BANDS)]
+        )
+        result[f"loctotal_{name}", "c"] = np.array([spearman(total, column[name])])
+    result["loc_loc", "c"] = matrix_rho(loc)
+    fourier = samples.observed("retornos", "c")
+    levels = samples.observed("haar", "c")
+    for name in ("sign", "rvar", "ticks"):
+        for label, bands in (("retornos", fourier), ("haar", levels)):
+            result[f"{label}_{name}", "c"] = np.array(
+                [spearman(bands[:, b], column[name]) for b in range(BANDS)]
+            )
+    result["retornos_retornos", "c"] = matrix_rho(fourier)
+    return result
+
+
+def location_rule(distances: dict, rho: dict) -> tuple[list[bool], bool]:
+    """La regla fijada antes de medir: qué ubicaciones «pasan» en la fase c.
+
+    Un nivel pasa si su D ≥ 0,10 y su |ρ| máximo contra `loc_total`, `c_jump_share`, `c_accel` y
+    `c_t50` no pasa de 0,9. `loc_total` pasa si su D ≥ 0,10 y su |ρ| máximo contra `c_jump_share`,
+    `c_accel` y `c_t50` no pasa de 0,9. Un `nan` (D sin muestras o ρ indefinida) no pasa en D y
+    no cuenta en ρ.
+    """
+
+    def redundant(values: list[float]) -> float:
+        finite = [v for v in values if not math.isnan(v)]
+        return max(finite, default=0.0)
+
+    levels = []
+    for b in range(BANDS):
+        d = distances["ubicacion", "c"][b]
+        worst = redundant(
+            [abs(rho[pair, "c"][b]) for pair in LOC_PAIRS_LEVEL if (pair, "c") in rho]
+        )
+        levels.append(bool(d >= LOC_THRESHOLD_D and worst <= RHO_THRESHOLD))
+    d = distances["ubicacion_total", "c"]
+    worst = redundant(
+        [abs(rho[pair, "c"][0]) for pair in LOC_PAIRS_TOTAL if (pair, "c") in rho]
+    )
+    return levels, bool(d >= LOC_THRESHOLD_D and worst <= RHO_THRESHOLD)
 
 
 # ----------------------------------------------------------------------------------------------
@@ -702,8 +986,9 @@ class Event:
         event, summary, walk, fit = row
         ref_price, self.ref_id, conf_price, self.conf_id, self.ext_id = event
         _, c_ticks, os_ticks = summary
-        _, c_var, os_var, self.c_t50 = walk
-        self.accel = fit[1]
+        _, c_var, os_var, self.c_t50, self.sign = walk
+        _, self.accel, self.jump = fit
+        self.c_ticks, self.c_var = c_ticks, c_var
         if (
             os_ticks < 0
             or c_ticks < 0
@@ -778,7 +1063,18 @@ def measure(uris: dict[str, str], seed: int, nulls: int) -> tuple[Samples, Count
                 for candidate in zero:
                     counters[phase.name, "energia_cero", candidate] += 1
             else:
-                samples.add(phase.name, result, event.accel, event.c_t50)
+                samples.add(
+                    phase.name,
+                    result,
+                    {
+                        "accel": event.accel,
+                        "t50": event.c_t50,
+                        "jump": event.jump,
+                        "sign": event.sign,
+                        "rvar": event.c_var,
+                        "ticks": event.c_ticks,
+                    },
+                )
 
         first_id = None
         current = next_event()
@@ -941,9 +1237,12 @@ def month_inflight(paths: dict[str, str]) -> int:
         return inflight_peak(streams)
 
 
+SHORT_KEYS = ("eventos", "c_lt16", "os_lt16", "os_vacias")
+
+
 def short_fractions(path: str) -> dict[str, int]:
     """Eventos, fases c y os bajo 16 ticks y fases os vacías de un `summaries.parquet`."""
-    counts = Counter()
+    counts = Counter(dict.fromkeys(SHORT_KEYS, 0))  # un archivo de 0 filas no lanza KeyError
     with ExitStack() as stack:
         try:
             parquet = open_parquet(stack, path)
@@ -982,9 +1281,12 @@ def csv_rows(
     distances: dict,
     rho: dict,
     short: dict[str, dict],
-    inflight: dict[str, int],
+    inflight: dict[str, tuple[int, int]],
     nulls: int,
     seed: int,
+    location: dict,
+    new_rho: dict,
+    rule: tuple[list[bool], bool] | None,
 ) -> list[dict]:
     rows = []
 
@@ -1023,13 +1325,68 @@ def csv_rows(
                         "N",
                         len(column),
                     )
+    for phase in PHASES:
+        if samples.n[phase] == 0:
+            continue
+        for candidate, band, observed, simulated in (
+            *(
+                (
+                    "ubicacion", b + 1, samples.observed_loc(phase)[:, b],
+                    samples.simulated_loc(phase)[:, b],
+                )
+                for b in range(BANDS)
+            ),
+            (
+                "ubicacion_total", "", samples.observed_loc_total(phase),
+                samples.simulated_loc_total(phase),
+            ),
+        ):  # fmt: skip
+            for source, values, fmt in (
+                ("observado", observed, number),
+                ("simulado", simulated, number32),
+            ):
+                column = np.sort(values[np.isfinite(values)])
+                if len(column):
+                    for percent in QUANTILES:
+                        add(
+                            "ubicacion", candidate, phase, band, source,
+                            f"p{percent}", fmt(quantile(column, percent)),
+                        )  # fmt: skip
+                add("ubicacion", candidate, phase, band, source, "N", len(column))
+                add(
+                    "ubicacion", candidate, phase, band, source, "nulos",
+                    len(values) - len(column),
+                )  # fmt: skip
     for (candidate, phase), (fast, slow) in distances.items():
         add("D", candidate, phase, "", "ambas", "D_fast", number(fast))
         add("D", candidate, phase, "", "ambas", "D_slow", number(slow))
+    for (candidate, phase), values in location.items():
+        if candidate == "ubicacion_total":
+            add("D", candidate, phase, "", "ambas", "D", number(values))
+        else:
+            for band, value in enumerate(values, start=1):
+                add("D", candidate, phase, band, "ambas", "D", number(value))
     for (pair, phase), values in rho.items():
         for band, value in enumerate(values, start=1):
             add("rho", pair, phase, band, "", "rho", number(value))
         add("rho", pair, phase, "", "", "max_abs_rho", number(max_abs(values)))
+    for (pair, phase), values in new_rho.items():
+        if values.ndim == 2:
+            for band, row in enumerate(values, start=1):
+                for other, value in enumerate(row, start=1):
+                    add("rho", pair, phase, band, f"con={other}", "rho", number(value))
+        elif pair in LOC_PAIRS_TOTAL:
+            add("rho", pair, phase, "", "", "rho", number(values[0]))
+        else:
+            for band, value in enumerate(values, start=1):
+                add("rho", pair, phase, band, "", "rho", number(value))
+        add("rho", pair, phase, "", "", "max_abs_rho", number(max_abs(values)))
+    if rule is not None:
+        levels, total = rule
+        for band, passes in enumerate(levels, start=1):
+            add("regla", "ubicacion", "c", band, "", "pasa", int(passes))
+        add("regla", "ubicacion_total", "c", "", "", "pasa", int(total))
+        add("regla", "ubicacion", "c", "", "", "locs_pasan", sum(levels))
     add("f32", "", "", "", "", "f32_err", number(samples.f32_err))
     for theta, counts in short.items():
         events = counts["eventos"]
@@ -1042,7 +1399,8 @@ def csv_rows(
                 number(lt16 / events if events else math.nan),
             )  # fmt: skip
         add("fases_lt16", "", "os", "", f"theta={theta}", "vacias", counts["os_vacias"])
-    for month, peak in inflight.items():
+    for month, (peak, thetas) in inflight.items():
+        add("ticks_en_vuelo", "", "", "", f"mes={month}", "thetas", thetas)
         add("ticks_en_vuelo", "", "", "", f"mes={month}", "inflight_peak_ticks", peak)
         add("ticks_en_vuelo", "", "", "", f"mes={month}", "bytes_8B", peak * 8)
         add("ticks_en_vuelo", "", "", "", f"mes={month}", "bytes_4B", peak * 4)
@@ -1121,6 +1479,11 @@ def final_line(month, theta, wall, verdict, figures: dict | None = None) -> str:
         f"rho_price_accel={cell('rho_price_accel')} rho_price_t50={cell('rho_price_t50')} "
         f"f32_err={cell('f32_err', '{:.3e}')} n_lt16={cell('n_lt16', '{}')} "
         f"inflight_peak_ticks={cell('inflight_peak_ticks', '{}')} "
+        f"D_haar_fast={cell('D_haar_fast')} D_haar_slow={cell('D_haar_slow')} "
+        f"D_loc_fast={cell('D_loc_fast')} D_loc_slow={cell('D_loc_slow')} "
+        f"D_loc_total={cell('D_loc_total')} rho_loc_total={cell('rho_loc_total')} "
+        f"rho_loc_jump={cell('rho_loc_jump')} rho_ret_sign={cell('rho_ret_sign')} "
+        f"rho_ret_ticks={cell('rho_ret_ticks')} locs_pasan={cell('locs_pasan', '{}')} "
         f"pared_s={wall:.1f} veredicto={verdict}"
     )
 
@@ -1166,6 +1529,19 @@ def run(parser: argparse.ArgumentParser, ns: argparse.Namespace) -> int:
     for label, uri in uris.items():
         log(f"  {label}: {uri}")
     try:
+        # Los listados corren antes de measure: un error de la API o un mes sin L2 falla barato.
+        l3_files = list_files(series_root(l3_root, key))
+        l3_summaries = thetas_of(l3_files, ns.month, "summaries.parquet")
+        l3_summaries.setdefault(theta, uris["summaries"])
+        inflight_paths = {}
+        if months:
+            l2_files = list_files(series_root(l2_root, key))
+            for month in months:
+                paths = thetas_of(l2_files, month, "events.parquet")
+                if not paths:
+                    raise InputError(f"L2 no tiene eventos de {month}")
+                inflight_paths[month] = paths
+
         samples, counters = measure(uris, ns.seed, ns.nulls)
         log(f"mes medido: {samples.n['c']} fases c, {samples.n['os']} fases os")
 
@@ -1178,22 +1554,17 @@ def run(parser: argparse.ArgumentParser, ns: argparse.Namespace) -> int:
                         band_distance(samples, candidate, phase, BANDS - 1),
                     )
         rho = redundancy(samples)
+        location = location_distances(samples)
+        new_rho = new_redundancy(samples)
+        rule = location_rule(location, new_rho)
 
         short = {}
-        l3_files = list_files(series_root(l3_root, key))
-        l3_summaries = thetas_of(l3_files, ns.month, "summaries.parquet")
-        l3_summaries.setdefault(theta, uris["summaries"])
         for other, path in l3_summaries.items():
             short[other] = short_fractions(path)
         inflight = {}
-        if months:
-            l2_files = list_files(series_root(l2_root, key))
-            for month in months:
-                paths = thetas_of(l2_files, month, "events.parquet")
-                if not paths:
-                    raise InputError(f"L2 no tiene eventos de {month}")
-                log(f"ticks en vuelo {month}: {len(paths)} θ")
-                inflight[month] = month_inflight(paths)
+        for month, paths in inflight_paths.items():
+            log(f"ticks en vuelo {month}: {len(paths)} θ")
+            inflight[month] = (month_inflight(paths), len(paths))
     except (InputError, OSError, ValueError, pa.ArrowException) as exc:
         log(f"FALLO {type(exc).__name__}: {exc}")
         wall = time.perf_counter() - started
@@ -1202,8 +1573,9 @@ def run(parser: argparse.ArgumentParser, ns: argparse.Namespace) -> int:
     wall = time.perf_counter() - started
 
     rows = csv_rows(
-        samples, counters, distances, rho, short, inflight, ns.nulls, ns.seed
-    )
+        samples, counters, distances, rho, short, inflight, ns.nulls, ns.seed,
+        location, new_rho, rule,
+    )  # fmt: skip
     log("  ".join(f"{h:<12}" for h in CSV_HEADER))
     for row in rows:
         log("  ".join(f"{row[h]!s:<12}" for h in CSV_HEADER))
@@ -1222,7 +1594,17 @@ def run(parser: argparse.ArgumentParser, ns: argparse.Namespace) -> int:
         "D_price_slow": distances["precios", "c"][1],
         "f32_err": samples.f32_err,
         "n_lt16": short[theta]["c_lt16"],
-        "inflight_peak_ticks": max(inflight.values()) if inflight else None,
+        "inflight_peak_ticks": max(p for p, _ in inflight.values()) if inflight else None,
+        "D_haar_fast": location["haar", "c"][0],
+        "D_haar_slow": location["haar", "c"][BANDS - 1],
+        "D_loc_fast": location["ubicacion", "c"][0],
+        "D_loc_slow": location["ubicacion", "c"][BANDS - 1],
+        "D_loc_total": location["ubicacion_total", "c"],
+        "rho_loc_total": max_abs(new_rho["loc_loctotal", "c"]),
+        "rho_loc_jump": max_abs(new_rho["loc_jump", "c"]),
+        "rho_ret_sign": max_abs(new_rho["retornos_sign", "c"]),
+        "rho_ret_ticks": max_abs(new_rho["retornos_ticks", "c"]),
+        "locs_pasan": sum(rule[0]),
     }
     for label, pair, phase in (
         ("rho_price_ret", "precios_retornos", "c"),
