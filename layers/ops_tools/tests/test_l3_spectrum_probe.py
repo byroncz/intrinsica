@@ -980,7 +980,6 @@ def test_ubicacion_nula_con_menos_de_2_coeficientes_o_energia_cero(probe):
     _, location = probe.haar_location(np.array(SQUARE))
     assert np.isnan(location[3:]).all()
     # Nivel 1 sin energía (pares iguales): nulo; el nivel 2 sí tiene.
-    _, location = probe.haar_location(np.array(SQUARE))
     assert np.isnan(location[0])
     assert not np.isnan(location[1])
     # Serie constante: toda la fase es nula y loc_total también.
