@@ -618,10 +618,10 @@ banda o nivel, numeradas de 1 a 7.
 | `c_fourier_band_5` | double | sí | F-01. Fracción de la energía de los retornos de la confirmación en la banda de período 5 (32 a menos de 64); nula con menos de 32 retornos |
 | `c_fourier_band_6` | double | sí | F-01. Fracción de la energía de los retornos de la confirmación en la banda de período 6 (64 a menos de 128); nula con menos de 64 retornos |
 | `c_fourier_band_7` | double | sí | F-01. Fracción de la energía de los retornos de la confirmación en la banda de período 7 (128 o más); nula con menos de 128 retornos |
-| `os_fourier_band_1` | double | sí | F-02. Lo mismo en el overshoot; nula si `os_ticks = 0` (banda 1) |
-| `os_fourier_band_2` | double | sí | F-02. Lo mismo en el overshoot; nula si `os_ticks = 0` (banda 2) |
-| `os_fourier_band_3` | double | sí | F-02. Lo mismo en el overshoot; nula si `os_ticks = 0` (banda 3) |
-| `os_fourier_band_4` | double | sí | F-02. Lo mismo en el overshoot; nula si `os_ticks = 0` (banda 4) |
+| `os_fourier_band_1` | double | sí | F-02. Lo mismo en el overshoot; nula con menos de 16 retornos en el overshoot (también con `os_ticks = 0`) (banda 1) |
+| `os_fourier_band_2` | double | sí | F-02. Lo mismo en el overshoot; nula con menos de 16 retornos en el overshoot (también con `os_ticks = 0`) (banda 2) |
+| `os_fourier_band_3` | double | sí | F-02. Lo mismo en el overshoot; nula con menos de 16 retornos en el overshoot (también con `os_ticks = 0`) (banda 3) |
+| `os_fourier_band_4` | double | sí | F-02. Lo mismo en el overshoot; nula con menos de 16 retornos en el overshoot (también con `os_ticks = 0`) (banda 4) |
 | `os_fourier_band_5` | double | sí | F-02. Lo mismo en el overshoot; nula si `os_ticks = 0` (banda 5); nula con menos de 32 retornos |
 | `os_fourier_band_6` | double | sí | F-02. Lo mismo en el overshoot; nula si `os_ticks = 0` (banda 6); nula con menos de 64 retornos |
 | `os_fourier_band_7` | double | sí | F-02. Lo mismo en el overshoot; nula si `os_ticks = 0` (banda 7); nula con menos de 128 retornos |
@@ -632,10 +632,10 @@ banda o nivel, numeradas de 1 a 7.
 | `c_haar_level_5` | double | sí | F-03. Fracción de la energía de los retornos de la confirmación en el nivel de Haar 5; nula con menos de 32 retornos |
 | `c_haar_level_6` | double | sí | F-03. Fracción de la energía de los retornos de la confirmación en el nivel de Haar 6; nula con menos de 64 retornos |
 | `c_haar_level_7` | double | sí | F-03. Fracción de la energía de los retornos de la confirmación en el nivel de Haar 7; nula con menos de 128 retornos |
-| `os_haar_level_1` | double | sí | F-04. Lo mismo en el overshoot; nula si `os_ticks = 0` (nivel 1) |
-| `os_haar_level_2` | double | sí | F-04. Lo mismo en el overshoot; nula si `os_ticks = 0` (nivel 2) |
-| `os_haar_level_3` | double | sí | F-04. Lo mismo en el overshoot; nula si `os_ticks = 0` (nivel 3) |
-| `os_haar_level_4` | double | sí | F-04. Lo mismo en el overshoot; nula si `os_ticks = 0` (nivel 4) |
+| `os_haar_level_1` | double | sí | F-04. Lo mismo en el overshoot; nula con menos de 16 retornos en el overshoot (también con `os_ticks = 0`) (nivel 1) |
+| `os_haar_level_2` | double | sí | F-04. Lo mismo en el overshoot; nula con menos de 16 retornos en el overshoot (también con `os_ticks = 0`) (nivel 2) |
+| `os_haar_level_3` | double | sí | F-04. Lo mismo en el overshoot; nula con menos de 16 retornos en el overshoot (también con `os_ticks = 0`) (nivel 3) |
+| `os_haar_level_4` | double | sí | F-04. Lo mismo en el overshoot; nula con menos de 16 retornos en el overshoot (también con `os_ticks = 0`) (nivel 4) |
 | `os_haar_level_5` | double | sí | F-04. Lo mismo en el overshoot; nula si `os_ticks = 0` (nivel 5); nula con menos de 32 retornos |
 | `os_haar_level_6` | double | sí | F-04. Lo mismo en el overshoot; nula si `os_ticks = 0` (nivel 6); nula con menos de 64 retornos |
 | `os_haar_level_7` | double | sí | F-04. Lo mismo en el overshoot; nula si `os_ticks = 0` (nivel 7); nula con menos de 128 retornos |
