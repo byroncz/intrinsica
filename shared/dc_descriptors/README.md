@@ -107,8 +107,10 @@ push(row group k) ──► cola de ítems (θ₀,k) (θ₁,k) … (θ₄₉,k) 
   `2^⌊log₂ n⌋` retornos) da 7 niveles. Todo en `f64` sobre los `f32` convertidos y siempre en el
   mismo orden, en el hilo que cierra el evento. Nulos: fase de menos de 16 retornos, overshoot
   vacío, banda o nivel sin bins (5, 6 y 7 con menos de 32, 64 y 128 retornos) y serie sin energía.
-  El trabajo transitorio de la FFT (`n` complejos de 16 B más el scratch de `rustfft`) no está en
-  `buffered_ticks`.
+  El trabajo transitorio de la FFT (`n` complejos de 16 B más el plan y el scratch de `rustfft`;
+  peor caso `16 B × (n + 2·2^⌈log₂(2n−1)⌉)`, ≈ 2,3 GiB con `n` = 20 M) no está en `buffered_ticks`:
+  se acota serializando los cierres de fases con `n ≥ 2^20` retornos (`SERIAL_CLOSE_MIN`), uno a la
+  vez por proceso.
 - **Momentos de A.** La familia A (`src/fit.rs`) lleva, por evento, tres acumuladores
   (`FitAcc`): la confirmación `c`, el overshoot `os` y el evento entero `ev`, cada uno en sus
   coordenadas `τ = (t − t₀)/(t_fin − t₀)`, `y = (p − p₀)/(p_fin − p₀)` con el ancla y el

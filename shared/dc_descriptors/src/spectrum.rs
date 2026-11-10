@@ -45,6 +45,7 @@ use crate::phase::{le_u64, TickError};
 use rustfft::num_complex::Complex;
 use rustfft::FftPlannerScalar;
 use std::f64::consts::{PI, SQRT_2};
+use std::sync::{Mutex, MutexGuard, PoisonError};
 
 /// Retornos mínimos de una fase para calcular sus registros.
 pub const N_MIN: usize = 16;
@@ -54,6 +55,26 @@ pub const BANDS: usize = 7;
 
 /// Ticks por evento a partir de los cuales no se calcula (`extreme − reference` de L2).
 pub const DEFAULT_BUDGET_TICKS: u64 = 20_000_000;
+
+/// Retornos de una fase a partir de los cuales su cierre se serializa en todo el proceso. La FFT
+/// de `n` complejos de `f64` (16 B por retorno) más el plan y el scratch de `rustfft` pesan
+/// varios GiB con `n` en los millones (con `n` primo, Bluestein trabaja con una FFT de potencia
+/// de 2 mayor que `2n`), y cada hilo del motor puede estar cerrando un evento: sin acotarlo, el
+/// pico suma un transitorio por hilo. Por debajo de este umbral el transitorio es de decenas de
+/// MiB y los cierres corren en paralelo.
+pub const SERIAL_CLOSE_MIN: usize = 1 << 20;
+
+/// El candado de los cierres grandes: a lo sumo uno a la vez, así el transitorio del cierre es el
+/// de una sola fase, no el de una por hilo. No toca el resultado: cada cierre es una función pura
+/// de su búfer, el orden en que se turnan no cambia ningún bit.
+static BIG_CLOSE: Mutex<()> = Mutex::new(());
+
+/// El turno para cerrar una fase de `n` retornos: `Some` (y se espera) si `n ≥ SERIAL_CLOSE_MIN`,
+/// `None` si puede correr de inmediato. Un hilo que entró en pánico dentro del turno no lo
+/// inutiliza: el candado no guarda datos.
+fn close_turn(n: usize) -> Option<MutexGuard<'static, ()>> {
+    (n >= SERIAL_CLOSE_MIN).then(|| BIG_CLOSE.lock().unwrap_or_else(PoisonError::into_inner))
+}
 
 /// El planificador de FFT. Es siempre el escalar: no usa instrucciones SIMD y da los mismos
 /// bits en cualquier host.
@@ -315,6 +336,8 @@ fn fourier_fractions(first: f32, chunks: Vec<Vec<f32>>, n: usize, center: f64) -
 /// que se consumen.
 fn analyse(first: f32, chunks: Vec<Vec<f32>>, n: usize) -> PhaseSpectrum {
     debug_assert!(n >= N_MIN);
+    // El turno cubre todo el cierre de la fase: la copia de la cola de Haar y la FFT.
+    let _turn = close_turn(n);
     let (mut low, mut high) = (first, first);
     for &value in chunks.iter().flatten() {
         low = low.min(value);
@@ -431,6 +454,23 @@ mod tests {
         for (band, (g, w)) in got.iter().zip(wanted).enumerate() {
             near(*g, w, &format!("{what}, banda {}", band + 1));
         }
+    }
+
+    #[test]
+    fn only_big_phases_wait_for_their_turn_to_close() {
+        // Solo esta prueba toma el turno con un `n` grande: las demás usan series chicas.
+        assert!(close_turn(SERIAL_CLOSE_MIN - 1).is_none());
+        let turn = close_turn(SERIAL_CLOSE_MIN).expect("una fase grande toma el candado");
+        assert!(
+            BIG_CLOSE.try_lock().is_err(),
+            "el turno excluye al siguiente"
+        );
+        assert!(close_turn(N_MIN).is_none(), "una fase chica no espera");
+        drop(turn);
+        assert!(
+            BIG_CLOSE.try_lock().is_ok(),
+            "al soltar el turno queda libre"
+        );
     }
 
     #[test]
