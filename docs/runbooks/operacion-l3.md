@@ -1729,9 +1729,10 @@ medir sale `-`.
 archivos, un listado de GCS o la lectura falla (la API de GCS devuelve un error: sale como `veredicto=fallo`,
 sin traceback), los archivos no cuadran entre sí (otro número de filas o de ticks, otro
 `confirm_agg_trade_id`, eventos más allá de los ticks del mes), un mes de `--inflight-months` no tiene L2 o
-no queda ningún evento medible. Los listados corren antes de medir, para fallar barato; **2** por uso (`--theta` o `--month` ausentes o inválidos, `--nulls` o
-`--seed` no enteros o `--nulls` menor que 1, `--inflight-months` inválido, sin las tres raíces ni
-`OPS_RESULTS_URI`, `--out` `gs://` fuera de `results/`). Si el CSV no se puede escribir, la sonda sale con
+no queda ningún evento medible. Los listados corren antes de medir, para fallar barato. **2** por uso
+(`--theta` o `--month` ausentes o inválidos, `--nulls` o `--seed` no enteros o `--nulls` menor que 1,
+`--inflight-months` inválido, sin las tres raíces ni `OPS_RESULTS_URI`, `--out` `gs://` fuera de
+`results/`). Si el CSV no se puede escribir, la sonda sale con
 **0** y lo avisa con `no se guardó la tabla en …`. Solo lee; lo único que escribe es el CSV.
 
 **Memoria.** Los ticks se leen un row group a la vez (`agg_trade_id` y `price`) y los cuatro archivos por
