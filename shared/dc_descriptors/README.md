@@ -107,10 +107,17 @@ push(row group k) ──► cola de ítems (θ₀,k) (θ₁,k) … (θ₄₉,k) 
   `2^⌊log₂ n⌋` retornos) da 7 niveles. Todo en `f64` sobre los `f32` convertidos y siempre en el
   mismo orden, en el hilo que cierra el evento. Nulos: fase de menos de 16 retornos, overshoot
   vacío, banda o nivel sin bins (5, 6 y 7 con menos de 32, 64 y 128 retornos) y serie sin energía.
-  El trabajo transitorio de la FFT (`n` complejos de 16 B más el plan y el scratch de `rustfft`;
-  peor caso `16 B × (n + 2·2^⌈log₂(2n−1)⌉)`, ≈ 2,3 GiB con `n` = 20 M) no está en `buffered_ticks`:
-  se acota serializando los cierres de fases con `n ≥ 2^20` retornos (`SERIAL_CLOSE_MIN`), uno a la
-  vez por proceso.
+  El trabajo transitorio de la FFT (el búfer de `n` complejos de 16 B más el plan y el scratch de
+  `rustfft`) no está en `buffered_ticks`. Peor caso, con `n` primo (Bluestein): `16 B × (2n + 4m)`,
+  con `m` la longitud de la FFT interna (`3·2^(k−2)` si alcanza `2n − 1`, si no `2^k`, con
+  `k = ⌈log₂(2n−1)⌉`): ≈ 3,6 GiB con `n` = 20 M (`m` = 3·2^24). Es una medida, no una estimación:
+  `tests/spectrum_memory.rs` cuenta los bytes con un asignador global y la cota queda dentro de
+  32 B del pico en los dos casos de Bluestein que prueba. Los otros planes pesan menos (48 a 64 B
+  por retorno). Se acota serializando los cierres de fases con `n ≥ 2^20` retornos
+  (`SERIAL_CLOSE_MIN`), uno a la vez por proceso; por debajo, el peor cierre es de 160 MiB por hilo
+  y corren en paralelo. **Con 20 M de retornos y `n` primo el cierre no cabe en el job de 4 GiB
+  junto con la base del proceso:** bajar el umbral no lo arregla (el pico es el de una sola fase).
+  Lo resuelve la hija 3 (job mayor, presupuesto de F menor o un plan sin Bluestein), no este crate.
 - **Momentos de A.** La familia A (`src/fit.rs`) lleva, por evento, tres acumuladores
   (`FitAcc`): la confirmación `c`, el overshoot `os` y el evento entero `ev`, cada uno en sus
   coordenadas `τ = (t − t₀)/(t_fin − t₀)`, `y = (p − p₀)/(p_fin − p₀)` con el ancla y el
