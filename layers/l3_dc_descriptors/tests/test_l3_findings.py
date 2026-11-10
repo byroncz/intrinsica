@@ -58,8 +58,40 @@ def test_a_value_error_has_no_check_type_of_its_own():
     assert findings.from_error(CTX, UNIT, PhaseValueError(THETA, 7, "no cabe")) is None
 
 
+def test_event_over_budget_is_a_warning_with_the_budget_and_the_family():
+    spectrum = RunContext(
+        mode="monthly",
+        run_id="run",
+        image_version="0.4.0+test",
+        series_start=(2017, 8),
+        landing_root="l1",
+        events_root="l2",
+        summaries_root="l3",
+        dq_root="dq",
+        family="spectrum",
+    )
+    finding = findings.event_over_budget(
+        spectrum,
+        UNIT,
+        theta=THETA,
+        confirm_agg_trade_id=7,
+        ticks=20_000_001,
+        budget=20_000_000,
+    )
+    assert finding.check_type == "event_over_budget"
+    assert (finding.severity, finding.status) == (Severity.WARNING, Status.FAIL)
+    assert finding.details == {
+        "theta": THETA,
+        "confirm_agg_trade_id": 7,
+        "ticks": 20_000_001,
+        "budget": 20_000_000,
+        "family": "spectrum",
+    }
+    assert (finding.layer, finding.stage) == ("l3", Stage.CANONICAL)
+
+
 def test_every_check_type_of_the_catalog_has_a_builder():
-    # TRD-L3 §9.3 menos `event_over_budget`, que no aplica a la familia S.
+    # TRD-L3 §9.3 menos `event_over_budget`, que solo aplica a `spectrum` y tiene su prueba.
     built = [
         findings.l2_input_missing(CTX, UNIT, theta=THETA, file="events.parquet"),
         findings.input_missing(CTX, UNIT, "input_missing", {}),

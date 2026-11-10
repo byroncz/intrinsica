@@ -35,17 +35,21 @@ from l3_dc_descriptors.schema import (
     FIT_SCHEMA,
     PATH_FAMILY,
     PATH_SCHEMA,
+    SPECTRUM_BUDGET_TICKS,
+    SPECTRUM_FAMILY,
+    SPECTRUM_SCHEMA,
     SUMMARIES_SCHEMA,
 )
 from l3_dc_descriptors.timing import Retained
 
 # Las columnas de datos de cada familia como las comprueba el motor: (nombre, bytes por valor,
-# nulable). Las 18 de `summaries`, las 14 de `path` y las 10 de `fit`.
+# nulable). Las 18 de `summaries`, las 14 de `path`, las 10 de `fit` y las 29 de `spectrum`.
 FAMILY_SCHEMAS = MappingProxyType(
     {
         FAMILY: SUMMARIES_SCHEMA,
         PATH_FAMILY: PATH_SCHEMA,
         FIT_FAMILY: FIT_SCHEMA,
+        SPECTRUM_FAMILY: SPECTRUM_SCHEMA,
     }
 )
 
@@ -60,6 +64,7 @@ def _engine_schema(schema: pa.Schema) -> tuple[tuple[str, int, bool], ...]:
 ENGINE_SCHEMA = _engine_schema(SUMMARIES_SCHEMA)
 PATH_ENGINE_SCHEMA = _engine_schema(PATH_SCHEMA)
 FIT_ENGINE_SCHEMA = _engine_schema(FIT_SCHEMA)
+SPECTRUM_ENGINE_SCHEMA = _engine_schema(SPECTRUM_SCHEMA)
 
 _NAMES = ("referencia", "confirmación", "extremo")
 
@@ -220,10 +225,12 @@ def new_engine(
     threads: int | None,
     family: str = FAMILY,
     silence_us: int = 0,
+    budget_ticks: int = SPECTRUM_BUDGET_TICKS,
 ) -> dc_pyo3.Engine:
     """Un motor para `thetas` (los `Decimal` de la unidad) con el esqueleto de cada uno.
 
-    `family` es `summaries`, `path` o `fit`; `silence_us` es el umbral de silencio de `path`.
+    `family` es `summaries`, `path`, `fit` o `spectrum`; `silence_us` es el umbral de silencio de
+    `path` y `budget_ticks` el presupuesto de ticks por evento de `spectrum`.
     """
     schema = _engine_schema(FAMILY_SCHEMAS[family])
     return dc_pyo3.Engine(
@@ -233,7 +240,15 @@ def new_engine(
         threads,
         family,
         silence_us,
+        budget_ticks,
     )
+
+
+def over_budget(sealed: tuple) -> list[tuple[int, int]]:
+    """Los eventos sobre el presupuesto de un row group sellado de `spectrum`:
+    `(confirm_agg_trade_id, ticks)` por evento, en orden de evento; vacío en las demás familias.
+    """
+    return list(sealed[6]) if len(sealed) > 6 else []
 
 
 def to_batch(
@@ -242,11 +257,12 @@ def to_batch(
     """Un row group de salida sellado como `RecordBatch`, sin copiar los buffers del motor.
 
     Devuelve `(posición del θ, índice del row group de salida, batch)`. En `summaries` los
-    `os_*` nulables comparten el mapa de validez del motor; en `path` y `fit` cada columna
-    nulable trae el suyo (o ninguno, si no tiene nulos).
+    `os_*` nulables comparten el mapa de validez del motor; en `path`, `fit` y `spectrum` cada
+    columna nulable trae el suyo (o ninguno, si no tiene nulos). Los eventos sobre el presupuesto
+    de `spectrum` no van en el batch: salen de `over_budget(sealed)`.
     """
     schema = FAMILY_SCHEMAS[family]
-    position, index, rows, columns, validity, null_count = sealed
+    position, index, rows, columns, validity, null_count, *_ = sealed
     constant = np.zeros((rows, 2), "<i8")
     constant[:, 0] = int(theta.scaleb(8))
     arrays = [

@@ -38,10 +38,11 @@ use crate::fit::{accumulate as accumulate_fit, close_fit, FitAcc, Frame};
 use crate::input::{
     Boundaries, EventBatch, EventIn, InputError, KeyColumns, RowGroupInput, TickColumns,
 };
-use crate::layout::{col, Family, FitRow, PathRow, Row};
-use crate::output::{Delivery, OutRow, OutTable, OutputError, SealedRowGroup};
+use crate::layout::{col, Family, FitRow, PathRow, Row, SpectrumRow};
+use crate::output::{Delivery, OutRow, OutTable, OutputError, OverBudget, SealedRowGroup};
 use crate::path::{accumulate, close_path, PathAcc, Reach};
 use crate::phase::{aggregate, EventAcc, TickError};
+use crate::spectrum::{accumulate as accumulate_returns, close_spectrum, SpectrumAcc};
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fmt;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -61,11 +62,14 @@ pub struct Config {
     pub threads: usize,
     /// Por θ, las filas de cada row group de salida (el esqueleto de L2).
     pub row_groups: Vec<Vec<usize>>,
-    /// La familia que el motor calcula: `summaries` (S), `path` (T) o `fit` (A).
+    /// La familia que el motor calcula: `summaries` (S), `path` (T), `fit` (A) o `spectrum` (F).
     pub family: Family,
     /// El umbral de silencio de la familia T en µs: un hueco entre ticks de una fase cuenta
-    /// como inactividad si es mayor. S no lo usa.
+    /// como inactividad si es mayor. S, A y F no lo usan.
     pub silence_us: i64,
+    /// El presupuesto de la familia F: un evento con `extreme − reference` de L2 mayor que esto
+    /// no guarda retornos y su fila queda nula. S, T y A no lo usan.
+    pub budget_ticks: u64,
 }
 
 /// Por qué el motor falló.
@@ -279,39 +283,58 @@ struct Partial<A> {
     last_group: Option<u64>,
 }
 
-/// Un tramo de un evento de la familia T que cruza row groups, o varios ya unidos: cubre los
-/// row groups de ordinal `first` a `last`, ambos incluidos, y guarda el estado de borde.
-struct Run {
+/// Un tramo de un evento de las familias T y F que cruza row groups, o varios ya unidos: cubre
+/// los row groups de ordinal `first` a `last`, ambos incluidos, y guarda el estado de borde.
+struct Chained<A> {
     first: u64,
     last: u64,
-    acc: PathAcc,
+    acc: A,
 }
 
-/// El almacén de un evento de T que cruza row groups (ADR-L3-17): corridas de tramos de
-/// ordinales consecutivos, en orden de ordinal y sin solaparse. Un tramo nuevo se une solo a
-/// la corrida que termina en el ordinal anterior (detrás) y a la que empieza en el siguiente
-/// (delante); si ninguna lo toca, abre otra. Es O(corridas), nunca O(ticks).
-#[derive(Default)]
-struct Runs {
-    runs: Vec<Run>,
+/// Un tramo de la familia T (solo lo pesan las pruebas: su tamaño es el costo fijo de T).
+#[cfg(test)]
+type Run = Chained<PathAcc>;
+
+/// Un tramo de la familia F: sus retornos y los precios de sus bordes (idem).
+#[cfg(test)]
+type SpectrumRun = Chained<SpectrumAcc>;
+
+/// El almacén de un evento de T o F que cruza row groups (ADR-L3-17 y ADR-L3-19): corridas de
+/// tramos de ordinales consecutivos, en orden de ordinal y sin solaparse. Un tramo nuevo se une
+/// solo a la corrida que termina en el ordinal anterior (detrás) y a la que empieza en el
+/// siguiente (delante); si ninguna lo toca, abre otra. Es O(corridas), nunca O(ticks) (en F,
+/// unir concatena listas de trozos de retornos sin copiarlos).
+struct Runs<A> {
+    runs: Vec<Chained<A>>,
     /// El row group del tramo que no empieza antes del suyo (donde está `R`).
     first_group: Option<u64>,
     /// El row group del tramo que no termina después del suyo (donde está `E`).
     last_group: Option<u64>,
 }
 
-impl Runs {
-    /// Agrega el tramo del row group `group`. Devuelve el evento entero cuando la corrida
-    /// única va del row group de `R` al de `E`, y un error si el tramo contradice a los que
-    /// ya están (un ordinal repetido o fuera del rango del evento).
+impl<A> Default for Runs<A> {
+    fn default() -> Self {
+        Self {
+            runs: Vec::new(),
+            first_group: None,
+            last_group: None,
+        }
+    }
+}
+
+impl<A> Runs<A> {
+    /// Agrega el tramo del row group `group`. `join(izquierda, derecha)` une el tramo de la
+    /// derecha, el de ordinal siguiente, a continuación del de la izquierda. Devuelve el evento
+    /// entero cuando la corrida única va del row group de `R` al de `E`, y un error si el tramo
+    /// contradice a los que ya están (un ordinal repetido o fuera del rango del evento).
     fn add(
         &mut self,
         group: u64,
-        acc: PathAcc,
+        acc: A,
         starts_before: bool,
         ends_after: bool,
-        silence_us: i64,
-    ) -> Result<Option<(PathAcc, u64)>, String> {
+        join: &impl Fn(&mut A, A),
+    ) -> Result<Option<(A, u64)>, String> {
         if !starts_before {
             self.first_group = Some(group);
         }
@@ -330,29 +353,30 @@ impl Runs {
         if self.runs.get(at).is_some_and(|run| run.first <= group) {
             return Err(format!("el row group {group} ya aportó su tramo al evento"));
         }
-        let mut merged = Run {
+        let mut merged = Chained {
             first: group,
             last: group,
             acc,
         };
         if self.runs.get(at).is_some_and(|run| run.first == group + 1) {
             let behind = self.runs.remove(at);
-            merged.acc.merge(&behind.acc, silence_us);
+            join(&mut merged.acc, behind.acc);
             merged.last = behind.last;
         }
         if at > 0 && self.runs[at - 1].last + 1 == group {
             let ahead = &mut self.runs[at - 1];
-            ahead.acc.merge(&merged.acc, silence_us);
+            join(&mut ahead.acc, merged.acc);
             ahead.last = merged.last;
         } else {
             self.runs.insert(at, merged);
         }
-        match (self.runs.as_slice(), self.first_group, self.last_group) {
-            ([run], Some(first), Some(last)) if run.first == first && run.last == last => {
-                Ok(Some((run.acc, last)))
+        let complete = match (self.runs.as_slice(), self.first_group, self.last_group) {
+            ([run], Some(first), Some(last)) => {
+                (run.first == first && run.last == last).then_some(last)
             }
-            _ => Ok(None),
-        }
+            _ => None,
+        };
+        Ok(complete.map(|last| (self.runs.pop().expect("una corrida").acc, last)))
     }
 }
 
@@ -549,6 +573,9 @@ fn located_event(error: &EngineError) -> u64 {
     }
 }
 
+/// Los eventos sobre el presupuesto pendientes de entrega, por `(θ, row group de salida)`.
+type OverBudgetByGroup = BTreeMap<(usize, usize), Vec<(u64, OverBudget)>>;
+
 struct Shared<B> {
     thetas: usize,
     out: OutTable,
@@ -569,9 +596,18 @@ struct Shared<B> {
     /// Lo mismo para la familia A: los momentos de cada evento abierto.
     fit_partials: Vec<Mutex<HashMap<u64, Partial<FitAcc>>>>,
     /// Lo mismo para la familia T: las corridas de tramos de cada evento abierto.
-    runs: Vec<Mutex<HashMap<u64, Runs>>>,
+    runs: Vec<Mutex<HashMap<u64, Runs<PathAcc>>>>,
+    /// Lo mismo para la familia F: las corridas de tramos con sus retornos.
+    spectrum_runs: Vec<Mutex<HashMap<u64, Runs<SpectrumAcc>>>>,
     family: Family,
     silence_us: i64,
+    budget_ticks: u64,
+    /// Retornos guardados ahora en los búferes de la familia F (4 B cada uno): los de los
+    /// tramos que un ítem acaba de armar y los de los eventos abiertos en el almacén.
+    buffered: AtomicU64,
+    /// Los eventos sobre el presupuesto cuyo row group de salida aún no se entregó, por
+    /// `(θ, row group de salida)`, con su índice de evento.
+    over_budget: Mutex<OverBudgetByGroup>,
     stats: Vec<Mutex<ThetaStats>>,
     failure: Mutex<Option<Failure>>,
     failed: AtomicBool,
@@ -622,8 +658,12 @@ impl<B: AsRef<[u8]> + Send + Sync + 'static> Engine<B> {
             partials: (0..thetas).map(|_| Mutex::new(HashMap::new())).collect(),
             fit_partials: (0..thetas).map(|_| Mutex::new(HashMap::new())).collect(),
             runs: (0..thetas).map(|_| Mutex::new(HashMap::new())).collect(),
+            spectrum_runs: (0..thetas).map(|_| Mutex::new(HashMap::new())).collect(),
             family: config.family,
             silence_us: config.silence_us,
+            budget_ticks: config.budget_ticks,
+            buffered: AtomicU64::new(0),
+            over_budget: Mutex::new(BTreeMap::new()),
             stats: (0..thetas).map(|_| Mutex::default()).collect(),
             failure: Mutex::new(None),
             failed: AtomicBool::new(false),
@@ -771,7 +811,25 @@ impl<B: AsRef<[u8]> + Send + Sync + 'static> Engine<B> {
     /// group de salida. Falla si el motor ya falló.
     pub fn pop_sealed(&self) -> Result<Option<SealedRowGroup>, EngineError> {
         self.shared.poll_failure()?;
-        Ok(lock(&self.shared.delivery).pop())
+        let Some(mut sealed) = lock(&self.shared.delivery).pop() else {
+            return Ok(None);
+        };
+        if self.shared.family == Family::Spectrum {
+            if let Some(mut events) =
+                lock(&self.shared.over_budget).remove(&(sealed.theta, sealed.index))
+            {
+                events.sort_unstable_by_key(|(index, _)| *index);
+                sealed.over_budget = events.into_iter().map(|(_, event)| event).collect();
+            }
+        }
+        Ok(Some(sealed))
+    }
+
+    /// Retornos que la familia F tiene guardados ahora en sus búferes (cero en las demás): los
+    /// de los eventos abiertos y los de los tramos que los hilos están cerrando. El
+    /// orquestador cobra 4 B por cada uno sobre el costo fijo por evento abierto.
+    pub fn buffered_ticks(&self) -> u64 {
+        self.shared.buffered.load(Ordering::Acquire)
     }
 
     /// Row groups empujados cuyos ítems no terminaron: los que aún anclan sus ticks.
@@ -819,6 +877,7 @@ impl<B: AsRef<[u8]> + Send + Sync + 'static> Engine<B> {
                 || !lock(&self.shared.partials[theta]).is_empty()
                 || !lock(&self.shared.fit_partials[theta]).is_empty()
                 || !lock(&self.shared.runs[theta]).is_empty()
+                || !lock(&self.shared.spectrum_runs[theta]).is_empty()
             {
                 return Err(EngineError::Incomplete {
                     theta,
@@ -984,6 +1043,7 @@ impl<B: AsRef<[u8]> + Send + Sync + 'static> Shared<B> {
                 |row: &Row| (row[col::C_TICKS] + row[col::OS_TICKS]) as u64,
             ),
             Family::Path => self.process_path(job, theta),
+            Family::Spectrum => self.process_spectrum(job, theta),
             Family::Fit => self.process_merged(
                 job,
                 theta,
@@ -1203,7 +1263,9 @@ impl<B: AsRef<[u8]> + Send + Sync + 'static> Shared<B> {
                             acc,
                             at.starts_before,
                             at.ends_after,
-                            self.silence_us,
+                            &|left: &mut PathAcc, right: PathAcc| {
+                                left.merge(&right, self.silence_us)
+                            },
                         )
                         .map_err(|message| {
                             fail(
@@ -1251,6 +1313,175 @@ impl<B: AsRef<[u8]> + Send + Sync + 'static> Shared<B> {
         }
         self.close_events(theta, done.iter().map(|(index, _)| *index));
         Ok(())
+    }
+
+    /// Un ítem de la familia F: como `process_path`, con los retornos de cada tramo en lugar de
+    /// sumas. Un evento sobre el presupuesto no lee ningún tick: su tramo es vacío y marcado, y
+    /// su fila sale nula y con el aviso. El búfer de un evento se libera al cerrarlo.
+    fn process_spectrum(&self, job: &Job<B>, theta: usize) -> Result<(), Box<Failure>> {
+        let fail = |group: u64, event: u64, error: EngineError| {
+            Box::new(Failure {
+                key: (group, theta, event),
+                error,
+            })
+        };
+        let event_error = |group: u64, event: u64, input: &EventIn, kind: EventErrorKind| {
+            fail(
+                group,
+                event,
+                EngineError::Event(EventError {
+                    theta,
+                    event,
+                    confirm_agg_trade_id: input.confirm,
+                    kind,
+                }),
+            )
+        };
+        let located = locate_events(
+            theta,
+            &read(&self.bounds[theta]),
+            job.ticks.keys(),
+            job.prev_high,
+        )
+        .map_err(|e| fail(job.id, located_event(&e), e))?;
+        if located.is_empty() {
+            return Ok(());
+        }
+        let first = located[0].index;
+        let mut done: Vec<(u64, SpectrumRow)> = Vec::with_capacity(located.len());
+        let mut crossing: Vec<(usize, SpectrumAcc)> = Vec::new();
+        let mut before_month = 0u64;
+        for (k, at) in located.iter().enumerate() {
+            let (index, event, positions) = (at.index, &at.event, &at.positions);
+            let acc = if event.extreme.wrapping_sub(event.reference) as u64 > self.budget_ticks {
+                SpectrumAcc::over_budget()
+            } else {
+                self.aggregate_spectrum(&job.ticks, positions)
+                    .map_err(|e| fail(job.id, index, EngineError::Ticks(e)))?
+            };
+            self.buffered.fetch_add(acc.stored(), Ordering::AcqRel);
+            if job.before_month {
+                before_month += (positions[2] - positions[0]) as u64;
+            }
+            if at.starts_before || at.ends_after {
+                crossing.push((k, acc));
+            } else {
+                let row = self
+                    .close_spectrum_event(acc, event)
+                    .map_err(|kind| event_error(job.id, index, event, kind))?;
+                done.push((index, row));
+            }
+        }
+        if !crossing.is_empty() {
+            let mut completed = Vec::new();
+            {
+                let mut store = lock(&self.spectrum_runs[theta]);
+                for (k, acc) in crossing {
+                    let at = &located[k];
+                    let index = at.index;
+                    let runs = store.entry(index).or_default();
+                    let outcome = runs
+                        .add(
+                            job.id,
+                            acc,
+                            at.starts_before,
+                            at.ends_after,
+                            &|left: &mut SpectrumAcc, right: SpectrumAcc| {
+                                let before = left.stored() + right.stored();
+                                left.join(right);
+                                self.buffered
+                                    .fetch_add(left.stored() - before, Ordering::AcqRel);
+                            },
+                        )
+                        .map_err(|message| {
+                            fail(
+                                job.id,
+                                index,
+                                EngineError::Internal(format!(
+                                    "evento {index} del θ {theta}: {message}"
+                                )),
+                            )
+                        })?;
+                    if let Some((acc, last_group)) = outcome {
+                        store.remove(&index);
+                        completed.push((k, index, acc, last_group));
+                    }
+                }
+            }
+            for (k, index, acc, last_group) in completed {
+                let event = &located[k].event;
+                let row = self
+                    .close_spectrum_event(acc, event)
+                    .map_err(|kind| event_error(last_group, index, event, kind))?;
+                done.push((index, row));
+            }
+        }
+        done.sort_unstable_by_key(|(index, _)| *index);
+        let closed_ticks: u64 = done.iter().map(|(_, row)| row.ticks).sum();
+        // Los avisos van antes de escribir las filas: el row group se sella (y se entrega)
+        // con la última, y `pop_sealed` ya los encuentra.
+        if done.iter().any(|(_, row)| row.over_budget.is_some()) {
+            let mut over = lock(&self.over_budget);
+            for (index, row) in &done {
+                if let (Some(ticks), Some(group)) =
+                    (row.over_budget, self.out.output_group(theta, *index))
+                {
+                    over.entry((theta, group)).or_default().push((
+                        *index,
+                        OverBudget {
+                            confirm_agg_trade_id: row.cells[0],
+                            ticks,
+                        },
+                    ));
+                }
+            }
+        }
+        let sealed = self.out.write(theta, &done).map_err(|e| match e {
+            OutputError::Beyond { event, rows } => {
+                fail(job.id, event, EngineError::Skeleton { theta, event, rows })
+            }
+            e @ OutputError::Overfull { .. } => {
+                fail(job.id, first, EngineError::Internal(e.to_string()))
+            }
+        })?;
+        {
+            let mut stats = lock(&self.stats[theta]);
+            stats.rows += done.len() as u64;
+            stats.closed_ticks += closed_ticks;
+            stats.before_month += before_month;
+        }
+        if !sealed.is_empty() {
+            let mut delivery = lock(&self.delivery);
+            for row_group in sealed {
+                delivery.insert(row_group);
+            }
+        }
+        self.close_events(theta, done.iter().map(|(index, _)| *index));
+        Ok(())
+    }
+
+    /// Cierra un evento de F y descuenta sus retornos del total en vuelo: `close_spectrum`
+    /// consume el búfer.
+    fn close_spectrum_event(
+        &self,
+        acc: SpectrumAcc,
+        event: &EventIn,
+    ) -> Result<SpectrumRow, EventErrorKind> {
+        self.buffered.fetch_sub(acc.stored(), Ordering::AcqRel);
+        close_spectrum(acc, event)
+    }
+
+    fn aggregate_spectrum(
+        &self,
+        ticks: &TickColumns<B>,
+        positions: &[usize; 3],
+    ) -> Result<SpectrumAcc, TickError> {
+        let [r, c, e] = *positions;
+        Ok(SpectrumAcc {
+            confirmation: accumulate_returns(ticks, r, c)?,
+            overshoot: accumulate_returns(ticks, c, e)?,
+            over_budget: false,
+        })
     }
 
     fn aggregate_fit(
@@ -1337,5 +1568,16 @@ mod tests {
         assert_eq!(size_of::<Partial<FitAcc>>(), 672);
         assert_eq!(size_of::<Partial<EventAcc>>(), 272);
         assert_eq!(size_of::<Run>(), 272);
+    }
+
+    /// Lo que pesa fijo un evento abierto de la familia F en el almacén de un θ (ADR-L3-19): el
+    /// tramo (`SpectrumRun`), sin los retornos, que cuestan 4 B cada uno aparte. Las cifras que
+    /// el TRD y el README citan se miden aquí.
+    #[test]
+    fn the_fixed_weight_of_an_open_event_of_f_is_the_run_without_its_returns() {
+        assert_eq!(size_of::<crate::spectrum::PhaseReturns>(), 48);
+        assert_eq!(size_of::<crate::spectrum::SpectrumAcc>(), 104);
+        assert_eq!(size_of::<SpectrumRun>(), 120);
+        assert_eq!(size_of::<f32>(), 4);
     }
 }

@@ -98,15 +98,22 @@ en el README del crate.
 
 ```python
 engine = dc_pyo3.Engine(
-    thetas, schema, row_groups, threads=None, family="summaries", silence_us=0
+    thetas,
+    schema,
+    row_groups,
+    threads=None,
+    family="summaries",
+    silence_us=0,
+    budget_ticks=20_000_000,
 )
 engine.push_boundaries(theta, batch)  # por lotes, por delante de los row groups
 engine.needed(theta)  # primer evento del θ sin cerrar
 engine.push(row_group_id, rows, ids, time, price, quantity, sold, before_month)
 engine.locate(theta, rows, ids, time, prev_high)  # solo para probar: no empuja
 while (sealed := engine.pop_sealed()) is not None:
-    theta, index, rows, columns, validity, null_count = sealed
+    theta, index, rows, columns, validity, null_count, *over_budget = sealed
 engine.inflight()
+engine.buffered_ticks()  # solo `spectrum`: retornos en los búferes de los eventos abiertos
 engine.busy()
 stats = (
     engine.finish()
@@ -114,10 +121,12 @@ stats = (
 engine.close()
 ```
 
-- `schema` son las columnas de datos de la familia (18 en `summaries`, 14 en `path`, 10 en `fit`) como
+- `schema` son las columnas de datos de la familia (18 en `summaries`, 14 en `path`, 10 en `fit` y 29 en `spectrum`) como
   `(nombre, bytes por valor, nulable)`; el motor las compara con las suyas y falla con
   `ValueError` si el esquema de la capa cambió. `family` es `"summaries"`, `"path"` (la
-  trayectoria, ADR-L3-17) o `"fit"` (la forma, ADR-L3-18) y `silence_us` el umbral de silencio de `path` en µs.
+  trayectoria, ADR-L3-17) `"fit"` (la forma, ADR-L3-18) o `"spectrum"` (la frecuencia, ADR-L3-19), `silence_us` el umbral de silencio de `path` en µs y
+  `budget_ticks` el presupuesto de `spectrum`: un evento con `extreme_agg_trade_id − reference_agg_trade_id` mayor no
+  guarda retornos y su fila queda nula.
   `row_groups[t]` son las filas de cada row group de salida del θ `t` (el esqueleto de L2),
   y van en el constructor y no en cada `push` porque no cambian por row group.
 - **Ticks sin copia.** `ids`, `time`, `price`, `quantity` y `sold` son `(memoryview de bytes del
@@ -141,8 +150,12 @@ engine.close()
 - **Salida sin copia.** `columns` son los `SealedColumn` de la familia: objetos de solo lectura
   con protocolo de buffer que poseen la memoria del motor. `pyarrow.py_buffer(column)` los
   envuelve sin copiar. En `summaries`, `validity` es el mapa de bits de las columnas `os_*`, o
-  `None`. En `path` y `fit`, `validity` es una lista con una entrada por columna, `(mapa de bits,
-  nulos)` si la columna tiene nulos y `None` si no; `null_count` suma los nulos.
+  `None`. En `path`, `fit` y `spectrum`, `validity` es una lista con una entrada por columna, `(mapa de bits,
+  nulos)` si la columna tiene nulos y `None` si no; `null_count` suma los nulos. `spectrum` agrega un
+  séptimo elemento: los eventos del row group sobre el presupuesto, `(confirm_agg_trade_id, ticks)`
+  en orden de evento (`ticks` es `extreme_agg_trade_id − reference_agg_trade_id`), con los que el
+  orquestador emite `event_over_budget`. `buffered_ticks()` son los retornos que guarda ahora el motor
+  de sus eventos abiertos (0 fuera de `spectrum`).
 - **Errores.** `DescriptorError` (subclase de `ValueError`) con `kind` y, según el caso,
   `theta` (posición), `event`, `confirm_agg_trade_id`, `phase`, `field`, `got`, `wanted` (`kind` `fit_overflow` en un momento de `fit` que no cupo) y, en
   `boundary`, `reason`, `bounds`, `low` y `high`.

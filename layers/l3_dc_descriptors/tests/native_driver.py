@@ -3,8 +3,8 @@
 Es lo que el orquestador (ITSC-358 es solo el motor) hará con más cuidado: entrega al motor
 las fronteras de L2 de cada θ, lee los row groups del lector, los empuja y escribe lo que
 sella. Aquí el lago es chico, así que se materializan todos los row groups y se puede
-empujar en cualquier orden. `path_native` y `fit_native` hacen lo mismo para las familias T
-(`path.parquet`) y A (`fit.parquet`).
+empujar en cualquier orden. `path_native`, `fit_native` y `spectrum_native` hacen lo mismo para
+las familias T (`path.parquet`), A (`fit.parquet`) y F (`spectrum.parquet`).
 """
 
 import random
@@ -30,6 +30,13 @@ from l3_dc_descriptors.schema import (
     PATH_SCHEMA,
     PATH_STATE_VERSION,
     SILENCE_US,
+    SPECTRUM_BANDS,
+    SPECTRUM_BUDGET_TICKS,
+    SPECTRUM_FAMILY,
+    SPECTRUM_N_MIN,
+    SPECTRUM_SCHEMA,
+    SPECTRUM_STATE_VERSION,
+    SPECTRUM_WINDOW,
     STATE_VERSION,
     SUMMARIES_SCHEMA,
 )
@@ -112,12 +119,16 @@ def _run(
     order: str | Sequence[int],
     seed: int,
     lot: int | None,
+    budget_ticks: int = SPECTRUM_BUDGET_TICKS,
+    over_budget: list | None = None,
 ) -> tuple[list[Decimal], list[FamilyWriter], list[tuple]]:
     """La pasada del motor sobre un mes para una familia: escribe cada row group sellado
     con un `FamilyWriter` (que `stack` cierra) y devuelve `(θ, escritores, estadísticas)`.
     Falta el `commit` de cada escritor. `summaries` se escribe contra `events.parquet` de L2;
-    `path` y `fit`, contra el `summaries.parquet` del mes (`path`, con `silence_us` en sus
-    metadatos; `fit`, solo con `state_version`).
+    `path`, `fit` y `spectrum`, contra el `summaries.parquet` del mes (`path`, con `silence_us` en
+    sus metadatos; `fit`, solo con `state_version`; `spectrum`, con los cuatro parámetros de F).
+    `over_budget`, si se pasa, recibe `(θ, confirm_agg_trade_id, ticks)` de los eventos sobre el
+    presupuesto de `spectrum`, en orden de entrega.
     """
     key = DEFAULT_KEY
     values = [Decimal(t) for t in thetas]
@@ -127,8 +138,16 @@ def _run(
         FAMILY: (SUMMARIES_SCHEMA, STATE_VERSION),
         PATH_FAMILY: (PATH_SCHEMA, PATH_STATE_VERSION),
         FIT_FAMILY: (FIT_SCHEMA, FIT_STATE_VERSION),
+        SPECTRUM_FAMILY: (SPECTRUM_SCHEMA, SPECTRUM_STATE_VERSION),
     }[family]
     extra = {"silence_us": str(SILENCE_US)} if is_path else None
+    if family == SPECTRUM_FAMILY:
+        extra = {
+            "n_min": str(SPECTRUM_N_MIN),
+            "bands": str(SPECTRUM_BANDS),
+            "window": SPECTRUM_WINDOW,
+            "budget_ticks": str(budget_ticks),
+        }
     writers = [
         stack.enter_context(
             FamilyWriter(
@@ -159,6 +178,7 @@ def _run(
         threads,
         family,
         SILENCE_US if is_path else 0,
+        budget_ticks,
     )
     stack.callback(engine.close)
     feeds = [
@@ -170,6 +190,11 @@ def _run(
         while (sealed := engine.pop_sealed()) is not None:
             position, _, batch = native.to_batch(values[sealed[0]], sealed, family)
             writers[position].write_row_group(batch)
+            if over_budget is not None:
+                over_budget.extend(
+                    (values[position], confirm, ticks)
+                    for confirm, ticks in native.over_budget(sealed)
+                )
 
     try:
         if lot is None:
@@ -265,6 +290,62 @@ def fit_native(
     )
 
 
+class SpectrumResult(NamedTuple):
+    """Lo que deja `spectrum_native` de un θ: el archivo, sus filas, su `content_hash` y los
+    eventos sobre el presupuesto `(confirm_agg_trade_id, ticks)`, en orden de evento.
+    """
+
+    path: str
+    rows: int
+    content_hash: str
+    over_budget: list[tuple[int, int]]
+
+
+def spectrum_native(
+    l1_root,
+    l2_root,
+    l3_root,
+    month: Month,
+    thetas: Sequence[str],
+    *,
+    series_start: Month | None = None,
+    threads: int = 4,
+    order: str | Sequence[int] = "forward",
+    seed: int = 0,
+    lot: int | None = None,
+    budget_ticks: int = SPECTRUM_BUDGET_TICKS,
+) -> dict[Decimal, SpectrumResult]:
+    """La familia F (`spectrum.parquet`) de un mes por el motor nativo, con las mismas opciones y
+    el mismo esqueleto que `path_native`: S primero, si falta. `budget_ticks` baja el presupuesto
+    para que un lago chico tenga eventos sobre él.
+    """
+    over: list = []
+    results = _derived_native(
+        SPECTRUM_FAMILY,
+        l1_root,
+        l2_root,
+        l3_root,
+        month,
+        thetas,
+        series_start=series_start,
+        threads=threads,
+        order=order,
+        seed=seed,
+        lot=lot,
+        budget_ticks=budget_ticks,
+        over_budget=over,
+    )
+    return {
+        theta: SpectrumResult(
+            result.path,
+            result.rows,
+            result.content_hash,
+            [(confirm, ticks) for t, confirm, ticks in over if t == theta],
+        )
+        for theta, result in results.items()
+    }
+
+
 def _derived_native(
     family: str,
     l1_root,
@@ -278,6 +359,8 @@ def _derived_native(
     order: str | Sequence[int],
     seed: int,
     lot: int | None,
+    budget_ticks: int = SPECTRUM_BUDGET_TICKS,
+    over_budget: list | None = None,
 ) -> dict[Decimal, PathResult]:
     key = DEFAULT_KEY
     l1_root, l2_root, l3_root = str(l1_root), str(l2_root), str(l3_root)
@@ -329,6 +412,8 @@ def _derived_native(
             order,
             seed,
             lot,
+            budget_ticks,
+            over_budget,
         )
         return {
             theta: PathResult(writer.path, rows, writer.commit())

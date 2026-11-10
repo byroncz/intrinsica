@@ -272,13 +272,15 @@ events = pq.read_table(
 ## Salida Parquet de L3
 
 Contrato hacia L4: el resumen por fase de cada evento de L2 (`summaries.parquet`) y,
-sobre el mismo esqueleto, la trayectoria de cada fase (`path.parquet`) y su forma
-(`fit.parquet`), una fila por evento y θ en cada archivo, en la misma partición que su fila de L2. Fuente de diseño:
+sobre el mismo esqueleto, la trayectoria de cada fase (`path.parquet`), su forma
+(`fit.parquet`) y la energía por banda de sus retornos (`spectrum.parquet`), una fila por evento y θ
+en cada archivo, en la misma partición que su fila de L2. Fuente de diseño:
 [TRD-L3 §7.2](TRD/l3.md#72-salida--summariesparquet-contrato-hacia-l4),
 [§7.2.1](TRD/l3.md#721-salida--pathparquet-familia-t),
-[§7.2.2](TRD/l3.md#722-salida--fitparquet-familia-a) y
+[§7.2.2](TRD/l3.md#722-salida--fitparquet-familia-a),
+[§7.2.3](TRD/l3.md#723-salida--spectrumparquet-familia-f) y
 [§7.3](TRD/l3.md#73-directorio-de-la-capa-y-esqueleto-común). Fuente en código:
-`SUMMARIES_SCHEMA`, `PATH_SCHEMA` y `FIT_SCHEMA` en
+`SUMMARIES_SCHEMA`, `PATH_SCHEMA`, `FIT_SCHEMA` y `SPECTRUM_SCHEMA` en
 [`layers/l3_dc_descriptors/src/l3_dc_descriptors/schema.py`](../layers/l3_dc_descriptors/src/l3_dc_descriptors/schema.py).
 Una prueba (`layers/l3_dc_descriptors/tests/test_l3_contract_doc.py`) rompe el CI
 si las tablas se desvían del código.
@@ -344,7 +346,7 @@ comprueba al escribir que iguala la suma de `quantity` de sus ticks.
 
 Lo escribe la imagen `l3_dc_descriptors` (`python -m l3_dc_descriptors --mode
 backfill|monthly`, [TRD-L3 §8](TRD/l3.md#8-pipeline-interno-y-modos-de-ejecución)),
-con `--family summaries` (la predeterminada), `--family path` (la familia T, ITSC-394) o `--family fit` (la familia A, ITSC-400). Lee `L3_LANDING_ROOT` (L1) y
+con `--family summaries` (la predeterminada), `--family path` (la familia T, ITSC-394) o `--family fit` (la familia A, ITSC-400). La familia F (`spectrum.parquet`) ya la calcula el motor (ITSC-412); su `--family spectrum`, el orquestador y la cadena mensual los conectan las hijas siguientes de ITSC-410. Lee `L3_LANDING_ROOT` (L1) y
 `L3_EVENTS_ROOT` (L2), escribe bajo `L3_SUMMARIES_ROOT` y deja sus hallazgos en
 `L3_DQ_ROOT`. El catálogo de θ no es de L3: `L3_THETAS_URI` (o `--thetas-uri`) apunta al
 mismo objeto `l2/thetas.yaml` que usa L2, y sin él la corrida termina con código 2.
@@ -587,6 +589,116 @@ con = duckdb.connect()
 wide = con.execute(
     f"SELECT * FROM read_parquet('{partition}/summaries.parquet') AS s "
     f"JOIN read_parquet('{partition}/fit.parquet') AS f "
+    "USING (theta, confirm_agg_trade_id)"
+).to_arrow_table()
+```
+
+### Esquema de `spectrum.parquet`
+
+Familia F ([TRD-L3 §7.2.3](TRD/l3.md#723-salida--spectrumparquet-familia-f)): la energía de los
+retornos de cada fase repartida por banda de período (Fourier) y por nivel (Haar). Tiene las
+mismas filas, en el mismo orden y con los mismos row groups que `summaries.parquet` de la
+partición, así que se une 1:1 por `(theta, confirm_agg_trade_id)`. Si falta el
+`summaries.parquet` del mes, `spectrum.parquet` no se escribe.
+
+Las dos fases son la confirmación `c` (ticks de `(R, C]`) y el overshoot `os` (ticks de `(C, E]`).
+La serie de una fase de `n` ticks son sus **`n` retornos** `r_k = ln(p_k / p_{k−1})`, con `p_k` el
+precio del tick `k` y el primer paso desde el **ancla** `p_0`: `p_R = reference_price` en la
+confirmación y `p_C = confirm_price` en el overshoot. Cada registro trae **siete** columnas, una por
+banda o nivel, numeradas de 1 a 7.
+
+| Columna | Tipo Arrow/Parquet | Nulable | Descripción |
+|---|---|---|---|
+| `theta` | decimal128(9, 8) | no | θ del evento; clave, redundante con la partición |
+| `confirm_agg_trade_id` | int64 | no | Clave: con `theta` identifica al evento y une con su fila de `summaries.parquet` |
+| `c_fourier_band_1` | double | sí | F-01. Fracción de la energía de los retornos de la confirmación en la banda de período 1 (2 a menos de 4 ticks); nula con menos de 16 retornos en la fase |
+| `c_fourier_band_2` | double | sí | F-01. Fracción de la energía de los retornos de la confirmación en la banda de período 2 (4 a menos de 8) |
+| `c_fourier_band_3` | double | sí | F-01. Fracción de la energía de los retornos de la confirmación en la banda de período 3 (8 a menos de 16) |
+| `c_fourier_band_4` | double | sí | F-01. Fracción de la energía de los retornos de la confirmación en la banda de período 4 (16 a menos de 32) |
+| `c_fourier_band_5` | double | sí | F-01. Fracción de la energía de los retornos de la confirmación en la banda de período 5 (32 a menos de 64); nula con menos de 32 retornos |
+| `c_fourier_band_6` | double | sí | F-01. Fracción de la energía de los retornos de la confirmación en la banda de período 6 (64 a menos de 128); nula con menos de 64 retornos |
+| `c_fourier_band_7` | double | sí | F-01. Fracción de la energía de los retornos de la confirmación en la banda de período 7 (128 o más); nula con menos de 128 retornos |
+| `os_fourier_band_1` | double | sí | F-02. Lo mismo en el overshoot; nula con menos de 16 retornos en el overshoot (también con `os_ticks = 0`) (banda 1) |
+| `os_fourier_band_2` | double | sí | F-02. Lo mismo en el overshoot; nula con menos de 16 retornos en el overshoot (también con `os_ticks = 0`) (banda 2) |
+| `os_fourier_band_3` | double | sí | F-02. Lo mismo en el overshoot; nula con menos de 16 retornos en el overshoot (también con `os_ticks = 0`) (banda 3) |
+| `os_fourier_band_4` | double | sí | F-02. Lo mismo en el overshoot; nula con menos de 16 retornos en el overshoot (también con `os_ticks = 0`) (banda 4) |
+| `os_fourier_band_5` | double | sí | F-02. Lo mismo en el overshoot; nula si `os_ticks = 0` (banda 5); nula con menos de 32 retornos |
+| `os_fourier_band_6` | double | sí | F-02. Lo mismo en el overshoot; nula si `os_ticks = 0` (banda 6); nula con menos de 64 retornos |
+| `os_fourier_band_7` | double | sí | F-02. Lo mismo en el overshoot; nula si `os_ticks = 0` (banda 7); nula con menos de 128 retornos |
+| `c_haar_level_1` | double | sí | F-03. Fracción de la energía de los retornos de la confirmación en el nivel de Haar 1; nula con menos de 16 retornos en la fase |
+| `c_haar_level_2` | double | sí | F-03. Fracción de la energía de los retornos de la confirmación en el nivel de Haar 2 |
+| `c_haar_level_3` | double | sí | F-03. Fracción de la energía de los retornos de la confirmación en el nivel de Haar 3 |
+| `c_haar_level_4` | double | sí | F-03. Fracción de la energía de los retornos de la confirmación en el nivel de Haar 4 |
+| `c_haar_level_5` | double | sí | F-03. Fracción de la energía de los retornos de la confirmación en el nivel de Haar 5; nula con menos de 32 retornos |
+| `c_haar_level_6` | double | sí | F-03. Fracción de la energía de los retornos de la confirmación en el nivel de Haar 6; nula con menos de 64 retornos |
+| `c_haar_level_7` | double | sí | F-03. Fracción de la energía de los retornos de la confirmación en el nivel de Haar 7; nula con menos de 128 retornos |
+| `os_haar_level_1` | double | sí | F-04. Lo mismo en el overshoot; nula con menos de 16 retornos en el overshoot (también con `os_ticks = 0`) (nivel 1) |
+| `os_haar_level_2` | double | sí | F-04. Lo mismo en el overshoot; nula con menos de 16 retornos en el overshoot (también con `os_ticks = 0`) (nivel 2) |
+| `os_haar_level_3` | double | sí | F-04. Lo mismo en el overshoot; nula con menos de 16 retornos en el overshoot (también con `os_ticks = 0`) (nivel 3) |
+| `os_haar_level_4` | double | sí | F-04. Lo mismo en el overshoot; nula con menos de 16 retornos en el overshoot (también con `os_ticks = 0`) (nivel 4) |
+| `os_haar_level_5` | double | sí | F-04. Lo mismo en el overshoot; nula si `os_ticks = 0` (nivel 5); nula con menos de 32 retornos |
+| `os_haar_level_6` | double | sí | F-04. Lo mismo en el overshoot; nula si `os_ticks = 0` (nivel 6); nula con menos de 64 retornos |
+| `os_haar_level_7` | double | sí | F-04. Lo mismo en el overshoot; nula si `os_ticks = 0` (nivel 7); nula con menos de 128 retornos |
+
+Las bandas de período `n/k` (en ticks) son: 1 = [2, 4), 2 = [4, 8), 3 = [8, 16), 4 = [16, 32),
+5 = [32, 64), 6 = [64, 128) y 7 = 128 o más.
+
+La **regla de nulos** es exacta, nada más es nulo: todas las columnas de una fase con **menos de 16
+retornos** (`n_min = 16`); todas las `os_*` con `os_ticks = 0`; una banda o nivel **sin bins**
+(la 5 con menos de 32 retornos, la 6 con menos de 64 y la 7 con menos de 128; es nulo, no cero);
+las siete columnas de Fourier de una fase cuyos retornos son todos iguales (energía total 0), y las
+siete de Haar si lo son los últimos `2^⌊log₂ n⌋`; y las **28 columnas de datos** de un evento
+sobre el presupuesto de ticks (`extreme_agg_trade_id − reference_agg_trade_id` mayor que
+`budget_ticks`, 20 000 000), que se decide con la fila de L2 antes de leer un tick y se avisa con
+`event_over_budget`. Las columnas nunca guardan `±inf` ni `NaN`; cada fracción está en `[0, 1]` y
+las bandas no nulas de un registro de una fase suman 1.
+
+### Fórmulas de `spectrum.parquet`
+
+- **Retornos.** `r = ln(1 + (p − p_ant) / p_ant)` entre ticks consecutivos de la fase (el
+  cociente de enteros y `ln_1p`), con el primer paso desde el ancla. Se guardan en `f32` y todo lo
+  que sigue se calcula en `f64` sobre los `f32` convertidos.
+- **Fourier (F-01, F-02).** La serie se centra (resta de la media), se multiplica por la ventana
+  de Hann periódica `0,5 − 0,5·cos(2π·j/n)`, `j = 0..n−1`, y pasa por una FFT exacta de longitud
+  `n`. La energía es `|X_k|²` de los bins `k = 1..⌊n/2⌋` (el bin 0 queda fuera) y cada columna es
+  la energía de los bins cuyo período `n/k` cae en la banda, entre la energía total de esos bins.
+- **Haar (F-03, F-04).** Sobre los últimos `2^⌊log₂ n⌋` retornos de la fase, centrados, la
+  transformada de Haar ortonormal (`a' = (x₂ᵢ + x₂ᵢ₊₁)/√2`, `d = (x₂ᵢ − x₂ᵢ₊₁)/√2`). La energía del
+  nivel `j` es `Σ d²` en la pasada `j`; los niveles 1 a 6 son las escalas de 2, 4, 8, 16, 32 y 64
+  ticks y el séptimo junta las de 128 en adelante. Cada columna es la energía del nivel entre la
+  suma de las de todos los niveles.
+- **Determinismo.** La FFT corre al cerrar el evento, sobre el búfer completo y en un solo hilo
+  (`rustfft` con el planificador escalar, sin instrucciones SIMD): el mismo archivo con cualquier
+  número de hilos, tamaño de tramo u orden de entrada.
+
+### Metadatos y lectura de `spectrum.parquet`
+
+- **Metadatos del archivo**: `state_version = "1.0.0"`, `n_min = "16"`, `bands = "7"`,
+  `window = "hann"` y `budget_ticks = "20000000"` (los metadatos de Parquet son texto). Cambiar
+  cualquiera de los cuatro parámetros exige una `state_version` nueva. No entran en el
+  `content_hash`.
+- **Disposición física**: la de `summaries.parquet` (misma partición, ZSTD nivel 3, sin
+  diccionario, `sorting_columns` por `confirm_agg_trade_id`, mismos row groups). El
+  `content_hash` lo calcula `pyutils.ContentHasher`, que hashea las columnas `double`
+  por los bits de cada valor (sin `NaN` ni `inf`, porque L3 no los produce).
+- **Quién lo escribe**: el motor de agregación (`Config.family = spectrum`) calcula las filas y el
+  `FamilyWriter` las repite sobre el esqueleto de `summaries.parquet` de la partición, con los
+  metadatos de arriba. La CLI de L3 (`--family spectrum`) y la cadena mensual los conectan las
+  hijas siguientes de la Épica ITSC-410.
+- **Leer**: se une con `summaries.parquet` por `(theta, confirm_agg_trade_id)`; la unión
+  es 1:1 y también por posición.
+
+```python
+import duckdb
+
+partition = (
+    "<raíz L3>/provider=binance/market=spot/asset=BTCUSDT"
+    "/theta=0.00010000/year=2020/month=01"
+)
+con = duckdb.connect()
+wide = con.execute(
+    f"SELECT * FROM read_parquet('{partition}/summaries.parquet') AS s "
+    f"JOIN read_parquet('{partition}/spectrum.parquet') AS f "
     "USING (theta, confirm_agg_trade_id)"
 ).to_arrow_table()
 ```
@@ -1001,7 +1113,7 @@ mismo que traen las excepciones del resumidor, de las que sale la mayoría de lo
   al cerrar la unidad (desde la 2.5.0 del TRD-L3); `inflight_bytes` (el tope de bytes de eventos
   abiertos, `L3_INFLIGHT_BYTES`), `inflight_events_max`, `inflight_bytes_max` (el máximo de
   eventos entregados al motor que aún no cerraron y ese máximo en bytes, a 337 B por evento en S, 769 B
-  en A y 369 B en T (una cifra por familia desde el TRD-L3 2.17.4, ITSC-407; T es cota inferior: guarda
+  en A y 369 B en T (una cifra por familia desde el TRD-L3 2.17.4, ITSC-407; F cobra 217 B por evento más 4 B por cada retorno que el motor guarda de sus eventos abiertos, desde el 2.18.0, ITSC-412; T es cota inferior: guarda
   una corrida por tramo suelto de un evento que cruza row groups; antes 337 B para todas, 321 B del 2.13.0
   al 2.15.0 y 305 B hasta el 2.12.1) y a 97 B (81 B del 2.13.0 al 2.15.0; 65 B hasta el 2.12.1) los que `cover` trajo por delante del último tramo; puede pasar del tope hasta en un tramo, porque
   el tope se mira antes de empujar) e `inflight_alone_bytes_max` (lo mismo

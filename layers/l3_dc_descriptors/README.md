@@ -72,6 +72,13 @@ fija), así que un evento de S que cruza row groups pesa más de 240 B. La cifra
 | `summaries` (S) | 240 B (la fila de salida, 18 columnas de `ENGINE_SCHEMA`; no es un `size_of`) | 97 B | **337 B** | 2,4 M de eventos | ≈ 337 MB |
 | `fit` (A) | 672 B (`Partial<FitAcc>`) | 97 B | **769 B** | 1,0 M de eventos | ≈ 769 MB |
 | `path` (T) | 272 B (una `Run`) | 97 B | **369 B** (cota inferior) | 2,2 M de eventos | ≈ 369 MB |
+| `spectrum` (F) | 120 B (una `SpectrumRun`) **más 4 B por retorno guardado** | 97 B | **217 B** más `4 × Engine.buffered_ticks()` | 3,7 M de eventos sin retornos | ≈ 217 MB más 4 MB por millón de retornos |
+
+F (ITSC-412, ADR-L3-19) es la única familia cuyo estado crece con los ticks del evento abierto: guarda los
+retornos de sus fases hasta cerrarlo (`f32`, 4 B cada uno), con un tope de 20 M de ticks por evento (80 MB).
+`summarize._unclosed` suma `SPECTRUM_RETURN_BYTES × buffered_ticks()` al costo fijo; lo que no cuenta es el
+trabajo transitorio de la FFT al cerrar (16 B por retorno más el scratch de `rustfft`). La familia ya la calcula el
+motor; la CLI y la cadena mensual la conectan las hijas siguientes de ITSC-410.
 
 T guarda una `Run` por cada tramo suelto de un evento que cruza row groups (fusión ordenada,
 ADR-L3-17), así que su estado crece con los row groups que el evento cruza: el estimador toma una
