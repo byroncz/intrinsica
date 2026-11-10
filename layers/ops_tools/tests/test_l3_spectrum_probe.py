@@ -940,16 +940,20 @@ def test_ubicacion_por_nivel_y_total_a_mano(probe, series, levels, total):
         total, abs=1e-12
     )
     # Las fracciones son las de `haar`, y varias series a la vez dan lo mismo que una por una.
-    assert fraction.tolist() == probe.haar(np.array(series)).tolist()
+    # Caminos de cálculo distintos: se comparan con tolerancia, no bit a bit. El último bit
+    # depende de la máquina (ITSC-377); la relación que se prueba es que dan lo mismo.
+    np.testing.assert_allclose(
+        fraction, probe.haar(np.array(series)), rtol=0, atol=1e-12
+    )
     block = np.array([series, series[::-1]])
     fractions, locations = probe.haar_location(block)
-    np.testing.assert_array_equal(fractions[0], fraction)
-    np.testing.assert_array_equal(locations[0], location)
-    assert probe.total_location(block)[0] == pytest.approx(total, abs=1e-15)
+    np.testing.assert_allclose(fractions[0], fraction, rtol=0, atol=1e-12)
+    np.testing.assert_allclose(locations[0], location, rtol=0, atol=1e-12)
+    assert probe.total_location(block)[0] == pytest.approx(total, abs=1e-12)
     for row, values in enumerate(block):
         one = probe.haar_location(values)
-        np.testing.assert_array_equal(fractions[row], one[0])
-        np.testing.assert_array_equal(locations[row], one[1])
+        np.testing.assert_allclose(fractions[row], one[0], rtol=0, atol=1e-12)
+        np.testing.assert_allclose(locations[row], one[1], rtol=0, atol=1e-12)
 
 
 def test_el_septimo_nivel_junta_las_escalas_de_128_en_adelante(probe):
