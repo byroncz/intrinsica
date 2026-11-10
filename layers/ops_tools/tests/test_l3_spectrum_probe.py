@@ -40,7 +40,13 @@ LAST_LINE = re.compile(
     r"rho_ret_accel=(?P<rho_ret_accel>\S+) rho_ret_t50=(?P<rho_ret_t50>\S+) "
     r"rho_price_accel=(?P<rho_price_accel>\S+) rho_price_t50=(?P<rho_price_t50>\S+) "
     r"f32_err=(?P<f32_err>\S+) n_lt16=(?P<n_lt16>\S+) "
-    r"inflight_peak_ticks=(?P<inflight_peak_ticks>\S+) pared_s=(?P<pared>\S+) "
+    r"inflight_peak_ticks=(?P<inflight_peak_ticks>\S+) "
+    r"D_haar_fast=(?P<D_haar_fast>\S+) D_haar_slow=(?P<D_haar_slow>\S+) "
+    r"D_loc_fast=(?P<D_loc_fast>\S+) D_loc_slow=(?P<D_loc_slow>\S+) "
+    r"D_loc_total=(?P<D_loc_total>\S+) rho_loc_total=(?P<rho_loc_total>\S+) "
+    r"rho_loc_jump=(?P<rho_loc_jump>\S+) rho_ret_sign=(?P<rho_ret_sign>\S+) "
+    r"rho_ret_ticks=(?P<rho_ret_ticks>\S+) locs_pasan=(?P<locs_pasan>\S+) "
+    r"pared_s=(?P<pared>\S+) "
     r"veredicto=(?P<veredicto>\S+)$"
 )
 
@@ -72,6 +78,8 @@ class Ev:
     gap: int = 0
     accel: float | None = 0.1
     t50: float | None = 0.5
+    jump: float | None = 0.3
+    sign: float | None = 0.2
 
 
 def walk(returns, start: int = BASE) -> list[int]:
@@ -160,6 +168,8 @@ def write_lake(
                 "os_var": realized(conf_price, event.os) if event.os else None,
                 "t50": event.t50,
                 "accel": event.accel,
+                "jump": event.jump,
+                "sign": event.sign,
             }
         )
         ref_id, ref_price = ext_id, (event.os or event.c)[-1]
@@ -224,6 +234,7 @@ def write_lake(
                 "c_realized_var": column("c_var", pa.float64()),
                 "os_realized_var": column("os_var", pa.float64()),
                 "c_t50": column("t50", pa.float64()),
+                "c_sign_autocorr": column("sign", pa.float64()),
             }
         ),
         paths["path"],
@@ -231,7 +242,11 @@ def write_lake(
     )
     pq.write_table(
         pa.table(
-            {"confirm_agg_trade_id": ids, "c_accel": column("accel", pa.float64())}
+            {
+                "confirm_agg_trade_id": ids,
+                "c_accel": column("accel", pa.float64()),
+                "c_jump_share": column("jump", pa.float64()),
+            }
         ),
         paths["fit"],
         row_group_size=4,
@@ -522,7 +537,7 @@ def test_un_ritmo_de_periodo_8_da_D_alto_y_el_ruido_iid_da_D_bajo(
         == 0
     )
     noise = last_line(capsys)
-    for name in ("D_ret_fast", "D_ret_slow"):
+    for name in ("D_ret_fast", "D_ret_slow", "D_price_fast", "D_price_slow"):
         assert float(noise[name]) < 0.10, noise
     assert noise["veredicto"] in ("retirada", "sigue")
     assert float(noise["f32_err"]) < 1e-4
@@ -887,3 +902,427 @@ def test_out_que_termina_en_barra_es_un_directorio(probe, tmp_path):
     args[args.index("--out") + 1] = f"{out}/"
     assert probe.main(args) == 0
     assert (tmp_path / "carpeta" / f"l3_spectrum_probe_{MONTH}_{THETA}.csv").exists()
+
+
+# --- (f) ubicación de la energía en el tiempo (ITSC-416) ---------------------------------------
+
+# Oráculo a mano, n = 8 (m = 3, sin retornos descartados): x = [6, 0, 0, 0, 2, 0, −2, −6], media 0.
+#   nivel 1: pares (6,0) (0,0) (2,0) (−2,−6): d² = 18, 0, 2, 8; aproximaciones [6, 0, 2, −8]/√2;
+#            t = (i + 0,5)·2/8 = 0,125 / 0,375 / 0,625 / 0,875 → loc_1 = (2,25 + 1,25 + 7)/28 = 0,375.
+#   nivel 2: d = (6−0)/2 = 3 y (2+8)/2 = 5: d² = 9 y 25; t = 0,25 y 0,75 → loc_2 = 21/34.
+#   nivel 3: un solo coeficiente (d² = 18) → nulo; niveles 4 a 7 no existen → nulos.
+#   energía: 28 + 34 + 18 = 80 = Σ x². Fracciones: 28/80, 34/80, 18/80.
+#   loc_total: r² = 36, 0, 0, 0, 4, 0, 4, 36; t_k = (k − 0,5)/8 → (2,25 + 2,25 + 3,25 + 33,75)/80.
+# Con n = 10 se agrega la cabeza [9, −9], que Haar ignora (los últimos 8) pero desplaza las
+# posiciones: t = (2 + (i + 0,5)·2^j)/10. nivel 1: 0,3 / 0,5 / 0,7 / 0,9 → loc_1 = 14/28 = 0,5;
+# nivel 2: 0,4 y 0,8 → loc_2 = (3,6 + 20)/34. loc_total: (65,4)/242 con t_k = (k − 0,5)/10.
+LOC_X = [6.0, 0.0, 0.0, 0.0, 2.0, 0.0, -2.0, -6.0]
+LOC_HAAR_FRACTIONS = [28 / 80, 34 / 80, 18 / 80, 0, 0, 0, 0]
+LOC_LEVELS_8 = [0.375, 21 / 34]
+LOC_LEVELS_10 = [0.5, 23.6 / 34]
+
+
+@pytest.mark.parametrize(
+    ("series", "levels", "total"),
+    [
+        (LOC_X, LOC_LEVELS_8, 41.5 / 80),
+        ([9.0, -9.0, *LOC_X], LOC_LEVELS_10, 65.4 / 242),
+    ],
+)
+def test_ubicacion_por_nivel_y_total_a_mano(probe, series, levels, total):
+    fraction, location = probe.haar_location(np.array(series))
+    assert fraction.tolist() == pytest.approx(LOC_HAAR_FRACTIONS, abs=1e-12)
+    assert location[:2].tolist() == pytest.approx(levels, abs=1e-12)
+    assert np.isnan(
+        location[2:]
+    ).all()  # un coeficiente en el nivel 3; los demás no existen
+    assert float(probe.total_location(np.array(series))) == pytest.approx(
+        total, abs=1e-12
+    )
+    # Las fracciones son las de `haar`, y varias series a la vez dan lo mismo que una por una.
+    assert fraction.tolist() == probe.haar(np.array(series)).tolist()
+    block = np.array([series, series[::-1]])
+    fractions, locations = probe.haar_location(block)
+    np.testing.assert_array_equal(fractions[0], fraction)
+    np.testing.assert_array_equal(locations[0], location)
+    assert probe.total_location(block)[0] == pytest.approx(total, abs=1e-15)
+    for row, values in enumerate(block):
+        one = probe.haar_location(values)
+        np.testing.assert_array_equal(fractions[row], one[0])
+        np.testing.assert_array_equal(locations[row], one[1])
+
+
+def test_el_septimo_nivel_junta_las_escalas_de_128_en_adelante(probe):
+    """n = 512: el nivel 7 junta los niveles 7, 8 y 9 (2 + 1 + 1 coeficientes), con su posición."""
+    rng = np.random.default_rng(3)
+    series = rng.standard_normal(512)
+    _, location = probe.haar_location(series)
+    approx = series - series.mean()
+    moment = energy = 0.0
+    for level in range(1, 10):
+        even, odd = approx[0::2], approx[1::2]
+        detail = (even - odd) / math.sqrt(2.0)
+        approx = (even + odd) / math.sqrt(2.0)
+        if level >= 7:
+            t = (np.arange(len(detail)) + 0.5) * 2**level / 512
+            moment += float((t * detail**2).sum())
+            energy += float((detail**2).sum())
+    assert location[6] == pytest.approx(moment / energy, abs=1e-12)
+    assert not np.isnan(location).any()
+
+
+def test_ubicacion_nula_con_menos_de_2_coeficientes_o_energia_cero(probe):
+    # n = 16: el nivel 4 tiene un coeficiente; los niveles 5 a 7 no existen.
+    _, location = probe.haar_location(np.array(SQUARE))
+    assert np.isnan(location[3:]).all()
+    # Nivel 1 sin energía (pares iguales): nulo; el nivel 2 sí tiene.
+    _, location = probe.haar_location(np.array(SQUARE))
+    assert np.isnan(location[0])
+    assert not np.isnan(location[1])
+    # Serie constante: toda la fase es nula y loc_total también.
+    flat = np.full(16, 0.25)
+    assert np.isnan(probe.haar_location(flat)[1]).all()
+    assert np.isnan(probe.total_location(np.zeros(16)))
+
+
+def test_la_agitacion_en_el_ultimo_cuarto_da_loc_total_cerca_de_0_875(probe):
+    """Con retornos de módulo 1 en los últimos 16 de 64, los k = 49..64 promedian 56,5:
+    (56,5 − 0,5)/64 = 0,875 exacto. Con módulo al azar solo es 0,875 en promedio."""
+    rng = np.random.default_rng(2)
+    series = np.concatenate((np.zeros(48), rng.choice([-1.0, 1.0], 16)))
+    assert float(probe.total_location(series)) == pytest.approx(0.875, abs=1e-12)
+    # La misma agitación al comienzo da la imagen en espejo.
+    assert float(probe.total_location(series[::-1])) == pytest.approx(0.125, abs=1e-12)
+
+
+def late_events(count: int, seed: int = 8) -> list[Ev]:
+    """c de 64 ticks con toda la agitación en el último cuarto (los 48 primeros, quietos)."""
+    rng = np.random.default_rng(seed)
+    events, start = [], BASE
+    for _ in range(count):
+        returns = np.concatenate((np.zeros(48), R * rng.standard_normal(16)))
+        prices = walk(returns, start)
+        events.append(Ev(prices, accel=float(rng.normal()), t50=float(rng.uniform())))
+        start = prices[-1]
+    return events
+
+
+def test_toda_la_agitacion_al_final_da_D_loc_total_alto(probe, tmp_path, capsys):
+    write_lake(tmp_path, late_events(120), rows_per_group=500)
+    out = tmp_path / "tarde.csv"
+    assert probe.main(argv(tmp_path, out, "--inflight-months", "")) == 0
+    line = last_line(capsys)
+    assert (
+        float(line["D_loc_total"]) > 0.9
+    )  # el barajado reparte la agitación: loc_total ≈ 0,5
+    rows = read_csv(out)
+    where = {
+        "seccion": "ubicacion",
+        "candidato": "ubicacion_total",
+        "fase": "c",
+        "banda": "",
+    }
+    observed = float(value(rows, **where, fuente="observado", medida="p50"))
+    simulated = float(value(rows, **where, fuente="simulado", medida="p50"))
+    assert observed == pytest.approx(0.875, abs=0.03)
+    assert simulated == pytest.approx(0.5, abs=0.05)
+
+
+def test_retornos_iid_dan_D_bajo_en_la_ubicacion_y_en_haar(probe, tmp_path, capsys):
+    write_lake(tmp_path, iid_events(600), rows_per_group=500)
+    assert probe.main(argv(tmp_path, tmp_path / "t.csv", "--inflight-months", "")) == 0
+    line = last_line(capsys)
+    # n = 32: los niveles 1 a 4 tienen ≥ 2 coeficientes; el 7 no existe (nulo, D = nan).
+    for name in ("D_haar_fast", "D_haar_slow", "D_loc_fast", "D_loc_total"):
+        assert float(line[name]) < 0.10, line
+    assert math.isnan(float(line["D_loc_slow"]))
+    assert line["locs_pasan"] == "0"
+
+
+def rhythm_first_half(seed: int) -> np.ndarray:
+    """n = 64: un ritmo de período 8 en la primera mitad y, en la segunda, retornos de la misma
+    energía (±A/√2 al azar), de modo que la energía total queda al centro."""
+    rng = np.random.default_rng(seed)
+    first = np.sin(2 * np.pi * np.arange(1, 33) / 8)
+    second = rng.choice([-1.0, 1.0], 32) / math.sqrt(2.0)
+    return np.concatenate((first, second))
+
+
+@pytest.mark.parametrize("seed", range(5))
+def test_la_ubicacion_por_nivel_distingue_lo_que_la_total_no(probe, seed):
+    series = rhythm_first_half(seed)
+    _, location = probe.haar_location(series)
+    # El ritmo vive en el nivel 3 (escala 8) y solo en la primera mitad.
+    assert location[2] < 0.4
+    assert float(probe.total_location(series)) == pytest.approx(0.5, abs=0.03)
+
+
+def test_las_cifras_anteriores_no_cambian_con_la_misma_semilla(probe, tmp_path):
+    """Valores capturados con la sonda de ITSC-411: la ubicación no pide números nuevos al
+    generador. Semilla 7, 5 nulos, el lago del oráculo."""
+    paths = write_lake(tmp_path, oracle_events())
+    samples, _ = probe.measure(uris(paths), seed=7, nulls=5)
+    first = {
+        ("retornos", "c"): [0.7736762, 0.1502634, 0.0538696, 0.0221909, 0, 0, 0],
+        ("precios", "c"): [0.0725816, 0.0609083, 0.3282671, 0.5382429, 0, 0, 0],
+        ("haar", "c"): [0.75, 0.125, 0.0625, 0.0625, 0, 0, 0],
+        ("retornos", "os"): [
+            0.5333505,
+            0.2870556,
+            0.1172713,
+            0.004591,
+            0.0190458,
+            0.0386859,
+            0,
+        ],
+        ("precios", "os"): [
+            0.0417627,
+            0.1573069,
+            0.1608962,
+            0.1874281,
+            0.1508556,
+            0.3017505,
+            0,
+        ],
+        ("haar", "os"): [
+            0.4741116,
+            0.2941942,
+            0.1392846,
+            0.0292969,
+            0.0440841,
+            0.0190286,
+            0,
+        ],
+    }
+    for key, expected in first.items():
+        assert samples.simulated(*key)[0].tolist() == pytest.approx(expected, abs=1e-6)
+    assert samples.simulated("haar", "c")[-1].tolist() == pytest.approx(
+        [0.5, 0.25, 0.25, 0, 0, 0, 0], abs=1e-6
+    )
+    assert probe.band_distance(samples, "retornos", "c", 0) == 0.5
+
+
+def test_csv_trae_ubicacion_D_rho_y_regla(probe, tmp_path, capsys):
+    write_lake(
+        tmp_path, [oracle_events()[0]]
+    )  # c alternado (n = 16), os senoide (n = 64)
+    out = tmp_path / "t.csv"
+    assert probe.main(argv(tmp_path, out, "--nulls", "3", "--inflight-months", "")) == 0
+    rows = read_csv(out)
+    cell = {"seccion": "ubicacion", "candidato": "ubicacion", "fase": "c"}
+    # Alternados: todos los coeficientes del nivel 1 pesan igual → el centro de masa es 0,5; el
+    # nivel 2 no tiene energía (nulo, y se cuenta); el total también es 0,5.
+    assert float(
+        value(rows, **cell, banda=1, fuente="observado", medida="p50")
+    ) == pytest.approx(0.5, abs=1e-12)
+    assert value(rows, **cell, banda=2, fuente="observado", medida="N") == "0"
+    assert value(rows, **cell, banda=2, fuente="observado", medida="nulos") == "1"
+    assert value(rows, **cell, banda=1, fuente="simulado", medida="nulos") == "0"
+    assert float(
+        value(
+            rows, **{**cell, "candidato": "ubicacion_total"}, banda="",
+            fuente="observado", medida="p50",
+        )
+    ) == pytest.approx(0.5, abs=1e-12)  # fmt: skip
+    # Nivel 3 de la fase os (senoide de n = 64): hay coeficientes, así que tiene ubicación.
+    assert float(
+        value(
+            rows, seccion="ubicacion", candidato="ubicacion", fase="os", banda=3,
+            fuente="observado", medida="p50",
+        )
+    ) < 1.0  # fmt: skip
+    for candidate in ("haar", "ubicacion"):
+        for band in range(1, 8):
+            float(
+                value(
+                    rows,
+                    seccion="D",
+                    candidato=candidate,
+                    fase="c",
+                    banda=band,
+                    medida="D",
+                )
+            )
+    float(value(rows, seccion="D", candidato="ubicacion_total", fase="c", medida="D"))
+    # rho: pares nuevos con sus 7 bandas, los de total con una sola cifra y las matrices 7 × 7.
+    for pair in ("loc_loctotal", "loc_jump", "loc_accel", "loc_t50", "retornos_sign",
+                 "retornos_rvar", "retornos_ticks", "haar_sign", "haar_rvar", "haar_ticks"):  # fmt: skip
+        value(rows, seccion="rho", candidato=pair, fase="c", banda=7, medida="rho")
+        value(
+            rows,
+            seccion="rho",
+            candidato=pair,
+            fase="c",
+            banda="",
+            medida="max_abs_rho",
+        )
+    for pair in ("loctotal_jump", "loctotal_accel", "loctotal_t50"):
+        value(rows, seccion="rho", candidato=pair, fase="c", banda="", medida="rho")
+    for pair in ("loc_loc", "retornos_retornos"):
+        assert (
+            sum(
+                1
+                for r in rows
+                if r["seccion"] == "rho"
+                and r["candidato"] == pair
+                and r["medida"] == "rho"
+            )
+            == 49
+        )
+        assert value(rows, seccion="rho", candidato=pair, fase="c", banda=3, fuente="con=3", medida="rho") in ("1", "nan")  # fmt: skip
+    # Con un solo evento toda ρ es nan (no cuenta) y solo el nivel 1 tiene D ≥ 0,10: pasa.
+    assert (
+        value(rows, seccion="regla", candidato="ubicacion", banda=1, medida="pasa")
+        == "1"
+    )
+    assert (
+        value(rows, seccion="regla", candidato="ubicacion", banda=2, medida="pasa")
+        == "0"
+    )
+    assert (
+        value(rows, seccion="regla", candidato="ubicacion", medida="locs_pasan") == "1"
+    )
+    line = last_line(capsys)
+    assert line["locs_pasan"] == "1"
+    assert line["eventos"] == "1"
+
+
+def test_las_redundancias_nuevas_a_mano(probe):
+    """Con 6 eventos y relaciones monótonas, ρ vale ±1 donde corresponde y `nan` si falta variación."""
+    samples = probe.Samples(6, 1)
+    samples.n["c"] = 6
+    i = np.arange(6.0)
+    samples.loc["c"][:] = np.column_stack([i, -i, i**3, i, i, i, i])
+    samples.loc_total["c"][:] = i**3
+    samples.jump[:] = -i
+    samples.accel[:] = 1.0  # constante: ρ indefinida
+    samples.t50[:] = i[::-1]
+    samples.sign[:] = i
+    samples.rvar[:] = 2.0
+    samples.ticks[:] = i[::-1]
+    for candidate in ("retornos", "haar"):
+        samples.obs[candidate, "c"][:] = np.column_stack([i, -i, i, i, i, i, i])
+    rho = probe.new_redundancy(samples)
+    assert rho["loc_loctotal", "c"].tolist() == [1, -1, 1, 1, 1, 1, 1]
+    assert rho["loc_jump", "c"].tolist() == [-1, 1, -1, -1, -1, -1, -1]
+    assert np.isnan(rho["loc_accel", "c"]).all()
+    assert math.isnan(probe.max_abs(rho["loc_accel", "c"]))
+    assert rho["loc_t50", "c"].tolist() == [-1, 1, -1, -1, -1, -1, -1]
+    assert rho["loctotal_jump", "c"].tolist() == [-1]
+    assert rho["retornos_sign", "c"].tolist() == [1, -1, 1, 1, 1, 1, 1]
+    assert np.isnan(rho["haar_rvar", "c"]).all()
+    assert rho["haar_ticks", "c"].tolist() == [-1, 1, -1, -1, -1, -1, -1]
+    for pair in ("loc_loc", "retornos_retornos"):
+        matrix = rho[pair, "c"]
+        assert matrix.shape == (7, 7)
+        assert np.diag(matrix).tolist() == [1.0] * 7
+        assert matrix[0, 1] == -1 and matrix[1, 0] == -1 and matrix[0, 2] == 1
+        assert probe.max_abs(matrix) == 1.0  # sin la diagonal
+    only_diagonal = np.eye(7)
+    assert probe.max_abs(only_diagonal) == 0.0
+    # Un registro nulo (nan) no cuenta: se descarta el par y quedan 5 eventos.
+    samples.jump[0] = np.nan
+    assert probe.new_redundancy(samples)["loc_jump", "c"][0] == pytest.approx(-1)
+
+
+def test_la_regla_de_la_ubicacion(probe):
+    nan = math.nan
+    distances = {
+        # nivel: 1 pasa, 2 D bajo, 3 ρ alto, 4 ρ justo en 0,9, 5 D nulo, 6 pasa, 7 ρ nan: pasa.
+        ("ubicacion", "c"): [0.2, 0.05, 0.2, 0.2, nan, 0.10, 0.2],
+        ("ubicacion_total", "c"): 0.3,
+    }
+    ok = np.full(7, 0.3)
+    rho = {(pair, "c"): ok.copy() for pair in probe.LOC_PAIRS_LEVEL}
+    rho["loc_jump", "c"][2] = -0.95
+    rho["loc_accel", "c"][3] = 0.9
+    rho["loc_t50", "c"][6] = nan
+    rho["loc_loctotal", "c"][6] = nan
+    rho.update({(pair, "c"): np.array([0.4]) for pair in probe.LOC_PAIRS_TOTAL})
+    levels, total = probe.location_rule(distances, rho)
+    assert levels == [True, False, False, True, False, True, True]
+    assert total is True
+    rho["loctotal_t50", "c"] = np.array([-0.95])
+    assert probe.location_rule(distances, rho)[1] is False
+    distances["ubicacion_total", "c"] = 0.099
+    rho["loctotal_t50", "c"] = np.array([0.1])
+    assert probe.location_rule(distances, rho)[1] is False
+
+
+# --- (g) robustez (hallazgos del PR 182) -------------------------------------------------------
+
+
+def test_un_summaries_de_0_filas_no_lanza_KeyError(probe, tmp_path, capsys):
+    """H1: `short_fractions` de un archivo vacío da ceros, y la sonda sigue."""
+    empty = write_summaries(tmp_path, "0.00238246", [], [])
+    assert probe.short_fractions(str(empty)) == {
+        "eventos": 0,
+        "c_lt16": 0,
+        "os_lt16": 0,
+        "os_vacias": 0,
+    }
+    write_lake(tmp_path, oracle_events())
+    out = tmp_path / "t.csv"
+    assert probe.main(argv(tmp_path, out, "--nulls", "2", "--inflight-months", "")) == 0
+    rows = read_csv(out)
+    where = {"seccion": "fases_lt16", "fuente": "theta=0.00238246"}
+    assert value(rows, **where, medida="eventos") == "0"
+    assert value(rows, **where, fase="c", medida="fraccion_lt16") == "nan"
+    assert last_line(capsys)["veredicto"] in ("sigue", "retirada")
+
+
+def test_un_error_de_la_API_de_GCS_en_los_listados_es_fallo_y_corre_antes_de_measure(
+    probe, tmp_path, capsys, monkeypatch
+):
+    """H2: sale como `veredicto=fallo` con código 1, sin traceback y sin leer el mes."""
+
+    def broken(bucket, prefix):
+        raise RuntimeError("503 Service Unavailable")
+
+    def never(*args):
+        raise AssertionError("measure no debe correr si los listados fallan")
+
+    monkeypatch.setattr(probe, "gcs_names", broken)
+    monkeypatch.setattr(probe, "measure", never)
+    args = argv(tmp_path, tmp_path / "t.csv")
+    args[args.index("--l3-root") + 1] = "gs://proy-dc-descriptors/l3"
+    assert probe.main(args) == 1
+    output = capsys.readouterr().out
+    assert "no se pudo listar gs://proy-dc-descriptors/l3" in output
+    assert "RuntimeError: 503 Service Unavailable" in output
+    assert output.strip().splitlines()[-1].endswith("veredicto=fallo")
+    assert not (tmp_path / "t.csv").exists()
+
+
+def test_un_mes_sin_L2_falla_antes_de_measure(probe, tmp_path, capsys, monkeypatch):
+    write_lake(tmp_path, oracle_events())
+
+    def never(*args):
+        raise AssertionError("measure no debe correr si falta L2")
+
+    monkeypatch.setattr(probe, "measure", never)
+    assert (
+        probe.main(argv(tmp_path, tmp_path / "t.csv", "--inflight-months", "2017-12"))
+        == 1
+    )
+    assert "L2 no tiene eventos de 2017-12" in capsys.readouterr().out
+
+
+def test_ticks_en_vuelo_registra_cuantos_theta_entraron_por_mes(probe, tmp_path):
+    """H4: una fila `thetas` por mes (el θ principal más los que traen L2 ese mes)."""
+    write_lake(tmp_path, [Ev(walk(SQUARE), walk(SINE))])
+    write_l2_events(tmp_path, "0.00238246", MONTH, THREE_THETAS["0.00238246"])
+    write_l2_events(tmp_path, "0.00500000", MONTH, [(0, 15, 15)])
+    write_l2_events(tmp_path, THETA, "2021-01", [(0, 7, 7)])
+    out = tmp_path / "t.csv"
+    args = argv(tmp_path, out, "--nulls", "2", "--inflight-months", f"2021-01,{MONTH}")
+    assert probe.main(args) == 0
+    rows = read_csv(out)
+    assert (
+        value(rows, seccion="ticks_en_vuelo", fuente="mes=2021-01", medida="thetas")
+        == "1"
+    )
+    assert (
+        value(rows, seccion="ticks_en_vuelo", fuente=f"mes={MONTH}", medida="thetas")
+        == "3"
+    )
