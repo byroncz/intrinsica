@@ -13,7 +13,7 @@ rango con la sección siguiente.
 
 ## Cambios requeridos
 
-**ITSC-416 (solo `ops_tools` 0.6.15; la imagen de L3 no cambia): la corrida de la sonda va después del apply de `ops`.**
+**ITSC-416 (solo `ops_tools` 0.6.16; la imagen de L3 no cambia): la corrida de la sonda va después del apply de `ops`.**
 El apply del stack `ops` (lo lanza el humano) publica la sonda nueva en `gs://<proyecto>-ops/scripts/`; sin él,
 `ops-script` corre la versión de ITSC-411 y la última línea no trae los campos de la ubicación. Corre
 `l3_spectrum_probe.py` sobre 2023-03 con θ `0.00098052` (ver «`l3_spectrum_probe.py`»).
