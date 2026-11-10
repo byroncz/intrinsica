@@ -1,9 +1,10 @@
 //! Las 18 columnas de datos de `summaries.parquet` (TRD-L3 §7.2), las 14 de `path.parquet`
 //! (la clave y los 13 registros de la familia T), las 10 de `fit.parquet` (la clave y los 9
-//! de la familia A) y la fila de un evento de cada una.
+//! de la familia A), las 29 de `spectrum.parquet` (la clave y las 28 de la familia F) y la
+//! fila de un evento de cada una.
 //!
-//! Es el contrato con `l3_dc_descriptors.schema` (`_COLUMNS`, `PATH_SCHEMA` y `FIT_SCHEMA`): mismo orden,
-//! mismos tipos. Los decimales (`DECIMAL(18,8)`) viajan sin escalar: el entero de 64 bits es
+//! Es el contrato con `l3_dc_descriptors.schema` (`_COLUMNS`, `PATH_SCHEMA`, `FIT_SCHEMA` y
+//! `SPECTRUM_SCHEMA`): mismo orden, mismos tipos. Los decimales (`DECIMAL(18,8)`) viajan sin escalar: el entero de 64 bits es
 //! la palabra baja del decimal de 128 bits y la alta es su extensión de signo. Los `DOUBLE`
 //! de `path.parquet` y `fit.parquet` viajan como los 64 bits del `f64`.
 
@@ -78,13 +79,14 @@ pub const COLUMNS: [ColumnSpec; WIDTH] = [
 ];
 
 /// Qué familia calcula el motor: la de resumen (`summaries.parquet`, S), la de trayectoria
-/// (`path.parquet`, T) o la de forma (`fit.parquet`, A).
+/// (`path.parquet`, T), la de forma (`fit.parquet`, A) o la de frecuencia (`spectrum.parquet`, F).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Family {
     #[default]
     Summaries,
     Path,
     Fit,
+    Spectrum,
 }
 
 impl Family {
@@ -94,6 +96,7 @@ impl Family {
             Self::Summaries => &COLUMNS,
             Self::Path => &PATH_COLUMNS,
             Self::Fit => &FIT_COLUMNS,
+            Self::Spectrum => &SPECTRUM_COLUMNS,
         }
     }
 }
@@ -133,6 +136,56 @@ pub const FIT_COLUMNS: [ColumnSpec; FIT_WIDTH] = [
     nullable(int("os_jump_share")),
     nullable(int("ev_jump_share")),
 ];
+
+/// Columnas de datos por fila de `spectrum.parquet` (sin `theta`): la clave y 28 de F, una por
+/// banda o nivel (7) y por registro (F-01 a F-04).
+pub const SPECTRUM_WIDTH: usize = 29;
+
+const fn band(name: &'static str) -> ColumnSpec {
+    nullable(int(name))
+}
+
+pub const SPECTRUM_COLUMNS: [ColumnSpec; SPECTRUM_WIDTH] = [
+    int("confirm_agg_trade_id"),
+    band("c_fourier_band_1"),
+    band("c_fourier_band_2"),
+    band("c_fourier_band_3"),
+    band("c_fourier_band_4"),
+    band("c_fourier_band_5"),
+    band("c_fourier_band_6"),
+    band("c_fourier_band_7"),
+    band("os_fourier_band_1"),
+    band("os_fourier_band_2"),
+    band("os_fourier_band_3"),
+    band("os_fourier_band_4"),
+    band("os_fourier_band_5"),
+    band("os_fourier_band_6"),
+    band("os_fourier_band_7"),
+    band("c_haar_level_1"),
+    band("c_haar_level_2"),
+    band("c_haar_level_3"),
+    band("c_haar_level_4"),
+    band("c_haar_level_5"),
+    band("c_haar_level_6"),
+    band("c_haar_level_7"),
+    band("os_haar_level_1"),
+    band("os_haar_level_2"),
+    band("os_haar_level_3"),
+    band("os_haar_level_4"),
+    band("os_haar_level_5"),
+    band("os_haar_level_6"),
+    band("os_haar_level_7"),
+];
+
+/// Posición de cada columna de `spectrum.parquet` en la fila: la banda o nivel `b` (1 a 7) de
+/// cada registro está en `BASE + b - 1`.
+pub mod spectrum_col {
+    pub const CONFIRM_AGG_TRADE_ID: usize = 0;
+    pub const C_FOURIER: usize = 1;
+    pub const OS_FOURIER: usize = 8;
+    pub const C_HAAR: usize = 15;
+    pub const OS_HAAR: usize = 22;
+}
 
 /// Posición de cada columna de `fit.parquet` en la fila.
 pub mod fit_col {
@@ -174,6 +227,18 @@ pub struct PathRow {
     pub cells: [i64; PATH_WIDTH],
     pub valid: u16,
     pub ticks: u64,
+}
+
+/// La fila de un evento de `spectrum.parquet`: como [`PathRow`], con 29 columnas (el mapa de
+/// presentes es un `u32`). `ticks` son los retornos de sus dos fases (0 si el evento está sobre
+/// el presupuesto) y `over_budget` trae, si lo está, los ticks que L2 dice que tiene
+/// (`extreme_agg_trade_id − reference_agg_trade_id`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpectrumRow {
+    pub cells: [i64; SPECTRUM_WIDTH],
+    pub valid: u32,
+    pub ticks: u64,
+    pub over_budget: Option<u64>,
 }
 
 /// La fila de un evento de `fit.parquet`, con el mismo significado de sus campos que

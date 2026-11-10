@@ -102,6 +102,35 @@ def family_skeleton_missing(
     )
 
 
+def event_over_budget(
+    ctx: RunContext,
+    unit: Unit,
+    *,
+    theta: str,
+    confirm_agg_trade_id: int,
+    ticks: int,
+    budget: int,
+) -> Finding:
+    """Un evento pasó el presupuesto de ticks y las columnas de la familia de serie completa
+    (`ctx.family`) de su fila quedaron nulas (ADR-L3-19). Un aviso por evento, no un error:
+    `ticks` es `extreme_agg_trade_id − reference_agg_trade_id` y no falla la unidad.
+    """
+    return finding(
+        ctx,
+        unit,
+        "event_over_budget",
+        severity=Severity.WARNING,
+        status=Status.FAIL,
+        details={
+            "theta": theta,
+            "confirm_agg_trade_id": confirm_agg_trade_id,
+            "ticks": ticks,
+            "budget": budget,
+            "family": ctx.family,
+        },
+    )
+
+
 def input_missing(
     ctx: RunContext, unit: Unit, check_type: str, details: dict
 ) -> Finding:

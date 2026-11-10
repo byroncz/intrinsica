@@ -733,6 +733,7 @@ fn the_contract_of_push_and_finish() {
             row_groups: vec![],
             family: Default::default(),
             silence_us: 0,
+            budget_ticks: 0,
         },
         Config {
             thetas: vec![1, 2],
@@ -740,6 +741,7 @@ fn the_contract_of_push_and_finish() {
             row_groups: vec![vec![1]],
             family: Default::default(),
             silence_us: 0,
+            budget_ticks: 0,
         },
     ] {
         assert!(matches!(

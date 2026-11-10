@@ -9,6 +9,12 @@ from l3_dc_descriptors.schema import (
     PATH_SCHEMA,
     PATH_STATE_VERSION,
     SILENCE_US,
+    SPECTRUM_BANDS,
+    SPECTRUM_BUDGET_TICKS,
+    SPECTRUM_N_MIN,
+    SPECTRUM_SCHEMA,
+    SPECTRUM_STATE_VERSION,
+    SPECTRUM_WINDOW,
 )
 
 DOC = Path(__file__).parents[3] / "docs" / "data-contracts.md"
@@ -94,3 +100,44 @@ def test_fit_doc_cites_the_boundary_bytes_of_the_code():
         f"  en A y {BY_FAMILY[PATH_FAMILY]} B en T"
     ) in text
     assert f"y a {BOUNDARY_ROW_BYTES} B" in text
+
+
+def test_spectrum_doc_matches_schema():
+    table = _table("Esquema de `spectrum.parquet`")
+    assert _doc_rows(table) == _schema_rows(SPECTRUM_SCHEMA)
+
+
+def test_spectrum_doc_names_the_four_registers_in_order():
+    table = _table("Esquema de `spectrum.parquet`")
+    registers = re.findall(
+        r"^\| `\w+` \| [^|]+ \| (?:sí|no) \| (F-\d\d)\.", table, re.MULTILINE
+    )
+    assert registers == [f"F-{i:02d}" for i in range(1, 5) for _ in range(7)]
+
+
+def test_spectrum_doc_metadata_matches_the_code():
+    metadata = _table("Metadatos y lectura de `spectrum.parquet`")
+    assert f'`state_version = "{SPECTRUM_STATE_VERSION}"`' in metadata
+    assert f'`n_min = "{SPECTRUM_N_MIN}"`' in metadata
+    assert f'`bands = "{SPECTRUM_BANDS}"`' in metadata
+    assert f'`window = "{SPECTRUM_WINDOW}"`' in metadata
+    assert f'`budget_ticks = "{SPECTRUM_BUDGET_TICKS}"`' in metadata
+    assert (SPECTRUM_STATE_VERSION, SPECTRUM_N_MIN, SPECTRUM_BANDS) == ("1.0.0", 16, 7)
+    assert (SPECTRUM_WINDOW, SPECTRUM_BUDGET_TICKS) == ("hann", 20_000_000)
+
+
+def test_spectrum_doc_cites_the_bytes_of_the_code():
+    from l3_dc_descriptors.schema import SPECTRUM_FAMILY
+    from l3_dc_descriptors.summarize import (
+        EVENT_BYTES,
+        SPECTRUM_RETURN_BYTES,
+        SPECTRUM_STATE_BYTES,
+    )
+
+    assert EVENT_BYTES[SPECTRUM_FAMILY] == SPECTRUM_STATE_BYTES + 97 == 217
+    assert SPECTRUM_RETURN_BYTES == 4
+    text = DOC.read_text()
+    assert (
+        f"F cobra {EVENT_BYTES[SPECTRUM_FAMILY]} B por evento más "
+        f"{SPECTRUM_RETURN_BYTES} B por cada retorno"
+    ) in text

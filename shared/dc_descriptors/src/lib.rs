@@ -8,7 +8,8 @@
 //! evento en su casilla (la fila del evento en el esqueleto) y entrega row groups de
 //! salida sellados. Las sumas son `u128` comprobadas (en la familia A, `i128` de punto fijo) y los parciales de un evento que
 //! cruza row groups se fusionan en cualquier orden, así que el archivo no depende de qué
-//! hilo tomó qué ítem. El modelo está en el `README.md` del crate y en ADR-L3-16 de
+//! hilo tomó qué ítem. La familia F no suma: guarda los retornos de cada fase abierta y calcula
+//! una FFT exacta al cerrarla. El modelo está en el `README.md` del crate y en ADR-L3-16 de
 //! `docs/TRD/l3.md`.
 //!
 //! Sin libpython: los bindings viven en `dc_pyo3`.
@@ -22,6 +23,7 @@ pub mod layout;
 pub mod output;
 pub mod path;
 pub mod phase;
+pub mod spectrum;
 
 pub use arith::{divide_half_even, Wide};
 pub use close::{close_event, EventError, EventErrorKind, PhaseName};
@@ -34,9 +36,14 @@ pub use input::{
     Boundaries, EventBatch, EventIn, InputError, KeyColumns, Region, RowGroupInput, TickColumns,
 };
 pub use layout::{
-    col, fit_col, path_col, ColumnSpec, Family, FitRow, PathRow, Row, COLUMNS, FIT_COLUMNS,
-    FIT_WIDTH, LIMIT, PATH_COLUMNS, PATH_WIDTH, WIDTH,
+    col, fit_col, path_col, spectrum_col, ColumnSpec, Family, FitRow, PathRow, Row, SpectrumRow,
+    COLUMNS, FIT_COLUMNS, FIT_WIDTH, LIMIT, PATH_COLUMNS, PATH_WIDTH, SPECTRUM_COLUMNS,
+    SPECTRUM_WIDTH, WIDTH,
 };
-pub use output::{ColumnMask, SealedRowGroup};
+pub use output::{ColumnMask, OverBudget, SealedRowGroup};
 pub use path::{close_path, PathAcc, PhasePath};
 pub use phase::{EventAcc, InstantAcc, PhaseAcc, TickError};
+pub use spectrum::{
+    close_spectrum, PhaseReturns, SpectrumAcc, BANDS as SPECTRUM_BANDS, DEFAULT_BUDGET_TICKS,
+    N_MIN as SPECTRUM_N_MIN,
+};

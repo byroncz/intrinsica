@@ -175,8 +175,10 @@ type PyStats = (u64, u64, u64, Option<i64>, Option<i64>);
 /// columnas de datos de salida como `(nombre, bytes por valor, nulable)`, que el motor
 /// comprueba contra las de su familia; `row_groups[t]` son las filas de cada row group de
 /// salida del θ `t` (el esqueleto de L2 o, en `path` y `fit`, el de `summaries.parquet`);
-/// `family` es `"summaries"` (por defecto), `"path"` o `"fit"`, y `silence_us` el umbral de
-/// silencio de `path` en µs (`summaries` y `fit` no lo usan).
+/// `family` es `"summaries"` (por defecto), `"path"`, `"fit"` o `"spectrum"`, `silence_us` el
+/// umbral de silencio de `path` en µs (las demás no lo usan) y `budget_ticks` el presupuesto de
+/// `spectrum`: un evento con `extreme_agg_trade_id − reference_agg_trade_id` mayor no guarda
+/// retornos y su fila queda nula (las demás no lo usan).
 #[pyclass(module = "dc_pyo3")]
 pub struct Engine {
     inner: Option<CoreEngine<Pinned>>,
@@ -186,7 +188,7 @@ pub struct Engine {
 #[pymethods]
 impl Engine {
     #[new]
-    #[pyo3(signature = (thetas, schema, row_groups, threads=None, family="summaries", silence_us=0))]
+    #[pyo3(signature = (thetas, schema, row_groups, threads=None, family="summaries", silence_us=0, budget_ticks=20_000_000))]
     fn new(
         thetas: Vec<i64>,
         schema: Vec<(String, usize, bool)>,
@@ -194,14 +196,16 @@ impl Engine {
         threads: Option<usize>,
         family: &str,
         silence_us: i64,
+        budget_ticks: u64,
     ) -> PyResult<Self> {
         let family = match family {
             "summaries" => Family::Summaries,
             "path" => Family::Path,
             "fit" => Family::Fit,
+            "spectrum" => Family::Spectrum,
             other => {
                 return Err(PyValueError::new_err(format!(
-                    "la familia {other:?} no existe: summaries, path o fit"
+                    "la familia {other:?} no existe: summaries, path, fit o spectrum"
                 )))
             }
         };
@@ -228,6 +232,7 @@ impl Engine {
             row_groups,
             family,
             silence_us,
+            budget_ticks,
         })
         .map_err(to_py_error)?;
         Ok(Self {
@@ -335,9 +340,11 @@ impl Engine {
     /// las columnas de datos de la familia (`SealedColumn`, en el orden del esquema).
     ///
     /// En `summaries` (18 columnas) `validity` es el mapa de bits de las filas con
-    /// overshoot, o `None` si todas lo tienen. En `path` (14 columnas) y `fit` (10) `validity`
-    /// es una lista con una entrada por columna: `(mapa de bits, nulos)` si la columna tiene
-    /// nulos y `None` si no (también si no es nulable), y `null_count` suma los nulos.
+    /// overshoot, o `None` si todas lo tienen. En `path` (14 columnas), `fit` (10) y `spectrum`
+    /// (29) `validity` es una lista con una entrada por columna: `(mapa de bits, nulos)` si la
+    /// columna tiene nulos y `None` si no (también si no es nulable), y `null_count` suma los
+    /// nulos. `spectrum` agrega un séptimo elemento: los eventos del row group sobre el
+    /// presupuesto, `(confirm_agg_trade_id, ticks)` en orden de evento.
     fn pop_sealed<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyAny>>> {
         let Some(sealed) = self.engine()?.pop_sealed().map_err(to_py_error)? else {
             return Ok(None);
@@ -350,6 +357,7 @@ impl Engine {
             validity,
             null_count,
             masks,
+            over_budget,
         } = sealed;
         let columns = columns
             .into_iter()
@@ -368,7 +376,16 @@ impl Engine {
                     .transpose()
                 })
                 .collect::<PyResult<Vec<_>>>()?;
-            let tuple = (theta, index, rows, columns, PyList::new(py, masks)?, nulls);
+            let masks = PyList::new(py, masks)?;
+            if self.family == Family::Spectrum {
+                let over_budget: Vec<(i64, u64)> = over_budget
+                    .into_iter()
+                    .map(|event| (event.confirm_agg_trade_id, event.ticks))
+                    .collect();
+                let tuple = (theta, index, rows, columns, masks, nulls, over_budget);
+                return Ok(Some(tuple.into_pyobject(py)?.into_any()));
+            }
+            let tuple = (theta, index, rows, columns, masks, nulls);
             return Ok(Some(tuple.into_pyobject(py)?.into_any()));
         }
         let validity = validity
@@ -381,6 +398,13 @@ impl Engine {
     /// Row groups empujados cuyos ítems no terminaron: los que aún anclan sus buffers.
     fn inflight(&self) -> PyResult<usize> {
         Ok(self.engine()?.inflight())
+    }
+
+    /// Retornos que la familia `spectrum` tiene guardados ahora en los búferes de sus eventos
+    /// abiertos (0 en las demás): el orquestador cobra 4 B por cada uno sobre el costo fijo por
+    /// evento abierto.
+    fn buffered_ticks(&self) -> PyResult<u64> {
+        Ok(self.engine()?.buffered_ticks())
     }
 
     /// Fracción del tiempo, desde el primer `push`, con ítems esperando en la cola.

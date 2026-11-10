@@ -7,8 +7,8 @@
 //! llenarse la última: el motor no conserva nada de un row group sellado.
 
 use crate::layout::{
-    col, ColumnSpec, FitRow, PathRow, Row, COLUMNS, FIT_COLUMNS, FIT_WIDTH, PATH_COLUMNS,
-    PATH_WIDTH, WIDTH,
+    col, ColumnSpec, FitRow, PathRow, Row, SpectrumRow, COLUMNS, FIT_COLUMNS, FIT_WIDTH,
+    PATH_COLUMNS, PATH_WIDTH, SPECTRUM_COLUMNS, SPECTRUM_WIDTH, WIDTH,
 };
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
@@ -19,7 +19,8 @@ use std::sync::{Mutex, PoisonError};
 /// `validity` es el mapa de bits de las filas con overshoot (las columnas `os_*`
 /// nulables son nulas en el resto). Un row group de `path.parquet` o de `fit.parquet` no usa `validity`: cada
 /// columna nulable trae su propio mapa en `masks[columna]` (`None` si no es nulable o no
-/// tiene nulos).
+/// tiene nulos). `over_budget` lista, en orden de evento, los eventos del row group que la
+/// familia F dejó sin calcular por pasar del presupuesto (vacío en las demás).
 #[derive(Debug)]
 pub struct SealedRowGroup {
     pub theta: usize,
@@ -29,6 +30,15 @@ pub struct SealedRowGroup {
     pub validity: Option<Vec<u8>>,
     pub null_count: usize,
     pub masks: Vec<Option<ColumnMask>>,
+    pub over_budget: Vec<OverBudget>,
+}
+
+/// Un evento que la familia F no calculó por pasar del presupuesto: su `confirm_agg_trade_id` y
+/// los ticks que L2 le da (`extreme_agg_trade_id − reference_agg_trade_id`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OverBudget {
+    pub confirm_agg_trade_id: i64,
+    pub ticks: u64,
 }
 
 /// El mapa de validez de una columna (bit en 1: valor presente) y sus nulos.
@@ -77,14 +87,14 @@ pub trait OutRow: Copy {
 
     /// Copia la fila a la casilla `r`; `valid[r]` recibe el mapa de columnas presentes si la
     /// fila lo lleva.
-    fn put(&self, columns: &mut [Vec<u8>], r: usize, valid: &mut [u16]);
+    fn put(&self, columns: &mut [Vec<u8>], r: usize, valid: &mut [u32]);
 
     fn seal(
         theta: usize,
         index: usize,
         rows: usize,
         columns: Vec<Vec<u8>>,
-        valid: &[u16],
+        valid: &[u32],
     ) -> SealedRowGroup;
 }
 
@@ -93,7 +103,7 @@ enum State {
     Open {
         columns: Vec<Vec<u8>>,
         /// Por fila, qué columnas tienen valor; vacío en la familia S.
-        valid: Vec<u16>,
+        valid: Vec<u32>,
         filled: usize,
     },
     Sealed,
@@ -157,6 +167,11 @@ impl OutTable {
                 },
             )
             .sum()
+    }
+
+    /// El row group de salida donde cae el evento `event` del θ.
+    pub fn output_group(&self, theta: usize, event: u64) -> Option<usize> {
+        self.locate(theta, event).map(|(group, _)| group)
     }
 
     /// El row group de salida y la fila de la casilla del evento `event` del θ.
@@ -258,7 +273,7 @@ impl OutRow for Row {
             .collect()
     }
 
-    fn put(&self, columns: &mut [Vec<u8>], r: usize, _valid: &mut [u16]) {
+    fn put(&self, columns: &mut [Vec<u8>], r: usize, _valid: &mut [u32]) {
         put_summary(columns, r, self);
     }
 
@@ -267,7 +282,7 @@ impl OutRow for Row {
         index: usize,
         rows: usize,
         columns: Vec<Vec<u8>>,
-        _valid: &[u16],
+        _valid: &[u32],
     ) -> SealedRowGroup {
         seal_summary(theta, index, rows, columns)
     }
@@ -280,9 +295,9 @@ impl OutRow for PathRow {
         zeroed(&PATH_COLUMNS, size)
     }
 
-    fn put(&self, columns: &mut [Vec<u8>], r: usize, valid: &mut [u16]) {
+    fn put(&self, columns: &mut [Vec<u8>], r: usize, valid: &mut [u32]) {
         put_cells(columns, r, &self.cells);
-        valid[r] = self.valid;
+        valid[r] = u32::from(self.valid);
     }
 
     fn seal(
@@ -290,7 +305,7 @@ impl OutRow for PathRow {
         index: usize,
         rows: usize,
         columns: Vec<Vec<u8>>,
-        valid: &[u16],
+        valid: &[u32],
     ) -> SealedRowGroup {
         debug_assert_eq!(columns.len(), PATH_WIDTH);
         seal_masked(theta, index, rows, columns, valid, &PATH_COLUMNS)
@@ -304,7 +319,31 @@ impl OutRow for FitRow {
         zeroed(&FIT_COLUMNS, size)
     }
 
-    fn put(&self, columns: &mut [Vec<u8>], r: usize, valid: &mut [u16]) {
+    fn put(&self, columns: &mut [Vec<u8>], r: usize, valid: &mut [u32]) {
+        put_cells(columns, r, &self.cells);
+        valid[r] = u32::from(self.valid);
+    }
+
+    fn seal(
+        theta: usize,
+        index: usize,
+        rows: usize,
+        columns: Vec<Vec<u8>>,
+        valid: &[u32],
+    ) -> SealedRowGroup {
+        debug_assert_eq!(columns.len(), FIT_WIDTH);
+        seal_masked(theta, index, rows, columns, valid, &FIT_COLUMNS)
+    }
+}
+
+impl OutRow for SpectrumRow {
+    const TRACKS_VALID: bool = true;
+
+    fn columns(size: usize) -> Vec<Vec<u8>> {
+        zeroed(&SPECTRUM_COLUMNS, size)
+    }
+
+    fn put(&self, columns: &mut [Vec<u8>], r: usize, valid: &mut [u32]) {
         put_cells(columns, r, &self.cells);
         valid[r] = self.valid;
     }
@@ -314,10 +353,10 @@ impl OutRow for FitRow {
         index: usize,
         rows: usize,
         columns: Vec<Vec<u8>>,
-        valid: &[u16],
+        valid: &[u32],
     ) -> SealedRowGroup {
-        debug_assert_eq!(columns.len(), FIT_WIDTH);
-        seal_masked(theta, index, rows, columns, valid, &FIT_COLUMNS)
+        debug_assert_eq!(columns.len(), SPECTRUM_WIDTH);
+        seal_masked(theta, index, rows, columns, valid, &SPECTRUM_COLUMNS)
     }
 }
 
@@ -343,7 +382,7 @@ fn seal_masked(
     index: usize,
     rows: usize,
     columns: Vec<Vec<u8>>,
-    valid: &[u16],
+    valid: &[u32],
     specs: &[ColumnSpec],
 ) -> SealedRowGroup {
     let masks = specs
@@ -375,6 +414,7 @@ fn seal_masked(
         validity: None,
         null_count: 0,
         masks,
+        over_budget: Vec::new(),
     }
 }
 
@@ -409,6 +449,7 @@ fn seal_summary(theta: usize, index: usize, rows: usize, columns: Vec<Vec<u8>>) 
         validity: (null_count > 0).then_some(validity),
         null_count,
         masks: Vec::new(),
+        over_budget: Vec::new(),
     }
 }
 
@@ -567,6 +608,7 @@ mod tests {
             validity: None,
             null_count: 0,
             masks: Vec::new(),
+            over_budget: Vec::new(),
         };
         delivery.insert(sealed(0, 1));
         delivery.insert(sealed(1, 0));
