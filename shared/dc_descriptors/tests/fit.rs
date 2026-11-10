@@ -116,6 +116,7 @@ fn fit_engine(threads: usize, rows: &[usize]) -> Engine<Shared> {
         row_groups: vec![rows.to_vec()],
         family: Family::Fit,
         silence_us: 0,
+        budget_ticks: 0,
     })
     .expect("configuración válida")
 }

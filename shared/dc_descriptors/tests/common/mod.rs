@@ -646,6 +646,7 @@ pub fn engine_of(
         row_groups: sizes.to_vec(),
         family,
         silence_us: 2_000,
+        budget_ticks: 0,
     })
     .expect("configuración válida")
 }

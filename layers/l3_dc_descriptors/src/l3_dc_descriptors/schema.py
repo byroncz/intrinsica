@@ -1,5 +1,5 @@
-"""Esquema de `summaries.parquet` (TRD-L3 §7.2), de `path.parquet` (TRD-L3 §7.2.1) y de
-`fit.parquet` (TRD-L3 §7.2.2), y su codificación en Arrow.
+"""Esquema de `summaries.parquet` (TRD-L3 §7.2), de `path.parquet` (TRD-L3 §7.2.1), de
+`fit.parquet` (TRD-L3 §7.2.2) y de `spectrum.parquet` (TRD-L3 §7.2.3), y su codificación en Arrow.
 
 Las filas se arman en un buffer de NumPy por columna, con los decimales en su escala
 (10⁻⁸): el valor de 64 bits es la palabra baja del decimal de 128 bits. Al llenar un row
@@ -22,6 +22,15 @@ SILENCE_US = 10_000_000
 # Parquet lleva solo `state_version`.
 FIT_FAMILY = "fit"
 FIT_STATE_VERSION = "1.0.0"
+# La familia F (frecuencia): su archivo, su versión de estado y los parámetros que van en los
+# metadatos del archivo junto a `state_version` (ADR-L3-19): los retornos mínimos de una fase, las
+# bandas de período, la ventana y el presupuesto de ticks por evento.
+SPECTRUM_FAMILY = "spectrum"
+SPECTRUM_STATE_VERSION = "1.0.0"
+SPECTRUM_N_MIN = 16
+SPECTRUM_BANDS = 7
+SPECTRUM_WINDOW = "hann"
+SPECTRUM_BUDGET_TICKS = 20_000_000
 
 DECIMAL = pa.decimal128(18, 8)
 THETA = pa.decimal128(9, 8)
@@ -98,6 +107,26 @@ FIT_SCHEMA = pa.schema(
         pa.field("theta", THETA, nullable=False),
         pa.field("confirm_agg_trade_id", pa.int64(), nullable=False),
         *(pa.field(name, kind, nullable=null) for name, kind, null in _FIT_COLUMNS),
+    ]
+)
+# Las 28 columnas de `spectrum.parquet` tras las claves, todas DOUBLE nulables: una por banda
+# (F-01 y F-02, Fourier) o por nivel (F-03 y F-04, Haar) y por fase, en el orden del Inventario.
+# Una fase con menos de `SPECTRUM_N_MIN` retornos, un overshoot vacío, una banda sin bins o una
+# serie sin energía dejan sus columnas nulas (TRD-L3 §7.2.3).
+_SPECTRUM_COLUMNS = tuple(
+    (f"{phase}_{register}_{unit}_{band}", pa.float64(), True)
+    for register, unit in (("fourier", "band"), ("haar", "level"))
+    for phase in ("c", "os")
+    for band in range(1, SPECTRUM_BANDS + 1)
+)
+SPECTRUM_SCHEMA = pa.schema(
+    [
+        pa.field("theta", THETA, nullable=False),
+        pa.field("confirm_agg_trade_id", pa.int64(), nullable=False),
+        *(
+            pa.field(name, kind, nullable=null)
+            for name, kind, null in _SPECTRUM_COLUMNS
+        ),
     ]
 )
 WIDTH = len(_COLUMNS)

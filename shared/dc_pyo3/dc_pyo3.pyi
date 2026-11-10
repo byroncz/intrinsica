@@ -127,17 +127,30 @@ class EventBatch(Protocol):
 
 # (rows, closed_ticks, before_month, first_reference, last_extreme)
 type Stats = tuple[int, int, int, int | None, int | None]
-# (theta, index, rows, columns, validity, null_count). En `summaries`, `validity` es el mapa de
-# las filas con overshoot (o `None`); en `path` y `fit`, una lista con una entrada por columna:
-# `(mapa de bits, nulos)` si la columna tiene nulos y `None` si no.
-type Sealed = tuple[
-    int,
-    int,
-    int,
-    list[SealedColumn],
-    SealedColumn | None | list[tuple[SealedColumn, int] | None],
-    int,
-]
+# (theta, index, rows, columns, validity, null_count) y, solo en `spectrum`, un séptimo elemento
+# con los eventos del row group sobre el presupuesto: `(confirm_agg_trade_id, ticks)` por evento,
+# en orden de evento. En `summaries`, `validity` es el mapa de las filas con overshoot (o
+# `None`); en `path`, `fit` y `spectrum`, una lista con una entrada por columna: `(mapa de
+# bits, nulos)` si la columna tiene nulos y `None` si no.
+type Sealed = (
+    tuple[
+        int,
+        int,
+        int,
+        list[SealedColumn],
+        SealedColumn | None | list[tuple[SealedColumn, int] | None],
+        int,
+    ]
+    | tuple[
+        int,
+        int,
+        int,
+        list[SealedColumn],
+        list[tuple[SealedColumn, int] | None],
+        int,
+        list[tuple[int, int]],
+    ]
+)
 
 class Engine:
     def __new__(
@@ -148,6 +161,7 @@ class Engine:
         threads: int | None = None,
         family: str = "summaries",
         silence_us: int = 0,
+        budget_ticks: int = 20_000_000,
     ) -> Self: ...
     def push_boundaries(self, theta: int, batch: EventBatch) -> None: ...
     def needed(self, theta: int) -> int: ...
@@ -172,6 +186,7 @@ class Engine:
     ) -> list[tuple[int, tuple[int, int, int], bool, bool]]: ...
     def pop_sealed(self) -> Sealed | None: ...
     def inflight(self) -> int: ...
+    def buffered_ticks(self) -> int: ...
     def busy(self) -> float: ...
     def finish(self) -> list[Stats]: ...
     def close(self) -> None: ...

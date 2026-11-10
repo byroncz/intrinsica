@@ -4,3 +4,8 @@ version = "0.1.0"
 edition = "2021"
 description = "Motor de agregación de L3: descriptores de summaries por evento DC, en hilos nativos y aritmética u128."
 publish = false
+
+[dependencies]
+# Sin las funciones SIMD (avx, sse, neon): la familia F fija FftPlannerScalar para que el content_hash
+# no dependa del procesador del host (ITSC-412).
+rustfft = { version = "6.4.1", default-features = false }

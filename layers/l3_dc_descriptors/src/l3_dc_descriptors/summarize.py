@@ -131,6 +131,13 @@ from l3_dc_descriptors.schema import (
     PATH_SCHEMA,
     PATH_STATE_VERSION,
     SILENCE_US,
+    SPECTRUM_BANDS,
+    SPECTRUM_BUDGET_TICKS,
+    SPECTRUM_FAMILY,
+    SPECTRUM_N_MIN,
+    SPECTRUM_SCHEMA,
+    SPECTRUM_STATE_VERSION,
+    SPECTRUM_WINDOW,
     STATE_VERSION,
     SUMMARIES_SCHEMA,
 )
@@ -177,13 +184,20 @@ PENDING_PER_WRITER = 3
 #  - `path` (T): una `Run` de `Runs`, 272 B: 369 B. T guarda una `Run` por cada tramo suelto de un
 #    evento que cruza row groups (fusión ordenada, ADR-L3-17), así que su estado no es fijo: la
 #    cifra toma una corrida por evento y es una cota inferior declarada.
+#  - `spectrum` (F): una `SpectrumRun` (120 B) más las fronteras: 217 B por evento abierto, y además
+#    `SPECTRUM_RETURN_BYTES` (4 B, un `f32`) por cada retorno guardado en sus búferes
+#    (ADR-L3-19). Esa parte no es una constante: es `Engine.buffered_ticks()` y `_unclosed` la suma
+#    aparte; `EVENT_BYTES[spectrum]` es solo el costo fijo.
 FIT_STATE_BYTES = 672
 PATH_STATE_BYTES = 272
+SPECTRUM_STATE_BYTES = 120
+SPECTRUM_RETURN_BYTES = 4
 EVENT_BYTES = MappingProxyType(
     {
         FAMILY: sum(width for _, width, _ in native.ENGINE_SCHEMA) + BOUNDARY_ROW_BYTES,
         FIT_FAMILY: FIT_STATE_BYTES + BOUNDARY_ROW_BYTES,
         PATH_FAMILY: PATH_STATE_BYTES + BOUNDARY_ROW_BYTES,
+        SPECTRUM_FAMILY: SPECTRUM_STATE_BYTES + BOUNDARY_ROW_BYTES,
     }
 )
 # Tope de bytes de eventos entregados al motor que aún no cerraron (ITSC-372): lo que la unidad
@@ -218,6 +232,18 @@ _OUTPUT = MappingProxyType(
             MappingProxyType({"silence_us": str(SILENCE_US)}),
         ),
         FIT_FAMILY: (FIT_SCHEMA, FIT_STATE_VERSION, None),
+        SPECTRUM_FAMILY: (
+            SPECTRUM_SCHEMA,
+            SPECTRUM_STATE_VERSION,
+            MappingProxyType(
+                {
+                    "n_min": str(SPECTRUM_N_MIN),
+                    "bands": str(SPECTRUM_BANDS),
+                    "window": SPECTRUM_WINDOW,
+                    "budget_ticks": str(SPECTRUM_BUDGET_TICKS),
+                }
+            ),
+        ),
     }
 )
 
@@ -586,15 +612,20 @@ def _unclosed(
     Los eventos son los entregados menos el índice del primero que no cerró
     (`Engine.needed`), por θ. Los que `cover` entregó por delante del último row group
     empujado (`BoundaryFeed.ahead`) no tienen casilla todavía y cuestan solo sus fronteras
-    (`BOUNDARY_ROW_BYTES`, 97 B); el resto, `EVENT_BYTES[family]` (337 B en S, 769 B en A y 369 B en T, que es cota
-    inferior: ver `EVENT_BYTES`). Cota superior de lo abierto en S y A.
+    (`BOUNDARY_ROW_BYTES`, 97 B); el resto, `EVENT_BYTES[family]` (337 B en S, 769 B en A, 369 B en T,
+    que es cota inferior, y 217 B en F: ver `EVENT_BYTES`). En F se suman además los retornos que el
+    motor tiene en sus búferes, 4 B cada uno (`Engine.buffered_ticks`, ADR-L3-19). Cota superior de
+    lo abierto en S y A.
     """
     events = ahead = 0
     for feed in feeds:
         events += feed.delivered - engine.needed(feed.position)
         ahead += feed.ahead
     ahead = min(ahead, events)
-    return events, (events - ahead) * EVENT_BYTES[family] + ahead * BOUNDARY_ROW_BYTES
+    held = (events - ahead) * EVENT_BYTES[family] + ahead * BOUNDARY_ROW_BYTES
+    if family == SPECTRUM_FAMILY:
+        held += engine.buffered_ticks() * SPECTRUM_RETURN_BYTES
+    return events, held
 
 
 def _lot_ticks(lot_events: int, events: int, ticks: int) -> int | None:
@@ -811,6 +842,10 @@ def summarize_month(
         )
     if family not in _OUTPUT:
         raise ValueError(f"familia {family!r}: debe ser una de {sorted(_OUTPUT)}")
+    if family == SPECTRUM_FAMILY:
+        # El motor ya la calcula (ITSC-412); falta la pasada: los avisos `event_over_budget`, el
+        # tope con los retornos en vuelo y la CLI son de la hija 3 de ITSC-410.
+        raise ValueError(f"familia {family!r}: el resumidor todavía no la corre")
     if lot_events is not None and lot_events < 0:
         raise ValueError(f"lot_events {lot_events} debe ser al menos 0")
     # T y A no concilian y su esqueleto es el de `summaries.parquet`; solo T lleva silencio.

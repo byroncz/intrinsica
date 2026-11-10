@@ -83,6 +83,7 @@ fn path_engine(threads: usize, rows: &[usize], silence_us: i64) -> Engine<Shared
         row_groups: vec![rows.to_vec()],
         family: Family::Path,
         silence_us,
+        budget_ticks: 0,
     })
     .expect("configuración válida")
 }
