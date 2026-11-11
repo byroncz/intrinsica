@@ -136,7 +136,7 @@ orden. `l3-monthly` resume un mes.
 | --- | --- | --- | --- |
 | `l3-backfill` | Vacío: la frontera de cada θ decide desde dónde avanza | Vacío: hasta el último mes con consolidado en L1. Si lo pasas, el workflow lo manda siempre, aunque sea igual a `from` | Reprocesa desde `from` e ignora la frontera; **exige `from`** |
 | `l3-backfill-spectrum` | Igual que `l3-backfill` | Igual que `l3-backfill` | Igual que `l3-backfill`. Es el job de 8 GiB de la familia F: corre `--mode backfill --family spectrum` y `family` solo puede quedar en `summaries` o `spectrum` |
-| `l3-monthly` | El mes; vacío = el mes anterior | Vacío o igual a `from`; **la CLI rechaza otro valor** (código 2) | **No lo admite**: el workflow falla antes de lanzar. Usa `l3-backfill` con `from` |
+| `l3-monthly` | El mes; vacío = el mes anterior | Vacío o igual a `from`; **la CLI rechaza otro valor** (código 2) | **No lo admite**: el workflow falla antes de lanzar. Usa `l3-backfill` con `from`. Acepta `family` = `spectrum`, pero corre en 4 GiB: el cierre de la FFT de una fase de F cerca del presupuesto pesa ≈ 3,6 GiB y no cabe (ADR-L3-19), así que **no es el job de F**; la pasada mensual de F es de la hija 5 de la Épica ITSC-410 |
 | `l3-monthly-path` | **No está en la lista de *Run job***: la cadena mensual lo corre solo. A mano, se lanza como `l3-monthly` con `family` = `path` | Igual que `l3-monthly` | Igual que `l3-monthly`: no lo admite |
 | `l3-monthly-fit` | **No está en la lista de *Run job***: la cadena mensual lo corre solo, después de `l3-monthly-path`. A mano, se lanza como `l3-monthly` con `family` = `fit` | Igual que `l3-monthly` | Igual que `l3-monthly`: no lo admite |
 

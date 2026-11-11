@@ -85,7 +85,7 @@ on:
         type: string
         required: false
       family:
-        description: "Solo l3-backfill, l3-monthly y l3-backfill-spectrum: familia de descriptores que se escribe. summaries (por defecto), path (la familia T), fit (la familia A) o spectrum (la familia F); path, fit y spectrum necesitan summaries.parquet del mes: corre antes el backfill de summaries. El backfill de spectrum se lanza con el job l3-backfill-spectrum (8 GiB; ahí family puede quedar en summaries o en spectrum). Los demás jobs la rechazan si no es summaries"
+        description: "Solo l3-backfill, l3-monthly y l3-backfill-spectrum: familia de descriptores que se escribe. summaries (por defecto), path (la familia T), fit (la familia A) o spectrum (la familia F); path, fit y spectrum necesitan summaries.parquet del mes: corre antes el backfill de summaries. El backfill de spectrum se lanza con el job l3-backfill-spectrum (8 GiB; ahí family puede quedar en summaries o en spectrum); l3-monthly con spectrum corre en 4 GiB, que no alcanzan para el cierre de la FFT de F (la pasada mensual de F es de la hija 5 de ITSC-410). Los demás jobs la rechazan si no es summaries"
         type: choice
         options:
           - summaries

@@ -69,7 +69,7 @@ if [[ "$job" == l3-backfill || "$job" == l3-monthly ]]; then
       ;;
   esac
 elif [[ -n "$family" && "$family" != summaries ]]; then
-  echo "run-job-args: family solo aplica a l3-backfill y l3-monthly, no a $job" >&2
+  echo "run-job-args: family solo aplica a l3-backfill, l3-monthly y l3-backfill-spectrum, no a $job" >&2
   exit 2
 fi
 
