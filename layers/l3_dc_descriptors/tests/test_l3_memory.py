@@ -28,8 +28,10 @@ from frames_lake import (
     write_carry_over,
     write_l2,
 )
+from l3_dc_descriptors import summarize_month
 from l3_dc_descriptors.schema import FAMILY
 from l3_dc_descriptors.summarize import EVENT_BYTES as EVENT_BYTES_BY_FAMILY
+from l3_dc_descriptors.timing import Phases
 
 EVENT_BYTES = EVENT_BYTES_BY_FAMILY[FAMILY]
 SPECTRUM_EVENT_BYTES = EVENT_BYTES_BY_FAMILY["spectrum"]
@@ -745,11 +747,11 @@ def test_the_fit_family_stays_under_the_same_caps_as_summaries(dense_runs):
 # Se afirman relaciones, no MiB (ITSC-377). En la unidad densa casi no hay retornos en vuelo: cada
 # evento son tres ticks y se cierra en cuanto entra su tramo (`inflight_ticks_max` es 2), así que lo
 # que esta prueba fija es que F no sube el pico por encima de S más lo que cuestan sus retornos, y que
-# la cifra de bytes en vuelo es la del estimador. Que el tope **cuenta** los retornos lo prueba, con
-# un motor simulado que sí los guarda, `test_l3_parallel.py`.
+# la cifra de bytes en vuelo es la del estimador. Que el tope **cuenta** los retornos lo prueban, con
+# un motor simulado que sí los guarda, `test_l3_parallel.py`, y con el motor real,
+# `test_the_spectrum_family_charges_the_returns_the_real_engine_holds` (eventos largos).
 #   - `inflight_bytes_max` queda entre 97 B por evento abierto (cada uno cuesta al menos sus
-#     fronteras) y 217 B por evento abierto más 4 B por retorno contado. No supera al de S: el costo
-#     fijo de F (217 B) es menor que el de S (337 B).
+#     fronteras) y 217 B por evento abierto más 4 B por retorno contado.
 #   - `rss_peak_mib` no pasa del de S más un 10 % y 1,5 veces los bytes de retornos en vuelo
 #     (`inflight_ticks_max` × 4 B). En 20 pares bajo carga (8 procesos ocupando CPU en 10 núcleos) F
 #     quedó entre 0,93 y 1,04 veces el pico de S (S 1 033 a 1 120 MiB, F 1 022 a 1 088); el 10 % es
@@ -773,7 +775,6 @@ def test_the_spectrum_family_charges_the_estimator_and_does_not_raise_the_peak_r
     assert spectrum["inflight_bytes_max"] <= (
         events * SPECTRUM_EVENT_BYTES + ticks * SPECTRUM_RETURN_BYTES
     ), spectrum
-    assert spectrum["inflight_bytes_max"] < summaries["inflight_bytes_max"], dense_runs
     returns_mib = 1.5 * ticks * SPECTRUM_RETURN_BYTES / MIB
     assert (
         spectrum["rss_peak_mib"]
@@ -797,6 +798,52 @@ def test_the_spectrum_family_stays_under_the_same_caps_as_summaries(dense_runs):
     assert spectrum["warned"] is False, spectrum
     # `cpu_s` y `wall_s` (el uso de la máquina es `cpu_s / (wall_s × vCPU)`) salen del hallazgo.
     assert spectrum["cpu_s"] > 0 and spectrum["wall_s"] > 0, spectrum
+
+
+def test_the_spectrum_family_charges_the_returns_the_real_engine_holds(tmp_path):
+    """ITSC-413 (H1): con el motor real y eventos que cruzan `LONG` row groups, el motor guarda
+    sus retornos mientras el evento sigue abierto y el estimador los cobra. La unidad densa no lo
+    prueba (sus eventos de 3 ticks cierran al entrar), y `test_l3_parallel.py` usa un motor simulado.
+
+    Cada θ tiene un evento de `LONG` row groups de 100 000 ticks. Con K = 1 el orquestador solo
+    empuja un row group cuando el anterior terminó, así que al empujar el décimo el motor ya
+    guarda los retornos de los nueve primeros de cada θ (el evento cierra al llegar a su extremo,
+    en el row group 11). Sin el término de retornos de `_unclosed` el estimador valdría a lo más
+    217 B por evento (unos 5 KB en total); con él, megabytes.
+    """
+    write_flat_l1(tmp_path / "l1", GROUPS * ROW_GROUP)
+    write_theta(tmp_path / "l2", THETAS[0], chain(100, 10))
+    write_theta(tmp_path / "l2", THETAS[1], chain(107, 10))
+    kw = {"readers": 1, "inflight": 1, "engine_threads": 1}
+    args = (tmp_path / "l1", tmp_path / "l2", tmp_path / "l3", (2017, 8))
+    summarize_month(
+        *args, ["0.001", "0.002"], series_start=(2017, 8), **kw
+    )  # esqueleto
+    phases = Phases()
+    summarize_month(
+        *args,
+        ["0.001", "0.002"],
+        series_start=(2017, 8),
+        family="spectrum",
+        phases=phases,
+        **kw,
+    )
+    # Cada θ guarda al menos `LONG - 2` row groups de retornos cuando el motor ya terminó los
+    # anteriores.
+    floor_ticks = (LONG - 2) * ROW_GROUP
+    assert phases.inflight_ticks_max >= floor_ticks, phases.inflight_ticks_max
+    fixed = phases.inflight_events_max * SPECTRUM_EVENT_BYTES
+    # Lo que falla si `_unclosed` ignora `buffered_ticks`: los bytes en vuelo no pasarían del costo
+    # fijo de los eventos abiertos.
+    assert phases.inflight_bytes_max >= fixed + floor_ticks * SPECTRUM_RETURN_BYTES, (
+        fixed,
+        phases.inflight_bytes_max,
+        phases.inflight_ticks_max,
+    )
+    # Y no más que ese costo fijo y todos los retornos vistos (4 B cada uno, cota superior).
+    assert phases.inflight_bytes_max <= (
+        fixed + phases.inflight_ticks_max * SPECTRUM_RETURN_BYTES
+    ), phases.inflight_bytes_max
 
 
 # ITSC-375. La composición del RSS en el pico y al cierre. Ninguna aserción es un MiB absoluto
