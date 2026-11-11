@@ -206,11 +206,14 @@ def summaries_summary(
     l2_events_content_hash: str,
     l2_carry_over_content_hash: str,
     unassigned_ticks: int | None = None,
+    over_budget_events: int | None = None,
 ) -> Finding:
     """Resumen de lo que escribió un θ: filas, hash del archivo y linaje contra L2.
 
     `unassigned_ticks` es de la conciliación de S (§9.1): la pasada de las demás familias no
-    concilia y no lo publica.
+    concilia y no lo publica. `over_budget_events` es de `spectrum`: cuántos eventos del θ en
+    el mes pasaron el presupuesto de ticks y dejaron su fila nula (0 si ninguno); las demás
+    familias no lo publican.
     """
     details = {
         "theta": theta,
@@ -222,6 +225,8 @@ def summaries_summary(
     }
     if unassigned_ticks is not None:
         details["unassigned_ticks"] = unassigned_ticks
+    if over_budget_events is not None:
+        details["over_budget_events"] = over_budget_events
     return finding(
         ctx,
         unit,

@@ -38,6 +38,9 @@ from l3_dc_descriptors.schema import (
     PATH_FAMILY,
     PATH_SCHEMA,
     PATH_STATE_VERSION,
+    SPECTRUM_FAMILY,
+    SPECTRUM_SCHEMA,
+    SPECTRUM_STATE_VERSION,
     STATE_VERSION,
     SUMMARIES_SCHEMA,
 )
@@ -53,6 +56,7 @@ _CONTRACTS = MappingProxyType(
         FAMILY: (SUMMARIES_SCHEMA, STATE_VERSION),
         PATH_FAMILY: (PATH_SCHEMA, PATH_STATE_VERSION),
         FIT_FAMILY: (FIT_SCHEMA, FIT_STATE_VERSION),
+        SPECTRUM_FAMILY: (SPECTRUM_SCHEMA, SPECTRUM_STATE_VERSION),
     }
 )
 
@@ -104,7 +108,7 @@ def list_partitions(
 
 
 def family_file(family: str) -> str:
-    """El archivo de la familia en la partición: `summaries.parquet`, `path.parquet`, `fit.parquet`."""
+    """El archivo de la familia en la partición: `summaries`, `path`, `fit` o `spectrum` más `.parquet`."""
     return f"{family}.parquet"
 
 

@@ -522,18 +522,6 @@ def test_the_orchestrator_would_write_the_footer_of_the_hand_file(hand):
         assert footer[key.encode()] == value.encode()
 
 
-def test_the_summarizer_does_not_run_f_yet(hand, tmp_path):
-    """El motor ya calcula F, pero la pasada del orquestador es de la hija 3 de ITSC-410: pedirla
-    es un error claro y no deja archivos.
-    """
-    l1, l2, _, _ = hand
-    with pytest.raises(ValueError, match="todavía no la corre"):
-        summarize.summarize_month(
-            l1, l2, tmp_path, M1, [TEXT], series_start=M1, family=SPECTRUM_FAMILY
-        )
-    assert not list(tmp_path.rglob("*.parquet"))
-
-
 def test_the_hand_file_keeps_the_skeleton_and_the_footer(hand):
     _, _, l3, result = hand
     summaries = spectrum_file(l3, TEXT).replace("spectrum.parquet", "summaries.parquet")

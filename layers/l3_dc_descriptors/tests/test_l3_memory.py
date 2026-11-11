@@ -32,6 +32,7 @@ from l3_dc_descriptors.schema import FAMILY
 from l3_dc_descriptors.summarize import EVENT_BYTES as EVENT_BYTES_BY_FAMILY
 
 EVENT_BYTES = EVENT_BYTES_BY_FAMILY[FAMILY]
+SPECTRUM_EVENT_BYTES = EVENT_BYTES_BY_FAMILY["spectrum"]
 
 ROW_GROUP = 100_000
 # Bytes de un row group decodificado: id, tiempo, precio y cantidad (8 + 8 + 16 + 16 B).
@@ -508,8 +509,10 @@ keys = (
     "inflight_bytes", "events", "lot_events", "lot_ticks", "lots", "inflight_max",
     "mem_peak", "mem_close_before_trim", "mem_close_after_trim", "mem_samples",
     "mem_peak_coverage", "trims", "trim_s", "trim_rss_mib", "gate_s", "setup_s", "aggregate_s",
+    "cpu_s", "wall_s",
 )
-print(json.dumps({k: details[k] for k in keys}))
+# `inflight_ticks_max` y `budget_ticks` solo los lleva spectrum (F).
+print(json.dumps({k: details[k] for k in keys} | {k: details.get(k) for k in ("inflight_ticks_max",)}))
 """
 
 
@@ -578,6 +581,12 @@ def dense_runs(tmp_path_factory) -> dict[str, dict]:
         ("lots_path", DENSE_CAP, {**cut, "family": "path", "skeleton": "lots"}),
         # La familia A, igual que T: sobre el `summaries.parquet` de la corrida `lots` (ITSC-400).
         ("lots_fit", DENSE_CAP, {**cut, "family": "fit", "skeleton": "lots"}),
+        # La familia F, igual (ITSC-413): sobre el `summaries.parquet` de la corrida `lots`.
+        (
+            "lots_spectrum",
+            DENSE_CAP,
+            {**cut, "family": "spectrum", "skeleton": "lots"},
+        ),
     ):
         out = subprocess.run(
             [
@@ -728,6 +737,66 @@ def test_the_fit_family_stays_under_the_same_caps_as_summaries(dense_runs):
     ), fit
     assert fit["inflight_alone_bytes_max"] <= fit["inflight_bytes"] == DENSE_CAP, fit
     assert fit["warned"] is False, fit
+
+
+# ITSC-413. La familia F corre la misma unidad sobre el `summaries.parquet` de la corrida de S
+# (`lots_spectrum` contra `lots`, las mismas opciones), con el estimador dinámico de ITSC-412: 217 B por
+# evento abierto (120 B de la `SpectrumRun` y 97 de fronteras) más 4 B por retorno que el motor guarda.
+# Se afirman relaciones, no MiB (ITSC-377). En la unidad densa casi no hay retornos en vuelo: cada
+# evento son tres ticks y se cierra en cuanto entra su tramo (`inflight_ticks_max` es 2), así que lo
+# que esta prueba fija es que F no sube el pico por encima de S más lo que cuestan sus retornos, y que
+# la cifra de bytes en vuelo es la del estimador. Que el tope **cuenta** los retornos lo prueba, con
+# un motor simulado que sí los guarda, `test_l3_parallel.py`.
+#   - `inflight_bytes_max` queda entre 97 B por evento abierto (cada uno cuesta al menos sus
+#     fronteras) y 217 B por evento abierto más 4 B por retorno contado. No supera al de S: el costo
+#     fijo de F (217 B) es menor que el de S (337 B).
+#   - `rss_peak_mib` no pasa del de S más un 10 % y 1,5 veces los bytes de retornos en vuelo
+#     (`inflight_ticks_max` × 4 B). En 20 pares bajo carga (8 procesos ocupando CPU en 10 núcleos) F
+#     quedó entre 0,93 y 1,04 veces el pico de S (S 1 033 a 1 120 MiB, F 1 022 a 1 088); el 10 % es
+#     el margen de la dispersión del pico (ITSC-377: hasta 140 MiB entre corridas iguales).
+SPECTRUM_MAX_RISE = 0.10
+SPECTRUM_RETURN_BYTES = 4
+
+
+def test_the_spectrum_family_charges_the_estimator_and_does_not_raise_the_peak_rss(
+    dense_runs,
+):
+    summaries, spectrum = dense_runs["lots"], dense_runs["lots_spectrum"]
+    assert spectrum["events"] == summaries["events"], dense_runs
+    ticks = spectrum["inflight_ticks_max"]
+    assert ticks is not None and ticks >= 0, spectrum
+    assert summaries["inflight_ticks_max"] is None  # solo F lo lleva
+    # Los bytes en vuelo son los del estimador: entre las fronteras de los eventos abiertos y su costo
+    # fijo más los retornos contados.
+    events = spectrum["inflight_events_max"]
+    assert 97 * events <= spectrum["inflight_bytes_max"], spectrum
+    assert spectrum["inflight_bytes_max"] <= (
+        events * SPECTRUM_EVENT_BYTES + ticks * SPECTRUM_RETURN_BYTES
+    ), spectrum
+    assert spectrum["inflight_bytes_max"] < summaries["inflight_bytes_max"], dense_runs
+    returns_mib = 1.5 * ticks * SPECTRUM_RETURN_BYTES / MIB
+    assert (
+        spectrum["rss_peak_mib"]
+        <= (1 + SPECTRUM_MAX_RISE) * summaries["rss_peak_mib"] + returns_mib
+    ), dense_runs
+
+
+def test_the_spectrum_family_stays_under_the_same_caps_as_summaries(dense_runs):
+    ahead = DENSE_THETAS * LOT_BATCH_ROWS
+    # Con un costo fijo menor por evento, el tope de bytes admite más eventos abiertos que en S.
+    cap_events = DENSE_CAP // SPECTRUM_EVENT_BYTES
+    spectrum = dense_runs["lots_spectrum"]
+    assert spectrum["lot_events"] == LOT_EVENTS, spectrum
+    assert spectrum["lots"] > 10 * DENSE_GROUPS, spectrum
+    assert spectrum["inflight_events_max"] <= (
+        cap_events + LOT_EVENTS + ahead + 10 * DENSE_THETAS
+    ), spectrum
+    assert (
+        spectrum["inflight_alone_bytes_max"] <= spectrum["inflight_bytes"] == DENSE_CAP
+    ), spectrum
+    assert spectrum["warned"] is False, spectrum
+    # `cpu_s` y `wall_s` (el uso de la máquina es `cpu_s / (wall_s × vCPU)`) salen del hallazgo.
+    assert spectrum["cpu_s"] > 0 and spectrum["wall_s"] > 0, spectrum
 
 
 # ITSC-375. La composición del RSS en el pico y al cierre. Ninguna aserción es un MiB absoluto

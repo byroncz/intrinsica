@@ -264,6 +264,9 @@ class ThetaResult:
     # Ticks de los eventos cerrados y los que eran de meses anteriores, del motor.
     closed: int = 0
     before_month: int = 0
+    # `spectrum`: los eventos de este θ sobre el presupuesto, `(confirm_agg_trade_id, ticks)` en
+    # orden de evento (ADR-L3-19); vacío en las demás familias.
+    over_budget: tuple[tuple[int, int], ...] = ()
 
 
 def ordered[T, R](
@@ -461,7 +464,13 @@ def _open_events(l2_root: str, key, month: Month, text: str) -> EventFile:
 
 
 def _open_writer(
-    l3_root: str, key, month: Month, text: str, skeleton: L2Events, family: str
+    l3_root: str,
+    key,
+    month: Month,
+    text: str,
+    skeleton: L2Events,
+    family: str,
+    budget_ticks: int = SPECTRUM_BUDGET_TICKS,
 ):
     """El `FamilyWriter` de la familia del θ, ya abierto (su temporal creado).
 
@@ -470,6 +479,9 @@ def _open_writer(
     comprueba sus filas por row group, `_skeleton_gate`).
     """
     schema, version, metadata = _OUTPUT[family]
+    if family == SPECTRUM_FAMILY:
+        # El presupuesto con que corre la unidad, que es el del archivo (decisión 7).
+        metadata = MappingProxyType({**metadata, "budget_ticks": str(budget_ticks)})
     writer = FamilyWriter(
         family_path(l3_root, key, text, month, family),
         schema,
@@ -700,7 +712,16 @@ def _push_all(
     pushed = 0
     warned = False
 
+    def note_returns() -> None:
+        # Los retornos guardados suben y bajan entre empujes: se miran tras cada empuje y cada vez
+        # que el orquestador pregunta si espera (`unit_timing.inflight_ticks_max`, F).
+        if family == SPECTRUM_FAMILY:
+            phases.inflight_ticks_max = max(
+                phases.inflight_ticks_max or 0, engine.buffered_ticks()
+            )
+
     def held(open_groups: int) -> bool:
+        note_returns()
         return (
             open_groups >= phases.inflight
             or sink.pending >= limit
@@ -735,6 +756,7 @@ def _push_all(
         pushed += 1
         phases.lots = pushed
         phases.inflight_max = max(phases.inflight_max, engine.inflight())
+        note_returns()
         events, held_bytes = _unclosed(engine, feeds, family)
         phases.inflight_events_max = max(phases.inflight_events_max, events)
         phases.inflight_bytes_max = max(phases.inflight_bytes_max, held_bytes)
@@ -779,9 +801,10 @@ def summarize_month(
 ) -> dict[Decimal, ThetaResult]:
     """Escribe el archivo de la `family` del mes para cada θ y devuelve lo que dejó de cada uno.
 
-    `family` es `summaries` (S, `summaries.parquet`), `path` (T, `path.parquet`) o `fit` (A,
-    `fit.parquet`). T y A corren la misma pasada con su motor (T con `SILENCE_US`; A, sin
-    parámetros), repiten el esqueleto de `summaries.parquet` del mes, que debe existir (§7.3),
+    `family` es `summaries` (S, `summaries.parquet`), `path` (T, `path.parquet`), `fit` (A,
+    `fit.parquet`) o `spectrum` (F, `spectrum.parquet`). T, A y F corren la misma pasada con su motor
+    (T con `SILENCE_US`; F con `SPECTRUM_BUDGET_TICKS`, que declara en los metadatos del archivo y
+    cuyos eventos sobre el presupuesto deja en `ThetaResult.over_budget`; A, sin parámetros), repiten el esqueleto de `summaries.parquet` del mes, que debe existir (§7.3),
     y no concilian ticks: ya los conciliaba S.
 
     Los eventos son los que cierran en `month` (la partición de L2); sus ticks pueden
@@ -842,10 +865,6 @@ def summarize_month(
         )
     if family not in _OUTPUT:
         raise ValueError(f"familia {family!r}: debe ser una de {sorted(_OUTPUT)}")
-    if family == SPECTRUM_FAMILY:
-        # El motor ya la calcula (ITSC-412); falta la pasada: los avisos `event_over_budget`, el
-        # tope con los retornos en vuelo y la CLI son de la hija 3 de ITSC-410.
-        raise ValueError(f"familia {family!r}: el resumidor todavía no la corre")
     if lot_events is not None and lot_events < 0:
         raise ValueError(f"lot_events {lot_events} debe ser al menos 0")
     # T y A no concilian y su esqueleto es el de `summaries.parquet`; solo T lleva silencio.
@@ -863,6 +882,11 @@ def summarize_month(
         DEFAULT_INFLIGHT_BYTES if inflight_bytes is None else inflight_bytes
     )
     phases.lot_events = DEFAULT_LOT_EVENTS if lot_events is None else lot_events
+    # Se lee aquí y no al importar: el presupuesto es de la unidad y el archivo lo declara.
+    budget_ticks = SPECTRUM_BUDGET_TICKS
+    if family == SPECTRUM_FAMILY:
+        phases.budget_ticks = budget_ticks
+        phases.inflight_ticks_max = 0
     texts = [f"{theta:.8f}" for theta in values]
 
     with ExitStack() as stack:
@@ -920,6 +944,7 @@ def summarize_month(
                 text,
                 item.events,
                 family,
+                budget_ticks,
             )
         # El motor pide los tamaños de row group de los 50 θ, que están en el pie de sus
         # `events.parquet`: no necesita los escritores abiertos.
@@ -930,6 +955,7 @@ def summarize_month(
             phases.engine_threads,
             family,
             SILENCE_US if family == PATH_FAMILY else 0,
+            budget_ticks,
         )
         stack.callback(engine.close)
         phases.engine_build_s += time.perf_counter() - built
@@ -1073,6 +1099,7 @@ def summarize_month(
                 inputs[i].lineage.carry_over,
                 stats[i][1],
                 stats[i][2],
+                sink.over_budget(i),
             )
             for i, theta in enumerate(values)
         }
