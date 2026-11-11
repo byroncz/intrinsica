@@ -2,7 +2,8 @@
 # (ITSC-311): no se les aplica el formato ni el lint del repo para no alterarlos. El tercero es
 # una sonda de operación (ITSC-338), excluida como los demás scripts de operación; l3_derived_check.py
 # (ITSC-386), l3_gap_probe.py (ITSC-392), l3_path_check.py (ITSC-395), l3_fit_bridge_probe.py
-# (ITSC-398), l3_fit_check.py (ITSC-401) y l3_spectrum_probe.py (ITSC-411) también. El resto de la
+# (ITSC-398), l3_fit_check.py (ITSC-401), l3_spectrum_probe.py (ITSC-411) y l3_spectrum_check.py
+# (ITSC-414) también. El resto de la
 # carpeta sigue la configuración raíz.
 extend = "../../../pyproject.toml"
 extend-exclude = [
@@ -15,4 +16,5 @@ extend-exclude = [
     "l3_fit_bridge_probe.py",
     "l3_fit_check.py",
     "l3_spectrum_probe.py",
+    "l3_spectrum_check.py",
 ]
