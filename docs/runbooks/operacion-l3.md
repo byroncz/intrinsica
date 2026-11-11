@@ -13,6 +13,12 @@ rango con la sección siguiente.
 
 ## Cambios requeridos
 
+**ITSC-417 (imagen de L3 ≥ 0.24.0; las otras cuatro imágenes solo suben el parche): el Deploy actualiza las cinco, sin orden entre ellas.**
+`spectrum.parquet` pasa a `state_version` 1.1.0 con 30 columnas de datos (`c_energy_loc` y
+`os_energy_loc`). No hay apply ni cambio de infraestructura: el job `l3-backfill-spectrum` ya existe.
+El backfill de F (y el mes previo, 2023-03) debe correr con la imagen 0.24.0 o posterior; un
+`spectrum.parquet` 1.0.0 que ya exista queda detrás de la frontera y esa corrida lo reescribe.
+
 **ITSC-413 (imagen de L3 ≥ 0.23.0): el job `l3-backfill-spectrum` va primero, el backfill de la familia F después.**
 El apply del stack `l3` crea el job `l3-backfill-spectrum` (8 GiB, 2 vCPU, `timeoutSeconds: 43200`, `args` `--mode backfill --family spectrum`) y el workflow `run-job.yml` lo ofrece en la lista de jobs. No cambia `l3-backfill` ni `summaries`, `path` o `fit`. Tras el merge y el apply (los lanza el humano), corre el mes previo y después el backfill de los 110 meses (ver «Backfill de la familia F»).
 
@@ -356,6 +362,11 @@ el uso de la máquina es `cpu_s / (wall_s × vCPU)` (`cpu_utilization` ya lo tra
 que Cloud Run entregó): las FFT con n ≥ 2^20 corren de a una y sin SIMD, así que ese uso se mide, no
 se supone. **El backfill de los 110 meses espera esa cifra y el veredicto de la sonda de ubicación
 (ITSC-416).** La cota de la Épica es `rss_peak_mib` ≤ 6 144 MiB.
+
+Desde ITSC-417 `spectrum.parquet` es `state_version` 1.1.0, con 30 columnas de datos (las dos
+nuevas, `c_energy_loc` y `os_energy_loc`, son la ubicación de la energía total de cada fase). El
+`spectrum.parquet` 1.0.0 de la corrida de prueba de 2023-03 queda detrás de la frontera de F, por
+esquema y por versión: este paso, o el backfill, lo reescribe; no hace falta borrarlo.
 
 1. `l3-backfill` con `family` = `summaries` y los valores por defecto, hasta que termine con
    código 0 (S al día).
@@ -1747,7 +1758,8 @@ veredicto de ITSC-410): cada banda de Fourier de retornos y cada nivel de Haar c
 
 Qué entra lo decide el arquitecto con las cifras, en la Épica ITSC-410 bajo el veredicto. Si la ubicación pasa,
 entra al motor como columnas nuevas de `spectrum.parquet` en una card aparte, antes del backfill de F; si no,
-queda documentado y F sigue con sus 28 columnas.
+queda documentado y F sigue con sus 28 columnas. (ITSC-417 lo hizo para la ubicación de la energía total,
+`c_energy_loc` y `os_energy_loc`; la ubicación por nivel de Haar no entra.)
 
 **El CSV** (`l3_spectrum_probe_<mes>_<θ>.csv`, en `results/<ejecución>/`) tiene el encabezado
 `seccion,candidato,fase,banda,fuente,medida,valor`:

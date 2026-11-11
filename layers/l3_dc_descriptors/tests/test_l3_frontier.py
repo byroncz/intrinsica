@@ -540,6 +540,36 @@ def test_an_invalid_spectrum_file_moves_the_spectrum_frontier_back(
     assert frontier_of(spectrum_lake) == ordinal(M3)
 
 
+@pytest.mark.parametrize(
+    ("damage", "reason"),
+    [
+        # Un `spectrum.parquet` 1.0.0 de verdad (la corrida de prueba de 2023-03): sus 28
+        # columnas, sin `c_energy_loc` ni `os_energy_loc`, y su versión. Lo frena el esquema.
+        (
+            lambda t: with_state_version(
+                t.drop_columns(["c_energy_loc", "os_energy_loc"]), "1.0.0"
+            ),
+            "esquema",
+        ),
+        # Las dos columnas de más con la versión vieja, o solo una de ellas: también atrás.
+        (lambda t: with_state_version(t, "1.0.0"), "state_version"),
+        (lambda t: t.drop_columns(["os_energy_loc"]), "esquema"),
+    ],
+    ids=["file_1_0_0", "version_1_0_0", "one_location_missing"],
+)
+def test_a_spectrum_file_of_version_1_0_0_is_behind_the_frontier(
+    spectrum_lake, damage, reason
+):
+    """El backfill de F lo reescribe: la frontera de F queda antes de ese mes, la de S no."""
+    rewrite(file_of(spectrum_lake.l3, SMALL, M3, "spectrum.parquet"), damage)
+    problem = invalid_reason(
+        str(spectrum_lake.l3), str(spectrum_lake.l2), KEY, SMALL, M3, "spectrum"
+    )
+    assert problem is not None and reason in problem
+    assert spectrum_frontier_of(spectrum_lake) == ordinal(M2)
+    assert frontier_of(spectrum_lake) == ordinal(M3)
+
+
 def test_the_spectrum_frontier_does_not_look_at_the_parameters_in_the_footer(
     spectrum_lake,
 ):

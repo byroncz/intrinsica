@@ -33,7 +33,7 @@ push(row group k) ──► cola de ítems (θ₀,k) (θ₁,k) … (θ₄₉,k) 
   | `Family::Summaries` (por defecto) | `summaries.parquet` | 18 (`COLUMNS`) | uno por row group, en cualquier orden |
   | `Family::Path` | `path.parquet` | 14 (`PATH_COLUMNS`: la clave y T-01 a T-13) | corridas de row groups vecinos, fusión ordenada |
   | `Family::Fit` | `fit.parquet` | 10 (`FIT_COLUMNS`: la clave y A-01 a A-09) | uno por row group, en cualquier orden (momentos aditivos) |
-  | `Family::Spectrum` | `spectrum.parquet` | 29 (`SPECTRUM_COLUMNS`: la clave y F-01 a F-04, 7 por registro) | corridas de row groups vecinos, fusión ordenada (búfer de retornos) |
+  | `Family::Spectrum` | `spectrum.parquet` | 31 (`SPECTRUM_COLUMNS`: la clave, F-01 a F-04 con 7 por registro y `c_energy_loc` y `os_energy_loc`) | corridas de row groups vecinos, fusión ordenada (búfer de retornos) |
 
   La familia T usa además `Config.silence_us` (µs): un hueco entre ticks de una fase cuenta
   como inactividad si es estrictamente mayor. S no lo usa. Los registros de T, sus fórmulas y
@@ -107,7 +107,13 @@ push(row group k) ──► cola de ítems (θ₀,k) (θ₁,k) … (θ₄₉,k) 
   `2^⌊log₂ n⌋` retornos) da 7 niveles. Todo en `f64` sobre los `f32` convertidos y siempre en el
   mismo orden, en el hilo que cierra el evento. Nulos: fase de menos de 16 retornos, overshoot
   vacío, banda o nivel sin bins (5, 6 y 7 con menos de 32, 64 y 128 retornos) y serie sin energía.
-  El trabajo transitorio de la FFT (el búfer de `n` complejos de 16 B más el plan y el scratch de
+  Antes de la FFT, el cierre calcula además la **ubicación de la energía total** de la fase
+  (`c_energy_loc`, `os_energy_loc`; ITSC-417): `Σ t_k·r_k² / Σ r_k²` con `t_k = (k − 0,5)/n`, sobre
+  los retornos sin centrar y sin ventana, en una pasada sobre el búfer `f32` con dos acumuladores
+  `f64` compensados (no copia la serie y `SpectrumRun` no crece). Es nula solo si todos los
+  retornos son cero: una fase de retornos iguales y no nulos no tiene Fourier pero sí ubicación,
+  0,5. La máscara de columnas presentes es un `u32`: `SPECTRUM_WIDTH` = 31 cabe y una aserción de
+  compilación en `layout.rs` lo fija. El trabajo transitorio de la FFT (el búfer de `n` complejos de 16 B más el plan y el scratch de
   `rustfft`) no está en `buffered_ticks`. Peor caso, con `n` primo (Bluestein): `16 B × (2n + 4m)`,
   con `m` la longitud de la FFT interna (`3·2^(k−2)` si alcanza `2n − 1`, si no `2^k`, con
   `k = ⌈log₂(2n−1)⌉`): ≈ 3,6 GiB con `n` = 20 M (`m` = 3·2^24). Es una medida, no una estimación:
@@ -268,7 +274,11 @@ sobre el presupuesto (no lee un tick: un precio en 0 dentro de él no falla; el 
 sobre el presupuesto; un aviso por evento aunque cruce row groups), un evento de tres row groups con
 los mismos bits en **todos** los órdenes de `push`, `R` como último tick de un row group, un row
 group intermedio con ticks de una sola fase, `buffered_ticks` mientras el evento está abierto y
-cero al cerrar, y una DFT de O(n²) sin `rustfft` sobre series aleatorias con 1 y 4 hilos. Las
+cero al cerrar, y una DFT de O(n²) sin `rustfft` sobre series aleatorias con 1 y 4 hilos. La
+ubicación de la energía se prueba contra una suma ingenua (1e-12, valores en (0, 1)), con los casos
+de nulos (menos de 16 retornos, overshoot vacío, todos los retornos en cero, evento sobre el
+presupuesto), el de retornos iguales y no nulos (0,5) y los mismos bits con 1 a 4 hilos, cortes de
+tick y lotes de eventos. Las
 pruebas unitarias de `src/spectrum.rs` cubren las bandas, Haar, la fusión de vecinos y el
 planificador escalar.
 

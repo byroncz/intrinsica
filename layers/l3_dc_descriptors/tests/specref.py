@@ -1,8 +1,8 @@
-"""La familia F de las pruebas: Python con `numpy.fft`, sin el motor (TRD-L3 §7.2.3, F-01 a F-04).
+"""La familia F de las pruebas: Python con `numpy.fft`, sin el motor (TRD-L3 §7.2.3, F-01 a F-04 y la ubicación de la energía).
 
 Un oráculo por evento sobre las tramas de `dc_frames`, como `pathref.py` y `fitref.py`. No importa
 nada de `l3_dc_descriptors` ni de `dc_pyo3` y no comparte código con el motor de Rust, que calcula
-con `rustfft`; la tolerancia entre los dos es de 1e-9.
+con `rustfft`; la tolerancia entre los dos es de 1e-9 en las bandas y de 1e-12 en la ubicación.
 
 Una fase son los precios de sus ticks, enteros × 10⁸, y su ancla: `reference_price` de L2 para la
 confirmación `(R, C]` y `confirm_price` para el overshoot `(C, E]`. Los retornos son
@@ -16,9 +16,15 @@ amplia y redondeados a `float32` (el búfer del motor guarda `f32`, decisión de
   y 128 o más.
 * Haar: sobre los últimos `2^⌊log₂ n⌋` retornos, centrados, transformada ortonormal; la energía de
   un nivel es `Σ d²` y el séptimo nivel junta las escalas de 128 en adelante.
+* Ubicación de la energía total (`c_energy_loc`, `os_energy_loc`): `Σ t_k·r_k² / Σ r_k²` con
+  `t_k = (k − 0,5)/n` y `k = 1..n`, sobre los retornos sin centrar y sin ventana. Cae en (0, 1):
+  0,5 si la energía se reparte pareja, menos si se concentra al inicio y más si al final. Es la
+  fórmula de `total_location` de `l3_spectrum_probe.py`.
 
 Una fase con menos de 16 retornos, un overshoot vacío, una banda o nivel sin bins y una serie con
-todos los retornos iguales dejan sus valores en `None`.
+todos los retornos iguales dejan sus valores de Fourier y Haar en `None`. La ubicación es `None`
+con menos de 16 retornos, con el overshoot vacío y si todos los retornos son cero; una serie de
+retornos iguales y no nulos no tiene Fourier pero sí ubicación (0,5).
 """
 
 import math
@@ -30,12 +36,17 @@ from dc_frames import read_frames
 N_MIN = 16
 BANDS = 7
 
-# Las 28 columnas de `spectrum.parquet` tras las claves, en el orden del esquema.
-COLUMNS = tuple(
-    f"{phase}_{register}_{unit}_{band}"
-    for register, unit in (("fourier", "band"), ("haar", "level"))
-    for phase in ("c", "os")
-    for band in range(1, BANDS + 1)
+# Las 30 columnas de `spectrum.parquet` tras las claves, en el orden del esquema: las 28 de bandas
+# y niveles, y al final las dos ubicaciones.
+COLUMNS = (
+    *(
+        f"{phase}_{register}_{unit}_{band}"
+        for register, unit in (("fourier", "band"), ("haar", "level"))
+        for phase in ("c", "os")
+        for band in range(1, BANDS + 1)
+    ),
+    "c_energy_loc",
+    "os_energy_loc",
 )
 
 type Fractions = list[float | None]
@@ -107,6 +118,22 @@ def haar(x: np.ndarray) -> Fractions:
     return [energy[b] / total if b < len(levels) else None for b in range(BANDS)]
 
 
+def location(x: np.ndarray) -> float | None:
+    """La ubicación en el tiempo de la energía total de una serie de `n` retornos:
+    `Σ t_k·r_k² / Σ r_k²` con `t_k = (k − 0,5)/n`. `None` si la energía es cero.
+
+    Caso a mano (`LOC_X` de `test_l3_spectrum_probe.py`): `[6, 0, 0, 0, 2, 0, −2, −6]` tiene
+    `Σ r² = 80` y `Σ (k − 0,5)·r² = 18 + 18 + 26 + 270 = 332`, que sobre `n = 8` es `41,5`:
+    la ubicación es `41,5/80`.
+    """
+    square = x * x
+    energy = float(square.sum())
+    if not energy > 0.0:
+        return None
+    t = (np.arange(len(x)) + 0.5) / len(x)
+    return float(square @ t) / energy
+
+
 def spectrum_row(
     confirmation: list[int],
     overshoot: list[int],
@@ -114,7 +141,7 @@ def spectrum_row(
     reference: int,
     confirm: int,
 ) -> tuple:
-    """Los 28 valores de un evento, en el orden de `COLUMNS`, con `None` donde son nulos.
+    """Los 30 valores de un evento, en el orden de `COLUMNS`, con `None` donde son nulos.
 
     `confirmation` y `overshoot` son los precios de los ticks de cada fase (× 10⁸); `reference` y
     `confirm` son `reference_price` y `confirm_price` de L2 (× 10⁸), las anclas.
@@ -124,12 +151,12 @@ def spectrum_row(
     phases = []
     for prices, anchor in ((confirmation, reference), (overshoot, confirm)):
         if len(prices) < N_MIN:
-            phases.append(([None] * BANDS, [None] * BANDS))
+            phases.append(([None] * BANDS, [None] * BANDS, None))
         else:
             x = returns(anchor, prices)
-            phases.append((fourier(x), haar(x)))
-    (c_fourier, c_haar), (os_fourier, os_haar) = phases
-    return (*c_fourier, *os_fourier, *c_haar, *os_haar)
+            phases.append((fourier(x), haar(x), location(x)))
+    (c_fourier, c_haar, c_loc), (os_fourier, os_haar, os_loc) = phases
+    return (*c_fourier, *os_fourier, *c_haar, *os_haar, c_loc, os_loc)
 
 
 def frame_prices(frame) -> list[int]:
@@ -138,7 +165,7 @@ def frame_prices(frame) -> list[int]:
 
 
 def from_reader(ev) -> tuple:
-    """Los 28 valores de un `EventFrames` del lector en modo por evento."""
+    """Los 30 valores de un `EventFrames` del lector en modo por evento."""
     event = ev.event.to_pylist()[0]
     return spectrum_row(
         frame_prices(ev.confirmation),
@@ -151,7 +178,7 @@ def from_reader(ev) -> tuple:
 def from_lake(
     l1_root, l2_root, month, thetas: list[str]
 ) -> dict[tuple[Decimal, int], tuple]:
-    """Los 28 valores de cada evento de los θ en el mes, por `(θ, confirm_agg_trade_id)`,
+    """Los 30 valores de cada evento de los θ en el mes, por `(θ, confirm_agg_trade_id)`,
     leyendo L1 y L2 con el lector de `dc_frames` (un evento a la vez). Un evento sobre el
     presupuesto no está aquí: el lector no lo distingue; las pruebas lo apartan.
     """

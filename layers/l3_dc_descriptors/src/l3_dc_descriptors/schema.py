@@ -26,7 +26,7 @@ FIT_STATE_VERSION = "1.0.0"
 # metadatos del archivo junto a `state_version` (ADR-L3-19): los retornos mínimos de una fase, las
 # bandas de período, la ventana y el presupuesto de ticks por evento.
 SPECTRUM_FAMILY = "spectrum"
-SPECTRUM_STATE_VERSION = "1.0.0"
+SPECTRUM_STATE_VERSION = "1.1.0"
 SPECTRUM_N_MIN = 16
 SPECTRUM_BANDS = 7
 SPECTRUM_WINDOW = "hann"
@@ -109,15 +109,21 @@ FIT_SCHEMA = pa.schema(
         *(pa.field(name, kind, nullable=null) for name, kind, null in _FIT_COLUMNS),
     ]
 )
-# Las 28 columnas de `spectrum.parquet` tras las claves, todas DOUBLE nulables: una por banda
-# (F-01 y F-02, Fourier) o por nivel (F-03 y F-04, Haar) y por fase, en el orden del Inventario.
-# Una fase con menos de `SPECTRUM_N_MIN` retornos, un overshoot vacío, una banda sin bins o una
-# serie sin energía dejan sus columnas nulas (TRD-L3 §7.2.3).
-_SPECTRUM_COLUMNS = tuple(
-    (f"{phase}_{register}_{unit}_{band}", pa.float64(), True)
-    for register, unit in (("fourier", "band"), ("haar", "level"))
-    for phase in ("c", "os")
-    for band in range(1, SPECTRUM_BANDS + 1)
+# Las 30 columnas de `spectrum.parquet` tras las claves, todas DOUBLE nulables: 28 por banda
+# (F-01 y F-02, Fourier) o por nivel (F-03 y F-04, Haar) y por fase, en el orden del Inventario,
+# y al final `c_energy_loc` y `os_energy_loc`, la ubicación en el tiempo de la energía total de
+# cada fase. Una fase con menos de `SPECTRUM_N_MIN` retornos, un overshoot vacío, una banda sin
+# bins o una serie sin energía dejan sus columnas nulas; la ubicación solo es nula si todos los
+# retornos son cero (TRD-L3 §7.2.3).
+_SPECTRUM_COLUMNS = (
+    *(
+        (f"{phase}_{register}_{unit}_{band}", pa.float64(), True)
+        for register, unit in (("fourier", "band"), ("haar", "level"))
+        for phase in ("c", "os")
+        for band in range(1, SPECTRUM_BANDS + 1)
+    ),
+    ("c_energy_loc", pa.float64(), True),
+    ("os_energy_loc", pa.float64(), True),
 )
 SPECTRUM_SCHEMA = pa.schema(
     [
