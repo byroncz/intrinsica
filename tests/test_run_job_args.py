@@ -293,8 +293,8 @@ def test_l3_rechaza_una_familia_que_no_existe(job, family):
         "ops-script",
     ],
 )
-@pytest.mark.parametrize("family", ["path", "fit"])
-def test_los_demas_jobs_rechazan_family_path_y_fit(job, family):
+@pytest.mark.parametrize("family", ["path", "fit", "spectrum"])
+def test_los_demas_jobs_rechazan_family_path_fit_y_spectrum(job, family):
     with pytest.raises(subprocess.CalledProcessError) as error:
         args(job, "", "", "", "", "", "", family)
     assert error.value.returncode == 2
@@ -304,3 +304,56 @@ def test_los_demas_jobs_rechazan_family_path_y_fit(job, family):
 def test_los_demas_jobs_ignoran_el_valor_por_defecto_summaries(job):
     # El input del workflow trae summaries siempre: no es pedir una familia.
     assert args(job, "2023-03", "", "", "", "", "", "summaries") == args(job, "2023-03")
+
+
+# ITSC-413: la familia F (spectrum).
+@pytest.mark.parametrize("job", ["l3-backfill", "l3-monthly"])
+def test_l3_family_spectrum_va_al_final(job):
+    modo = job.split("-", 1)[1]
+    assert args(job, "", "", "", "", "", "", "spectrum") == (
+        f"--mode,{modo},--family=spectrum"
+    )
+
+
+def test_l3_backfill_spectrum_arma_el_backfill_de_la_cli_con_la_familia_fija():
+    # El job de 8 GiB: su modo de la CLI es backfill, no "backfill-spectrum" (--args reemplaza
+    # los argumentos del contenedor), y la familia sale del job aunque el workflow mande el
+    # valor por defecto (summaries).
+    for family in ("", "summaries", "spectrum"):
+        assert args("l3-backfill-spectrum", "", "", "", "", "", "", family) == (
+            "--mode,backfill,--family=spectrum"
+        )
+    assert args("l3-backfill-spectrum") == "--mode,backfill,--family=spectrum"
+
+
+def test_l3_backfill_spectrum_con_rango_conserva_to_y_force():
+    # Igual que l3-backfill: to igual a from se pasa (sin to, el rango queda abierto).
+    assert (
+        args(
+            "l3-backfill-spectrum",
+            "2023-03",
+            "2023-03",
+            "true",
+            "2017-08",
+            "",
+            "",
+            "summaries",
+        )
+        == "--mode,backfill,--from=2023-03,--to=2023-03,--force,"
+        "--series-start=2017-08,--family=spectrum"
+    )
+    assert args("l3-backfill-spectrum", "2023-03") == (
+        "--mode,backfill,--from=2023-03,--family=spectrum"
+    )
+
+
+@pytest.mark.parametrize("family", ["path", "fit", "shape", "Spectrum"])
+def test_l3_backfill_spectrum_rechaza_otra_familia(family):
+    out = subprocess.run(
+        [SCRIPT, "l3-backfill-spectrum", "", "", "", "", "", "", family],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert out.returncode == 2
+    assert "spectrum" in out.stderr

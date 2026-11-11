@@ -38,13 +38,18 @@ from l3_dc_descriptors.frontier import (
 from l3_dc_descriptors.landing import last_consolidated
 from l3_dc_descriptors.memory import tune_allocators
 from l3_dc_descriptors.pipeline import process_unit
-from l3_dc_descriptors.schema import FAMILY, FIT_FAMILY, PATH_FAMILY
+from l3_dc_descriptors.schema import (
+    FAMILY,
+    FIT_FAMILY,
+    PATH_FAMILY,
+    SPECTRUM_FAMILY,
+)
 from l3_dc_descriptors.summarize import MAX_META_WORKERS
 from l3_dc_descriptors.thetas import ThetasError, load_thetas
 from l3_dc_descriptors.unit_process import run_unit
 
 MODES = ("backfill", "monthly")
-FAMILIES = (FAMILY, PATH_FAMILY, FIT_FAMILY)
+FAMILIES = (FAMILY, PATH_FAMILY, FIT_FAMILY, SPECTRUM_FAMILY)
 EXIT_USAGE = 2
 ROOT_VARS = (
     "L3_LANDING_ROOT",
@@ -532,7 +537,7 @@ def _parser() -> argparse.ArgumentParser:
         "--family",
         default=FAMILY,
         help=f"familia de descriptores: {', '.join(FAMILIES)} (por defecto {FAMILY!r}). "
-        f"{PATH_FAMILY!r} y {FIT_FAMILY!r} necesitan 'summaries.parquet' del mes",
+        f"{PATH_FAMILY!r}, {FIT_FAMILY!r} y {SPECTRUM_FAMILY!r} necesitan 'summaries.parquet' del mes",
     )
     parser.add_argument(
         "--force",

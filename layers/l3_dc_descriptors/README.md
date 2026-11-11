@@ -29,7 +29,7 @@ memoria del mes muere con su proceso. Un mes que ningún θ necesita se salta si
 | `--series-start` / `L3_SERIES_START` | Primer mes de la serie de L2, el único sin mes anterior. Se declara, no se infiere |
 | `--thetas` | Acota el catálogo, en decimal como en la ruta (`0.00010000,0.00031313`) |
 | `--force` | Reprocesa el rango ignorando la frontera. Exige `--from`; solo en `backfill` |
-| `--family` | `summaries` (la predeterminada), `path` (la familia T, `path.parquet`, [TRD-L3 §7.2.1](../../docs/TRD/l3.md#721-salida--pathparquet-familia-t)) o `fit` (la familia A, `fit.parquet`, [TRD-L3 §7.2.2](../../docs/TRD/l3.md#722-salida--fitparquet-familia-a), ITSC-400); otro valor es código 2. `path` y `fit` repiten el esqueleto de `summaries.parquet`: sin él en el mes, el θ sale del rango con `family_skeleton_missing` y la corrida termina con código 1. No concilian ticks (ya lo hizo S) y su frontera nunca supera la de `summaries` |
+| `--family` | `summaries` (la predeterminada), `path` (la familia T, `path.parquet`, [TRD-L3 §7.2.1](../../docs/TRD/l3.md#721-salida--pathparquet-familia-t)), `fit` (la familia A, `fit.parquet`, [TRD-L3 §7.2.2](../../docs/TRD/l3.md#722-salida--fitparquet-familia-a), ITSC-400) o `spectrum` (la familia F, `spectrum.parquet`, [TRD-L3 §7.2.3](../../docs/TRD/l3.md#723-salida--spectrumparquet-familia-f), ITSC-413); otro valor es código 2. `path`, `fit` y `spectrum` repiten el esqueleto de `summaries.parquet`: sin él en el mes, el θ sale del rango con `family_skeleton_missing` y la corrida termina con código 1. No concilian ticks (ya lo hizo S) y su frontera nunca supera la de `summaries` |
 | `--thetas-uri` / `L3_THETAS_URI` | **Obligatorio.** El catálogo de θ: el mismo objeto `l2/thetas.yaml` que usa L2 (ruta local o `gs://`). L3 no lleva copia |
 | `--asset` | Activo; por defecto `BTCUSDT` |
 
@@ -77,8 +77,11 @@ fija), así que un evento de S que cruza row groups pesa más de 240 B. La cifra
 F (ITSC-412, ADR-L3-19) es la única familia cuyo estado crece con los ticks del evento abierto: guarda los
 retornos de sus fases hasta cerrarlo (`f32`, 4 B cada uno), con un tope de 20 M de ticks por evento (80 MB).
 `summarize._unclosed` suma `SPECTRUM_RETURN_BYTES × buffered_ticks()` al costo fijo; lo que no cuenta es el
-trabajo transitorio de la FFT al cerrar (16 B por retorno más el scratch de `rustfft`). La familia ya la calcula el
-motor; la CLI y la cadena mensual la conectan las hijas siguientes de ITSC-410.
+trabajo transitorio de la FFT al cerrar (16 B × (2n + 4m), ver ADR-L3-19). `--family spectrum` (ITSC-413)
+corre la unidad con esta cifra: `unit_timing` lleva `inflight_ticks_max` (el máximo de retornos que el motor
+guardó a la vez), `budget_ticks` y `cpu_s`, y cada evento sobre el presupuesto de 20 M de ticks deja su fila
+nula y un `event_over_budget`. F corre en un job de 8 GiB (`l3-backfill-spectrum`); la cadena mensual es de la
+hija siguiente de ITSC-410.
 
 T guarda una `Run` por cada tramo suelto de un evento que cruza row groups (fusión ordenada,
 ADR-L3-17), así que su estado crece con los row groups que el evento cruza: el estimador toma una
@@ -132,7 +135,7 @@ mes sin `events.parquet` y `carry_over.parquet` de L2 detiene el rango de ese θ
 con sus dos Parquet pero sin `content_hash.json` (el linaje que L2 publica, ITSC-368) falla la
 unidad con `l2_lineage_missing`: se cubre con el backfill del linaje antes del apply de la
 imagen ([runbook](../../docs/runbooks/operacion-l3.md#cambios-requeridos)). En `monthly`, un θ
-que no llegó al mes previo (`l3_frontier`) o al que L2 no le ha llegado (`l2_missing`) o, en `--family path` o `fit`, no tiene `summaries.parquet` del mes (`summaries_missing`) deja
+que no llegó al mes previo (`l3_frontier`) o al que L2 no le ha llegado (`l2_missing`) o, en `--family path`, `fit` o `spectrum`, no tiene `summaries.parquet` del mes (`summaries_missing`) deja
 `theta_behind_frontier` y no falla la unidad mientras otro avance.
 
 **Hallazgos**: el catálogo de `check_type` y sus `details` están en
@@ -332,7 +335,7 @@ del hallazgo y sus `details` (valores JSON).
 | `L2StateInconsistent.no_pending` | `l2_state_inconsistent` | `theta`, `month`, `direction`, `has_pending_event` |
 | `PhaseQuantityMismatch` | `phase_quantity_mismatch` | `theta`, `confirm_agg_trade_id`, `phase`, `expected`, `got` |
 | `PhaseTicksMismatch` | `phase_ticks_mismatch` | `theta`, `month`, `N_M`, `sigma_closed`, `P_M`, `tail_M`, `U_M` |
-| `SkeletonMismatch` | `family_skeleton_mismatch` | `theta`, `month`, `family`, `detail` (qué difiere del esqueleto: `events.parquet` de L2 o, en `path` y `fit`, `summaries.parquet`) |
+| `SkeletonMismatch` | `family_skeleton_mismatch` | `theta`, `month`, `family`, `detail` (qué difiere del esqueleto: `events.parquet` de L2 o, en `path`, `fit` y `spectrum`, `summaries.parquet`) |
 | `PhaseValueError` | ninguno | `theta`, `confirm_agg_trade_id`: un valor no cabe en `DECIMAL(18,8)` |
 
 Los valores de `got` y `wanted` de precios son enteros sin escalar (10⁻⁸). Además

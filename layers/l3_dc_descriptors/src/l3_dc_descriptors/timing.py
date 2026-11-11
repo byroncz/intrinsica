@@ -196,6 +196,7 @@ class Phases:
 
     __slots__ = (
         "aggregate_s",
+        "budget_ticks",
         "carry_gate",
         "carry_wait_s",
         "commit",
@@ -211,6 +212,7 @@ class Phases:
         "inflight_bytes_max",
         "inflight_events_max",
         "inflight_max",
+        "inflight_ticks_max",
         "items",
         "l1_footer",
         "l1_wait_s",
@@ -244,6 +246,10 @@ class Phases:
         self.inflight_events_max = 0
         self.inflight_bytes_max = 0
         self.inflight_alone_bytes_max = 0
+        # Solo `spectrum` (ADR-L3-19): el máximo de retornos que el motor guardó a la vez y el
+        # presupuesto de ticks por evento. `None` en las demás familias: no entran al hallazgo.
+        self.inflight_ticks_max: int | None = None
+        self.budget_ticks: int | None = None
         self.items = 0
         self.lot_events = 0
         self.lot_ticks: int | None = None
@@ -519,7 +525,11 @@ class Timing:
         ninguno lo pase solo: es lo normal, no una señal. La señal es
         `inflight_alone_bytes_max`, los bytes abiertos tras empujar un tramo a un motor
         vacío: si pasa de `inflight_bytes`, un solo tramo trajo más eventos que el tope
-        (y salió el aviso `L3_INFLIGHT_BYTES`). `lot_events` es el lote en eventos con que
+        (y salió el aviso `L3_INFLIGHT_BYTES`). Solo en `spectrum` (F), `inflight_ticks_max` es el
+        máximo de retornos que el motor guardó a la vez (`Engine.buffered_ticks`, 4 B cada uno) y
+        `budget_ticks`, el presupuesto de ticks por evento con que corrió; las demás familias no
+        llevan estas dos claves. `cpu_s` es el tiempo de CPU de la unidad: `cpu_s / (wall_s ×
+        cores)` es `cpu_utilization`. `lot_events` es el lote en eventos con que
         corrió (`L3_LOT_EVENTS`; 0 si el corte está desactivado), `lot_ticks` el tamaño de
         tramo en ticks que salió de la densidad del mes (`null` sin corte) y `lots` los
         tramos empujados (ITSC-373); un mes poco denso no se parte y `lots` son sus row
@@ -575,6 +585,14 @@ class Timing:
         }
         counts = self.row_groups
         utilization = self.cpu_utilization
+        spectrum = {
+            name: value
+            for name, value in (
+                ("inflight_ticks_max", p.inflight_ticks_max),
+                ("budget_ticks", p.budget_ticks),
+            )
+            if value is not None
+        }
         return {
             **{name: round(value, 3) for name, value in seconds.items()},
             "threads": p.threads,
@@ -588,6 +606,7 @@ class Timing:
             "inflight_events_max": p.inflight_events_max,
             "inflight_bytes_max": p.inflight_bytes_max,
             "inflight_alone_bytes_max": p.inflight_alone_bytes_max,
+            **spectrum,
             "writers": p.writers,
             "engine_busy": round(p.engine_busy, 3),
             "items": p.items,

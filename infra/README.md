@@ -453,7 +453,10 @@ revisa antes de aprobar el `apply`.
 
 ## Stack l3 (Descriptores por evento)
 
-Instancia del módulo `layer` con cuatro modos: `l3-backfill`, `l3-monthly`,
+Instancia del módulo `layer` con cinco modos: `l3-backfill`, `l3-backfill-spectrum` (el backfill de la
+familia F, ITSC-413: `args = ["--mode", "backfill", "--family", "spectrum"]`, `memory = "8Gi"`, `cpu = "2"`
+y el timeout de `l3-backfill`; el veredicto de la Épica ITSC-410 fija 8 GiB para F, y Cloud Run exige al menos
+2 vCPU para pasar de 4 GiB), `l3-monthly`,
 `l3-monthly-path` (la pasada mensual de la familia T, ITSC-396) y `l3-monthly-fit`
 (la de la familia A, ITSC-402), cada uno con su
 service account y una sola tarea (sin task array). `l3-monthly-path` es el mismo
@@ -679,6 +682,10 @@ muestra solo el workflow `l1-run-job` con la cadena nueva y dos bindings nuevos:
 `run.invoker` sobre `l3-monthly-fit` y `run.viewer` sobre `l3-monthly-path`, que ahora
 el workflow espera (el `run.invoker` sobre `l3-monthly-path` ya existía). Cualquier otro
 cambio es una sorpresa y se revisa antes de aprobar.
+
+En el PR de ITSC-413, el plan de `l3` crea solo el job `l3-backfill-spectrum` con su service account
+y sus bindings (los de `l3-backfill`) y actualiza la imagen de los jobs existentes (VERSION menor). El plan
+de `l1` no cambia: la cadena mensual de F es de otra card.
 
 **Lanzar los jobs.** *Actions → Run job* (nunca un agente):
 

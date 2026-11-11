@@ -36,6 +36,7 @@ from l3_dc_descriptors.memory import (
     trim_threshold,
 )
 from l3_dc_descriptors.profiling import top_functions
+from l3_dc_descriptors.schema import SPECTRUM_FAMILY
 from l3_dc_descriptors.summarize import ThetaResult, summarize_month
 from l3_dc_descriptors.timing import (
     Phases,
@@ -214,8 +215,25 @@ def _process_unit(
                         if result.reconciliation is None
                         else result.reconciliation.unassigned
                     ),
+                    over_budget_events=(
+                        len(result.over_budget)
+                        if ctx.family == SPECTRUM_FAMILY
+                        else None
+                    ),
                 )
                 for theta, result in sorted(summaries, key=lambda item: item[0])
+            ),
+            *(
+                findings.event_over_budget(
+                    ctx,
+                    unit,
+                    theta=theta_text(theta),
+                    confirm_agg_trade_id=confirm,
+                    ticks=ticks,
+                    budget=phases.budget_ticks,
+                )
+                for theta, result in sorted(summaries, key=lambda item: item[0])
+                for confirm, ticks in result.over_budget
             ),
             findings.unit_timing(ctx, unit, timing),
         ),

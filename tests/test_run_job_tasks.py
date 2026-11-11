@@ -203,4 +203,21 @@ def test_l3_monthly_rechaza_to_distinto_de_from_y_from_invalido(desde, hasta, me
 
 
 def test_job_invalido_nombra_los_jobs_l3():
-    assert "l3-backfill, l3-monthly" in run("l9-x", "2023-03").stderr
+    assert (
+        "l3-backfill, l3-monthly, l3-backfill-spectrum" in run("l9-x", "2023-03").stderr
+    )
+
+
+@pytest.mark.parametrize(
+    ("desde", "hasta"),
+    [("", ""), ("2023-03", ""), ("2023-03", "2023-03"), ("2023-03", "2024-01")],
+)
+def test_l3_backfill_spectrum_es_una_sola_unidad_como_l3_backfill(desde, hasta):
+    # ITSC-413: el job de 8 GiB de la familia F recorre el rango en una tarea.
+    assert units("l3-backfill-spectrum", desde, hasta) == ["1"]
+
+
+def test_l3_backfill_spectrum_rechaza_rangos_invalidos():
+    out = run("l3-backfill-spectrum", "2023-05", "2023-03")
+    assert out.returncode == 2
+    assert "menor que from" in out.stderr

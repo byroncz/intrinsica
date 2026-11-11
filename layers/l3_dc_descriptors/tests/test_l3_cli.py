@@ -9,7 +9,7 @@ import pyarrow.parquet as pq
 import pytest
 from cli_support import emitted, env_for, l3_files, write_catalog
 from frames_lake import write_carry_over
-from l3_dc_descriptors import SUMMARIES_SCHEMA, cli
+from l3_dc_descriptors import SUMMARIES_SCHEMA, cli, summarize
 from l3_dc_descriptors.cli import UsageError, main, previous_month, resolve_range
 from l3_dc_descriptors.schema import (
     FIT_SCHEMA,
@@ -17,6 +17,12 @@ from l3_dc_descriptors.schema import (
     PATH_SCHEMA,
     PATH_STATE_VERSION,
     SILENCE_US,
+    SPECTRUM_BANDS,
+    SPECTRUM_BUDGET_TICKS,
+    SPECTRUM_N_MIN,
+    SPECTRUM_SCHEMA,
+    SPECTRUM_STATE_VERSION,
+    SPECTRUM_WINDOW,
 )
 from l3_lake import M2, M3, build_lake, fixture_ticks, month_cuts
 from pyutils import content_hash
@@ -26,6 +32,7 @@ SMALL, BIG = 100_000, 2_000_000
 SERIES = ["--series-start", "2017-08"]
 BACKFILL = ["--mode", "backfill", *SERIES]
 PARTITION = "provider=binance/market=spot/asset=BTCUSDT"
+KEYS = ("theta", "confirm_agg_trade_id")
 
 
 @pytest.fixture
@@ -883,3 +890,198 @@ def test_the_fit_family_rejects_a_summaries_file_with_other_row_groups(
     mismatch = emitted(tmp_path, "family_skeleton_mismatch")
     assert [r["details"]["theta"] for r in mismatch] == [theta_text(theta)]
     assert mismatch[0]["details"]["family"] == "fit"
+
+
+# F (spectrum)
+
+
+def spectrum_file_of(lake, theta: int, month) -> Path:
+    return Path(month_dir(lake.l3, theta, month) + "/spectrum.parquet")
+
+
+def spans_of(lake, theta: int, month) -> list[tuple[int, int]]:
+    """`(confirm_agg_trade_id, extreme − reference)` de cada evento del mes, de `events.parquet`."""
+    table = pq.read_table(
+        l2_file(lake, theta, month, "events.parquet"),
+        columns=[
+            "confirm_agg_trade_id",
+            "reference_agg_trade_id",
+            "extreme_agg_trade_id",
+        ],
+    ).to_pydict()
+    return [
+        (c, e - r)
+        for c, r, e in zip(
+            table["confirm_agg_trade_id"],
+            table["reference_agg_trade_id"],
+            table["extreme_agg_trade_id"],
+            strict=True,
+        )
+    ]
+
+
+def test_the_spectrum_family_writes_spectrum_parquet_after_summaries(
+    lake, tmp_path, catalog
+):
+    assert run(lake, tmp_path, catalog, *BACKFILL) == 0
+    before = {p: p.read_bytes() for p in l3_files(lake)}
+
+    assert run(lake, tmp_path, catalog, *BACKFILL, "--family", "spectrum") == 0
+
+    for theta in lake.thetas:
+        for month in lake.months:
+            file = pq.ParquetFile(spectrum_file_of(lake, theta, month))
+            assert file.schema_arrow.remove_metadata().equals(SPECTRUM_SCHEMA)
+            meta = file.schema_arrow.metadata
+            assert meta[b"state_version"] == SPECTRUM_STATE_VERSION.encode()
+            assert meta[b"n_min"] == str(SPECTRUM_N_MIN).encode()
+            assert meta[b"bands"] == str(SPECTRUM_BANDS).encode()
+            assert meta[b"window"] == SPECTRUM_WINDOW.encode()
+            assert meta[b"budget_ticks"] == str(SPECTRUM_BUDGET_TICKS).encode()
+            skeleton = summaries(lake, theta, month)
+            assert [
+                file.metadata.row_group(i).num_rows
+                for i in range(file.metadata.num_row_groups)
+            ] == [
+                skeleton.metadata.row_group(i).num_rows
+                for i in range(skeleton.metadata.num_row_groups)
+            ]
+    # S, T y A no se tocan: una corrida de F no cambia un byte de lo que ya estaba.
+    assert all(p.read_bytes() == data for p, data in before.items())
+    rows = [
+        r
+        for r in emitted(tmp_path, "summaries_summary")
+        if r["details"]["family"] == "spectrum"
+    ]
+    assert len(rows) == len(lake.thetas) * len(lake.months)
+    for row in rows:
+        details = row["details"]
+        assert "unassigned_ticks" not in details
+        assert details["content_hash"]
+        assert details["l2_events_content_hash"]
+        assert details["l2_carry_over_content_hash"]
+        assert details["over_budget_events"] == 0
+    assert emitted(tmp_path, "event_over_budget") == []
+    timing = [
+        r["details"]
+        for r in emitted(tmp_path, "unit_timing")
+        if r["details"]["family"] == "spectrum"
+    ]
+    assert len(timing) == len(lake.months)
+    for details in timing:
+        assert details["budget_ticks"] == SPECTRUM_BUDGET_TICKS
+        assert details["inflight_ticks_max"] >= 0
+        assert details["cpu_s"] > 0
+    # Las demás familias no llevan las claves de F.
+    assert all(
+        "inflight_ticks_max" not in r["details"]
+        for r in emitted(tmp_path, "unit_timing")
+        if r["details"]["family"] == "summaries"
+    )
+
+
+def test_the_spectrum_family_needs_summaries_parquet_of_the_month(
+    lake, tmp_path, catalog
+):
+    code = run(lake, tmp_path, catalog, *BACKFILL, "--family", "spectrum")
+    assert code == 1
+    assert [p for p in l3_files(lake) if p.name == "spectrum.parquet"] == []
+    missing = emitted(tmp_path, "family_skeleton_missing")
+    assert {r["details"]["theta"] for r in missing} == {
+        theta_text(t) for t in lake.thetas
+    }
+    assert {r["details"]["file"] for r in missing} == {"summaries.parquet"}
+    assert {r["details"]["family"] for r in missing} == {"spectrum"}
+    assert {r["severity"] for r in missing} == {"error"}
+
+
+def test_the_spectrum_family_skips_a_theta_without_summaries_and_stops_its_range(
+    lake, tmp_path, catalog
+):
+    assert run(lake, tmp_path, catalog, *BACKFILL) == 0
+    lost, lost_month = lake.thetas[0], lake.months[1]
+    (Path(month_dir(lake.l3, lost, lost_month)) / "summaries.parquet").unlink()
+
+    assert run(lake, tmp_path, catalog, *BACKFILL, "--family", "spectrum") == 1
+
+    assert spectrum_file_of(lake, lost, lake.months[0]).exists()
+    assert not spectrum_file_of(lake, lost, lost_month).exists()
+    others = [t for t in lake.thetas if t != lost]
+    assert all(
+        spectrum_file_of(lake, t, m).exists() for t in others for m in lake.months
+    )
+
+
+def test_the_spectrum_family_rejects_a_summaries_file_with_other_row_groups(
+    lake, tmp_path, catalog
+):
+    assert run(lake, tmp_path, catalog, *BACKFILL) == 0
+    theta, month = lake.thetas[0], lake.months[0]
+    file = Path(month_dir(lake.l3, theta, month)) / "summaries.parquet"
+    table = pq.read_table(file)
+    pq.write_table(table, file, row_group_size=max(1, table.num_rows // 3))
+
+    assert run(lake, tmp_path, catalog, *BACKFILL, "--family", "spectrum") == 1
+
+    assert not spectrum_file_of(lake, theta, month).exists()
+    mismatch = emitted(tmp_path, "family_skeleton_mismatch")
+    assert [r["details"]["theta"] for r in mismatch] == [theta_text(theta)]
+    assert mismatch[0]["details"]["family"] == "spectrum"
+
+
+def test_an_event_over_the_budget_leaves_a_null_row_and_a_warning(
+    lake, tmp_path, catalog, monkeypatch
+):
+    assert run(lake, tmp_path, catalog, *BACKFILL) == 0
+    spans = {
+        (theta, month): spans_of(lake, theta, month)
+        for theta in lake.thetas
+        for month in lake.months
+    }
+    # El presupuesto, bajado solo aquí, deja sobre él los eventos de mayor extensión.
+    budget = max(s for events in spans.values() for _, s in events) - 1
+    over = {
+        (theta_text(theta), confirm, span)
+        for (theta, _), events in spans.items()
+        for confirm, span in events
+        if span > budget
+    }
+    assert over
+    monkeypatch.setattr(summarize, "SPECTRUM_BUDGET_TICKS", budget)
+
+    # No falla la unidad: el evento queda nulo y el hallazgo es un aviso.
+    assert run(lake, tmp_path, catalog, *BACKFILL, "--family", "spectrum") == 0
+
+    warned = emitted(tmp_path, "event_over_budget")
+    assert {
+        (
+            r["details"]["theta"],
+            r["details"]["confirm_agg_trade_id"],
+            r["details"]["ticks"],
+        )
+        for r in warned
+    } == over
+    assert len(warned) == len(over)
+    for row in warned:
+        assert row["severity"] == "warning"
+        assert row["details"]["budget"] == budget
+        assert row["details"]["family"] == "spectrum"
+    counted = sum(
+        r["details"]["over_budget_events"]
+        for r in emitted(tmp_path, "summaries_summary")
+        if r["details"]["family"] == "spectrum"
+    )
+    assert counted == len(over)
+    nulls = 0
+    for (theta, month), events in spans.items():
+        file = pq.ParquetFile(spectrum_file_of(lake, theta, month))
+        assert file.schema_arrow.metadata[b"budget_ticks"] == str(budget).encode()
+        table = file.read().to_pydict()
+        for confirm, span in events:
+            if span <= budget:
+                continue
+            row = table["confirm_agg_trade_id"].index(confirm)
+            data = [v[row] for name, v in table.items() if name not in KEYS]
+            assert data and all(v is None for v in data)
+            nulls += 1
+    assert nulls == len(over)

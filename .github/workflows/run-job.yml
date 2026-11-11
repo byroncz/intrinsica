@@ -16,8 +16,12 @@
 # l3-backfill va en una sola tarea que recorre el rango y la frontera de cada θ
 # decide desde dónde avanza (from vacío); l3-monthly resume un mes (vacío, el mes
 # anterior; lo decide la CLI) y no admite to distinto de from ni force. Ambos
-# admiten series_start y family (ITSC-394, ITSC-400: summaries, path o fit; los backfills
-# de path y de fit van después del de summaries, que escribe el esqueleto de cada mes).
+# admiten series_start y family (ITSC-394, ITSC-400, ITSC-413: summaries, path, fit o spectrum; los
+# backfills de path, fit y spectrum van después del de summaries, que escribe el esqueleto de cada
+# mes). La familia F (spectrum) corre en un job de 8 GiB (ITSC-413, veredicto de ITSC-410): su
+# backfill es l3-backfill-spectrum, que run-job-args.sh arma como --mode backfill --family
+# spectrum con los mismos from, to, force y series_start. l3-backfill con family = spectrum
+# existe pero tiene 4 GiB: no es el job de F.
 # La cadena mensual corre además los jobs l3-monthly-path (ITSC-396: --mode monthly
 # --family path, después de l3-monthly) y l3-monthly-fit (ITSC-402: --mode monthly
 # --family fit, después de l3-monthly-path). Ninguno está en la lista: a mano, la
@@ -58,6 +62,7 @@ on:
           - l2-backfill
           - l2-monthly
           - l3-backfill
+          - l3-backfill-spectrum
           - l3-monthly
           - ops-script
           - viz-render
@@ -80,12 +85,13 @@ on:
         type: string
         required: false
       family:
-        description: "Solo l3-backfill y l3-monthly: familia de descriptores que se escribe. summaries (por defecto), path (la familia T) o fit (la familia A); path y fit necesitan summaries.parquet del mes: corre antes el backfill de summaries. Los demás jobs la rechazan si no es summaries"
+        description: "Solo l3-backfill, l3-monthly y l3-backfill-spectrum: familia de descriptores que se escribe. summaries (por defecto), path (la familia T), fit (la familia A) o spectrum (la familia F); path, fit y spectrum necesitan summaries.parquet del mes: corre antes el backfill de summaries. El backfill de spectrum se lanza con el job l3-backfill-spectrum (8 GiB; ahí family puede quedar en summaries o en spectrum); l3-monthly con spectrum corre en 4 GiB, que no alcanzan para el cierre de la FFT de F (la pasada mensual de F es de la hija 5 de ITSC-410). Los demás jobs la rechazan si no es summaries"
         type: choice
         options:
           - summaries
           - path
           - fit
+          - spectrum
         default: summaries
         required: false
       script:
@@ -130,8 +136,8 @@ jobs:
           # La familia es de L3 (ITSC-394): la CLI de los demás jobs no define --family y
           # argparse saldría con 2 dentro de Cloud Run. summaries es el valor por defecto
           # del input y no cuenta.
-          if [[ -n "$FAMILY" && "$FAMILY" != summaries && "$JOB" != l3-backfill && "$JOB" != l3-monthly ]]; then
-            echo "::error::family solo aplica a l3-backfill y l3-monthly, no a $JOB"
+          if [[ -n "$FAMILY" && "$FAMILY" != summaries && "$JOB" != l3-backfill && "$JOB" != l3-monthly && "$JOB" != l3-backfill-spectrum ]]; then
+            echo "::error::family solo aplica a l3-backfill, l3-monthly y l3-backfill-spectrum, no a $JOB"
             exit 1
           fi
           # l3-monthly resume un mes y no reprocesa: su CLI sale con 2 con --force.

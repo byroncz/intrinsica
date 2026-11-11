@@ -69,6 +69,9 @@ class SealedWriters:
         self._month = month
         self._clock = clock
         self._queues = [_Queue() for _ in writers]
+        # Los eventos sobre el presupuesto de `spectrum` de cada θ, en orden de evento: un
+        # escritor a la vez atiende a un θ y en orden de row group, así que no necesita candado.
+        self._over: list[list[tuple[int, int]]] = [[] for _ in writers]
         self._cond = threading.Condition()
         self._pending = 0
         self._error: BaseException | None = None
@@ -82,6 +85,12 @@ class SealedWriters:
     def error(self) -> BaseException | None:
         with self._cond:
             return self._error
+
+    def over_budget(self, position: int) -> tuple[tuple[int, int], ...]:
+        """Los eventos del θ sobre el presupuesto, `(confirm_agg_trade_id, ticks)` en orden de
+        evento (vacío fuera de `spectrum`). Se lee tras `join()`: ya no se escribe nada.
+        """
+        return tuple(self._over[position])
 
     def put(self, sealed: tuple) -> None:
         """Encola un row group sellado `(θ, índice, …)` y despierta a un escritor si hace falta."""
@@ -145,6 +154,7 @@ class SealedWriters:
                     self._thetas[position], sealed, self._family
                 )
                 self._writers[position].write_row_group(batch)
+            self._over[position].extend(native.over_budget(sealed))
         except FamilySkeletonMismatch as error:
             raise SkeletonMismatch(
                 self._texts[position], self._month, self._family, error.detail

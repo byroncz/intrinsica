@@ -346,7 +346,7 @@ comprueba al escribir que iguala la suma de `quantity` de sus ticks.
 
 Lo escribe la imagen `l3_dc_descriptors` (`python -m l3_dc_descriptors --mode
 backfill|monthly`, [TRD-L3 §8](TRD/l3.md#8-pipeline-interno-y-modos-de-ejecución)),
-con `--family summaries` (la predeterminada), `--family path` (la familia T, ITSC-394) o `--family fit` (la familia A, ITSC-400). La familia F (`spectrum.parquet`) ya la calcula el motor (ITSC-412); su `--family spectrum`, el orquestador y la cadena mensual los conectan las hijas siguientes de ITSC-410. Lee `L3_LANDING_ROOT` (L1) y
+con `--family summaries` (la predeterminada), `--family path` (la familia T, ITSC-394), `--family fit` (la familia A, ITSC-400) o `--family spectrum` (la familia F, ITSC-413; el motor es de ITSC-412). La cadena mensual de F es de la hija siguiente de ITSC-410. Lee `L3_LANDING_ROOT` (L1) y
 `L3_EVENTS_ROOT` (L2), escribe bajo `L3_SUMMARIES_ROOT` y deja sus hallazgos en
 `L3_DQ_ROOT`. El catálogo de θ no es de L3: `L3_THETAS_URI` (o `--thetas-uri`) apunta al
 mismo objeto `l2/thetas.yaml` que usa L2, y sin él la corrida termina con código 2.
@@ -374,13 +374,13 @@ L2: un mes sin `events.parquet` y `carry_over.parquet` de L2 no se procesa
 (`l2_input_missing`). Por eso cambiar `STATE_VERSION` o el esquema hace que el siguiente
 `backfill` reescriba la serie del θ sin `--force`.
 
-La frontera es **por familia**: `path.parquet` y `fit.parquet` tienen la suya, y la de una
+La frontera es **por familia**: `path.parquet`, `fit.parquet` y `spectrum.parquet` tienen la suya, y la de una
 familia distinta de `summaries` **nunca supera la de `summaries`** del mismo θ, porque repite su
-esqueleto. Una corrida de `--family path` o `--family fit` no toca `summaries.parquet` ni el archivo
-de la otra familia, y la frontera de `summaries` no mira los de las demás. `--family path` y
-`--family fit` solo escriben un mes si `summaries.parquet` de ese `(θ, mes)` existe; si no, el θ sale del rango con `family_skeleton_missing` y la corrida termina con
+esqueleto. Una corrida de `--family path`, `--family fit` o `--family spectrum` no toca `summaries.parquet` ni el archivo
+de la otra familia, y la frontera de `summaries` no mira los de las demás. `--family path`,
+`--family fit` y `--family spectrum` solo escriben un mes si `summaries.parquet` de ese `(θ, mes)` existe; si no, el θ sale del rango con `family_skeleton_missing` y la corrida termina con
 código 1. La compuerta lee además el pie de `summaries.parquet`: sus filas por row group deben
-ser las de `events.parquet` (si no, `family_skeleton_mismatch`). `path` y `fit` no concilian
+ser las de `events.parquet` (si no, `family_skeleton_mismatch`). `path`, `fit` y `spectrum` no concilian
 ticks ni leen carry-overs: ya lo hizo la pasada de `summaries`.
 
 ### Leer
@@ -683,8 +683,11 @@ las bandas no nulas de un registro de una fase suman 1.
   por los bits de cada valor (sin `NaN` ni `inf`, porque L3 no los produce).
 - **Quién lo escribe**: el motor de agregación (`Config.family = spectrum`) calcula las filas y el
   `FamilyWriter` las repite sobre el esqueleto de `summaries.parquet` de la partición, con los
-  metadatos de arriba. La CLI de L3 (`--family spectrum`) y la cadena mensual los conectan las
-  hijas siguientes de la Épica ITSC-410.
+  metadatos de arriba. La CLI de L3 con `--family spectrum` (ITSC-413), después de la de
+  `summaries`, corre la unidad y escribe el archivo; `budget_ticks` es el presupuesto con que
+  corrió esa unidad. Cada evento sobre el presupuesto deja su fila nula y un hallazgo
+  `event_over_budget` (TRD-L3 §9.3), sin fallar la unidad. Su frontera por θ es la de «Quién lo
+  escribe y hasta dónde llegó». La cadena mensual de F es de la hija siguiente de la Épica ITSC-410.
 - **Leer**: se une con `summaries.parquet` por `(theta, confirm_agg_trade_id)`; la unión
   es 1:1 y también por posición.
 

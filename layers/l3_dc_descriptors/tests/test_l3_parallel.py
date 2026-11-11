@@ -30,6 +30,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pyref
 import pytest
+import specref
 from dc_frames import FamilySkeletonMismatch, FamilyWriter, FramesInputError
 from dc_frames.lake import EventFile, l1_path
 from l3_dc_descriptors import (
@@ -45,10 +46,10 @@ from l3_dc_descriptors import (
 from l3_dc_descriptors.context import RunContext, Unit
 from l3_dc_descriptors.cpu import CpuLimit
 from l3_dc_descriptors.pipeline import process_unit
-from l3_dc_descriptors.schema import FAMILY, FIT_SCHEMA, PATH_SCHEMA
+from l3_dc_descriptors.schema import FAMILY, FIT_SCHEMA, PATH_SCHEMA, SPECTRUM_SCHEMA
 from l3_dc_descriptors.timing import BusyClock, Phases, ReadMeter
 from l3_lake import M1, M2, build_lake, fixture_ticks, month_cuts
-from native_driver import fit_native, path_native
+from native_driver import fit_native, path_native, spectrum_native
 
 ENGINE_THREADS = (1, 2, 4)
 READERS = (1, 2)
@@ -701,8 +702,11 @@ class ClosingEngine:
     empujarlo. Anota cuántos row groups tuvo abiertos a la vez.
     """
 
-    def __init__(self, work: float) -> None:
+    def __init__(self, work: float, returns: int = 0) -> None:
         self.work = work
+        self.returns = (
+            returns  # retornos que guarda cada row group abierto (solo spectrum)
+        )
         self.open = 0
         self.most = 0
         self.closed = 0
@@ -727,6 +731,10 @@ class ClosingEngine:
         with self.lock:
             return self.closed
 
+    def buffered_ticks(self) -> int:
+        with self.lock:
+            return self.open * self.returns
+
 
 class FakeFeed:
     """Las fronteras de un θ: cada row group trae `per_group` eventos nuevos."""
@@ -743,12 +751,24 @@ class FakeFeed:
 
 
 def push_fake_row_groups(
-    monkeypatch, cap: int, per_group: int = 1000, groups: int = 6, ahead: int = 0
+    monkeypatch,
+    cap: int,
+    per_group: int = 1000,
+    groups: int = 6,
+    ahead: int = 0,
+    family: str = FAMILY,
+    returns: int = 0,
 ):
     """`_push_all` con 6 row groups de `per_group` eventos (`ahead` de ellos por delante) y un
     motor que tarda 30 ms en cerrar cada uno. Devuelve el motor y las `Phases`.
     """
-    engine, feed, phases = ClosingEngine(0.03), FakeFeed(per_group, ahead), Phases()
+    engine, feed, phases = (
+        ClosingEngine(0.03, returns),
+        FakeFeed(per_group, ahead),
+        Phases(),
+    )
+    if family == "spectrum":
+        phases.inflight_ticks_max = 0
     phases.inflight, phases.writers, phases.inflight_bytes = 4, 1, cap
 
     def push(engine, row_group_id, ids, columns, before_month):
@@ -762,7 +782,7 @@ def push_fake_row_groups(
     idle = types.SimpleNamespace(error=None, pending=0)
     observed = types.SimpleNamespace(observe=lambda ids: None)
     pushed = summarize._push_all(
-        engine, row_groups, [feed], idle, idle, [], M1, phases, observed
+        engine, row_groups, [feed], idle, idle, [], M1, phases, observed, family
     )
     assert pushed == groups
     while engine.inflight():
@@ -1901,3 +1921,303 @@ def test_the_fit_pass_without_summaries_fails_without_publishing(lake, fit_refer
         hidden.rename(target / "summaries.parquet")
     assert (target / "fit.parquet").read_bytes() == before
     assert l3_threads() == []
+
+
+# La pasada de la familia F (`--family spectrum`): mismas tablas y mismo `content_hash` que la
+# referencia (`native_driver.spectrum_native`, validada contra `specref`) con cualquier hilo,
+# lector, escritor, lote y tamaño de lote de fronteras.
+
+
+def run_spectrum(lake, **options) -> dict:
+    """Los resultados y las tablas de `spectrum.parquet` de todos los meses (con
+    `summaries.parquet` ya escrito por la referencia de S).
+    """
+    results, tables = {}, {}
+    for month in lake.months:
+        results[month] = summarize_month(
+            lake.l1,
+            lake.l2,
+            lake.l3,
+            month,
+            lake.theta_texts,
+            series_start=M1,
+            family="spectrum",
+            **options,
+        )
+        for theta, result in results[month].items():
+            tables[month, theta] = pq.read_table(result.path, schema=SPECTRUM_SCHEMA)
+    return {"results": results, "tables": tables}
+
+
+@pytest.fixture(scope="module")
+def spectrum_reference(lake, reference):
+    """La referencia de F: `native_driver.spectrum_native` sobre el `summaries.parquet` de la
+    referencia de S, que queda escrito en el lago.
+    """
+    results, tables = {}, {}
+    for month in lake.months:
+        results[month] = spectrum_native(
+            lake.l1, lake.l2, lake.l3, month, lake.theta_texts, series_start=M1
+        )
+        for theta, result in results[month].items():
+            tables[month, theta] = pq.read_table(result.path, schema=SPECTRUM_SCHEMA)
+    return {"results": results, "tables": tables}
+
+
+def assert_same_spectrum(got: dict, expected: dict) -> None:
+    assert_same_path(got, expected)
+    for month, per_theta in expected["results"].items():
+        for theta, result in per_theta.items():
+            # El orquestador deja los eventos sobre el presupuesto en el orden del motor.
+            assert list(got["results"][month][theta].over_budget) == list(
+                result.over_budget
+            )
+
+
+def test_the_spectrum_reference_is_the_oracle(lake, spectrum_reference):
+    """La referencia de F es el oráculo `specref` sobre el lector de `dc_frames`: nulos exactos
+    y fracciones a 1e-9 (ADR-L3-19, «`f32` y no `f64`»).
+    """
+    compared = 0
+    for month in lake.months:
+        wanted = specref.from_lake(lake.l1, lake.l2, month, lake.theta_texts)
+        got = {
+            (row["theta"], row["confirm_agg_trade_id"]): row
+            for (m, _), table in spectrum_reference["tables"].items()
+            if m == month
+            for row in table.to_pylist()
+        }
+        assert got.keys() == wanted.keys()
+        for key, values in wanted.items():
+            for name, value in zip(specref.COLUMNS, values, strict=True):
+                if value is None:
+                    assert got[key][name] is None, (key, name)
+                else:
+                    assert math.isclose(
+                        got[key][name], value, rel_tol=0, abs_tol=1e-9
+                    ), (key, name)
+        compared += len(got)
+    assert compared > 0
+
+
+@pytest.mark.parametrize(("engine_threads", "readers", "inflight", "writers"), KNOBS)
+def test_the_spectrum_pass_gives_the_same_table_and_hash_with_any_knobs(
+    lake, spectrum_reference, engine_threads, readers, inflight, writers
+):
+    got = run_spectrum(
+        lake,
+        threads=4,
+        engine_threads=engine_threads,
+        readers=readers,
+        inflight=inflight,
+        writers=writers,
+    )
+    assert_same_spectrum(got, spectrum_reference)
+    assert l3_threads() == []
+
+
+@pytest.mark.parametrize("threads", [1, 2, 50])
+def test_the_spectrum_pass_does_not_depend_on_the_io_pool(
+    lake, spectrum_reference, threads
+):
+    assert_same_spectrum(run_spectrum(lake, threads=threads), spectrum_reference)
+
+
+@pytest.mark.parametrize("lot_events", [1, 5, 10, 25, 100])
+@pytest.mark.parametrize(
+    ("engine_threads", "readers", "inflight", "writers"), [(1, 1, 1, 1), (4, 2, 4, 4)]
+)
+def test_the_spectrum_pass_gives_the_same_result_in_lots(
+    lake, spectrum_reference, lot_events, engine_threads, readers, inflight, writers
+):
+    """Con tramos de pocos ticks hay eventos que cruzan tramos y row groups: la fusión ordenada
+    de F (ADR-L3-19) da la misma tabla y el mismo `content_hash` que sin corte.
+    """
+    got = run_spectrum(
+        lake,
+        threads=4,
+        engine_threads=engine_threads,
+        readers=readers,
+        inflight=inflight,
+        writers=writers,
+        lot_events=lot_events,
+    )
+    assert_same_spectrum(got, spectrum_reference)
+
+
+@pytest.mark.parametrize(
+    ("engine_threads", "readers", "inflight", "writers"),
+    [(1, 1, 1, 1), (2, 2, 4, 1), (4, 1, 4, 4), (4, 2, 1, 4)],
+)
+def test_the_spectrum_pass_gives_the_same_result_with_boundaries_in_lots_of_three(
+    lake, spectrum_reference, tiny_l2, engine_threads, readers, inflight, writers
+):
+    got = run_spectrum(
+        lake,
+        threads=4,
+        engine_threads=engine_threads,
+        readers=readers,
+        inflight=inflight,
+        writers=writers,
+    )
+    assert_same_spectrum(got, spectrum_reference)
+    assert_same_spectrum(
+        run_spectrum(lake, engine_threads=4, inflight=4, lot_events=3),
+        spectrum_reference,
+    )
+
+
+def test_a_spectrum_run_does_not_change_a_byte_of_summaries_path_or_fit(
+    lake, path_reference, fit_reference, spectrum_reference
+):
+    """Criterio 4 de la Épica: una corrida de F no toca los archivos de S, T ni A."""
+    files = sorted(
+        [
+            *lake.l3.rglob("summaries.parquet"),
+            *lake.l3.rglob("path.parquet"),
+            *lake.l3.rglob("fit.parquet"),
+        ]
+    )
+    assert len(files) == 3 * len(lake.thetas) * len(lake.months)
+    before = {f: f.read_bytes() for f in files}
+    run_spectrum(lake, engine_threads=2, lot_events=10)
+    assert {f: f.read_bytes() for f in files} == before
+
+
+def test_a_spectrum_run_with_a_lowered_budget_matches_the_reference(
+    lake, spectrum_reference, monkeypatch
+):
+    """Con un presupuesto bajado solo aquí hay eventos sobre él: la unidad deja el mismo
+    archivo (filas nulas) y los mismos eventos que la referencia con el mismo presupuesto,
+    con cualquier corte en tramos.
+    """
+    budget = 40
+    monkeypatch.setattr(summarize, "SPECTRUM_BUDGET_TICKS", budget)
+    reference = {
+        month: spectrum_native(
+            lake.l1,
+            lake.l2,
+            lake.l3,
+            month,
+            lake.theta_texts,
+            series_start=M1,
+            budget_ticks=budget,
+        )
+        for month in lake.months
+    }
+    expected_over = sum(
+        len(r.over_budget) for m in reference.values() for r in m.values()
+    )
+    assert expected_over > 0
+    try:
+        for lot_events in (None, 5):
+            got = {}
+            for month in lake.months:
+                got[month] = summarize_month(
+                    lake.l1,
+                    lake.l2,
+                    lake.l3,
+                    month,
+                    lake.theta_texts,
+                    series_start=M1,
+                    family="spectrum",
+                    engine_threads=2,
+                    lot_events=lot_events,
+                )
+            for month, per_theta in reference.items():
+                for theta, result in per_theta.items():
+                    assert got[month][theta].content_hash == result.content_hash
+                    assert list(got[month][theta].over_budget) == result.over_budget
+    finally:
+        # Devuelve el lago a la referencia con el presupuesto de verdad para las demás pruebas.
+        monkeypatch.undo()
+        for month in lake.months:
+            spectrum_native(
+                lake.l1, lake.l2, lake.l3, month, lake.theta_texts, series_start=M1
+            )
+
+
+def test_the_spectrum_pass_reports_the_lineage_of_l2_like_summaries(
+    lake, reference, spectrum_reference
+):
+    for month, per_theta in spectrum_reference["results"].items():
+        got = summarize_month(
+            lake.l1,
+            lake.l2,
+            lake.l3,
+            month,
+            lake.theta_texts,
+            series_start=M1,
+            family="spectrum",
+        )
+        for theta, result in got.items():
+            assert result.l2_events_content_hash == (
+                reference["results"][month][theta].l2_events_content_hash
+            )
+            assert result.l2_carry_over_content_hash == (
+                reference["results"][month][theta].l2_carry_over_content_hash
+            )
+            assert result.reconciliation is None  # F no concilia: ya lo hizo S
+            assert result.content_hash == per_theta[theta].content_hash
+
+
+def test_the_spectrum_pass_without_summaries_fails_without_publishing(
+    lake, spectrum_reference
+):
+    theta = lake.theta_texts[0]
+    target = lake.l3 / (
+        "provider=binance/market=spot/asset=BTCUSDT/"
+        f"theta={theta}/year={M1[0]}/month={M1[1]:02d}"
+    )
+    hidden = target / "summaries.hidden"
+    (target / "summaries.parquet").rename(hidden)
+    before = (target / "spectrum.parquet").read_bytes()
+    try:
+        with pytest.raises(FramesInputError, match="summaries"):
+            summarize_month(
+                lake.l1,
+                lake.l2,
+                lake.l3,
+                M1,
+                lake.theta_texts,
+                series_start=M1,
+                family="spectrum",
+            )
+    finally:
+        hidden.rename(target / "summaries.parquet")
+    assert (target / "spectrum.parquet").read_bytes() == before
+    assert l3_threads() == []
+
+
+def test_the_byte_cap_of_spectrum_charges_the_returns_the_engine_holds(monkeypatch):
+    """ITSC-413: con el motor simulado, F cobra 217 B por evento abierto más 4 B por retorno que
+    el motor guarda (`buffered_ticks`), y con un tope bajo entran menos row groups a la vez,
+    como en S. `inflight_ticks_max` es el máximo de retornos que vio el orquestador.
+    """
+    fixed = summarize.EVENT_BYTES["spectrum"]
+    assert fixed == 120 + boundaries.BOUNDARY_ROW_BYTES
+    each = 1000 * fixed + 500 * summarize.SPECTRUM_RETURN_BYTES
+    kw = {"family": "spectrum", "returns": 500}
+    # Sin tope de bytes, K = 4 deja entrar cuatro row groups a la vez.
+    engine, phases = push_fake_row_groups(monkeypatch, 10**12, **kw)
+    assert engine.most == 4
+    assert phases.inflight_ticks_max == 4 * 500
+    # Con 1,5 row groups el segundo entra y el tercero espera: como en S, pero el tope cuenta los
+    # retornos (2 000 B por row group, que sin ellos serían 217 000 B y no 219 000 B).
+    engine, phases = push_fake_row_groups(monkeypatch, 3 * each // 2, **kw)
+    assert engine.most == 2
+    assert phases.inflight_ticks_max == 2 * 500
+    assert phases.inflight_bytes_max == 2 * each
+    assert phases.inflight_alone_bytes_max == each
+    # Los retornos son lo que decide: con tope de 435 000 B, dos row groups cuestan 434 000 B de
+    # costo fijo (cabrían tres si no se contaran los retornos) y 438 000 B con ellos.
+    cap = 2 * 1000 * fixed + 1000
+    engine, _ = push_fake_row_groups(monkeypatch, cap, **kw)
+    assert engine.most == 2
+    # Los demás topes valen igual: con medio row group, cada uno avanza solo.
+    engine, phases = push_fake_row_groups(monkeypatch, each // 2, **kw)
+    assert engine.most == 1
+    assert phases.inflight_alone_bytes_max == each > phases.inflight_bytes
+    # Fuera de F no se pregunta por los retornos: S no tiene `buffered_ticks` que contar.
+    _, phases = push_fake_row_groups(monkeypatch, 10**12)
+    assert phases.inflight_ticks_max is None

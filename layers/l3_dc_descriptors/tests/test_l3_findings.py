@@ -128,3 +128,37 @@ def test_every_check_type_of_the_catalog_has_a_builder():
         "theta_config_drift",
         "summaries_summary",
     }
+
+
+def test_summaries_summary_of_spectrum_carries_the_over_budget_count():
+    base = {
+        "theta": THETA,
+        "rows": 3,
+        "content_hash": "a",
+        "l2_events_content_hash": "b",
+        "l2_carry_over_content_hash": "c",
+    }
+    spectrum = RunContext(
+        mode="backfill",
+        run_id="run",
+        image_version="0.4.0+test",
+        series_start=(2017, 8),
+        landing_root="l1",
+        events_root="l2",
+        summaries_root="l3",
+        dq_root="dq",
+        family="spectrum",
+    )
+    found = findings.summaries_summary(spectrum, UNIT, **base, over_budget_events=2)
+    assert found.details == {"family": "spectrum", **base, "over_budget_events": 2}
+    # Sin ninguno el conteo es 0 y se publica; las demás familias no lo llevan.
+    assert (
+        findings.summaries_summary(
+            spectrum, UNIT, **base, over_budget_events=0
+        ).details["over_budget_events"]
+        == 0
+    )
+    assert (
+        "over_budget_events"
+        not in findings.summaries_summary(CTX, UNIT, **base, unassigned_ticks=0).details
+    )

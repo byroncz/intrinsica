@@ -468,3 +468,170 @@ def test_monthly_fit_names_summaries_as_the_reason_when_the_month_has_none(
     }
     assert file_of(lake.l3, SMALL, M2, "fit.parquet").exists()
     assert not file_of(lake.l3, BIG, M2, "fit.parquet").exists()
+
+
+# La familia F (`spectrum.parquet`): su frontera sale de su propio archivo y nunca supera la de S.
+
+
+@pytest.fixture
+def spectrum_lake(lake):
+    for month in lake.months:
+        summarize_month(
+            lake.l1,
+            lake.l2,
+            lake.l3,
+            month,
+            lake.theta_texts,
+            series_start=M1,
+            family="spectrum",
+        )
+    return lake
+
+
+def spectrum_frontier_of(lake, theta: int = SMALL) -> int | None:
+    summaries = list_summaries(str(lake.l3), KEY)
+    listed = list_summaries(str(lake.l3), KEY, "spectrum")
+    result = frontiers(
+        [theta], listed, START, str(lake.l3), str(lake.l2), KEY, "spectrum", summaries
+    )
+    return result[theta]
+
+
+def test_a_complete_spectrum_series_reaches_its_last_month(spectrum_lake):
+    assert spectrum_frontier_of(spectrum_lake, BIG) == ordinal(M3)
+
+
+def test_the_spectrum_frontier_does_not_depend_on_having_the_file_for_s(lake):
+    assert frontier_of(lake) == ordinal(M3)
+    assert spectrum_frontier_of(lake) is None
+
+
+def test_a_hole_in_the_spectrum_series_ends_it_before_the_hole(spectrum_lake):
+    file_of(spectrum_lake.l3, SMALL, M2, "spectrum.parquet").unlink()
+    assert spectrum_frontier_of(spectrum_lake) == ordinal(M1)
+    assert frontier_of(spectrum_lake) == ordinal(M3)
+
+
+def test_the_spectrum_frontier_never_passes_the_one_of_summaries(spectrum_lake):
+    file_of(spectrum_lake.l3, SMALL, M3, "summaries.parquet").unlink()
+    assert spectrum_frontier_of(spectrum_lake) == ordinal(M2)
+    assert spectrum_frontier_of(spectrum_lake, BIG) == ordinal(M3)
+
+
+@pytest.mark.parametrize(
+    ("damage", "reason"),
+    [
+        (lambda t: with_state_version(t, "0.9.0"), "state_version"),
+        (lambda t: t.drop_columns(["os_haar_level_7"]), "esquema"),
+        (lambda t: t.drop_columns(["c_fourier_band_1"]), "esquema"),
+    ],
+    ids=["state_version", "schema", "schema_other_column"],
+)
+def test_an_invalid_spectrum_file_moves_the_spectrum_frontier_back(
+    spectrum_lake, damage, reason
+):
+    rewrite(file_of(spectrum_lake.l3, SMALL, M3, "spectrum.parquet"), damage)
+    problem = invalid_reason(
+        str(spectrum_lake.l3), str(spectrum_lake.l2), KEY, SMALL, M3, "spectrum"
+    )
+    assert problem is not None and reason in problem
+    assert spectrum_frontier_of(spectrum_lake) == ordinal(M2)
+    # Las fronteras de S no se enteran.
+    assert frontier_of(spectrum_lake) == ordinal(M3)
+
+
+def test_the_spectrum_frontier_does_not_look_at_the_parameters_in_the_footer(
+    spectrum_lake,
+):
+    # Cambiar n_min, bands, window o budget_ticks es una state_version nueva (decisión 7): el
+    # pie con otros parámetros y la misma versión sigue siendo una frontera válida.
+    version = pq.ParquetFile(
+        file_of(spectrum_lake.l3, SMALL, M3, "spectrum.parquet")
+    ).schema_arrow.metadata[b"state_version"]
+
+    def other_budget(table):
+        return table.replace_schema_metadata(
+            {"state_version": version.decode(), "budget_ticks": "1"}
+        )
+
+    rewrite(file_of(spectrum_lake.l3, SMALL, M3, "spectrum.parquet"), other_budget)
+    assert spectrum_frontier_of(spectrum_lake) == ordinal(M3)
+
+
+def test_a_summaries_copy_is_not_a_valid_spectrum_file(spectrum_lake):
+    summaries = file_of(spectrum_lake.l3, SMALL, M3, "summaries.parquet")
+    spectrum = file_of(spectrum_lake.l3, SMALL, M3, "spectrum.parquet")
+    spectrum.write_bytes(summaries.read_bytes())
+    problem = invalid_reason(
+        str(spectrum_lake.l3), str(spectrum_lake.l2), KEY, SMALL, M3, "spectrum"
+    )
+    assert problem is not None and "esquema" in problem
+
+
+def test_other_row_groups_than_l2_are_invalid_for_spectrum_too(spectrum_lake):
+    spectrum = file_of(spectrum_lake.l3, SMALL, M3, "spectrum.parquet")
+    table = pq.read_table(spectrum)
+    pq.write_table(table, spectrum, row_group_size=table.num_rows)
+    problem = invalid_reason(
+        str(spectrum_lake.l3), str(spectrum_lake.l2), KEY, SMALL, M3, "spectrum"
+    )
+    assert problem is not None and "row group" in problem
+    assert spectrum_frontier_of(spectrum_lake) == ordinal(M2)
+
+
+def monthly_spectrum(lake, tmp_path, *extra) -> int:
+    catalog = write_catalog(tmp_path / "thetas.yaml", lake.thetas)
+    argv = ["--mode", "monthly", "--series-start", "2017-08", "--family", "spectrum"]
+    return main([*argv, *extra], env_for(lake, tmp_path, catalog))
+
+
+def test_monthly_spectrum_names_the_spectrum_frontier_as_the_reason(lake, tmp_path):
+    # S llegó a 2017-10, F solo hizo 2017-08: F está en 2017-08 y el mes 2017-10 no es el siguiente.
+    summarize_month(
+        lake.l1,
+        lake.l2,
+        lake.l3,
+        M1,
+        lake.theta_texts,
+        series_start=M1,
+        family="spectrum",
+    )
+    others = ("summaries.parquet", "path.parquet", "fit.parquet")
+    before = {p: p.read_bytes() for n in others for p in lake.l3.rglob(n)}
+
+    assert monthly_spectrum(lake, tmp_path, "--from", "2017-10") == 1
+
+    rows = emitted(tmp_path, "theta_behind_frontier")
+    assert len(rows) == len(lake.thetas)
+    assert {r["details"]["reason"] for r in rows} == {"l3_frontier"}
+    assert {r["details"]["frontier"] for r in rows} == {"2017-08"}
+    assert {r["details"]["family"] for r in rows} == {"spectrum"}
+    assert not file_of(lake.l3, SMALL, M3, "spectrum.parquet").exists()
+    assert before == {p: p.read_bytes() for n in others for p in lake.l3.rglob(n)}
+
+
+def test_monthly_spectrum_names_summaries_as_the_reason_when_the_month_has_none(
+    lake, tmp_path
+):
+    summarize_month(
+        lake.l1,
+        lake.l2,
+        lake.l3,
+        M1,
+        lake.theta_texts,
+        series_start=M1,
+        family="spectrum",
+    )
+    file_of(lake.l3, BIG, M2, "summaries.parquet").unlink()
+
+    assert monthly_spectrum(lake, tmp_path, "--from", "2017-09") == 0
+
+    (row,) = emitted(tmp_path, "theta_behind_frontier")
+    assert row["details"] == {
+        "theta": theta_text(BIG),
+        "frontier": "2017-08",
+        "reason": "summaries_missing",
+        "family": "spectrum",
+    }
+    assert file_of(lake.l3, SMALL, M2, "spectrum.parquet").exists()
+    assert not file_of(lake.l3, BIG, M2, "spectrum.parquet").exists()

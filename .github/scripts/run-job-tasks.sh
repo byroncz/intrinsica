@@ -18,6 +18,7 @@
 #   l3-backfill:                   igual que l2-backfill: una sola unidad ("1") para todo
 #                                  el rango y from puede ir vacío (L3 no tiene carry-over,
 #                                  pero la frontera de cada θ decide desde dónde avanza)
+#   l3-backfill-spectrum:          igual que l3-backfill (ITSC-413: el job de 8 GiB de la familia F)
 #   l3-monthly:                    una sola unidad ("1"); from vacío = el mes anterior (lo
 #                                  decide la CLI); to vacío o igual a from, y sin from no
 #                                  admite to
@@ -90,7 +91,7 @@ case "$job" in
     check_month_range
     echo 1
     ;;
-  l2-backfill | l3-backfill)
+  l2-backfill | l3-backfill | l3-backfill-spectrum)
     if [[ -z "$from" ]]; then
       # Sin from no hay rango que comparar: solo se valida to, si vino.
       [[ -z "${3:-}" ]] || valid_month "$to" || fail "to inválido '$to': se espera YYYY-MM"
@@ -135,6 +136,6 @@ case "$job" in
     echo 1
     ;;
   *)
-    fail "job inválido '$job': l1-backfill, l1-daily, l1-monthly-close, l1-seam-check, l2-backfill, l2-monthly, l3-backfill, l3-monthly, ops-script, viz-tiles o viz-render"
+    fail "job inválido '$job': l1-backfill, l1-daily, l1-monthly-close, l1-seam-check, l2-backfill, l2-monthly, l3-backfill, l3-monthly, l3-backfill-spectrum, ops-script, viz-tiles o viz-render"
     ;;
 esac

@@ -101,6 +101,26 @@ module "layer" {
     backfill = { timeout = 43200, access = local.access }
     monthly  = { access = local.access }
 
+    # El backfill de la familia F (ITSC-413): el modo backfill de la CLI con
+    # --family spectrum, en un job de 8 GiB. F guarda en RAM los retornos de cada
+    # evento abierto (4 B cada uno) y calcula una FFT exacta al cerrarlo, cuyo
+    # transitorio pasa de lo que cabe en los 4 GiB de backfill (TRD-L3 ADR-L3-19).
+    # El veredicto de la Épica ITSC-410 (arquitecto, 2026-11-10) fija 8 GiB para F;
+    # la cota de pico es 6 144 MiB, el 75 % de la memoria. Cloud Run exige al menos
+    # 2 vCPU para pasar de 4 GiB: los 2 de la capa cumplen, y se declaran aquí para
+    # que bajar el cpu de la capa no deje este modo inválido sin que el apply lo
+    # diga. Mismo timeout que backfill (43 200 s); la pared de F se mide en el mes
+    # previo y en el backfill completo (runbook de L3). El nombre del modo no es el
+    # de la CLI, de ahí los args propios; run-job-args.sh arma los mismos para
+    # l3-backfill-spectrum.
+    backfill-spectrum = {
+      args    = ["--mode", "backfill", "--family", "spectrum"]
+      cpu     = "2"
+      memory  = "8Gi"
+      timeout = 43200
+      access  = local.access
+    }
+
     # La pasada de la familia T (ITSC-396): el mismo modo monthly de la CLI con
     # --family path, en su propio job para que el workflow la corra después de la
     # de S y un fallo de T no toque lo que S ya publicó. Mismos recursos que
