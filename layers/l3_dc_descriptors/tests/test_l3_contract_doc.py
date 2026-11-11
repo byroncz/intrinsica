@@ -122,8 +122,16 @@ def test_spectrum_doc_metadata_matches_the_code():
     assert f'`bands = "{SPECTRUM_BANDS}"`' in metadata
     assert f'`window = "{SPECTRUM_WINDOW}"`' in metadata
     assert f'`budget_ticks = "{SPECTRUM_BUDGET_TICKS}"`' in metadata
-    assert (SPECTRUM_STATE_VERSION, SPECTRUM_N_MIN, SPECTRUM_BANDS) == ("1.0.0", 16, 7)
+    assert (SPECTRUM_STATE_VERSION, SPECTRUM_N_MIN, SPECTRUM_BANDS) == ("1.1.0", 16, 7)
     assert (SPECTRUM_WINDOW, SPECTRUM_BUDGET_TICKS) == ("hann", 20_000_000)
+
+
+def test_spectrum_doc_ends_with_the_two_energy_locations():
+    table = _table("Esquema de `spectrum.parquet`")
+    names = re.findall(r"^\| `(\w+)` \|", table, re.MULTILINE)
+    assert names[-3:] == ["os_haar_level_7", "c_energy_loc", "os_energy_loc"]
+    assert len(names) == 32  # 2 claves y 30 columnas de datos
+    assert "30 columnas de datos" in DOC.read_text()
 
 
 def test_spectrum_doc_cites_the_bytes_of_the_code():

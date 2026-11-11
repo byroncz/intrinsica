@@ -43,7 +43,7 @@ from l3_dc_descriptors.schema import (
 from l3_dc_descriptors.timing import Retained
 
 # Las columnas de datos de cada familia como las comprueba el motor: (nombre, bytes por valor,
-# nulable). Las 18 de `summaries`, las 14 de `path`, las 10 de `fit` y las 29 de `spectrum`.
+# nulable). Las 18 de `summaries`, las 14 de `path`, las 10 de `fit` y las 31 de `spectrum`.
 FAMILY_SCHEMAS = MappingProxyType(
     {
         FAMILY: SUMMARIES_SCHEMA,

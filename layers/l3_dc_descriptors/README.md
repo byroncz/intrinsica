@@ -81,7 +81,11 @@ trabajo transitorio de la FFT al cerrar (16 B × (2n + 4m), ver ADR-L3-19). `--f
 corre la unidad con esta cifra: `unit_timing` lleva `inflight_ticks_max` (el máximo de retornos que el motor
 guardó a la vez), `budget_ticks` y `cpu_s`, y cada evento sobre el presupuesto de 20 M de ticks deja su fila
 nula y un `event_over_budget`. F corre en un job de 8 GiB (`l3-backfill-spectrum`); la cadena mensual es de la
-hija siguiente de ITSC-410.
+hija siguiente de ITSC-410. Desde ITSC-417 `spectrum.parquet` tiene 30 columnas de datos (`state_version`
+`1.1.0`): a las 28 de energía por banda y nivel se suman `c_energy_loc` y `os_energy_loc`, la ubicación en el
+tiempo de la energía total de cada fase (`Σ t_k·r_k² / Σ r_k²`, en (0, 1); [TRD-L3
+§7.2.3](../../docs/TRD/l3.md#723-salida--spectrumparquet-familia-f)). Un `spectrum.parquet` `1.0.0` queda detrás de
+la frontera y el backfill lo reescribe.
 
 T guarda una `Run` por cada tramo suelto de un evento que cruza row groups (fusión ordenada,
 ADR-L3-17), así que su estado crece con los row groups que el evento cruza: el estimador toma una
