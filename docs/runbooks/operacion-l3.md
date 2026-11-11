@@ -16,6 +16,11 @@ rango con la sección siguiente.
 **ITSC-413 (imagen de L3 ≥ 0.23.0): el job `l3-backfill-spectrum` va primero, el backfill de la familia F después.**
 El apply del stack `l3` crea el job `l3-backfill-spectrum` (8 GiB, 2 vCPU, `timeoutSeconds: 43200`, `args` `--mode backfill --family spectrum`) y el workflow `run-job.yml` lo ofrece en la lista de jobs. No cambia `l3-backfill` ni `summaries`, `path` o `fit`. Tras el merge y el apply (los lanza el humano), corre el mes previo y después el backfill de los 110 meses (ver «Backfill de la familia F»).
 
+**ITSC-416 (solo `ops_tools` 0.6.16; la imagen de L3 no cambia): la corrida de la sonda va después del apply de `ops`.**
+El apply del stack `ops` (lo lanza el humano) publica la sonda nueva en `gs://<proyecto>-ops/scripts/`; sin él,
+`ops-script` corre la versión de ITSC-411 y la última línea no trae los campos de la ubicación. Corre
+`l3_spectrum_probe.py` sobre 2023-03 con θ `0.00098052` (ver «`l3_spectrum_probe.py`»).
+
 **ITSC-402 (solo infraestructura; la imagen de L3 no cambia): dos applies, en este orden.**
 Primero `l3` (crea el job `l3-monthly-fit` con `timeoutSeconds: 7500` y sube `l3-backfill` a
 `timeoutSeconds: 43200`) y después `l1` (el workflow encadena `l3-monthly-fit` y recibe
@@ -1089,7 +1094,7 @@ locales (`uv run`).
 | `l3_path_check.py` | Prueba `path.parquet` (familia T) contra `summaries.parquet` sobre un θ y un mes: resumen por columna, esqueleto, invariantes y regla de nulos en un CSV | `--theta 0.00098052 --month 2023-03` |
 | `l3_fit_bridge_probe.py` | Sonda de la familia A (ITSC-397): compara `c_accel` y `c_jump_share` observados con 20 puentes brownianos por evento sobre un θ y un mes; da D de Kolmogorov-Smirnov y el veredicto `sigue\|retirada` | `--theta 0.00098052 --month 2023-03` |
 | `l3_fit_check.py` | Prueba `fit.parquet` (familia A) contra `summaries.parquet` y `events.parquet` sobre un θ y un mes: resumen por columna, esqueleto, invariantes, regla de nulos y cifras informativas en un CSV | `--theta 0.00098052 --month 2023-03` |
-| `l3_spectrum_probe.py` | Sonda doble de la familia F (ITSC-410): energía por banda de retornos y de precios por fase contra sus nulos, Haar contra Fourier, redundancia con A y T, fases bajo 16 ticks por θ y pico de ticks en vuelo desde L2; da D y ρ y el veredicto `sigue\|retirada` | `--theta 0.00098052 --month 2023-03` |
+| `l3_spectrum_probe.py` | Sonda doble de la familia F (ITSC-410, ITSC-416): energía por banda de retornos y de precios por fase contra sus nulos, Haar contra Fourier, ubicación en el tiempo de la energía por nivel de Haar y total, redundancia con A y T, fases bajo 16 ticks por θ y pico de ticks en vuelo desde L2; da D y ρ, la regla de la ubicación y el veredicto `sigue\|retirada` | `--theta 0.00098052 --month 2023-03` |
 
 El apply del stack `ops` publica todos estos scripts en `scripts/`; verifica con
 `gcloud storage ls gs://<proyecto>-ops/scripts/`.
@@ -1703,20 +1708,71 @@ fijaron **antes de medir** (decisión 1): **`veredicto=sigue`** si y solo si alg
 («Veredicto de la sonda»). `f32_err` es el mayor |fracción en f32 − fracción en f64| sobre las fases del mes
 (decisión 5: si cabe en `f32` el búfer de retornos es de 4 B por tick).
 
+**Ubicación de la energía en el tiempo (ITSC-416).** F guarda cuánta energía hay por nivel de Haar y pierde
+*dónde* ocurre. El mapa completo (un coeficiente por tick y nivel) pesa lo mismo que los ticks y no se guarda;
+el candidato es un número por nivel y fase, el centro de masa de la energía. Sobre la misma serie de Haar (los
+últimos `2^m` retornos, `m = ⌊log₂ n⌋`, centrados), el coeficiente de detalle `d_{j,i}` del nivel `j`
+(`i = 0..N_j − 1`) está en el centro de su bloque dentro de la fase:
+
+- `t_{j,i} = (n − 2^m + (i + 0,5)·2^j) / n`, en [0, 1] (0 es el comienzo de la fase y 1 el final);
+- `loc_j = Σ t_{j,i}·d_{j,i}² / Σ d_{j,i}²`. El nivel 7 junta los niveles de escala 128 en adelante, cada
+  coeficiente con su posición. Es nulo (y se cuenta en `nulos`) si el nivel tiene menos de 2 coeficientes o
+  energía cero: con `n` entre 16 y 31 solo existen los niveles 1 a 3 con ubicación.
+- `loc_total = Σ t_k·r_k² / Σ r_k²` con `t_k = (k − 0,5)/n` sobre los `n` retornos de la fase: dónde ocurrió la
+  agitación sin separar por nivel. Es la línea base: si todos los niveles se mueven con ella, la ubicación por
+  nivel no agrega nada.
+
+Ejemplo para entender la posición: con `n = 10`, Haar mira los últimos 8 retornos y el nivel 1 tiene 4
+coeficientes en `t = 0,3 / 0,5 / 0,7 / 0,9`: los dos primeros retornos no cuentan, y por eso la ubicación de
+ruido iid sale cerca de `0,5 + (n − 2^m)/(2n)` y no de 0,5.
+
+El nulo son los mismos retornos barajados de siempre (la sonda no pide números nuevos al generador: las cifras
+del CSV de ITSC-411 no cambian con la misma semilla). `D` es la de Kolmogorov-Smirnov exacta entre observado y
+simulado, sin los nulos, por nivel y fase y para `loc_total`; además la corrida calcula la `D` de las
+**fracciones** de Haar por nivel, que la primera corrida no calculó.
+
+**Redundancia nueva** (Spearman, fase c; `nan` no cuenta; el máximo de una matriz no cuenta la diagonal):
+`loc_j` contra `loc_total`, contra `c_jump_share` y `c_accel` (`fit.parquet`) y contra `c_t50`; `loc_total`
+contra esos tres; `loc_j` entre niveles (7 × 7). Y las que la primera corrida no midió (consecuencia 6 del
+veredicto de ITSC-410): cada banda de Fourier de retornos y cada nivel de Haar contra `c_sign_autocorr` y
+`c_realized_var` (`path.parquet`) y `c_ticks` (`summaries.parquet`), y las bandas de Fourier entre sí (7 × 7).
+
+**Regla de la ubicación** (fijada antes de medir; no cambia el `veredicto`):
+
+- la ubicación de un nivel **pasa** si su `D ≥ 0,10` en c y su |ρ| máximo contra `loc_total`, `c_jump_share`,
+  `c_accel` y `c_t50` no pasa de 0,9;
+- `loc_total` **pasa** si su `D ≥ 0,10` y su |ρ| máximo contra `c_jump_share`, `c_accel` y `c_t50` no pasa de
+  0,9;
+- un `nan` no pasa en `D` y no cuenta en ρ. `locs_pasan` es cuántos de los 7 niveles pasan.
+
+Qué entra lo decide el arquitecto con las cifras, en la Épica ITSC-410 bajo el veredicto. Si la ubicación pasa,
+entra al motor como columnas nuevas de `spectrum.parquet` en una card aparte, antes del backfill de F; si no,
+queda documentado y F sigue con sus 28 columnas.
+
 **El CSV** (`l3_spectrum_probe_<mes>_<θ>.csv`, en `results/<ejecución>/`) tiene el encabezado
 `seccion,candidato,fase,banda,fuente,medida,valor`:
 
 - `cuantiles`: por `candidato` (`retornos`, `precios`, `haar`), `fase` (`c`, `os`), `banda` (1 a 7) y `fuente`
   (`observado`, `simulado`): `p1`, `p5`, `p10`, `p25`, `p50`, `p75`, `p90`, `p95`, `p99` (rango más cercano:
   con N valores, el que ocupa el lugar ⌈N·q⌉) y `N` (simulado: nulos·N). Los simulados se guardan en `float32`.
-- `D`: por `candidato` (`retornos`, `precios`) y `fase`, `D_fast` y `D_slow`.
+- `ubicacion`: por `candidato` (`ubicacion` con `banda` 1 a 7, y `ubicacion_total` con `banda` vacía), `fase` y
+  `fuente` (`observado`, `simulado`): `p1` … `p99` de los valores no nulos, `N` (no nulos) y `nulos`.
+- `D`: por `candidato` (`retornos`, `precios`) y `fase`, `D_fast` y `D_slow`; y, por `banda` (nivel 1 a 7) y
+  `fase`, `D` de `haar` (fracciones por nivel) y de `ubicacion`, más `D` de `ubicacion_total`. Sin muestras
+  no nulas, `D` es `nan`.
 - `rho`: por par (`precios_retornos`, `haar_fourier`, `retornos_accel`, `retornos_t50`, `precios_accel`,
-  `precios_t50`), `fase` y `banda`, más `max_abs_rho` por par. Los pares con A y T son solo de `c`.
+  `precios_t50`), `fase` y `banda`, más `max_abs_rho` por par. Los pares con A y T son solo de `c`. Pares de
+  ITSC-416, solo de `c`: por nivel o banda, `loc_loctotal`, `loc_jump`, `loc_accel`, `loc_t50`,
+  `retornos_sign`, `retornos_rvar`, `retornos_ticks`, `haar_sign`, `haar_rvar` y `haar_ticks`; de una sola
+  cifra (`banda` vacía), `loctotal_jump`, `loctotal_accel` y `loctotal_t50`; y las matrices `loc_loc` y
+  `retornos_retornos` (49 filas, `banda` = fila y `fuente` = `con=<columna>`).
+- `regla`: `pasa` (0 o 1) por nivel de `ubicacion` y para `ubicacion_total`, y `locs_pasan`.
 - `f32`: `f32_err`.
 - `fases_lt16`: por θ del mes (en `fuente`, `theta=<θ>`), `eventos` y, por fase, `lt16` y `fraccion_lt16`; en
   `os` además `vacias`. Una fase `os` vacía cuenta como bajo 16 (decisión 4: sus columnas serían nulas igual).
-- `ticks_en_vuelo`: por mes de `--inflight-months` (en `fuente`, `mes=<mes>`), `inflight_peak_ticks` y su
-  equivalente en bytes a 8 B y a 4 B por tick (`bytes_8B`, `bytes_4B`).
+- `ticks_en_vuelo`: por mes de `--inflight-months` (en `fuente`, `mes=<mes>`), `thetas` (cuántos θ entraron
+  al pico ese mes), `inflight_peak_ticks` y su equivalente en bytes a 8 B y a 4 B por tick (`bytes_8B`,
+  `bytes_4B`).
 - `excluidos`: `fases_cortas`, `fases_vacias` y `energia_cero` por fase (y por candidato), más
   `eventos_sobre_presupuesto` y `evento_mes_anterior`. `muestras`: las N por fase. `config`: `nulls` y `semilla`.
 
@@ -1729,17 +1785,25 @@ pico el arquitecto fija el tamaño del job de F (≤ 1 GiB: job de 4 GiB; entre 
 
 **Última línea:** `spectrum probe: mes=… theta=… eventos=… D_ret_fast=… D_ret_slow=… D_price_fast=…
 D_price_slow=… rho_price_ret=… rho_haar_fourier=… rho_ret_accel=… rho_ret_t50=… rho_price_accel=…
-rho_price_t50=… f32_err=… n_lt16=… inflight_peak_ticks=… pared_s=… veredicto=sigue|retirada|fallo`. `eventos`
-son los N de `c`; cada `rho_*` es el máximo de |ρ| de las 7 bandas; `n_lt16` es el número de fases `c` del
-θ bajo 16 ticks; `inflight_peak_ticks` es el mayor de los meses. Con `veredicto=fallo` lo que no se pudo medir
-sale `-`.
+rho_price_t50=… f32_err=… n_lt16=… inflight_peak_ticks=… D_haar_fast=… D_haar_slow=… D_loc_fast=…
+D_loc_slow=… D_loc_total=… rho_loc_total=… rho_loc_jump=… rho_ret_sign=… rho_ret_ticks=… locs_pasan=…
+pared_s=… veredicto=sigue|retirada|fallo`. `eventos` son los N de `c`; cada `rho_*` es el máximo de |ρ| de las
+7 bandas o niveles; `n_lt16` es el número de fases `c` del θ bajo 16 ticks; `inflight_peak_ticks` es el mayor
+de los meses. Los campos de ITSC-416, todos de la fase `c`: `D_haar_*` y `D_loc_*` son `D` de las fracciones de
+Haar y de `loc_j` en el nivel 1 (`fast`) y el 7 (`slow`); `D_loc_total` la de `loc_total`; `rho_loc_total` y
+`rho_loc_jump`, el máximo de |ρ| de los 7 niveles de `loc_j` contra `loc_total` y `c_jump_share`;
+`rho_ret_sign` y `rho_ret_ticks`, el de las 7 bandas de Fourier de retornos contra `c_sign_autocorr` y
+`c_ticks`; `locs_pasan`, cuántos de los 7 niveles pasan la regla. Con `veredicto=fallo` lo que no se pudo
+medir sale `-`.
 
 **Códigos:** **0** si midió (con `sigue` o con `retirada`: ambos son resultados); **1** si falta alguno de los
-archivos, la lectura falla, los archivos no cuadran entre sí (otro número de filas o de ticks, otro
+archivos, un listado de GCS o la lectura falla (la API de GCS devuelve un error: sale como `veredicto=fallo`,
+sin traceback), los archivos no cuadran entre sí (otro número de filas o de ticks, otro
 `confirm_agg_trade_id`, eventos más allá de los ticks del mes), un mes de `--inflight-months` no tiene L2 o
-no queda ningún evento medible; **2** por uso (`--theta` o `--month` ausentes o inválidos, `--nulls` o
-`--seed` no enteros o `--nulls` menor que 1, `--inflight-months` inválido, sin las tres raíces ni
-`OPS_RESULTS_URI`, `--out` `gs://` fuera de `results/`). Si el CSV no se puede escribir, la sonda sale con
+no queda ningún evento medible. Los listados corren antes de medir, para fallar barato. **2** por uso
+(`--theta` o `--month` ausentes o inválidos, `--nulls` o `--seed` no enteros o `--nulls` menor que 1,
+`--inflight-months` inválido, sin las tres raíces ni `OPS_RESULTS_URI`, `--out` `gs://` fuera de
+`results/`). Si el CSV no se puede escribir, la sonda sale con
 **0** y lo avisa con `no se guardó la tabla en …`. Solo lee; lo único que escribe es el CSV.
 
 **Memoria.** Los ticks se leen un row group a la vez (`agg_trade_id` y `price`) y los cuatro archivos por
@@ -1748,8 +1812,9 @@ presupuesto: 160 MB), que se libera al cerrar la fase; el cálculo suma varias c
 serie centrada, espectro) y los nulos se generan en grupos de a lo sumo 2²⁰ valores. Medido en local: ≈ 2 ms
 por fase típica; una fase de 2 M ticks sube el pico unos 130 MiB y una de 20 M ticks (el presupuesto) llega a
 1,7 GiB (≈ 9 veces la serie), dentro de los 8 GiB del job `ops-script`. Lo único que crece con el mes son los resultados por
-evento, necesarios para que D y los cuantiles sean exactos: ≈ 3,7 KB por evento con 20 nulos (≈ 134 MB para
-los 36 239 eventos de 2023-03). El pase del pico en vuelo usa 8 192 filas por θ.
+evento, necesarios para que D y los cuantiles sean exactos: ≈ 3,7 KB por evento con 20 nulos, más 8 números
+`float32` por fase y por nulo de la ubicación (≈ 1,3 KB), bajo 10 KB por evento (≈ 180 MB para los 36 239
+eventos de 2023-03). El estado sigue siendo la fase abierta. El pase del pico en vuelo usa 8 192 filas por θ.
 
 **Cómo correrla.** Necesita `events.parquet` de L2, `summaries.parquet`, `path.parquet` y `fit.parquet` de L3
 del θ y el mes, el `consolidated.parquet` del mes de L1, y L2 de los meses de `--inflight-months` (los θ que
@@ -1758,6 +1823,10 @@ tengan L2 en cada mes). *Actions → Run job*: `job` = `ops-script`, `script` =
 `--theta 0.00098052 --month 2023-03`. Las corridas las lanza y aprueba el humano; pega la última línea y los
 cuantiles en ITSC-411. El veredicto lo escribe el arquitecto en la Épica ITSC-410, sección «Veredicto de la
 sonda».
+
+**Corrida real (ITSC-416):** la lanza el humano con `ops-script` sobre 2023-03, θ `0.00098052`, con los
+mismos `args` (el apply de `ops` publica el script). Pega la última línea en ITSC-416; la decisión sobre la
+ubicación la escribe el arquitecto en la Épica ITSC-410, bajo el veredicto.
 
 **Corrida real (ITSC-411):** pendiente. La tabla se llena con la última línea cuando el humano la corra.
 
