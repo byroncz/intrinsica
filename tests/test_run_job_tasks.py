@@ -213,7 +213,7 @@ def test_job_invalido_nombra_los_jobs_l3():
     [("", ""), ("2023-03", ""), ("2023-03", "2023-03"), ("2023-03", "2024-01")],
 )
 def test_l3_backfill_spectrum_es_una_sola_unidad_como_l3_backfill(desde, hasta):
-    # ITSC-413: el job de 8 GiB de la familia F recorre el rango en una tarea.
+    # ITSC-413: el job de 32 GiB de la familia F recorre el rango en una tarea.
     assert units("l3-backfill-spectrum", desde, hasta) == ["1"]
 
 

@@ -95,7 +95,7 @@ push(row group k) ──► cola de ítems (θ₀,k) (θ₁,k) … (θ₄₉,k) 
   que une dos tramos se calcula al unir: el búfer final es el mismo con cualquier corte y orden de
   `push`. El primer retorno (del ancla al primer tick) se calcula al cerrar. Es la excepción
   declarada a «estado de cientos de bytes por evento»: acotada por `Config.budget_ticks`
-  (20 000 000: un evento con `extreme − reference` mayor **no lee ningún tick**, no guarda retornos,
+  (130 000 000, `DEFAULT_BUDGET_TICKS`: un evento con `extreme − reference` mayor **no lee ningún tick**, no guarda retornos,
   su fila sale nula y `SealedRowGroup.over_budget` lo avisa) y por el tope del orquestador.
   `Engine::buffered_ticks()` dice cuántos retornos hay en vuelo (cuesta 4 B cada uno); el costo fijo
   por evento abierto es `size_of::<SpectrumRun>()` = 120 B, fijado por una prueba de `engine.rs`.
@@ -116,14 +116,14 @@ push(row group k) ──► cola de ítems (θ₀,k) (θ₁,k) … (θ₄₉,k) 
   compilación en `layout.rs` lo fija. El trabajo transitorio de la FFT (el búfer de `n` complejos de 16 B más el plan y el scratch de
   `rustfft`) no está en `buffered_ticks`. Peor caso, con `n` primo (Bluestein): `16 B × (2n + 4m)`,
   con `m` la longitud de la FFT interna (`3·2^(k−2)` si alcanza `2n − 1`, si no `2^k`, con
-  `k = ⌈log₂(2n−1)⌉`): ≈ 3,6 GiB con `n` = 20 M (`m` = 3·2^24). Es una medida, no una estimación:
+  `k = ⌈log₂(2n−1)⌉`): ≈ 3,6 GiB con `n` = 20 M (`m` = 3·2^24). Con el presupuesto de 130 M (ITSC-418), `3·2^26` no alcanza `2n − 1`, `m` = 2^28 y la cota da 21 339 869 184 B (20 351 MiB), bajo los 24 576 MiB del job de 32 GiB; es la fórmula, no una medición, y `the_closing_bound_at_the_budget_fits_the_job` la fija. Los 20 M son una medida, no una estimación:
   `tests/spectrum_memory.rs` cuenta los bytes con un asignador global y la cota queda dentro de
   32 B del pico en los dos casos de Bluestein que prueba. Los otros planes pesan menos (48 a 64 B
   por retorno). Se acota serializando los cierres de fases con `n ≥ 2^20` retornos
   (`SERIAL_CLOSE_MIN`), uno a la vez por proceso; por debajo, el peor cierre es de 160 MiB por hilo
   y corren en paralelo. **Con 20 M de retornos y `n` primo el cierre no cabe en el job de 4 GiB
   junto con la base del proceso:** bajar el umbral no lo arregla (el pico es el de una sola fase).
-  Lo resuelve la hija 3 (job mayor, presupuesto de F menor o un plan sin Bluestein), no este crate.
+  Lo resuelve el job de F (32 GiB desde ITSC-418), no este crate.
 - **Momentos de A.** La familia A (`src/fit.rs`) lleva, por evento, tres acumuladores
   (`FitAcc`): la confirmación `c`, el overshoot `os` y el evento entero `ev`, cada uno en sus
   coordenadas `τ = (t − t₀)/(t_fin − t₀)`, `y = (p − p₀)/(p_fin − p₀)` con el ancla y el
@@ -188,7 +188,7 @@ let engine = Engine::<B>::new(Config {
     row_groups,  // por θ, las filas de cada row group de salida
     family,      // Family::Summaries (por defecto), Family::Path, Family::Fit o Family::Spectrum
     silence_us,  // umbral de silencio de la familia T, en µs (S, A y F no lo usan)
-    budget_ticks, // presupuesto de la familia F: ticks por evento (20_000_000; S, T y A no lo usan)
+    budget_ticks, // presupuesto de la familia F: ticks por evento (130_000_000; S, T y A no lo usan)
 })?;
 // Por lotes, en orden y sin copiar: filas consecutivas de events.parquet de L2 del θ, por
 // delante del row group que las toca (antes o después de empezar los push).

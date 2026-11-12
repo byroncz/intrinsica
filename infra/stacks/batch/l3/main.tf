@@ -25,6 +25,21 @@ locals {
     (local.buckets["dc-descriptors"]) = { role = "roles/storage.objectUser", prefixes = ["l3/"] }
     (local.buckets["dq-findings"])    = { role = "roles/storage.objectUser", prefixes = ["l3/"] }
   }
+
+  # El env común de los modos. En el módulo layer el env de un modo reemplaza a var.env, no
+  # se mezcla: un modo que agrega una variable pasa merge(local.env, {...}).
+  env = {
+    L3_LANDING_ROOT   = "gs://${local.buckets["landing"]}/l1"
+    L3_EVENTS_ROOT    = "gs://${local.buckets["dc-events"]}/l2"
+    L3_SUMMARIES_ROOT = "gs://${local.buckets["dc-descriptors"]}/l3"
+    L3_DQ_ROOT        = "gs://${local.buckets["dq-findings"]}/l3"
+    # Primer mes de la serie de L2: el único sin mes anterior. Se declara, no se
+    # infiere.
+    L3_SERIES_START = "2017-08"
+    # El mismo objeto que usa L2. L3 no siembra ni copia el catálogo: agregar un
+    # θ es editarlo en GCS (TRD-L2 §7.3) y lanzar l3-backfill sin from.
+    L3_THETAS_URI = "gs://${local.buckets["manifest"]}/l2/thetas.yaml"
+  }
 }
 
 provider "google" {
@@ -68,18 +83,7 @@ module "layer" {
   # salta los meses cuyo summaries.parquet ya es válido.
   max_retries = 1
 
-  env = {
-    L3_LANDING_ROOT   = "gs://${local.buckets["landing"]}/l1"
-    L3_EVENTS_ROOT    = "gs://${local.buckets["dc-events"]}/l2"
-    L3_SUMMARIES_ROOT = "gs://${local.buckets["dc-descriptors"]}/l3"
-    L3_DQ_ROOT        = "gs://${local.buckets["dq-findings"]}/l3"
-    # Primer mes de la serie de L2: el único sin mes anterior. Se declara, no se
-    # infiere.
-    L3_SERIES_START = "2017-08"
-    # El mismo objeto que usa L2. L3 no siembra ni copia el catálogo: agregar un
-    # θ es editarlo en GCS (TRD-L2 §7.3) y lanzar l3-backfill sin from.
-    L3_THETAS_URI = "gs://${local.buckets["manifest"]}/l2/thetas.yaml"
-  }
+  env = local.env
 
   # Una service account por modo. Ambos modos leen y escriben lo mismo; la
   # separación deja revocar o auditar cada uno por su cuenta.
@@ -102,22 +106,28 @@ module "layer" {
     monthly  = { access = local.access }
 
     # El backfill de la familia F (ITSC-413): el modo backfill de la CLI con
-    # --family spectrum, en un job de 8 GiB. F guarda en RAM los retornos de cada
-    # evento abierto (4 B cada uno) y calcula una FFT exacta al cerrarlo, cuyo
+    # --family spectrum, en un job de 32 GiB y 8 vCPU. F guarda en RAM los retornos de
+    # cada evento abierto (4 B cada uno) y calcula una FFT exacta al cerrarlo, cuyo
     # transitorio pasa de lo que cabe en los 4 GiB de backfill (TRD-L3 ADR-L3-19).
-    # El veredicto de la Épica ITSC-410 (arquitecto, 2026-11-10) fija 8 GiB para F;
-    # la cota de pico es 6 144 MiB, el 75 % de la memoria. Cloud Run exige al menos
-    # 2 vCPU para pasar de 4 GiB: los 2 de la capa cumplen, y se declaran aquí para
-    # que bajar el cpu de la capa no deje este modo inválido sin que el apply lo
-    # diga. Mismo timeout que backfill (43 200 s); la pared de F se mide en el mes
-    # previo y en el backfill completo (runbook de L3). El nombre del modo no es el
-    # de la CLI, de ahí los args propios; run-job-args.sh arma los mismos para
-    # l3-backfill-spectrum.
+    # ITSC-418 (decisión del humano con el arquitecto, 2026-11-12, Épica ITSC-410) sube
+    # el presupuesto de F a 130 M de ticks por evento y el job de 8 GiB a 32 GiB, el
+    # máximo de Cloud Run: la cota de pico es 24 576 MiB, el 75 % de la memoria, y el
+    # cierre del peor evento (n = 130 M) pide 20 351 MiB según 16 B × (2n + 4m), con
+    # m = 2^28 (TRD-L3 ADR-L3-19). Cloud Run pide 8 vCPU para 32 GiB (la cifra de la
+    # card; el apply la valida: no se pudo consultar su documentación desde el
+    # contenedor); se declaran aquí para que bajar el cpu de la capa no deje este modo
+    # inválido sin que el apply lo diga. Mismo timeout que backfill (43 200 s); la
+    # pared de F se mide en el mes previo y en el backfill completo (runbook de L3).
+    # L3_INFLIGHT_BYTES sube de 768 MiB a 4 GiB: con el presupuesto nuevo los eventos
+    # gigantes guardan sus retornos y el tope por defecto frenaría la unidad a un
+    # tramo a la vez durante meses enteros. El nombre del modo no es el de la CLI, de
+    # ahí los args propios; run-job-args.sh arma los mismos para l3-backfill-spectrum.
     backfill-spectrum = {
       args    = ["--mode", "backfill", "--family", "spectrum"]
-      cpu     = "2"
-      memory  = "8Gi"
+      cpu     = "8"
+      memory  = "32Gi"
       timeout = 43200
+      env     = merge(local.env, { L3_INFLIGHT_BYTES = "4294967296" })
       access  = local.access
     }
 

@@ -60,7 +60,7 @@ pub const N_MIN: usize = 16;
 pub const BANDS: usize = 7;
 
 /// Ticks por evento a partir de los cuales no se calcula (`extreme − reference` de L2).
-pub const DEFAULT_BUDGET_TICKS: u64 = 20_000_000;
+pub const DEFAULT_BUDGET_TICKS: u64 = 130_000_000;
 
 /// Retornos de una fase a partir de los cuales su cierre se serializa en todo el proceso. El
 /// cierre tiene un transitorio que depende del plan de `rustfft`. El peor es el de `n` primo, que
@@ -68,8 +68,11 @@ pub const DEFAULT_BUDGET_TICKS: u64 = 20_000_000;
 /// `2^k` si no, con `k = ⌈log₂(2n − 1)⌉`): el pico del cierre, con el búfer de `n` complejos de
 /// `f64` incluido, es `16 B × (2n + 4m)`. Lo fija `tests/spectrum_memory.rs` con un asignador
 /// que cuenta, y vale para cualquier plan (Rader y los compuestos pesan 48 a 64 B por retorno,
-/// medidos). Con `n` = 20 M, `m` = 3·2^24 y el pico es ≈ 3,6 GiB (≈ 193 B por retorno). Cada hilo
-/// del motor puede estar cerrando un evento: sin acotarlo, el pico suma un transitorio por hilo.
+/// medidos). Con `n` = 20 M, `m` = 3·2^24 y el pico es ≈ 3,6 GiB (≈ 193 B por retorno). Con el
+/// presupuesto de 130 M (ITSC-418), `3·2^26` no alcanza `2n − 1` y `m` = 2^28: la cota da
+/// 21 339 869 184 B (20 351 MiB, ≈ 164 B por retorno), bajo los 24 576 MiB (75 % de 32 GiB) del
+/// job de F. Cada hilo del motor puede estar cerrando un evento: sin acotarlo, el pico suma un
+/// transitorio por hilo.
 /// Por debajo de este umbral el peor transitorio es de 160 MiB por hilo (`n` = 1 048 573, primo)
 /// y los cierres corren en paralelo.
 pub const SERIAL_CLOSE_MIN: usize = 1 << 20;

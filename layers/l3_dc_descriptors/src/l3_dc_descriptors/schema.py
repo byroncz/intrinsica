@@ -26,11 +26,11 @@ FIT_STATE_VERSION = "1.0.0"
 # metadatos del archivo junto a `state_version` (ADR-L3-19): los retornos mínimos de una fase, las
 # bandas de período, la ventana y el presupuesto de ticks por evento.
 SPECTRUM_FAMILY = "spectrum"
-SPECTRUM_STATE_VERSION = "1.1.0"
+SPECTRUM_STATE_VERSION = "1.2.0"
 SPECTRUM_N_MIN = 16
 SPECTRUM_BANDS = 7
 SPECTRUM_WINDOW = "hann"
-SPECTRUM_BUDGET_TICKS = 20_000_000
+SPECTRUM_BUDGET_TICKS = 130_000_000
 
 DECIMAL = pa.decimal128(18, 8)
 THETA = pa.decimal128(9, 8)

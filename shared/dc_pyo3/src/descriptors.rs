@@ -9,7 +9,7 @@
 use crate::buffers::view;
 use dc_descriptors::{
     BoundaryKind, Config, Engine as CoreEngine, EngineError, EventBatch, EventErrorKind, Family,
-    KeyColumns, Region, RowGroupInput, SealedRowGroup, TickColumns,
+    KeyColumns, Region, RowGroupInput, SealedRowGroup, TickColumns, DEFAULT_BUDGET_TICKS,
 };
 use pyo3::buffer::PyBuffer;
 use pyo3::create_exception;
@@ -188,7 +188,7 @@ pub struct Engine {
 #[pymethods]
 impl Engine {
     #[new]
-    #[pyo3(signature = (thetas, schema, row_groups, threads=None, family="summaries", silence_us=0, budget_ticks=20_000_000))]
+    #[pyo3(signature = (thetas, schema, row_groups, threads=None, family="summaries", silence_us=0, budget_ticks=DEFAULT_BUDGET_TICKS))]
     fn new(
         thetas: Vec<i64>,
         schema: Vec<(String, usize, bool)>,
