@@ -13,7 +13,7 @@ use dc_descriptors::{
 use std::f64::consts::PI;
 use std::time::Duration;
 
-const BUDGET: u64 = 20_000_000;
+const BUDGET: u64 = 130_000_000;
 /// Las bandas de una fase: siete fracciones, nulas donde la banda no tiene bins.
 type Fractions = [Option<f64>; 7];
 
@@ -953,4 +953,10 @@ fn bad_events_and_ticks_are_errors_not_values() {
         run_spectrum(&bad, &[ev], &[], &[0], 1, &[1], &[1], BUDGET),
         Err(EngineError::Ticks(TickError::ZeroPrice))
     ));
+}
+
+#[test]
+fn the_default_budget_is_the_one_the_layer_declares() {
+    // `SPECTRUM_BUDGET_TICKS` de L3 (schema.py) vale lo mismo; lo comprueba test_l3_spectrum.py.
+    assert_eq!(dc_descriptors::DEFAULT_BUDGET_TICKS, BUDGET);
 }

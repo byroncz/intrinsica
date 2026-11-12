@@ -14,7 +14,7 @@
 #   agrega --family=<f> (summaries, path, fit o spectrum). El workflow la pasa siempre, con summaries por defecto, así
 #   que en los demás jobs vacío y summaries son "sin familia" y cualquier otro valor se
 #   rechaza con 2. l3-backfill-spectrum (ITSC-413) es el backfill de la familia F en un job de
-#   8 GiB: su modo en la CLI es backfill y su familia, spectrum; family solo puede ser
+#   32 GiB (ITSC-418, antes 8 GiB): su modo en la CLI es backfill y su familia, spectrum; family solo puede ser
 #   summaries (el valor por defecto), vacío o spectrum
 #
 # --to se omite si es igual a from, salvo en l2-backfill (ITSC-292) y
@@ -42,7 +42,7 @@ script_args=${7:-}
 family=${8:-}
 
 # l3-backfill-spectrum (ITSC-413) es el modo backfill de la CLI con la familia fija: el job existe
-# solo para tener 8 GiB, y --args reemplaza los argumentos del contenedor, así que aquí se
+# solo para tener 32 GiB, y --args reemplaza los argumentos del contenedor, así que aquí se
 # arman los mismos de l3-backfill con --family=spectrum. Una familia que no sea la suya se
 # rechaza: pedir path en el job de F escondería un error de quien lanza.
 if [[ "$job" == l3-backfill-spectrum ]]; then

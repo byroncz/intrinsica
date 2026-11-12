@@ -185,6 +185,27 @@ fn check(n: usize, what: &str) -> usize {
     peak
 }
 
+/// El job de F (ITSC-418): 32 GiB, con una cota de pico del 75 %.
+const JOB_BOUND: usize = 24_576 << 20;
+
+/// El peor cierre que admite el presupuesto, `n` = `DEFAULT_BUDGET_TICKS` retornos, no se mide
+/// (pediría ≈ 20 GiB): se comprueba la cota, que las mediciones de abajo respaldan a escala chica.
+/// Con 130 M, `3·2^26` no alcanza `2n − 1` y la FFT interna de Bluestein es de 2^28: la cota es
+/// 21 339 869 184 B (20 351 MiB), bajo la del job. Un presupuesto que la pase tiene que subir el
+/// job antes que esta cifra.
+#[test]
+fn the_closing_bound_at_the_budget_fits_the_job() {
+    let n = dc_descriptors::DEFAULT_BUDGET_TICKS as usize;
+    assert_eq!(bluestein_inner(n), 1 << 28);
+    assert_eq!(closing_bound(n), 21_339_869_184);
+    assert!(
+        closing_bound(n) <= JOB_BOUND,
+        "la cota del cierre con n = {n} pasa de la del job"
+    );
+    // Los cierres de n ≥ 2^20 siguen de a uno: el pico del job es el de una sola fase.
+    assert!(n >= dc_descriptors::spectrum::SERIAL_CLOSE_MIN);
+}
+
 #[test]
 fn the_closing_peak_stays_under_the_documented_bound() {
     // Bluestein (n primo con un factor primo grande en n − 1), con las dos longitudes internas

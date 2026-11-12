@@ -122,8 +122,8 @@ def test_spectrum_doc_metadata_matches_the_code():
     assert f'`bands = "{SPECTRUM_BANDS}"`' in metadata
     assert f'`window = "{SPECTRUM_WINDOW}"`' in metadata
     assert f'`budget_ticks = "{SPECTRUM_BUDGET_TICKS}"`' in metadata
-    assert (SPECTRUM_STATE_VERSION, SPECTRUM_N_MIN, SPECTRUM_BANDS) == ("1.1.0", 16, 7)
-    assert (SPECTRUM_WINDOW, SPECTRUM_BUDGET_TICKS) == ("hann", 20_000_000)
+    assert (SPECTRUM_STATE_VERSION, SPECTRUM_N_MIN, SPECTRUM_BANDS) == ("1.2.0", 16, 7)
+    assert (SPECTRUM_WINDOW, SPECTRUM_BUDGET_TICKS) == ("hann", 130_000_000)
 
 
 def test_spectrum_doc_ends_with_the_two_energy_locations():

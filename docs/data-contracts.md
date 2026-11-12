@@ -656,7 +656,7 @@ siete de Haar si lo son los últimos `2^⌊log₂ n⌋`; la ubicación de una fa
 las dos primeras reglas, si **todos sus retornos son cero** (`Σ r² = 0`): una fase de retornos
 iguales y no nulos deja Fourier y Haar nulos pero sí tiene ubicación, 0,5; y las **30 columnas de
 datos** de un evento sobre el presupuesto de ticks (`extreme_agg_trade_id −
-reference_agg_trade_id` mayor que `budget_ticks`, 20 000 000), que se decide con la fila de L2
+reference_agg_trade_id` mayor que `budget_ticks`, 130 000 000), que se decide con la fila de L2
 antes de leer un tick y se avisa con `event_over_budget`. Las columnas nunca guardan `±inf` ni
 `NaN`; cada fracción está en `[0, 1]`, las bandas no nulas de un registro de una fase suman 1 y
 cada ubicación no nula está en `(0, 1)`.
@@ -686,12 +686,14 @@ cada ubicación no nula está en `(0, 1)`.
 
 ### Metadatos y lectura de `spectrum.parquet`
 
-- **Metadatos del archivo**: `state_version = "1.1.0"`, `n_min = "16"`, `bands = "7"`,
-  `window = "hann"` y `budget_ticks = "20000000"` (los metadatos de Parquet son texto). Cambiar
-  cualquiera de los cuatro parámetros exige una `state_version` nueva; la `1.1.0` (columnas nuevas:
-  las dos ubicaciones) no cambia ninguno. No entran en el `content_hash`. Un `spectrum.parquet`
-  `1.0.0` (28 columnas de datos) queda detrás de la frontera de F por esquema y por versión, y el
-  backfill lo reescribe.
+- **Metadatos del archivo**: `state_version = "1.2.0"`, `n_min = "16"`, `bands = "7"`,
+  `window = "hann"` y `budget_ticks = "130000000"` (los metadatos de Parquet son texto). Cambiar
+  cualquiera de los cuatro parámetros exige una `state_version` nueva: la `1.1.0` (columnas nuevas:
+  las dos ubicaciones) no cambió ninguno, y la `1.2.0` (ITSC-418) sube el presupuesto de 20 M a
+  130 M de ticks sin cambiar ningún valor calculado: solo dejan de ser nulos los eventos entre 20 M
+  y 130 M de ticks. No entran en el `content_hash`. Un `spectrum.parquet` `1.1.0` o `1.0.0` (28
+  columnas de datos) queda detrás de la frontera de F por versión (el `1.0.0`, también por
+  esquema), y el backfill lo reescribe.
 - **Disposición física**: la de `summaries.parquet` (misma partición, ZSTD nivel 3, sin
   diccionario, `sorting_columns` por `confirm_agg_trade_id`, mismos row groups). El
   `content_hash` lo calcula `pyutils.ContentHasher`, que hashea las columnas `double`
@@ -1034,7 +1036,7 @@ mismo que traen las excepciones del resumidor, de las que sale la mayoría de lo
   `carry_over.parquet` del mes anterior.
 - **`event_over_budget`** (`warning`, `fail`, desde el 2.19.0 del TRD-L3, ITSC-413): un evento
   supera el presupuesto de ticks (`extreme_agg_trade_id − reference_agg_trade_id` mayor que
-  `budget_ticks`, 20 000 000) y sus columnas de datos quedan nulas en `spectrum.parquet`.
+  `budget_ticks`, 130 000 000) y sus columnas de datos quedan nulas en `spectrum.parquet`.
   `details`: `theta`, `confirm_agg_trade_id`, `ticks` (esa diferencia), `budget` y `family`
   (`spectrum`). Uno por evento; no falla la unidad. Se cuentan por θ y mes en
   `over_budget_events` del `summaries_summary`.

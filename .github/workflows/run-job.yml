@@ -18,7 +18,7 @@
 # anterior; lo decide la CLI) y no admite to distinto de from ni force. Ambos
 # admiten series_start y family (ITSC-394, ITSC-400, ITSC-413: summaries, path, fit o spectrum; los
 # backfills de path, fit y spectrum van después del de summaries, que escribe el esqueleto de cada
-# mes). La familia F (spectrum) corre en un job de 8 GiB (ITSC-413, veredicto de ITSC-410): su
+# mes). La familia F (spectrum) corre en un job de 32 GiB y 8 vCPU (ITSC-413, veredicto de ITSC-410; ITSC-418 sube la memoria y el presupuesto a 130 M de ticks por evento): su
 # backfill es l3-backfill-spectrum, que run-job-args.sh arma como --mode backfill --family
 # spectrum con los mismos from, to, force y series_start. l3-backfill con family = spectrum
 # existe pero tiene 4 GiB: no es el job de F.
@@ -85,7 +85,7 @@ on:
         type: string
         required: false
       family:
-        description: "Solo l3-backfill, l3-monthly y l3-backfill-spectrum: familia de descriptores que se escribe. summaries (por defecto), path (la familia T), fit (la familia A) o spectrum (la familia F); path, fit y spectrum necesitan summaries.parquet del mes: corre antes el backfill de summaries. El backfill de spectrum se lanza con el job l3-backfill-spectrum (8 GiB; ahí family puede quedar en summaries o en spectrum); l3-monthly con spectrum corre en 4 GiB, que no alcanzan para el cierre de la FFT de F (la pasada mensual de F es de la hija 5 de ITSC-410). Los demás jobs la rechazan si no es summaries"
+        description: "Solo l3-backfill, l3-monthly y l3-backfill-spectrum: familia de descriptores que se escribe. summaries (por defecto), path (la familia T), fit (la familia A) o spectrum (la familia F); path, fit y spectrum necesitan summaries.parquet del mes: corre antes el backfill de summaries. El backfill de spectrum se lanza con el job l3-backfill-spectrum (32 GiB; ahí family puede quedar en summaries o en spectrum); l3-monthly con spectrum corre en 4 GiB, que no alcanzan para el cierre de la FFT de F (la pasada mensual de F es de la hija 5 de ITSC-410). Los demás jobs la rechazan si no es summaries"
         type: choice
         options:
           - summaries

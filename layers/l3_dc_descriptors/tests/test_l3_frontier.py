@@ -554,10 +554,14 @@ def test_an_invalid_spectrum_file_moves_the_spectrum_frontier_back(
         # Las dos columnas de más con la versión vieja, o solo una de ellas: también atrás.
         (lambda t: with_state_version(t, "1.0.0"), "state_version"),
         (lambda t: t.drop_columns(["os_energy_loc"]), "esquema"),
+        # Un `spectrum.parquet` 1.1.0 (presupuesto de 20 M, ITSC-417): mismo esquema de 30
+        # columnas, otra versión. Cambiar el presupuesto es versión nueva (decisión 7): el
+        # backfill lo reescribe para que sus eventos entre 20 M y 130 M dejen de ser nulos.
+        (lambda t: with_state_version(t, "1.1.0"), "state_version"),
     ],
-    ids=["file_1_0_0", "version_1_0_0", "one_location_missing"],
+    ids=["file_1_0_0", "version_1_0_0", "one_location_missing", "version_1_1_0"],
 )
-def test_a_spectrum_file_of_version_1_0_0_is_behind_the_frontier(
+def test_a_spectrum_file_of_an_older_version_is_behind_the_frontier(
     spectrum_lake, damage, reason
 ):
     """El backfill de F lo reescribe: la frontera de F queda antes de ese mes, la de S no."""

@@ -18,7 +18,7 @@
 #   l3-backfill:                   igual que l2-backfill: una sola unidad ("1") para todo
 #                                  el rango y from puede ir vacío (L3 no tiene carry-over,
 #                                  pero la frontera de cada θ decide desde dónde avanza)
-#   l3-backfill-spectrum:          igual que l3-backfill (ITSC-413: el job de 8 GiB de la familia F)
+#   l3-backfill-spectrum:          igual que l3-backfill (ITSC-413: el job de 32 GiB de la familia F)
 #   l3-monthly:                    una sola unidad ("1"); from vacío = el mes anterior (lo
 #                                  decide la CLI); to vacío o igual a from, y sin from no
 #                                  admite to

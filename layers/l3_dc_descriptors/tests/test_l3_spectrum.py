@@ -1,7 +1,7 @@
 """La familia F (`spectrum.parquet`, TRD-L3 §7.2.3): un fixture calculado a mano, el oráculo con
 `numpy.fft` y el motor nativo sobre el lago de pruebas (ITSC-412, ADR-L3-19).
 
-Tres cosas se sostienen mutuamente: las 28 fracciones de cada fila de un fixture chico, escritas
+Tres cosas se sostienen mutuamente: los 30 valores de cada fila de un fixture chico, escritos
 a mano en esta prueba con sus operaciones a la vista (ocho eventos: alza y baja, overshoot vacío,
 fases de 15 y 16 retornos, retornos alternados, senoide de período 8, una fase plana, un evento que
 cruza row groups y tramos y un evento sobre el presupuesto); el oráculo `specref` (Python con
@@ -11,7 +11,9 @@ retornos ideales y el búfer guarda `f32`: se comparan con 1e-6 (veredicto de la
 """
 
 import math
+import re
 from decimal import Decimal
+from pathlib import Path
 
 import numpy as np
 import pyarrow.parquet as pq
@@ -78,9 +80,9 @@ def test_the_schema_is_the_key_and_30_nullable_doubles_in_the_inventory_order():
     )
     assert not SPECTRUM_SCHEMA.field("theta").nullable
     assert not SPECTRUM_SCHEMA.field("confirm_agg_trade_id").nullable
-    assert (SPECTRUM_FAMILY, SPECTRUM_STATE_VERSION) == ("spectrum", "1.1.0")
+    assert (SPECTRUM_FAMILY, SPECTRUM_STATE_VERSION) == ("spectrum", "1.2.0")
     assert (SPECTRUM_N_MIN, SPECTRUM_BANDS, SPECTRUM_WINDOW) == (16, 7, "hann")
-    assert SPECTRUM_BUDGET_TICKS == 20_000_000
+    assert SPECTRUM_BUDGET_TICKS == 130_000_000
 
 
 # ---------------------------------------------------------------------------------------
@@ -213,7 +215,7 @@ BLOCKS = [
         0,
         (NOTHING, SQUARE_F16, NOTHING, SQUARE_H16),
     ),
-    # 15 retornos y overshoot vacío: las 28 columnas nulas.
+    # 15 retornos y overshoot vacío: las 30 columnas nulas.
     ("fifteen_only", +1, shifted(SINE[:15], DRIFT), [], 0, (NOTHING,) * 4),
     # Una confirmación plana (todos los retornos 0) no tiene energía: nulas sus columnas.
     (
@@ -233,13 +235,13 @@ BLOCKS = [
         0,
         (SINE_F128, SINE_F64, SINE_H128, SINE_H64),
     ),
-    # Sobre el presupuesto: 25 M de ids entre R y E con 5 ticks. No se calcula nada.
+    # Sobre el presupuesto: 150 M de ids entre R y E con 5 ticks. No se calcula nada.
     (
         "over_budget",
         +1,
         [R, R, R],
         [-R, R],
-        25_000_000,
+        150_000_000,
         (NOTHING,) * 4,
     ),
 ]
@@ -500,7 +502,7 @@ def test_the_event_over_the_budget_is_all_null_and_warns_once(hand):
         "theta": TEXT,
         "confirm_agg_trade_id": OVER_BUDGET[0][0],
         "ticks": OVER_BUDGET[0][1],
-        "budget": 20_000_000,
+        "budget": 130_000_000,
         "family": "spectrum",
     }
 
@@ -528,6 +530,59 @@ def test_a_lower_budget_nulls_exactly_the_events_over_it(hand, tmp_path):
             assert row == base[key], key
     footer = pq.read_schema(result.path).metadata
     assert footer[b"budget_ticks"] == str(limit).encode()
+
+
+def test_the_same_event_is_null_below_its_ticks_and_full_above(hand, tmp_path):
+    """Subir el presupuesto no cambia ningún valor: solo el evento que antes lo pasaba deja de ser
+    nulo (ITSC-418). Se baja el presupuesto a los ticks de un evento y a uno menos."""
+    l1, l2, _, baseline = hand
+    base = rows_of(baseline.path)
+    span = {
+        r["confirm_agg_trade_id"]: r["extreme_agg_trade_id"]
+        - r["reference_agg_trade_id"]
+        for r in EVENT_ROWS
+    }
+    over = OVER_BUDGET[0][0]
+    full = [
+        c
+        for c, n in span.items()
+        if c != over and any(base[Decimal(TEXT), c][name] is not None for name in NAMES)
+    ]
+    assert full, "el fixture necesita un evento con valores"
+    target = max(full, key=span.__getitem__)
+
+    def run(budget):
+        # Los dos presupuestos escriben el mismo archivo: se leen antes de la corrida siguiente.
+        result = spectrum_native(l1, l2, tmp_path, M1, [TEXT], budget_ticks=budget)
+        result = result[Decimal(TEXT)]
+        return result, rows_of(result.path)
+
+    (below, got_below), (at, got_at) = run(span[target] - 1), run(span[target])
+    assert all(got_below[Decimal(TEXT), target][n] is None for n in NAMES)
+    assert (target, span[target]) in below.over_budget
+    assert (target, span[target]) not in at.over_budget
+    # Con el presupuesto en el límite el evento tiene sus valores, los del archivo base, y
+    # ninguna otra fila cambia: salvo las de los eventos que el presupuesto menor ya anulaba.
+    assert got_at[Decimal(TEXT), target] == base[Decimal(TEXT), target]
+    nulled = {c for c, _ in below.over_budget}
+    for key, row in got_below.items():
+        if key[1] not in nulled:
+            assert row == base[key], key
+    for key, row in got_at.items():
+        if key[1] not in {c for c, _ in at.over_budget}:
+            assert row == base[key], key
+
+
+def test_the_layer_budget_is_the_engine_default():
+    """`SPECTRUM_BUDGET_TICKS` (el que va al pie del archivo) y el valor por defecto del motor
+    (`DEFAULT_BUDGET_TICKS` de dc_descriptors, también el del binding) son el mismo número."""
+    root = Path(__file__).resolve().parents[3]
+    rust = (root / "shared/dc_descriptors/src/spectrum.rs").read_text()
+    match = re.search(r"pub const DEFAULT_BUDGET_TICKS: u64 = ([\d_]+);", rust)
+    assert match and int(match[1].replace("_", "")) == SPECTRUM_BUDGET_TICKS
+    stub = (root / "shared/dc_pyo3/dc_pyo3.pyi").read_text()
+    match = re.search(r"budget_ticks: int = ([\d_]+),", stub)
+    assert match and int(match[1].replace("_", "")) == SPECTRUM_BUDGET_TICKS
 
 
 def permutation_ids():
@@ -574,7 +629,7 @@ def assert_skeleton_and_footer(path: str, summaries: str, budget: int | None = N
         k: v for k, v in pq.read_schema(path).metadata.items() if k != b"ARROW:schema"
     }
     assert meta == {
-        b"state_version": b"1.1.0",
+        b"state_version": b"1.2.0",
         b"n_min": b"16",
         b"bands": b"7",
         b"window": b"hann",
@@ -591,7 +646,7 @@ def test_the_orchestrator_would_write_the_footer_of_the_hand_file(hand):
         "n_min": "16",
         "bands": "7",
         "window": "hann",
-        "budget_ticks": "20000000",
+        "budget_ticks": "130000000",
     }
     footer = pq.read_schema(result.path).metadata
     for key, value in {"state_version": version, **metadata}.items():
@@ -762,7 +817,7 @@ def test_the_rows_hold_the_invariants(lake, baseline):
 
 
 def test_the_engine_matches_the_oracle_over_the_reader_frames(lake, baseline):
-    """Todos los θ y meses del lago: los 28 valores del motor son los del oráculo, que lee cada
+    """Todos los θ y meses del lago: los 30 valores del motor son los del oráculo, que lee cada
     evento con el lector de `dc_frames` (1e-9, nulos exactos).
     """
     lake_, _ = lake

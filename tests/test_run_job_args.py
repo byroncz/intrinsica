@@ -316,7 +316,7 @@ def test_l3_family_spectrum_va_al_final(job):
 
 
 def test_l3_backfill_spectrum_arma_el_backfill_de_la_cli_con_la_familia_fija():
-    # El job de 8 GiB: su modo de la CLI es backfill, no "backfill-spectrum" (--args reemplaza
+    # El job de 32 GiB: su modo de la CLI es backfill, no "backfill-spectrum" (--args reemplaza
     # los argumentos del contenedor), y la familia sale del job aunque el workflow mande el
     # valor por defecto (summaries).
     for family in ("", "summaries", "spectrum"):

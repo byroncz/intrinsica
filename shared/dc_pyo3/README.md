@@ -104,7 +104,7 @@ engine = dc_pyo3.Engine(
     threads=None,
     family="summaries",
     silence_us=0,
-    budget_ticks=20_000_000,
+    budget_ticks=130_000_000,
 )
 engine.push_boundaries(theta, batch)  # por lotes, por delante de los row groups
 engine.needed(theta)  # primer evento del θ sin cerrar
@@ -121,7 +121,7 @@ stats = (
 engine.close()
 ```
 
-- `schema` son las columnas de datos de la familia (18 en `summaries`, 14 en `path`, 10 en `fit` y 29 en `spectrum`) como
+- `schema` son las columnas de datos de la familia (18 en `summaries`, 14 en `path`, 10 en `fit` y 31 en `spectrum`) como
   `(nombre, bytes por valor, nulable)`; el motor las compara con las suyas y falla con
   `ValueError` si el esquema de la capa cambió. `family` es `"summaries"`, `"path"` (la
   trayectoria, ADR-L3-17) `"fit"` (la forma, ADR-L3-18) o `"spectrum"` (la frecuencia, ADR-L3-19), `silence_us` el umbral de silencio de `path` en µs y

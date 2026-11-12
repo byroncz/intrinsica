@@ -75,16 +75,16 @@ fija), así que un evento de S que cruza row groups pesa más de 240 B. La cifra
 | `spectrum` (F) | 120 B (una `SpectrumRun`) **más 4 B por retorno guardado** | 97 B | **217 B** más `4 × Engine.buffered_ticks()` | 3,7 M de eventos sin retornos | ≈ 217 MB más 4 MB por millón de retornos |
 
 F (ITSC-412, ADR-L3-19) es la única familia cuyo estado crece con los ticks del evento abierto: guarda los
-retornos de sus fases hasta cerrarlo (`f32`, 4 B cada uno), con un tope de 20 M de ticks por evento (80 MB).
+retornos de sus fases hasta cerrarlo (`f32`, 4 B cada uno), con un tope de 130 M de ticks por evento (520 MB por evento en el peor caso, sumando sus dos fases).
 `summarize._unclosed` suma `SPECTRUM_RETURN_BYTES × buffered_ticks()` al costo fijo; lo que no cuenta es el
 trabajo transitorio de la FFT al cerrar (16 B × (2n + 4m), ver ADR-L3-19). `--family spectrum` (ITSC-413)
 corre la unidad con esta cifra: `unit_timing` lleva `inflight_ticks_max` (el máximo de retornos que el motor
-guardó a la vez), `budget_ticks` y `cpu_s`, y cada evento sobre el presupuesto de 20 M de ticks deja su fila
-nula y un `event_over_budget`. F corre en un job de 8 GiB (`l3-backfill-spectrum`); la cadena mensual es de la
+guardó a la vez), `budget_ticks` y `cpu_s`, y cada evento sobre el presupuesto de 130 M de ticks deja su fila
+nula y un `event_over_budget`. F corre en un job de 32 GiB y 8 vCPU (`l3-backfill-spectrum`, con `L3_INFLIGHT_BYTES` de 4 GiB; la cota de pico del job es 24 576 MiB); la cadena mensual es de la
 hija siguiente de ITSC-410. Desde ITSC-417 `spectrum.parquet` tiene 30 columnas de datos (`state_version`
-`1.1.0`): a las 28 de energía por banda y nivel se suman `c_energy_loc` y `os_energy_loc`, la ubicación en el
+`1.1.0`; con el presupuesto de 130 M de ITSC-418, `1.2.0`): a las 28 de energía por banda y nivel se suman `c_energy_loc` y `os_energy_loc`, la ubicación en el
 tiempo de la energía total de cada fase (`Σ t_k·r_k² / Σ r_k²`, en (0, 1); [TRD-L3
-§7.2.3](../../docs/TRD/l3.md#723-salida--spectrumparquet-familia-f)). Un `spectrum.parquet` `1.0.0` queda detrás de
+§7.2.3](../../docs/TRD/l3.md#723-salida--spectrumparquet-familia-f)). Un `spectrum.parquet` `1.0.0` o `1.1.0` queda detrás de
 la frontera y el backfill lo reescribe.
 
 T guarda una `Run` por cada tramo suelto de un evento que cruza row groups (fusión ordenada,
