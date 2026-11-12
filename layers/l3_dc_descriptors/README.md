@@ -75,7 +75,7 @@ fija), así que un evento de S que cruza row groups pesa más de 240 B. La cifra
 | `spectrum` (F) | 120 B (una `SpectrumRun`) **más 4 B por retorno guardado** | 97 B | **217 B** más `4 × Engine.buffered_ticks()` | 3,7 M de eventos sin retornos | ≈ 217 MB más 4 MB por millón de retornos |
 
 F (ITSC-412, ADR-L3-19) es la única familia cuyo estado crece con los ticks del evento abierto: guarda los
-retornos de sus fases hasta cerrarlo (`f32`, 4 B cada uno), con un tope de 130 M de ticks por evento (520 MB por fase en el peor caso).
+retornos de sus fases hasta cerrarlo (`f32`, 4 B cada uno), con un tope de 130 M de ticks por evento (520 MB por evento en el peor caso, sumando sus dos fases).
 `summarize._unclosed` suma `SPECTRUM_RETURN_BYTES × buffered_ticks()` al costo fijo; lo que no cuenta es el
 trabajo transitorio de la FFT al cerrar (16 B × (2n + 4m), ver ADR-L3-19). `--family spectrum` (ITSC-413)
 corre la unidad con esta cifra: `unit_timing` lleva `inflight_ticks_max` (el máximo de retornos que el motor
