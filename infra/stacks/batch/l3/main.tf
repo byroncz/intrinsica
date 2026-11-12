@@ -113,7 +113,8 @@ module "layer" {
     # el presupuesto de F a 130 M de ticks por evento y el job de 8 GiB a 32 GiB, el
     # máximo de Cloud Run: la cota de pico es 24 576 MiB, el 75 % de la memoria, y el
     # cierre del peor evento (n = 130 M) pide 20 351 MiB según 16 B × (2n + 4m), con
-    # m = 2^28 (TRD-L3 ADR-L3-19). Cloud Run pide 8 vCPU para 32 GiB (la cifra de la
+    # m = 2^28 (TRD-L3 ADR-L3-19), más hasta 4 096 MiB de retornos en vuelo: 24 447 MiB
+    # antes de la base del proceso, con ≈ 130 MiB de margen. Cloud Run pide 8 vCPU para 32 GiB (la cifra de la
     # card; el apply la valida: no se pudo consultar su documentación desde el
     # contenedor); se declaran aquí para que bajar el cpu de la capa no deje este modo
     # inválido sin que el apply lo diga. Mismo timeout que backfill (43 200 s); la

@@ -348,7 +348,9 @@ El job lleva `args` `--mode backfill --family spectrum`, `cpu: '8'` (la cifra de
 el tope por defecto, 768 MiB, frenaría la unidad a un tramo a la vez cuando los eventos gigantes
 guardan sus retornos) y el timeout de `l3-backfill`, 43 200 s. **La cota de pico es 24 576 MiB**, el
 75 % de 32 GiB; el peor cierre (n = 130 M retornos) pide 21 339 869 184 B (20 351 MiB) según
-16 B × (2n + 4m), con m = 2^28, y los cierres con n ≥ 2^20 corren de a uno. En *Run job* se elige
+16 B × (2n + 4m), con m = 2^28, y los cierres con n ≥ 2^20 corren de a uno. El pico esperado es ese
+transitorio más los retornos en vuelo (hasta `L3_INFLIGHT_BYTES`, 4 096 MiB) más la base del proceso:
+20 351 + 4 096 = 24 447 MiB antes de la base, así que el margen frente a la cota es de ≈ 130 MiB. En *Run job* se elige
 `job` = `l3-backfill-spectrum`; `family` puede quedar en `summaries` (el valor por defecto) o en
 `spectrum`, y cualquier otro valor se rechaza antes de lanzar. `l3-backfill` con `family` =
 `spectrum` también existe, pero corre con 4 GiB: no es el job de F.
