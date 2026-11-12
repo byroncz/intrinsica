@@ -116,9 +116,9 @@ push(row group k) ──► cola de ítems (θ₀,k) (θ₁,k) … (θ₄₉,k) 
   compilación en `layout.rs` lo fija. El trabajo transitorio de la FFT (el búfer de `n` complejos de 16 B más el plan y el scratch de
   `rustfft`) no está en `buffered_ticks`. Peor caso, con `n` primo (Bluestein): `16 B × (2n + 4m)`,
   con `m` la longitud de la FFT interna (`3·2^(k−2)` si alcanza `2n − 1`, si no `2^k`, con
-  `k = ⌈log₂(2n−1)⌉`): ≈ 3,6 GiB con `n` = 20 M (`m` = 3·2^24). Con el presupuesto de 130 M (ITSC-418), `3·2^26` no alcanza `2n − 1`, `m` = 2^28 y la cota da 21 339 869 184 B (20 351 MiB), bajo los 24 576 MiB del job de 32 GiB; es la fórmula, no una medición, y `the_closing_bound_at_the_budget_fits_the_job` la fija. Los 20 M son una medida, no una estimación:
+  `k = ⌈log₂(2n−1)⌉`): ≈ 3,6 GiB con `n` = 20 M (`m` = 3·2^24). Con el presupuesto de 130 M (ITSC-418), `3·2^26` no alcanza `2n − 1`, `m` = 2^28 y la cota da 21 339 869 184 B (20 351 MiB), bajo los 24 576 MiB del job de 32 GiB; es la fórmula, no una medición, y `the_closing_bound_at_the_budget_fits_the_job` la fija. La fórmula está medida a `n` ≈ 1 M:
   `tests/spectrum_memory.rs` cuenta los bytes con un asignador global y la cota queda dentro de
-  32 B del pico en los dos casos de Bluestein que prueba. Los otros planes pesan menos (48 a 64 B
+  32 B del pico en los dos casos de Bluestein que prueba. A 20 M y a 130 M es la misma fórmula, sin medir. Los otros planes pesan menos (48 a 64 B
   por retorno). Se acota serializando los cierres de fases con `n ≥ 2^20` retornos
   (`SERIAL_CLOSE_MIN`), uno a la vez por proceso; por debajo, el peor cierre es de 160 MiB por hilo
   y corren en paralelo. **Con 20 M de retornos y `n` primo el cierre no cabe en el job de 4 GiB
