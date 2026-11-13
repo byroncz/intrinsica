@@ -5,6 +5,7 @@
 
 mod common;
 
+use common::closing::{bluestein_inner, closing_bound};
 use common::{batches, skeleton, Columns, Ev, Rng, Series, Shared};
 use dc_descriptors::{
     spectrum_col as sc, Config, Engine, EngineError, EventErrorKind, Family, OverBudget,
@@ -959,4 +960,25 @@ fn bad_events_and_ticks_are_errors_not_values() {
 fn the_default_budget_is_the_one_the_layer_declares() {
     // `SPECTRUM_BUDGET_TICKS` de L3 (schema.py) vale lo mismo; lo comprueba test_l3_spectrum.py.
     assert_eq!(dc_descriptors::DEFAULT_BUDGET_TICKS, BUDGET);
+}
+
+/// El job de F (ITSC-418): 32 GiB, con una cota de pico del 75 %.
+const JOB_BOUND: usize = 24_576 << 20;
+
+/// El peor cierre que admite el presupuesto, `n` = `DEFAULT_BUDGET_TICKS` retornos, no se mide
+/// (pediría ≈ 20 GiB): se comprueba la cota, que las mediciones de `spectrum_memory.rs` respaldan
+/// a escala chica. Con 130 M, `3·2^26` no alcanza `2n − 1` y la FFT interna de Bluestein es de 2^28: la cota es
+/// 21 339 869 184 B (20 351 MiB), bajo la del job. Un presupuesto que la pase tiene que subir el
+/// job antes que esta cifra.
+#[test]
+fn the_closing_bound_at_the_budget_fits_the_job() {
+    let n = dc_descriptors::DEFAULT_BUDGET_TICKS as usize;
+    assert_eq!(bluestein_inner(n), 1 << 28);
+    assert_eq!(closing_bound(n), 21_339_869_184);
+    assert!(
+        closing_bound(n) <= JOB_BOUND,
+        "la cota del cierre con n = {n} pasa de la del job"
+    );
+    // Los cierres de n ≥ 2^20 siguen de a uno: el pico del job es el de una sola fase.
+    assert!(n >= dc_descriptors::spectrum::SERIAL_CLOSE_MIN);
 }
