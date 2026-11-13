@@ -907,3 +907,19 @@ def test_the_months_after_every_theta_left_the_range_are_not_counted_as_up_to_da
     (row,) = emitted(tmp_path, "backfill_summary")
     details = row["details"]
     assert (details["processed"], details["skipped"], details["months"]) == (0, 1, 3)
+
+
+def test_the_log_reports_how_many_footers_the_frontier_read(
+    incident, tmp_path, family, caplog
+):
+    """El costo medido de ITSC-419: un archivo por mes y θ (el doble fuera de S), dos pies cada uno."""
+    caplog.set_level("INFO")
+    run_family(incident, tmp_path, family, "--mode", "backfill")
+    files = (
+        len(incident.months)
+        * len(INCIDENT_THETAS)
+        * (1 if family == "summaries" else 2)
+    )
+    assert f"fronteras: {files} archivos verificados ({2 * files} pies) de 2 θ en " in (
+        caplog.text
+    )
