@@ -178,6 +178,72 @@ def theta_behind_frontier(
     )
 
 
+def theta_frontier_regressed(
+    ctx: RunContext,
+    unit: Unit,
+    *,
+    theta: str,
+    first_invalid_month: str,
+    invalid_months: int,
+    reason: str,
+    frontier: str | None,
+) -> Finding:
+    """La frontera del θ quedó por debajo del último mes que existe porque hay archivos
+    inválidos en su serie (§8.2, ITSC-419). Uno por θ y familia, no uno por mes:
+    `first_invalid_month` es el que la retrocedió, `invalid_months` cuántos hay en la serie
+    verificada y `reason`, el del primero (con el archivo delante). `frontier` es el mes en que
+    quedó (`null` si ninguno). `unit` es el primer mes inválido.
+    """
+    return finding(
+        ctx,
+        unit,
+        "theta_frontier_regressed",
+        severity=Severity.WARNING,
+        status=Status.FAIL,
+        metric_value=float(invalid_months),
+        details={
+            "theta": theta,
+            "family": ctx.family,
+            "first_invalid_month": first_invalid_month,
+            "invalid_months": invalid_months,
+            "reason": reason,
+            "frontier": frontier,
+        },
+    )
+
+
+def backfill_summary(
+    ctx: RunContext,
+    unit: Unit,
+    *,
+    processed: int,
+    skipped: int,
+    months: int,
+    first: str,
+    last: str,
+) -> Finding:
+    """Cierre de un backfill: de los `months` del rango `first`..`last`, `processed` se
+    procesaron y `skipped` se saltaron por estar al día (ITSC-419). Lo que falta para sumar
+    `months` son meses cuyos θ salieron del rango (L2 o esqueleto ausente) o la unidad que falló.
+    """
+    return finding(
+        ctx,
+        unit,
+        "backfill_summary",
+        severity=Severity.INFO,
+        status=Status.PASS,
+        metric_value=float(processed),
+        details={
+            "family": ctx.family,
+            "processed": processed,
+            "skipped": skipped,
+            "months": months,
+            "first": first,
+            "last": last,
+        },
+    )
+
+
 def theta_config_drift(
     ctx: RunContext, unit: Unit, *, theta: str, months: int, last_month: str
 ) -> Finding:

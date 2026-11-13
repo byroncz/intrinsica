@@ -13,25 +13,27 @@ import logging
 import os
 import re
 import sys
+import time
 import uuid
 from collections.abc import Mapping, Sequence
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
-from dc_frames.lake import Month, month_ordinal
+from dc_frames.lake import Month, month_of, month_ordinal
 from dq import configure_logging
 
 from l3_dc_descriptors import findings, memory
 from l3_dc_descriptors.context import RunContext, Unit
 from l3_dc_descriptors.frontier import (
+    Frontier,
     Listing,
     family_file,
-    frontiers,
     l2_missing,
     label,
     list_l2,
     list_summaries,
+    scan_frontiers,
     skeleton_missing,
     theta_text,
 )
@@ -292,6 +294,69 @@ def _report_drift(
     )
 
 
+def _scan(
+    args: argparse.Namespace,
+    ctx: RunContext,
+    asset: Unit,
+    thetas: list[int],
+    listed: Listing,
+    summaries: Listing,
+) -> dict[int, Frontier]:
+    """Las fronteras de los θ, verificadas mes a mes, y el aviso de las que retrocedieron.
+
+    Lee los pies de todos los archivos de la serie contigua de cada θ (§8.2): deja en el log
+    cuántos y cuánto tardó, la cifra con que se decide si el costo en la nube importa. Por
+    cada θ cuya frontera quedó por debajo del último mes que existe porque hay archivos
+    inválidos emite **un** `theta_frontier_regressed` (no uno por mes), también en `monthly`.
+    """
+    began = time.monotonic()
+    scans = scan_frontiers(
+        thetas,
+        listed,
+        ctx.series_start,
+        str(ctx.summaries_root),
+        str(ctx.events_root),
+        asset.key,
+        args.family,
+        summaries,
+    )
+    logger.info(
+        "fronteras: %d archivos verificados (%d pies) de %d θ en %.1f s",
+        sum(found.checked for found in scans.values()),
+        2 * sum(found.checked for found in scans.values()),
+        len(scans),
+        time.monotonic() - began,
+    )
+    regressed = []
+    for theta, found in scans.items():
+        first = found.first_invalid
+        if first is None:
+            continue
+        logger.warning(
+            "θ=%d: %d archivos inválidos en la serie de %s, el primero en %s (%s); "
+            "frontera %s",
+            theta,
+            len(found.invalid),
+            args.family,
+            label(first),
+            found.invalid[first],
+            label(found.reached),
+        )
+        regressed.append(
+            findings.theta_frontier_regressed(
+                ctx,
+                asset.with_month(month_of(first)),
+                theta=theta_text(theta),
+                first_invalid_month=label(first),
+                invalid_months=len(found.invalid),
+                reason=found.invalid[first],
+                frontier=label(found.reached),
+            )
+        )
+    findings.emit(ctx, regressed)
+    return scans
+
+
 def _run_unit(
     unit: Unit, ctx: RunContext, thetas: list[int], *, isolated: bool = False
 ) -> bool:
@@ -348,6 +413,7 @@ def _backfill(
     l2: Listing,
     force: bool,
     summaries: Listing,
+    invalid: Mapping[int, Frontier] | None = None,
 ) -> int:
     """Recorre `months` en orden; cada mes lleva solo los θ cuya frontera es anterior.
 
@@ -358,9 +424,21 @@ def _backfill(
     demás siguen. Una familia distinta de S exige además `summaries.parquet` del mes
     (`summaries` es su listado, §7.3): al θ que no lo tiene le pasa lo mismo, con
     `family_skeleton_missing`. Un fallo de la unidad detiene el rango; los meses siguientes no se tocan.
+
+    Al terminar escribe `backfill: N meses procesados, K saltados por estar al día, de M en el
+    rango` y la misma cifra en el hallazgo `backfill_summary`. `invalid` son las fronteras
+    verificadas de los θ (sin `force`): si al terminar un θ conserva un mes inválido del
+    rango que no reprocesó (el rango empezó después de él), la corrida termina con código 1
+    en vez de dejar un archivo malo detrás de una frontera que ya no lo ve (ITSC-419).
     """
     stopped: set[int] = set()
-    processed = 0
+    # θ → meses inválidos del rango (hasta el último) que aún no se reescribieron.
+    last = month_ordinal(months[-1])
+    unrepaired = {
+        theta: {n for n in found.invalid if n <= last}
+        for theta, found in (invalid or {}).items()
+    }
+    processed = skipped = 0
     for month in months:
         n = month_ordinal(month)
         unit = asset.with_month(month)
@@ -371,6 +449,7 @@ def _backfill(
         ]
         if not pending:
             logger.info("unidad %s: ningún θ la necesita, se salta", unit)
+            skipped += 1
             continue
         ready = []
         for theta in pending:
@@ -418,8 +497,40 @@ def _backfill(
         if not _run_unit(unit, ctx, ready, isolated=ctx.unit_process):
             return 1
         frontier.update(dict.fromkeys(ready, n))
+        for theta in ready:
+            unrepaired.get(theta, set()).discard(n)
         processed += 1
-    if stopped:
+    first_label, last_label = label(month_ordinal(months[0])), label(last)
+    logger.info(
+        "backfill: %d meses procesados, %d saltados por estar al día, de %d en el rango",
+        processed,
+        skipped,
+        len(months),
+    )
+    findings.emit(
+        ctx,
+        [
+            findings.backfill_summary(
+                ctx,
+                asset.with_month(months[0]),
+                processed=processed,
+                skipped=skipped,
+                months=len(months),
+                first=first_label,
+                last=last_label,
+            )
+        ],
+    )
+    leftover = {theta: sorted(left) for theta, left in unrepaired.items() if left}
+    for theta, left in leftover.items():
+        logger.error(
+            "θ=%d: %d meses inválidos del rango sin reprocesar (el primero, %s); "
+            "el rango no empezó en ellos",
+            theta,
+            len(left),
+            label(left[0]),
+        )
+    if stopped or leftover:
         return 1
     if not processed:
         logger.info("backfill: los %d θ están al día en el rango", len(thetas))
@@ -610,20 +721,8 @@ def main(
     _report_drift(ctx, asset, catalog, summaries)
     l2 = list_l2(events_root, asset.key)
     forced = args.force
-    frontier = (
-        {}
-        if forced
-        else frontiers(
-            thetas,
-            listed,
-            series_start,
-            summaries_root,
-            events_root,
-            asset.key,
-            args.family,
-            summaries,
-        )
-    )
+    scans = {} if forced else _scan(args, ctx, asset, thetas, listed, summaries)
+    frontier = {theta: found.reached for theta, found in scans.items()}
     for theta in thetas:
         logger.info("θ=%d frontera=%s", theta, label(frontier.get(theta)))
 
@@ -649,4 +748,4 @@ def main(
             )
             return 0
     months = resolve_range(first, args.to)
-    return _backfill(months, ctx, asset, thetas, frontier, l2, forced, summaries)
+    return _backfill(months, ctx, asset, thetas, frontier, l2, forced, summaries, scans)

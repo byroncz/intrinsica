@@ -129,12 +129,16 @@ por delante (un lote de 32 768 eventos por θ) también cuentan como abiertas.
 de la unidad (entrada de L1 o L2 ausente, L2 incoherente, esqueleto, conciliación) o `monthly`
 sin ningún θ listo y con rezagados; 2 uso o configuración (no escribe nada).
 
-**Frontera** ([§8.2](../../docs/TRD/l3.md#82-modo-backfill-histórico)): por θ y familia, el último mes de
-su serie contigua desde `--series-start` cuyo archivo de la familia (`summaries.parquet` o
-`path.parquet`) es válido (esquema, `theta`,
-`state_version` y filas por row group iguales a `events.parquet` de L2 del mes). Sale de un
-listado de la raíz de L3 más el pie del archivo de cada θ; no se consulta cada partición. Un
-mes sin `events.parquet` y `carry_over.parquet` de L2 detiene el rango de ese θ con
+**Frontera** ([§8.2](../../docs/TRD/l3.md#82-modo-backfill-histórico)): por θ y familia, el fin del
+**prefijo contiguo de meses válidos** desde `--series-start` (ITSC-419): ningún mes anterior a la
+frontera puede ser inválido, y con un archivo inválido en el mes `m` es `m − 1` aunque haya válidos
+después. Un archivo de la familia (`summaries.parquet`, `path.parquet`, `fit.parquet` o
+`spectrum.parquet`) es válido si su esquema, `theta`, `state_version` y filas por row group son los
+de la imagen y los de `events.parquet` de L2 del mes. Sale de un listado de la raíz de L3 más el
+pie de **cada** archivo de la serie (solo pies; el log dice cuántos y cuánto tardó). Si la frontera
+retrocede por archivos inválidos, un `theta_frontier_regressed` por θ lo avisa, y el cierre de
+`backfill` deja `backfill: N meses procesados, K saltados por estar al día, de M en el rango` y
+un `backfill_summary`. Un mes sin `events.parquet` y `carry_over.parquet` de L2 detiene el rango de ese θ con
 `l2_input_missing` (los demás siguen, la corrida termina con código 1). Una partición de L2
 con sus dos Parquet pero sin `content_hash.json` (el linaje que L2 publica, ITSC-368) falla la
 unidad con `l2_lineage_missing`: se cubre con el backfill del linaje antes del apply de la
