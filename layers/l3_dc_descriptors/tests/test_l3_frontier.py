@@ -894,3 +894,16 @@ def test_a_family_backfill_over_an_invalid_summaries_month_exits_with_1(
     assert "corre primero el backfill de summaries" in caplog.text
     # El inválido sigue ahí: la frontera de T no lo oculta.
     assert family_scan(path_lake, "path")[SMALL].ceiling_invalid.keys() == {ordinal(M2)}
+
+
+def test_the_months_after_every_theta_left_the_range_are_not_counted_as_up_to_date(
+    lake, tmp_path
+):
+    """Con L2 ausente para todos los θ desde M2, `N + K < M` delata los meses que no se miraron."""
+    for theta in lake.thetas:
+        for month in (M2, M3):
+            file_of(lake.l2, theta, month, "events.parquet").unlink()
+    assert run_family(lake, tmp_path, "summaries", "--mode", "backfill") == 1
+    (row,) = emitted(tmp_path, "backfill_summary")
+    details = row["details"]
+    assert (details["processed"], details["skipped"], details["months"]) == (0, 1, 3)

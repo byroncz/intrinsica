@@ -451,8 +451,13 @@ def _backfill(
             if t not in stopped and (force or _before(frontier.get(t), n))
         ]
         if not pending:
-            logger.info("unidad %s: ningún θ la necesita, se salta", unit)
-            skipped += 1
+            # Al día solo si algún θ sigue en el rango: si todos salieron, el mes no se
+            # cuenta (ni procesado ni saltado) y `N + K < M` lo delata.
+            if len(stopped) < len(thetas):
+                logger.info("unidad %s: ningún θ la necesita, se salta", unit)
+                skipped += 1
+            else:
+                logger.info("unidad %s: todos los θ salieron del rango", unit)
             continue
         ready = []
         for theta in pending:
