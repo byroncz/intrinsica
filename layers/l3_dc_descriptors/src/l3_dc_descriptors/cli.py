@@ -332,14 +332,15 @@ def _scan(
         first = found.first_invalid
         if first is None:
             continue
+        every = found.all_invalid
         logger.warning(
             "θ=%d: %d archivos inválidos en la serie de %s, el primero en %s (%s); "
             "frontera %s",
             theta,
-            len(found.invalid),
+            len(every),
             args.family,
             label(first),
-            found.invalid[first],
+            every[first],
             label(found.reached),
         )
         regressed.append(
@@ -348,8 +349,8 @@ def _scan(
                 asset.with_month(month_of(first)),
                 theta=theta_text(theta),
                 first_invalid_month=label(first),
-                invalid_months=len(found.invalid),
-                reason=found.invalid[first],
+                invalid_months=len(every),
+                reason=every[first],
                 frontier=label(found.reached),
             )
         )
@@ -429,7 +430,9 @@ def _backfill(
     rango` y la misma cifra en el hallazgo `backfill_summary`. `invalid` son las fronteras
     verificadas de los θ (sin `force`): si al terminar un θ conserva un mes inválido del
     rango que no reprocesó (el rango empezó después de él), la corrida termina con código 1
-    en vez de dejar un archivo malo detrás de una frontera que ya no lo ve (ITSC-419).
+    en vez de dejar un archivo malo detrás de una frontera que ya no lo ve (ITSC-419). Lo
+    mismo con un mes inválido de `summaries.parquet` en el rango cuando la familia no es S:
+    su pasada no lo reescribe, así que el código 1 pide el backfill de S primero.
     """
     stopped: set[int] = set()
     # θ → meses inválidos del rango (hasta el último) que aún no se reescribieron.
@@ -530,7 +533,23 @@ def _backfill(
             len(left),
             label(left[0]),
         )
-    if stopped or leftover:
+    # Los de `summaries.parquet` no los repara la pasada de otra familia: hay que correr S antes.
+    broken_ceiling = {
+        theta: sorted(n for n in found.ceiling_invalid if n <= last)
+        for theta, found in (invalid or {}).items()
+    }
+    for theta, left in broken_ceiling.items():
+        if left:
+            logger.error(
+                "θ=%d: %d meses inválidos de %s en el rango (el primero, %s); "
+                "esta pasada no los repara: corre primero el backfill de %s",
+                theta,
+                len(left),
+                family_file(FAMILY),
+                label(left[0]),
+                FAMILY,
+            )
+    if stopped or leftover or any(broken_ceiling.values()):
         return 1
     if not processed:
         logger.info("backfill: los %d θ están al día en el rango", len(thetas))

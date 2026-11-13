@@ -880,3 +880,17 @@ def test_a_backfill_inside_the_valid_prefix_skips_and_counts_the_months(lake, tm
     (warning,) = emitted(tmp_path, "theta_frontier_regressed")
     assert warning["details"]["first_invalid_month"] == "2017-10"
     assert warning["details"]["frontier"] == "2017-09"
+
+
+def test_a_family_backfill_over_an_invalid_summaries_month_exits_with_1(
+    path_lake, tmp_path, caplog
+):
+    """La pasada de T no reescribe `summaries.parquet`: no puede dejar el cierre en 0."""
+    rewrite(
+        file_of(path_lake.l3, SMALL, M2, "summaries.parquet"),
+        lambda t: with_state_version(t, OLD),
+    )
+    assert run_family(path_lake, tmp_path, "path", "--mode", "backfill") == 1
+    assert "corre primero el backfill de summaries" in caplog.text
+    # El inválido sigue ahí: la frontera de T no lo oculta.
+    assert family_scan(path_lake, "path")[SMALL].ceiling_invalid.keys() == {ordinal(M2)}

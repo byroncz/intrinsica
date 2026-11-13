@@ -198,20 +198,28 @@ class Frontier:
     """La frontera de un θ y lo que la verificación encontró.
 
     `reached` es el ordinal del último mes del prefijo contiguo de meses válidos (`None` si no
-    hay). `invalid` son los meses de la serie contigua cuyo archivo es inválido, ordinal → motivo
-    (con el archivo delante: `path.parquet: ...`); solo trae los que la verificación leyó, es
-    decir, hasta el primer hueco de la serie. `checked` cuenta los meses cuyo pie se leyó (cada
-    uno son dos pies: el de la familia y el de `events.parquet`).
+    hay). `invalid` son los meses de la serie contigua cuyo archivo **de la familia** es
+    inválido, ordinal → motivo (con el archivo delante: `path.parquet: ...`); solo trae los que
+    la verificación leyó, es decir, hasta el primer hueco de la serie. `ceiling_invalid` son los
+    de `summaries.parquet` cuando la familia no es S (su techo, §7.3): una pasada de la familia
+    no los repara, por eso van aparte (vacío en S). `checked` cuenta los meses cuyo pie se leyó
+    (cada uno son dos pies: el de la familia y el de `events.parquet`).
     """
 
     reached: int | None
     invalid: Mapping[int, str] = field(default_factory=dict)
     checked: int = 0
+    ceiling_invalid: Mapping[int, str] = field(default_factory=dict)
+
+    @property
+    def all_invalid(self) -> Mapping[int, str]:
+        """Los inválidos de la familia y de su techo, con el motivo de la familia si coinciden."""
+        return {**self.ceiling_invalid, **self.invalid}
 
     @property
     def first_invalid(self) -> int | None:
         """El primer mes inválido: el que retrocede la frontera (`None` si no hay)."""
-        return min(self.invalid, default=None)
+        return min(self.all_invalid, default=None)
 
 
 def _scan(
@@ -280,7 +288,7 @@ def scan_frontiers(
     θ desde `series_start` (solo pies, con el pool de lectura): la frontera es el fin del prefijo
     de meses válidos y un inválido en `m` la deja en `m − 1`. La de una familia distinta de S
     nunca supera la de S: `summaries`, el listado de `summaries.parquet`, es obligatorio,
-    porque su archivo repite ese esqueleto; sus inválidos también quedan en `invalid`.
+    porque su archivo repite ese esqueleto; sus inválidos quedan aparte, en `ceiling_invalid`.
     """
     thetas = list(thetas)
     start = month_ordinal(series_start)
@@ -302,8 +310,9 @@ def scan_frontiers(
         )
         result[theta] = Frontier(
             reached=reached,
-            invalid={**top.invalid, **found.invalid},
+            invalid=found.invalid,
             checked=found.checked + top.checked,
+            ceiling_invalid=top.invalid,
         )
     return result
 
