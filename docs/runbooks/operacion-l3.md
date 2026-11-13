@@ -186,7 +186,9 @@ saltara en silencio todo lo anterior (2026-11-12, F: 45 de 111 meses, código 0)
   resto son meses cuyo θ salió del rango (`l2_input_missing` o `family_skeleton_missing`).
 - **Código 1** si, sin `force`, queda un θ con un archivo inválido dentro del rango que la corrida
   no reescribió (el `from` empezó después de él): el log dice cuál es el primero. Se relanza sin
-  `from`, o con `from` en ese mes.
+  `from`, o con `from` en ese mes. En `path`, `fit` o `spectrum` también sale 1 si `summaries.parquet`
+  tiene un mes inválido en el rango: esa pasada no lo repara, el log pide correr primero el
+  backfill de `summaries`.
 
 **Con el núcleo nuevo cabe en una sola ejecución.** El backfill completo de 110 meses a
 2 vCPU con la imagen 0.19.0 y los valores por defecto (ITSC-378, 2026-10-25) tardó 6 638 s
