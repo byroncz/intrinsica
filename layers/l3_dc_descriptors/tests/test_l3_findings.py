@@ -103,6 +103,18 @@ def test_every_check_type_of_the_catalog_has_a_builder():
         findings.theta_config_drift(
             CTX, UNIT, theta=THETA, months=1, last_month="2017-08"
         ),
+        findings.theta_frontier_regressed(
+            CTX,
+            UNIT,
+            theta=THETA,
+            first_invalid_month="2017-09",
+            invalid_months=2,
+            reason="summaries.parquet: state_version 0.9.0 y la imagen es 1.0.0",
+            frontier=None,
+        ),
+        findings.backfill_summary(
+            CTX, UNIT, processed=1, skipped=1, months=3, first="2017-08", last="2017-10"
+        ),
         findings.summaries_summary(
             CTX,
             UNIT,
@@ -126,6 +138,8 @@ def test_every_check_type_of_the_catalog_has_a_builder():
         "theta_catalog_invalid",
         "theta_behind_frontier",
         "theta_config_drift",
+        "theta_frontier_regressed",
+        "backfill_summary",
         "summaries_summary",
     }
 
@@ -162,3 +176,20 @@ def test_summaries_summary_of_spectrum_carries_the_over_budget_count():
         "over_budget_events"
         not in findings.summaries_summary(CTX, UNIT, **base, unassigned_ticks=0).details
     )
+
+
+def test_the_backfill_findings_have_the_severity_and_status_of_the_catalog():
+    regressed = findings.theta_frontier_regressed(
+        CTX,
+        UNIT,
+        theta=THETA,
+        first_invalid_month="2017-09",
+        invalid_months=2,
+        reason="path.parquet: no se pudo leer",
+        frontier="2017-08",
+    )
+    summary = findings.backfill_summary(
+        CTX, UNIT, processed=1, skipped=1, months=3, first="2017-08", last="2017-10"
+    )
+    assert (regressed.severity, regressed.status) == (Severity.WARNING, Status.FAIL)
+    assert (summary.severity, summary.status) == (Severity.INFO, Status.PASS)
