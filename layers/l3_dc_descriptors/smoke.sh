@@ -2,7 +2,7 @@
 # Prueba de humo de la imagen: arma un lago chico (L1, L2 y un catálogo temporal) con el
 # generador de las pruebas (tests/l3_lake.py: ticks reales y eventos del detector real de
 # L2), corre backfill dentro del contenedor y verifica una fila por evento; vuelve a
-# correr y comprueba que no escribe nada (la frontera); y corre --force --from
+# correr y comprueba que no escribe datos (la frontera) y que solo deja el backfill_summary; y corre --force --from
 # comprobando el mismo content_hash. Uso: smoke.sh <imagen>
 #
 # El lago se genera en el host con `uv run` (el generador es de tests/, que no viaja en la
@@ -32,7 +32,6 @@ check() {
   docker run --rm -v "$data:/data" -v "$here/smoke_check.py:/smoke_check.py:ro" \
     --entrypoint python "$image" /smoke_check.py "$@"
 }
-changed() { find "$data/l3" "$data/dq" -type f -newer "$data/marker" | wc -l; }
 
 # 1. backfill: tres meses, cinco θ, una fila por evento y un hallazgo por unidad.
 cli --mode backfill | tee "$data/run1.log"
@@ -45,13 +44,13 @@ grep -q '"check_type": "summaries_summary"' "$data/run1.log" \
 grep -q '"content_hash"' "$data/run1.log" \
   || { echo "::error::la salida no trae content_hash"; exit 1; }
 
-# 2. segunda corrida: la frontera lo deja todo al día y no se escribe nada.
+# 2. segunda corrida: la frontera lo deja todo al día y no se escriben datos. Solo queda el
+# hallazgo backfill_summary en dq (processed 0, skipped 3); `check idle` lo comprueba.
 sleep 1 && touch "$data/marker"
 cli --mode backfill | tee "$data/run2.log"
 grep -q 'están al día' "$data/run2.log" \
   || { echo "::error::la segunda corrida no dijo que estaba al día"; exit 1; }
-[ "$(changed)" -eq 0 ] \
-  || { echo "::error::la segunda corrida escribió $(changed) archivos"; exit 1; }
+check idle 3
 
 # 3. --force --from: reprocesa dos meses y deja el mismo content_hash.
 cli --mode backfill --force --from 2017-09 | tee "$data/run3.log"
