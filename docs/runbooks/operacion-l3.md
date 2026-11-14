@@ -716,7 +716,8 @@ Qué hacer:
    queda un mes detrás de la de S.
 4. Lanza **`l3-monthly` con `family` = `fit`** (mismo mes, `to` y `force` vacíos):
    la cadena tampoco llegó a `l3-monthly-fit`, y sin este paso la frontera de A
-. Lanza **`l3-backfill-spectrum`**, sin `from` ni `to` (o con `from` = el mes): la cadena tampoco llegó a
+   queda un mes detrás.
+5. Lanza **`l3-backfill-spectrum`**, sin `from` ni `to` (o con `from` = el mes): la cadena tampoco llegó a
    `l3-monthly-spectrum`, y sin este paso la frontera de F queda un mes detrás. No lo lances como
    `l3-monthly` con `family` = `spectrum`: corre en 4 GiB y F pide 32 GiB.
 6. Verifica que no queden `theta_behind_frontier`, de S (`details.family` =
