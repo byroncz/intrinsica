@@ -606,6 +606,7 @@ def test_without_the_knobs_the_defaults_apply(lake, tmp_path, catalog):
         ("L3_META_WORKERS", "ocho"),
         ("L3_FRONTIER_WORKERS", "0"),
         ("L3_FRONTIER_WORKERS", "-4"),
+        ("L3_FRONTIER_WORKERS", "257"),
         ("L3_FRONTIER_WORKERS", "sesenta"),
     ],
 )

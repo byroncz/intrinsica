@@ -1106,3 +1106,16 @@ def test_the_log_says_how_many_readers_the_frontier_used(lake, tmp_path, caplog)
     argv = ["--mode", "backfill", "--series-start", "2017-08"]
     assert main(argv, env) == 0
     assert " con 3 lectores en " in caplog.text
+
+
+def test_an_unreadable_events_footer_is_cached_as_text_and_read_once(tmp_path):
+    """H2/H3 de ITSC-420: se guarda el motivo (un `str`), no la excepción ni su traceback."""
+    broken = tmp_path / "events.parquet"
+    broken.write_bytes(b"no es un parquet")
+    reader = FooterReader()
+    first = reader.event_rows(str(tmp_path), str(broken))
+    assert isinstance(first, str) and first.startswith("no se pudo leer (")
+    assert reader.event_rows(str(tmp_path), str(broken)) is first
+    assert reader.opened == 1
+    missing = reader.event_rows(str(tmp_path), str(tmp_path / "ausente.parquet"))
+    assert isinstance(missing, str) and "falta L2" in missing

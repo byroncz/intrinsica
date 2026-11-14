@@ -28,6 +28,7 @@ from l3_dc_descriptors.context import RunContext, Unit
 from l3_dc_descriptors.frontier import (
     DEFAULT_FRONTIER_WORKERS,
     FRONTIER_WORKERS_ENV,
+    MAX_FRONTIER_WORKERS,
     FooterReader,
     Frontier,
     Listing,
@@ -189,7 +190,9 @@ def _context(
         meta_workers=_count(
             env, "L3_META_WORKERS", minimum=1, maximum=MAX_META_WORKERS
         ),
-        frontier_workers=_count(env, FRONTIER_WORKERS_ENV, minimum=1),
+        frontier_workers=_count(
+            env, FRONTIER_WORKERS_ENV, minimum=1, maximum=MAX_FRONTIER_WORKERS
+        ),
         unit_process=_flag(env, "L3_UNIT_PROCESS", default=True),
         memory_sample_s=_sample_period(env),
         trim_rss_mib=_trim_rss_mib(env),

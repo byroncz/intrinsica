@@ -34,7 +34,7 @@ import re
 import threading
 from array import array
 from collections.abc import Iterable, Mapping
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from dataclasses import dataclass, field
 from decimal import Decimal
@@ -67,6 +67,9 @@ from l3_dc_descriptors.schema import (
 # manda es cuántos viajes a la vez, y 8 lectores medían ≈ 0,7 s por pie y lector (ITSC-420).
 FRONTIER_WORKERS_ENV = "L3_FRONTIER_WORKERS"
 DEFAULT_FRONTIER_WORKERS = 64
+# Tope: `pool.map` encola todas las tareas y cada lector es un hilo; más de esto no acelera (E/S de
+# un viaje) y solo gasta hilos.
+MAX_FRONTIER_WORKERS = 256
 THETA_DIGITS = 8
 # Por familia: su esquema y su `state_version`, lo que hace válido el archivo de la frontera.
 _CONTRACTS = MappingProxyType(
@@ -170,7 +173,10 @@ class FooterReader:
     - con `share_events`, el pie de `events.parquet` de un `(θ, mes)` se lee una sola vez por
       corrida aunque lo pidan la familia y el techo de S. Del pie se guarda solo lo que la
       comprobación usa, las filas por row group (un `array` de enteros de 8 B por row group
-      no vacío), no el pie. El caché vive lo que vive el lector: se libera con él.
+      no vacío), no el pie; si la lectura falló, solo el texto del motivo, nunca la excepción
+      (su traceback ancla los marcos y con ellos el pie). Cada entrada cuesta además su clave
+      (la ruta) y el objeto `array` o `str`, del orden de 200 B. El caché vive lo que vive el
+      lector: se libera con él.
 
     `opened` cuenta los pies que se pidieron al almacenamiento de verdad, también los que
     fallaron. Es seguro desde varios hilos.
@@ -179,7 +185,7 @@ class FooterReader:
     def __init__(self, share_events: bool = True) -> None:
         self._lock = threading.Lock()
         self._roots: dict[str, tuple[pafs.FileSystem, str]] = {}
-        self._rows: dict[str, Future[array]] | None = {} if share_events else None
+        self._rows: dict[str, array | str] | None = {} if share_events else None
         self.opened = 0
 
     def _locate(self, root: str, path: str) -> tuple[pafs.FileSystem, str]:
@@ -206,31 +212,30 @@ class FooterReader:
         except FileNotFoundError:
             raise FramesInputError(f"falta {what}: {path}") from None
 
-    def _read_rows(self, root: str, path: str) -> array:
-        with closing(self.open(root, path, "L2")) as events:
-            return array("q", row_group_sizes(events))
+    def _read_rows(self, root: str, path: str) -> array | str:
+        """Las filas por row group de `path`, o el motivo (texto) de que no se pudo leer."""
+        try:
+            with closing(self.open(root, path, "L2")) as events:
+                return array("q", row_group_sizes(events))
+        except (FramesError, pa.ArrowException, OSError) as exc:
+            return f"no se pudo leer ({exc})"
 
-    def event_rows(self, root: str, path: str) -> array:
-        """Las filas por row group de `events.parquet` en `path`; el pie se lee una vez."""
+    def event_rows(self, root: str, path: str) -> array | str:
+        """Las filas por row group de `events.parquet` en `path`, o el motivo si no se leyó.
+
+        El pie se lee una vez por corrida. No hace falta que dos hilos esperen la misma ruta: las
+        pasadas de la familia y del techo de S corren en serie y, dentro de una, cada `(θ, mes)`
+        se pide una sola vez. Si alguna vez coincidieran, el costo sería una lectura repetida.
+        """
         if self._rows is None:
             return self._read_rows(root, path)
         with self._lock:
-            slot = self._rows.get(path)
-            mine = slot is None
-            if slot is None:
-                slot = self._rows[path] = Future()
-        if mine:
-            try:
-                slot.set_result(self._read_rows(root, path))
-            except (FramesError, pa.ArrowException, OSError) as exc:
-                # Lo que `invalid_reason` convierte en «no se pudo leer»: se guarda para quien
-                # lo pida después, sin traceback, para que el caché no ancle los marcos.
-                slot.set_exception(exc.with_traceback(None))
-            except BaseException as exc:
-                # Un fallo inesperado no deja esperando a los demás hilos: lo ven y sube.
-                slot.set_exception(exc)
-                raise
-        return slot.result()
+            found = self._rows.get(path)
+        if found is None:
+            found = self._read_rows(root, path)
+            with self._lock:
+                self._rows[path] = found
+        return found
 
 
 def invalid_reason(
@@ -257,6 +262,8 @@ def invalid_reason(
         with closing(reader.open(summaries_root, path, "la familia")) as table:
             # Antes de cualquier comprobación, como siempre: si L2 no se lee, eso manda.
             skeleton = reader.event_rows(events_root, events)
+            if isinstance(skeleton, str):
+                return skeleton
             schema = table.schema_arrow
             if not schema.remove_metadata().equals(expected):
                 return "su esquema no es el de la imagen"
