@@ -346,7 +346,7 @@ comprueba al escribir que iguala la suma de `quantity` de sus ticks.
 
 Lo escribe la imagen `l3_dc_descriptors` (`python -m l3_dc_descriptors --mode
 backfill|monthly`, [TRD-L3 §8](TRD/l3.md#8-pipeline-interno-y-modos-de-ejecución)),
-con `--family summaries` (la predeterminada), `--family path` (la familia T, ITSC-394), `--family fit` (la familia A, ITSC-400) o `--family spectrum` (la familia F, ITSC-413; el motor es de ITSC-412). La cadena mensual de F es de la hija siguiente de ITSC-410. Lee `L3_LANDING_ROOT` (L1) y
+con `--family summaries` (la predeterminada), `--family path` (la familia T, ITSC-394), `--family fit` (la familia A, ITSC-400) o `--family spectrum` (la familia F, ITSC-413; el motor es de ITSC-412). La pasada mensual de F es el job `l3-monthly-spectrum` (32 GiB y 8 vCPU, último eslabón de la cadena mensual, ITSC-415). Lee `L3_LANDING_ROOT` (L1) y
 `L3_EVENTS_ROOT` (L2), escribe bajo `L3_SUMMARIES_ROOT` y deja sus hallazgos en
 `L3_DQ_ROOT`. El catálogo de θ no es de L3: `L3_THETAS_URI` (o `--thetas-uri`) apunta al
 mismo objeto `l2/thetas.yaml` que usa L2, y sin él la corrida termina con código 2.
@@ -704,7 +704,7 @@ cada ubicación no nula está en `(0, 1)`.
   `summaries`, corre la unidad y escribe el archivo; `budget_ticks` es el presupuesto con que
   corrió esa unidad. Cada evento sobre el presupuesto deja su fila nula y un hallazgo
   `event_over_budget` (TRD-L3 §9.3), sin fallar la unidad. Su frontera por θ es la de «Quién lo
-  escribe y hasta dónde llegó». La cadena mensual de F es de la hija siguiente de la Épica ITSC-410.
+  escribe y hasta dónde llegó». La pasada mensual de F es el job `l3-monthly-spectrum` (32 GiB y 8 vCPU, último eslabón de la cadena mensual, ITSC-415).
 - **Leer**: se une con `summaries.parquet` por `(theta, confirm_agg_trade_id)`; la unión
   es 1:1 y también por posición.
 

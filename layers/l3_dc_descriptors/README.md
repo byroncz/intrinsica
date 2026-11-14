@@ -80,8 +80,8 @@ retornos de sus fases hasta cerrarlo (`f32`, 4 B cada uno), con un tope de 130 M
 trabajo transitorio de la FFT al cerrar (16 B × (2n + 4m), ver ADR-L3-19). `--family spectrum` (ITSC-413)
 corre la unidad con esta cifra: `unit_timing` lleva `inflight_ticks_max` (el máximo de retornos que el motor
 guardó a la vez), `budget_ticks` y `cpu_s`, y cada evento sobre el presupuesto de 130 M de ticks deja su fila
-nula y un `event_over_budget`. F corre en un job de 32 GiB y 8 vCPU (`l3-backfill-spectrum`, con `L3_INFLIGHT_BYTES` de 4 GiB; la cota de pico del job es 24 576 MiB); la cadena mensual es de la
-hija siguiente de ITSC-410. Desde ITSC-417 `spectrum.parquet` tiene 30 columnas de datos (`state_version`
+nula y un `event_over_budget`. F corre en un job de 32 GiB y 8 vCPU (`l3-backfill-spectrum`, con `L3_INFLIGHT_BYTES` de 4 GiB; la cota de pico del job es 24 576 MiB); la pasada mensual de F es el job
+`l3-monthly-spectrum` (32 GiB y 8 vCPU, último eslabón de la cadena mensual, ITSC-415). Desde ITSC-417 `spectrum.parquet` tiene 30 columnas de datos (`state_version`
 `1.1.0`; con el presupuesto de 130 M de ITSC-418, `1.2.0`): a las 28 de energía por banda y nivel se suman `c_energy_loc` y `os_energy_loc`, la ubicación en el
 tiempo de la energía total de cada fase (`Σ t_k·r_k² / Σ r_k²`, en (0, 1); [TRD-L3
 §7.2.3](../../docs/TRD/l3.md#723-salida--spectrumparquet-familia-f)). Un `spectrum.parquet` `1.0.0` o `1.1.0` queda detrás de
