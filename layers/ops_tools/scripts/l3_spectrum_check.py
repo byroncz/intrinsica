@@ -2,8 +2,8 @@
 
 Abre el `spectrum.parquet` y el `summaries.parquet` de L3 y el `events.parquet` de L2 de una sola
 partición (un θ y un mes) y deja un CSV con:
-  - por cada una de las columnas de datos de F (28 con `bands` = 7): filas, nulos, mínimo,
-    mediana y máximo;
+  - por cada una de las columnas de datos de F (las que trae el esquema del archivo: 30 con
+    `bands` = 7 en `state_version` 1.1.0 y 1.2.0): filas, nulos, mínimo, mediana y máximo;
   - por cada invariante: cuántas filas lo violan (0 es lo esperado);
   - por cada cifra informativa: su conteo (no suma a las violaciones).
 
@@ -13,11 +13,13 @@ es `fourier` (bandas de período) o `haar` (niveles):
   - esqueleto: filas de `spectrum` = filas de `summaries`; unión 1:1 por `(theta,
     confirm_agg_trade_id)` con `summaries` y con `events` (sin huérfanas ni claves repetidas);
     mismos row groups y mismas filas por row group según los pies de `spectrum` y `summaries`;
-  - `fracciones_en_0_1`: cada fracción no nula está en [0, 1];
+  - `fracciones_en_0_1`: cada fracción no nula está en [0, 1], también `c_energy_loc` y
+    `os_energy_loc`, la ubicación de la energía total de cada fase;
   - `suma_bandas_<fase>_<registro>`: las fracciones no nulas de una fase y un registro suman 1
-    con tolerancia 1e-9 (si hay alguna no nula);
+    con tolerancia 1e-9 (si hay alguna no nula); `*_energy_loc` no entra: no es una fracción
+    que se reparta;
   - presupuesto: `nulos_presupuesto` cuenta los eventos con `extreme_agg_trade_id −
-    reference_agg_trade_id > budget_ticks` que no traen las 28 columnas nulas. Un evento sobre el
+    reference_agg_trade_id > budget_ticks` que no traen todas las columnas de datos nulas. Un evento sobre el
     presupuesto no se calcula (decidido con la fila de L2, antes de leer un tick);
   - regla de nulos, solo en los eventos que no superan el presupuesto y con lo que `summaries`
     permite decidir (`n_min` y `bands` salen de los metadatos):
@@ -28,6 +30,8 @@ es `fourier` (bandas de período) o `haar` (niveles):
       · `nulos_<fase>_<registro>_nulo_donde_valor`: con `ticks ≥ n_min`, un registro con algunas
         columnas con bins nulas y otras no. Con bins, o están todas o ninguna: ninguna es la serie
         sin energía (abajo);
+      · `nulos_<fase>_energy_loc_valor_donde_nulo`: `<fase>_energy_loc` no nula con
+        `ticks < n_min`. Con `ticks ≥ n_min` es nula solo si Σ r² = 0 (abajo);
   - `doubles_finitos`: ni `±inf` ni `NaN` en las columnas de datos.
 
 Lo que la sonda no puede decidir porque no ve los ticks se cuenta aparte, como información, y no
@@ -35,6 +39,8 @@ suma a `violaciones`:
   - `energia_cero_<fase>_<registro>`: con `ticks ≥ n_min`, el registro entero nulo: la serie (o la
     cola de Haar) no tiene energía porque todos sus retornos son iguales (quinta causa de nulo del
     contrato);
+  - `energia_total_cero_<fase>`: con `ticks ≥ n_min`, `<fase>_energy_loc` nula: todos los retornos
+    de la fase son cero (Σ r² = 0), causa de nulo que `summaries` no deja decidir;
   - `fase_corta_c` y `fase_corta_os`: fases con `ticks < n_min`, que explican sus nulos;
   - `sobre_presupuesto`: eventos sobre `budget_ticks` (el `over_budget` de la última línea).
 
@@ -93,6 +99,10 @@ PHASES = {"c": "s.c_ticks", "os": "s.os_ticks"}
 # (registro, unidad) de F: Fourier por banda de período y Haar por nivel. El orden de las columnas
 # del archivo es registro, fase, banda.
 REGISTERS = (("fourier", "band"), ("haar", "level"))
+# La ubicación en el tiempo de la energía total de cada fase (desde `state_version` 1.1.0): una
+# columna por fase, después de los registros. Si el archivo no la trae (1.0.0), no se verifica.
+LOC_COLUMNS = {"c": "c_energy_loc", "os": "os_energy_loc"}
+KEYS = ("theta", "confirm_agg_trade_id")
 META_KEYS = ("state_version", "n_min", "bands", "window", "budget_ticks")
 CSV_HEADER = [
     "seccion",
@@ -204,14 +214,37 @@ def group(phase: str, register: str, bands: int) -> list[str]:
     return [f"{phase}_{register}_{unit}_{b}" for b in range(1, bands + 1)]
 
 
-def data_columns(bands: int) -> list[str]:
+def data_columns(bands: int, with_loc: bool = True) -> list[str]:
     """Las columnas de datos de F en el orden del archivo."""
-    return [
+    columns = [
         column
         for register, _ in REGISTERS
         for phase in PHASES
         for column in group(phase, register, bands)
     ]
+    return [*columns, *LOC_COLUMNS.values()] if with_loc else columns
+
+
+def schema_columns(names: list[str], bands: int) -> list[str]:
+    """Las columnas de datos que el esquema trae; `ValueError` si faltan o sobran.
+
+    El número no es una constante de la sonda: sale del esquema, con las de la ubicación de la
+    energía como opcionales. Una columna que la sonda no conoce no se verificaría: falla.
+    """
+    for with_loc in (True, False):
+        expected = data_columns(bands, with_loc)
+        if set(names) - set(KEYS) == set(expected):
+            absent = [k for k in KEYS if k not in names]
+            if absent:
+                raise ValueError(f"a spectrum.parquet le faltan columnas: {', '.join(absent)}")
+            return expected
+    expected = set(data_columns(bands))
+    absent = sorted(expected - set(names))
+    extra = sorted(set(names) - expected - set(KEYS))
+    raise ValueError(
+        "el esquema de spectrum.parquet no es el esperado con "
+        f"bands={bands}: faltan {absent or '-'}; sobran {extra or '-'}"
+    )
 
 
 def stats_query(columns: list[str]) -> str:
@@ -242,7 +275,8 @@ def join_query(params: dict) -> str:
     bands, n_min = params["bands"], params["n_min"]
     over = f"(e.extreme_agg_trade_id - e.reference_agg_trade_id) > {params['budget_ticks']}"
     within = f"NOT ({over})"
-    every = [c for r, _ in REGISTERS for p in PHASES for c in group(p, r, bands)]
+    every = params["columns"]
+    loc = {p: c for p, c in LOC_COLUMNS.items() if c in every}
     items = {
         "sin_summaries": "count(*) FILTER (WHERE s.confirm_agg_trade_id IS NULL)",
         "sin_events": "count(*) FILTER (WHERE e.confirm_agg_trade_id IS NULL)",
@@ -286,6 +320,15 @@ def join_query(params: dict) -> str:
             informative[f"energia_cero_{phase}_{register}"] = v(
                 f"{within} AND {ticks} >= {n_min} AND NOT {some_value}"
             )
+    for phase, column in loc.items():
+        ticks = PHASES[phase]
+        # Con `ticks < n_min` la ubicación es nula; con `ticks ≥ n_min` solo es nula con Σ r² = 0.
+        items[f"nulos_{phase}_energy_loc_valor_donde_nulo"] = v(
+            f"{within} AND f.{column} IS NOT NULL AND {ticks} < {n_min}"
+        )
+        informative[f"energia_total_cero_{phase}"] = v(
+            f"{within} AND {ticks} >= {n_min} AND f.{column} IS NULL"
+        )
     for phase, ticks in PHASES.items():
         informative[f"fase_corta_{phase}"] = v(f"{within} AND {ticks} < {n_min}")
     items.update({f"info_{name}": expr for name, expr in informative.items()})
@@ -334,7 +377,7 @@ def measure(
     summaries_groups: list[int],
 ) -> dict:
     """Todas las cuentas de la partición; ninguna fila sale de DuckDB."""
-    columns = data_columns(params["bands"])
+    columns = params["columns"]
     stats = as_dict(con.execute(stats_query(columns)))
     joined = as_dict(con.execute(join_query(params)))
     spectrum_rows, spectrum_dups = key_counts(con, "spectrum")
@@ -483,19 +526,14 @@ def run(parser: argparse.ArgumentParser, ns: argparse.Namespace) -> int:
         params = parse_meta(spectrum_meta)
     except ValueError as exc:
         return fail(str(exc), version)
-    absent = [
-        c
-        for c in ["theta", "confirm_agg_trade_id", *data_columns(params["bands"])]
-        if c not in datasets["spectrum"].schema.names
-    ]
-    if absent:
-        return fail(
-            f"a spectrum.parquet le faltan columnas: {', '.join(absent)}", version
-        )
+    try:
+        params["columns"] = schema_columns(datasets["spectrum"].schema.names, params["bands"])
+    except ValueError as exc:
+        return fail(str(exc), version)
     log(
         f"spectrum check: state_version={params['state_version']} n_min={params['n_min']} "
         f"bands={params['bands']} window={params['window']} "
-        f"budget_ticks={params['budget_ticks']}"
+        f"budget_ticks={params['budget_ticks']} columnas_de_datos={len(params['columns'])}"
     )
 
     con = duckdb.connect()

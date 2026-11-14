@@ -38,13 +38,16 @@ BANDS = 7
 REGISTERS = ("fourier", "haar")
 PHASES = ("c", "os")
 UNIT = {"fourier": "band", "haar": "level"}
-# Las 28 columnas de datos de F en el orden del archivo (TRD-L3 §7.2.3).
-COLUMNS = [
+# Las 30 columnas de datos de F en el orden del archivo (TRD-L3 §7.2.3): los registros por banda
+# o nivel y, al final, la ubicación en el tiempo de la energía total de cada fase.
+BAND_COLUMNS = [
     f"{phase}_{register}_{UNIT[register]}_{b}"
     for register in REGISTERS
     for phase in PHASES
     for b in range(1, BANDS + 1)
 ]
+LOC = [f"{phase}_energy_loc" for phase in PHASES]
+COLUMNS = [*BAND_COLUMNS, *LOC]
 INVARIANTS = [
     "filas_spectrum_igual_summaries",
     "union_1a1",
@@ -59,11 +62,13 @@ INVARIANTS = [
         for p in PHASES
         for kind in ("valor_donde_nulo", "nulo_donde_valor")
     ),
+    *(f"nulos_{p}_energy_loc_valor_donde_nulo" for p in PHASES),
     "doubles_finitos",
 ]
 INFORMATIVE = [
     "sobre_presupuesto",
     *(f"energia_cero_{p}_{r}" for r in REGISTERS for p in PHASES),
+    *(f"energia_total_cero_{p}" for p in PHASES),
     *(f"fase_corta_{p}" for p in PHASES),
 ]
 LAST_LINE = re.compile(
@@ -243,7 +248,7 @@ def test_csv_coincide_con_el_archivo_y_cero_violaciones(check, lake, tmp_path, c
 
     assert line["mes"] == MONTH
     assert line["theta"] == THETA
-    assert line["version"] == "1.0.0"
+    assert line["version"] == "1.2.0"
     assert line["filas"] == str(table.num_rows) and table.num_rows > 5
     assert line["violaciones"] == "0"
     assert line["over"] == "0"
@@ -304,9 +309,15 @@ def test_las_cifras_informativas_coinciden_con_un_oraculo_en_python(
 ):
     got = informative(run_ok(check, lake, tmp_path, capsys, 0))
     expected = dict.fromkeys(INFORMATIVE, 0)
+    budget = int(
+        pq.read_metadata(file(lake, "spectrum.parquet")).metadata[b"budget_ticks"]
+    )
     for sp, s, e in joined(lake):
-        expected["sobre_presupuesto"] += span(e) > 20_000_000
+        expected["sobre_presupuesto"] += span(e) > budget
         for phase in PHASES:
+            expected[f"energia_total_cero_{phase}"] += (
+                ticks(s, phase) >= N_MIN and sp[f"{phase}_energy_loc"] is None
+            )
             expected[f"fase_corta_{phase}"] += ticks(s, phase) < N_MIN
             for register in REGISTERS:
                 expected[f"energia_cero_{phase}_{register}"] += ticks(
@@ -536,10 +547,100 @@ def test_n_min_sale_del_pie_del_archivo(check, lake, tmp_path, capsys):
 
 def test_bands_sale_del_pie_del_archivo(check, lake, tmp_path, capsys):
     spectrum = file(lake, "spectrum.parquet")
-    rewrite(spectrum, pq.read_table(spectrum), bands="6")
+    seventh = [c for c in BAND_COLUMNS if c.endswith("_7")]
+    rewrite(spectrum, pq.read_table(spectrum).drop_columns(seventh), bands="6")
     rows = run_ok(check, lake, tmp_path, capsys, 0)
-    assert len([c for (s, c) in rows if s == "columna"]) == 4 * 6
+    assert len([c for (s, c) in rows if s == "columna"]) == 4 * 6 + 2
     assert ("columna", "c_fourier_band_7") not in rows
+    assert ("columna", "c_energy_loc") in rows
+
+
+def test_bands_del_pie_que_no_cuadra_con_el_esquema_es_fallo(
+    check, lake, tmp_path, capsys
+):
+    """Con `bands = 6` en el pie y 7 columnas por grupo, sobran columnas que nadie verificaría."""
+    spectrum = file(lake, "spectrum.parquet")
+    rewrite(spectrum, pq.read_table(spectrum), bands="6")
+    assert check.main(argv(lake, tmp_path / "salida.csv")) == 1
+    text = capsys.readouterr().out
+    assert "c_fourier_band_7" in text and "sobran" in text
+    assert text.strip().splitlines()[-1].endswith("veredicto=fallo")
+
+
+def test_una_columna_desconocida_es_fallo(check, lake, tmp_path, capsys):
+    spectrum = file(lake, "spectrum.parquet")
+    table = pq.read_table(spectrum)
+    table = table.append_column("c_algo_nuevo", pa.nulls(table.num_rows, pa.float64()))
+    rewrite(spectrum, table)
+    assert check.main(argv(lake, tmp_path / "salida.csv")) == 1
+    assert "c_algo_nuevo" in capsys.readouterr().out
+
+
+def test_un_archivo_sin_las_columnas_de_ubicacion_se_verifica_sin_ellas(
+    check, lake, tmp_path, capsys
+):
+    """El número de columnas sale del esquema: un archivo de 28 columnas (1.0.0) sigue valiendo."""
+    spectrum = file(lake, "spectrum.parquet")
+    rewrite(spectrum, pq.read_table(spectrum).drop_columns(LOC), state_version="1.0.0")
+    rows = run_ok(check, lake, tmp_path, capsys, 0)
+    assert [c for (s, c) in rows if s == "columna"] == BAND_COLUMNS
+    assert not any("energy_loc" in c for _, c in rows)
+
+
+def test_la_ubicacion_no_entra_en_la_suma_de_bandas(check, lake, tmp_path, capsys):
+    """`*_energy_loc` es un valor en [0, 1] pero no una fracción que se reparta."""
+    index = first(lake, lambda sp, s, e: sp["c_energy_loc"] is not None)
+    put(lake, index, c_energy_loc=0.5)
+    assert set(violations(run_ok(check, lake, tmp_path, capsys, 0)).values()) == {0}
+
+
+@pytest.mark.parametrize("value", [1.0000001, -0.1])
+@pytest.mark.parametrize("phase", PHASES)
+def test_una_ubicacion_fuera_de_0_1_da_violacion(
+    check, lake, tmp_path, capsys, phase, value
+):
+    index = first(lake, lambda sp, s, e: sp[f"{phase}_energy_loc"] is not None)
+    put(lake, index, **{f"{phase}_energy_loc": value})
+    got = violations(run_ok(check, lake, tmp_path, capsys, 1))
+    assert got["fracciones_en_0_1"] == 1
+    assert sum(got.values()) == 1
+
+
+@pytest.mark.parametrize("phase", PHASES)
+def test_una_ubicacion_en_una_fase_corta_da_violacion(
+    check, lake, tmp_path, capsys, phase
+):
+    index = first(
+        lake,
+        lambda sp, s, e: (
+            ticks(s, phase) < N_MIN
+            and sp[f"{phase}_energy_loc"] is None
+            and span(e) <= 130_000_000
+        ),
+    )
+    put(lake, index, **{f"{phase}_energy_loc": 0.5})
+    got = violations(run_ok(check, lake, tmp_path, capsys, 1))
+    assert got[f"nulos_{phase}_energy_loc_valor_donde_nulo"] == 1
+    assert sum(got.values()) == 1
+
+
+@pytest.mark.parametrize("phase", PHASES)
+def test_una_ubicacion_nula_con_la_fase_larga_es_informativa(
+    check, lake, tmp_path, capsys, phase
+):
+    """Con `ticks ≥ n_min` la ubicación solo es nula con Σ r² = 0, que la sonda no ve."""
+    index = first(
+        lake,
+        lambda sp, s, e: (
+            ticks(s, phase) >= N_MIN and sp[f"{phase}_energy_loc"] is not None
+        ),
+    )
+    base = informative(run_ok(check, lake, tmp_path, capsys, 0))
+    put(lake, index, **{f"{phase}_energy_loc": None})
+    rows = run_ok(check, lake, tmp_path, capsys, 0)
+    assert set(violations(rows).values()) == {0}
+    got = informative(rows)
+    assert got[f"energia_total_cero_{phase}"] == base[f"energia_total_cero_{phase}"] + 1
 
 
 @pytest.mark.parametrize("key", ["state_version", "n_min", "bands", "budget_ticks"])
