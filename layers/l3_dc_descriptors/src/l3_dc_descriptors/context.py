@@ -69,6 +69,9 @@ class RunContext:
     # los escritores, pie de L1 y publicación; ITSC-369). `None` es el valor por defecto de
     # `summarize`.
     meta_workers: int | None = None
+    # `L3_FRONTIER_WORKERS`: lectores de la verificación de la frontera (solo pies, E/S; ITSC-420).
+    # `None` es `frontier.DEFAULT_FRONTIER_WORKERS`.
+    frontier_workers: int | None = None
     # `L3_LOT_EVENTS`: eventos que cabe en un tramo, la parte de un row group de L1 que se empuja
     # al motor (ITSC-373). `None` es el valor por defecto de `summarize` y 0 desactiva el corte.
     lot_events: int | None = None

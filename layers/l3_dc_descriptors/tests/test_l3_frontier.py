@@ -3,13 +3,16 @@
 from decimal import Decimal
 from pathlib import Path
 
+import dc_frames.lake as lake_module
 import pyarrow as pa
+import pyarrow.fs as pafs
 import pyarrow.parquet as pq
 import pytest
 from cli_support import emitted, env_for, write_catalog
 from l3_dc_descriptors import frontier, summarize_month
 from l3_dc_descriptors.cli import main
 from l3_dc_descriptors.frontier import (
+    FooterReader,
     frontiers,
     invalid_reason,
     l2_missing,
@@ -753,7 +756,7 @@ def incident(tmp_path, family):
     return lake
 
 
-def family_scan(lake, family: str):
+def family_scan(lake, family: str, workers: int | None = None, reader=None):
     summaries = list_summaries(str(lake.l3), KEY)
     listed = list_summaries(str(lake.l3), KEY, family)
     return scan_frontiers(
@@ -765,6 +768,8 @@ def family_scan(lake, family: str):
         KEY,
         family,
         summaries,
+        workers,
+        reader,
     )
 
 
@@ -912,14 +917,192 @@ def test_the_months_after_every_theta_left_the_range_are_not_counted_as_up_to_da
 def test_the_log_reports_how_many_footers_the_frontier_read(
     incident, tmp_path, family, caplog
 ):
-    """El costo medido de ITSC-419: un archivo por mes y θ (el doble fuera de S), dos pies cada uno."""
+    """Un archivo por mes y θ (el doble fuera de S) y los pies que se pidieron de verdad (ITSC-420).
+
+    En S son dos por archivo (el suyo y el de `events.parquet`); fuera de S, el de
+    `events.parquet` de un mes se lee una vez aunque lo pidan la familia y el techo de S: el
+    de la familia, el de `summaries.parquet` y el de `events.parquet`, tres por (θ, mes).
+    """
     caplog.set_level("INFO")
     run_family(incident, tmp_path, family, "--mode", "backfill")
-    files = (
-        len(incident.months)
-        * len(INCIDENT_THETAS)
-        * (1 if family == "summaries" else 2)
+    cells = len(incident.months) * len(INCIDENT_THETAS)
+    files, footers = (
+        (cells, 2 * cells) if family == "summaries" else (2 * cells, 3 * cells)
     )
-    assert f"fronteras: {files} archivos verificados ({2 * files} pies) de 2 θ en " in (
-        caplog.text
+    assert (
+        f"fronteras: {files} archivos verificados ({footers} pies leídos) de 2 θ "
+        f"con 64 lectores en " in caplog.text
     )
+
+
+# El costo de la verificación (ITSC-420): menos viajes y más lectores, el mismo resultado.
+
+
+class CountingFs(pafs.FileSystemHandler):
+    """Un sistema de archivos local que cuenta los `get_file_info` por ruta y las aperturas."""
+
+    def __init__(self) -> None:
+        self.inner = pafs.LocalFileSystem()
+        self.exists_trips = 0
+        self.opened: list[str] = []
+
+    def get_type_name(self):
+        return "counting"
+
+    def normalize_path(self, path):
+        return path
+
+    def get_file_info(self, paths):
+        self.exists_trips += 1
+        return self.inner.get_file_info(list(paths))
+
+    def get_file_info_selector(self, selector):
+        return self.inner.get_file_info(selector)
+
+    def open_input_file(self, path):
+        self.opened.append(path)
+        return self.inner.open_input_file(path)
+
+    def open_input_stream(self, path):
+        return self.inner.open_input_stream(path)
+
+    def __eq__(self, other):
+        return self is other
+
+    def __ne__(self, other):
+        return self is not other
+
+    def _read_only(self, *args, **kwargs):
+        raise NotImplementedError
+
+    create_dir = delete_dir = delete_dir_contents = delete_root_dir_contents = (
+        _read_only
+    )
+    delete_file = move = copy_file = open_output_stream = open_append_stream = (
+        _read_only
+    )
+
+
+@pytest.fixture
+def counting(monkeypatch):
+    """El sistema de archivos de la verificación, contado, y las raíces que se resolvieron."""
+    handler, resolved = CountingFs(), []
+    real = frontier.resolve_fs
+
+    def resolve(root):
+        resolved.append(str(root))
+        return pafs.PyFileSystem(handler), real(root)[1]
+
+    monkeypatch.setattr(frontier, "resolve_fs", resolve)
+    return handler, resolved
+
+
+def test_the_events_footer_is_opened_once_per_theta_and_month(incident, family):
+    """También fuera de S, donde lo piden la familia y el techo de S (cuenta las aperturas)."""
+    reader = FooterReader(share_events=family != "summaries")
+    handler = CountingFs()
+    cells = len(incident.months) * len(INCIDENT_THETAS)
+    real = frontier.resolve_fs
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(
+            frontier,
+            "resolve_fs",
+            lambda root: (pafs.PyFileSystem(handler), real(root)[1]),
+        )
+        family_scan(incident, family, reader=reader)
+    events = [p for p in handler.opened if p.endswith("events.parquet")]
+    assert len(events) == cells == len(set(events))
+    # Fuera de S: el archivo de la familia, el de summaries y el de events, una vez cada uno.
+    assert (
+        reader.opened
+        == len(handler.opened)
+        == cells * (2 if family == "summaries" else 3)
+    )
+
+
+def test_without_sharing_a_family_reads_the_events_footer_twice(incident, family):
+    """El caché es lo que evita la segunda lectura: sin él, la familia y el techo la repiten."""
+    if family == "summaries":
+        pytest.skip("S no tiene techo aparte: un solo recorrido")
+    reader = FooterReader(share_events=False)
+    family_scan(incident, family, reader=reader)
+    cells = len(incident.months) * len(INCIDENT_THETAS)
+    assert reader.opened == 4 * cells
+
+
+def test_the_footers_are_read_without_the_existence_trip_and_with_one_filesystem_per_root(
+    incident, family, counting
+):
+    handler, resolved = counting
+    summaries = list_summaries(str(incident.l3), KEY)
+    listed = list_summaries(str(incident.l3), KEY, family)
+    resolved.clear()
+    scan_frontiers(
+        INCIDENT_THETAS,
+        listed,
+        START,
+        str(incident.l3),
+        str(incident.l2),
+        KEY,
+        family,
+        summaries,
+    )
+    assert handler.exists_trips == 0
+    assert sorted(resolved) == sorted([str(incident.l3), str(incident.l2)])
+
+
+def test_the_old_open_path_would_pay_the_existence_trip(incident, counting):
+    """La razón de `FooterReader`: `open_parquet` hace un `get_file_info` por apertura."""
+    handler, _ = counting
+    month = incident.months[0]
+    path = str(file_of(incident.l3, SMALL, month, "summaries.parquet"))
+    # `open_parquet` vive en dc_frames y resuelve con su propio `resolve_fs`.
+    with pytest.MonkeyPatch.context() as patch:
+        real = lake_module.resolve_fs
+        patch.setattr(
+            lake_module,
+            "resolve_fs",
+            lambda root: (pafs.PyFileSystem(handler), real(root)[1]),
+        )
+        lake_module.open_parquet(path, "la familia").close()
+    assert handler.exists_trips == 1
+
+
+def test_a_file_that_vanishes_between_the_listing_and_the_reading_is_invalid(lake):
+    listed = list_summaries(str(lake.l3), KEY)
+    file_of(lake.l3, SMALL, M3, "summaries.parquet").unlink()
+    found = scan_frontiers([SMALL], listed, START, str(lake.l3), str(lake.l2), KEY)
+    assert found[SMALL].reached == ordinal(M2)
+    assert "no se pudo leer" in found[SMALL].invalid[ordinal(M3)]
+    assert "falta la familia" in found[SMALL].invalid[ordinal(M3)]
+
+
+def test_the_result_does_not_depend_on_the_number_of_readers(incident, family):
+    def outcome(workers: int):
+        found = family_scan(incident, family, workers)
+        return {
+            theta: (f.reached, dict(f.invalid), dict(f.ceiling_invalid), f.checked)
+            for theta, f in found.items()
+        }
+
+    one = outcome(1)
+    assert one[SMALL][0] is None and one[SMALL][1]
+    assert outcome(8) == one
+    assert outcome(64) == one
+
+
+def test_a_scan_needs_at_least_one_reader(lake):
+    listed = list_summaries(str(lake.l3), KEY)
+    with pytest.raises(ValueError, match="workers"):
+        scan_frontiers(
+            [SMALL], listed, START, str(lake.l3), str(lake.l2), KEY, workers=0
+        )
+
+
+def test_the_log_says_how_many_readers_the_frontier_used(lake, tmp_path, caplog):
+    caplog.set_level("INFO")
+    catalog = write_catalog(tmp_path / "thetas.yaml", lake.thetas)
+    env = env_for(lake, tmp_path, catalog, L3_FRONTIER_WORKERS="3")
+    argv = ["--mode", "backfill", "--series-start", "2017-08"]
+    assert main(argv, env) == 0
+    assert " con 3 lectores en " in caplog.text

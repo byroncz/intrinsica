@@ -108,8 +108,9 @@ relanza los mismos inputs.
 
    Deben existir `l3-backfill`, `l3-backfill-spectrum`, `l3-monthly`, `l3-monthly-path` y `l3-monthly-fit`.
    `l3-backfill-spectrum` lleva `args` `--mode backfill --family spectrum`, `memory: 32Gi`, `cpu: '8'`, `L3_INFLIGHT_BYTES` = `4294967296` y `timeoutSeconds: 43200` (ITSC-413 e ITSC-418; `gcloud run jobs describe l3-backfill-spectrum`).
-   `l3-monthly-path` lleva `args` `--mode monthly --family path` y los mismos recursos que
-   `l3-monthly` (ITSC-396; compruébalo con `gcloud run jobs describe l3-monthly-path`).
+   `l3-monthly-path` lleva `args` `--mode monthly --family path`, los mismos recursos que
+   `l3-monthly` y `timeoutSeconds: 5400` (ITSC-396 e ITSC-420; compruébalo con
+   `gcloud run jobs describe l3-monthly-path`). `l3-monthly` lleva `timeoutSeconds: 3600` (ITSC-420).
    `l3-monthly-fit` lleva `args` `--mode monthly --family fit`, los mismos recursos salvo el
    timeout, `timeoutSeconds: 7500` (ITSC-402; `gcloud run jobs describe l3-monthly-fit`).
    `l3-backfill` tiene `timeoutSeconds: 43200` (ITSC-402; antes 10800, y antes de ITSC-352,
@@ -117,7 +118,7 @@ relanza los mismos inputs.
    antes `'4'`). Las raíces
    (`L3_LANDING_ROOT`, `L3_EVENTS_ROOT`, `L3_SUMMARIES_ROOT`, `L3_DQ_ROOT`),
    `L3_SERIES_START` y `L3_THETAS_URI` van en `env`; `L3_THREADS`, `L3_READERS`, `L3_INFLIGHT`,
-   `L3_WRITERS`, `L3_ENGINE_THREADS`, `L3_META_WORKERS`, `L3_INFLIGHT_BYTES`, `L3_LOT_EVENTS`, `L3_TRIM_RSS_MIB`, `L3_TRIM_MIN_S` y `L3_UNIT_PROCESS` son opcionales (ver "Hilos y topes de la unidad" y "Memoria acotada").
+   `L3_WRITERS`, `L3_ENGINE_THREADS`, `L3_META_WORKERS`, `L3_FRONTIER_WORKERS`, `L3_INFLIGHT_BYTES`, `L3_LOT_EVENTS`, `L3_TRIM_RSS_MIB`, `L3_TRIM_MIN_S` y `L3_UNIT_PROCESS` son opcionales (ver "Hilos y topes de la unidad" y "Memoria acotada").
 2. **Imagen `l3_dc_descriptors`** de `layers/l3_dc_descriptors/VERSION`. El stack
    `l3` deriva el tag de ese archivo: sin `apply` posterior al merge, el job
    sigue con la imagen vieja.
@@ -173,9 +174,15 @@ con un archivo inválido (otra `state_version`, otro esquema, ilegible) en el me
 era el último válido y una corrida de un solo mes en medio de la serie hacía que el backfill
 saltara en silencio todo lo anterior (2026-11-12, F: 45 de 111 meses, código 0). Para eso, ahora:
 
-- **Al empezar**, el log dice `fronteras: N archivos verificados (… pies) de … θ en … s`: es el costo
-  de verificar todos los meses (solo pies). Con 111 meses y 50 θ, una familia distinta de S lee
-  22 200 pies y S, 11 100. Si ese tiempo molesta en la nube, se decide con esa cifra.
+- **Al empezar**, el log dice `fronteras: N archivos verificados (P pies leídos) de … θ con L lectores en … s`: es el costo
+  de verificar todos los meses (solo pies). `N` son los archivos de la serie (con 111 meses y 50 θ,
+  5 550 en S y 11 100 en una familia distinta de S, que verifica también el techo de S) y `P` los pies
+  que se pidieron de verdad: el de `events.parquet` de un mes se lee una vez aunque lo pidan la familia
+  y el techo de S, así que en una familia distinta de S son 16 650 y no 22 200 (3 por θ y mes), y en S
+  11 100. La verificación midió **1 945,8 s** con 8 lectores (imagen 0.25.1, 2 vCPU, familia `path`;
+  ITSC-420) y desde ITSC-420 corre con `L3_FRONTIER_WORKERS` lectores, 64 por defecto; la meta del
+  arquitecto es **menos de 300 s** en ese caso, y se mide en la nube, no en CI. Si pasa de 300 s, decide
+  el arquitecto con esa cifra (los timeouts mensuales de «Timeouts» ya cubren el costo medido).
 - **Por cada θ cuya frontera retrocedió** por archivos inválidos hay un hallazgo
   `theta_frontier_regressed` (warning, uno por θ): `first_invalid_month`, `invalid_months` y el
   `reason` del primero. Dice desde dónde se va a reescribir y por qué.
@@ -449,11 +456,26 @@ estimadas (por 1,16). ITSC-378 las reemplazó por el backfill completo de 110 me
 
 | Job | Desplegado hasta el apply de ITSC-352 | Definitivo (ITSC-352) | Vigente con ITSC-402 | Cuenta (medida) |
 | --- | --- | --- | --- | --- |
-| `l3-monthly` | 10 800 s | 1 200 s | **1 200 s** | 6 × 183,7 = 1 102 s: 6,5 × |
-| `l3-monthly-path` | (no existía) | (los de `l3-monthly`) | **1 200 s** | los de `l3-monthly` |
+| `l3-monthly` | 10 800 s | 1 200 s | **3 600 s** (ITSC-420; 1 200 s hasta ITSC-402) | verificación + 6 × 183,7 = 1 946 + 1 102 = 3 048 s: 1,18 × (1,85 × la verificación sola) |
+| `l3-monthly-path` | (no existía) | (los de `l3-monthly`) | **5 400 s** (ITSC-420; 1 200 s hasta ITSC-402) | verificación + 6 × 183,7 = 3 048 s (S; T tarda un 11 % menos): 1,77 × con 5 400 s |
 | `l3-monthly-fit` | (no existía) | (no existía) | **7 500 s** | 6 × 1 240 (2023-03, A) = 7 440 s: 6,05 × con 7 500 s |
 | `l3-backfill-spectrum` | (no existía) | (no existía) | **43 200 s** (ITSC-413) | El de `l3-backfill`; la pared de F sale del mes previo y del backfill completo (ver «Backfill de la familia F») |
 | `l3-backfill` | 86 400 s | 10 800 s | **43 200 s** | S: 1,5 × 6 638 = 9 957 s (1,63 × con 10 800 s); A: 1,5 × 27 556 = 41 334 s (1,57 × con 43 200 s) |
+
+**La verificación de la frontera entra en la regla (ITSC-420).** Desde ITSC-419 cada backfill y cada monthly
+verifican todos los meses de la serie de cada θ antes de procesar nada (TRD-L3 §8.2), y en la nube eso
+midió 1 945,8 s con 8 lectores (imagen 0.25.1, 2 vCPU, familia `path`, 50 θ, 111 meses; ejecución
+`l3-backfill-m7thd`). Con los 1 200 s de `l3-monthly` y `l3-monthly-path` la cadena del cierre mensual
+del 2026-12-01 habría muerto por timeout. La regla para un job mensual pasa a ser: **timeout ≥ la
+verificación + 6 × el mes más lento**. Con la cifra medida: 1 946 + 6 × 183,7 = 3 048 s, y los
+3 600 s de `l3-monthly` y 5 400 s de `l3-monthly-path` la cubren con 1,18 × y 1,77 ×. `l3-monthly-fit`
+no cambia: sus 7 500 s ya eran 6,05 × el mes más lento de A y siguen cubriendo con holgura los 1 946 s
+de verificación. Cada modo de `l3` fija su `timeout` explícito (ya no hereda el de la capa, 1 200 s). La
+espera del workflow `l1-run-job` en `monthly-close` sondea cada 30 s hasta `completionTime` y no tiene tope
+propio: admite estos timeouts (5 400 s son ≈ 180 sondeos, muy bajo el límite de pasos de Workflows).
+La verificación más rápida de ITSC-420 (más lectores, un pie de `events.parquet` por mes, sin el viaje de
+existencia) debería bajar esa cifra a menos de 300 s; con la medida nueva la hija ITSC-415 ajusta los
+timeouts mensuales y los umbrales de subida.
 
 Los valores de ITSC-402 **los aplica el humano** con el `apply` del stack `l3`; hasta entonces rigen
 los desplegados. La regla de subida de `l3-monthly` no cambia: si 2022-11 pasa de 200 s, sube.
@@ -489,9 +511,10 @@ causa en el log de la ejecución:
   `rss_before_trim_mib` y `rss_after_trim_mib` de los meses anteriores y la sección
   «El asignador».
 - **Timeout**: la tarea se corta sin mensaje de memoria. El de `l3-monthly` es de
-  1 200 s desde el apply de ITSC-352 (10 800 s antes; 6,5 veces la pared medida del mes más
-  lento a 2 vCPU, 183,7 s en 2022-11, ITSC-378); el de `l3-monthly-fit`, de 7 500 s, y el de
-  `l3-backfill`, de 43 200 s desde ITSC-402 (ver «Timeouts»).
+  3 600 s desde ITSC-420 (1 200 s antes; cubre la verificación de la frontera, 1 945,8 s medidos,
+  más 6 veces el mes más lento a 2 vCPU, 183,7 s en 2022-11, ITSC-378); el de `l3-monthly-path`,
+  de 5 400 s; el de `l3-monthly-fit`, de 7 500 s, y el de `l3-backfill`, de 43 200 s desde
+  ITSC-402 (ver «Timeouts»).
 - **Un hallazgo `error`**: lee su `check_type` en la tabla siguiente.
 
 Los 17 `check_type` de [TRD-L3 §9.3](../TRD/l3.md#93-tipos-de-chequeo-check_type),
@@ -788,6 +811,7 @@ Python lee, escribe y mide; los hilos nativos del motor calculan. Son opcionales
 | `L3_ENGINE_THREADS` | Hilos nativos del motor. Entero ≥ 1 | los vCPU efectivos redondeados (`round(cores)` de `unit_timing`): 2 en `l3-backfill` |
 | `L3_THREADS` | Pool de E/S: lectura de las fronteras de L2 y conciliación. Entero ≥ 1; nunca se usan más que θ | `ceil(3 × cores)`, nunca más que θ: 7 a 2 vCPU, 12 a 4 y 26 a 8 (con los `cores` medidos en T5: 2,086, 3,945 y 8,342) |
 | `L3_META_WORKERS` | Pool de metadatos (ITSC-369): pasada de entrada de cada θ (`events.parquet`, carry-over, huella), pie de L1, apertura de los escritores y publicación. Son esperas de red de un viaje, no CPU: no sigue a los vCPU. Entero entre 1 y 64; nunca se usan más que θ | 16 (nunca más que θ) |
+| `L3_FRONTIER_WORKERS` | Lectores de la verificación de la frontera (ITSC-420): una tarea por (θ, mes), solo pies. Es E/S de un viaje, no CPU: no sigue a los vCPU, y con 8 lectores la verificación midió 1 945,8 s en la nube. Entero ≥ 1 (0, negativo o no entero es error de uso, código 2); se puede subir sin cambiar el resultado, que no depende del número de lectores. Memoria: a lo sumo un pie por lector a la vez (64 por defecto) más el caché de filas por row group de `events.parquet` (8 B por row group no vacío y por (θ, mes), solo fuera de S, liberado al terminar la verificación) | 64 |
 
 El stack `l3` no fija ninguna: los valores siguen a los vCPU y el resultado (tablas y
 `content_hash`) es el mismo en cualquier combinación. Un valor que no sea un entero ≥ 1 termina
