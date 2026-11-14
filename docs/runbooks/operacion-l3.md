@@ -1155,7 +1155,7 @@ se decodifican a lo sumo 2 row groups más que con 1, al final.
 
 ## Scripts de operación
 
-Nueve scripts de `layers/ops_tools/scripts/`, para el job `ops-script`
+Diez scripts de `layers/ops_tools/scripts/`, para el job `ops-script`
 ([runbook de operación ad hoc](operacion-ops.md)). El apply del stack `ops` los publica en
 `gs://<proyecto>-ops/scripts/` (ya no se suben a mano) y se lanzan con `job` = `ops-script`. Todos solo
 leen, toman las raíces del proyecto de `OPS_RESULTS_URI` y también aceptan rutas
@@ -1172,6 +1172,7 @@ locales (`uv run`).
 | `l3_fit_bridge_probe.py` | Sonda de la familia A (ITSC-397): compara `c_accel` y `c_jump_share` observados con 20 puentes brownianos por evento sobre un θ y un mes; da D de Kolmogorov-Smirnov y el veredicto `sigue\|retirada` | `--theta 0.00098052 --month 2023-03` |
 | `l3_fit_check.py` | Prueba `fit.parquet` (familia A) contra `summaries.parquet` y `events.parquet` sobre un θ y un mes: resumen por columna, esqueleto, invariantes, regla de nulos y cifras informativas en un CSV | `--theta 0.00098052 --month 2023-03` |
 | `l3_spectrum_probe.py` | Sonda doble de la familia F (ITSC-410, ITSC-416): energía por banda de retornos y de precios por fase contra sus nulos, Haar contra Fourier, ubicación en el tiempo de la energía por nivel de Haar y total, redundancia con A y T, fases bajo 16 ticks por θ y pico de ticks en vuelo desde L2; da D y ρ, la regla de la ubicación y el veredicto `sigue\|retirada` | `--theta 0.00098052 --month 2023-03` |
+| `l3_spectrum_check.py` | Prueba `spectrum.parquet` (familia F) contra `summaries.parquet` y `events.parquet` sobre un θ y un mes: resumen por columna, esqueleto, invariantes, regla de nulos y presupuesto en un CSV | `--theta 0.00098052 --month 2023-03` |
 | `l3_version_audit.py` | Audita las versiones de las cuatro familias (ITSC-419): lee solo el pie de cada archivo de cada θ y mes con `events.parquet` en L2, anota `state_version` (y `budget_ticks` en `spectrum`) y dice si cada familia tiene una sola versión y si falta algún archivo; da `veredicto=ok\|mezcla\|faltantes` | sin `args` |
 
 El apply del stack `ops` publica todos estos scripts en `scripts/`; verifica con
@@ -1912,6 +1913,100 @@ ubicación la escribe el arquitecto en la Épica ITSC-410, bajo el veredicto.
 | Mes | θ | Eventos | `D_ret_fast` | `D_ret_slow` | `D_price_fast` | `D_price_slow` | `f32_err` | `n_lt16` | Pico en vuelo | Pared | Veredicto | Run |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | 2023-03 | `0.00098052` | pendiente | pendiente | pendiente | pendiente | pendiente | pendiente | pendiente | pendiente | pendiente | pendiente | pendiente |
+
+### `l3_spectrum_check.py`
+
+Prueba `spectrum.parquet` (familia F, [contrato](../data-contracts.md#esquema-de-spectrumparquet);
+[TRD-L3 §7.2.3](../TRD/l3.md#723-salida--spectrumparquet-familia-f)) sobre **un θ y un mes** reales
+(ITSC-414). Abre el `spectrum.parquet` y el `summaries.parquet` de L3 y el `events.parquet` de L2 de esa
+partición por su ruta completa, los registra en DuckDB como datasets de PyArrow y cuenta todo con consultas
+de agregación: ninguna fila pasa por Python. `state_version`, `n_min`, `bands`, `window` y `budget_ticks`
+salen de los metadatos de `spectrum.parquet`, leídos con PyArrow, y la sonda usa esos valores: no tiene
+constantes propias (un archivo con otro `n_min` se mide contra ese `n_min`). **No importa ninguna capa**
+(una importación cambiaría `uv.lock`). Necesita `events.parquet` porque el presupuesto se decide con la fila
+de L2 (`extreme_agg_trade_id − reference_agg_trade_id`), y `summaries.parquet` porque la regla de nulos
+depende de `c_ticks` y `os_ticks`.
+
+El apply del stack `ops` lo publica en `scripts/`; verifica con
+`gcloud storage ls gs://<proyecto>-ops/scripts/l3_spectrum_check.py`.
+
+| `args` | Efecto |
+| --- | --- |
+| `--theta 0.00098052 --month 2023-03` | Obligatorios: un θ (8 decimales como máximo) y un mes `YYYY-MM` |
+| `--summaries-root` | Otra raíz de L3, también local, donde viven `spectrum.parquet` y `summaries.parquet` (por defecto `gs://<proyecto>-dc-descriptors/l3`) |
+| `--l2-root` | Otra raíz de L2, también local, para `events.parquet` (por defecto `gs://<proyecto>-dc-events/l2`) |
+| `--provider`, `--market`, `--asset` | Otra serie (por defecto `binance`, `spot`, `BTCUSDT`) |
+| `--out` | Otra ruta del CSV; una ruta que termina en `/` es un directorio |
+
+**El CSV** (`l3_spectrum_check_<mes>_<θ>.csv`, en `results/<ejecución>/`) tiene el encabezado
+`seccion,columna,filas,nulos,min,mediana,max,violaciones,conteo` y una fila por cosa medida:
+
+- `columna`: las columnas de datos de F, en el orden del archivo, con `filas`, `nulos`, `min`, `mediana` y
+  `max`. Son **30 con `bands` = 7** (F-01 a F-04 y, al final, `c_energy_loc` y `os_energy_loc`, desde
+  `state_version` 1.1.0), pero el número **no es una constante de la sonda**: sale del esquema del archivo.
+  Las dos de ubicación son opcionales (un 1.0.0 de 28 columnas se verifica sin ellas); cualquier otra
+  columna que falte o sobre es `fallo`, porque una columna que la sonda no conoce no se verificaría.
+- `invariante`: una fila por invariante con sus `violaciones`, contadas en filas (0 es lo esperado):
+  - **Esqueleto:** `filas_spectrum_igual_summaries`; unión 1:1 por `(theta, confirm_agg_trade_id)` con
+    `summaries` (`union_1a1`) y con `events` (`union_events_1a1`), sin huérfanas ni claves repetidas;
+    `row_groups_iguales`: mismos row groups y mismas filas por row group según los pies.
+  - **`fracciones_en_0_1`:** cada fracción no nula está en `[0, 1]`, sin tolerancia (el motor divide una
+    suma de términos no negativos entre una suma que los contiene, así que no puede pasar de 1). Incluye
+    `c_energy_loc` y `os_energy_loc`, que están en `(0, 1)`.
+  - **`suma_bandas_{c,os}_{fourier,haar}`:** las fracciones no nulas de una fase y un registro suman 1 con
+    tolerancia 1e-9. Las `*_energy_loc` no entran: dicen **dónde** está la energía, no cómo se reparte.
+  - **Presupuesto:** `nulos_presupuesto` cuenta los eventos con `extreme_agg_trade_id −
+    reference_agg_trade_id > budget_ticks` (130 000 000 en 1.2.0, leído del pie) que no traen todas las
+    columnas de datos nulas.
+  - **Regla de nulos**, en los eventos que **no** superan el presupuesto y por fase `{c,os}` y registro
+    `{fourier,haar}`, con `ticks` = `c_ticks` u `os_ticks`:
+    - `nulos_<fase>_<registro>_valor_donde_nulo`: una columna no nula donde la regla manda nula, o sea toda
+      la fase si `ticks < n_min` (incluido `os_ticks = 0`) y, con `ticks ≥ n_min`, la banda o el nivel `b`
+      sin bins: `ticks < 2^b` (la 5 con menos de 32, la 6 con menos de 64 y la 7 con menos de 128 retornos).
+    - `nulos_<fase>_<registro>_nulo_donde_valor`: con `ticks ≥ n_min`, un registro con algunas columnas con
+      bins nulas y otras no. Con bins, o están todas o ninguna.
+    - `nulos_<fase>_energy_loc_valor_donde_nulo`: `<fase>_energy_loc` no nula con `ticks < n_min`. Con
+      `ticks ≥ n_min` es nula solo si Σ r² = 0 (informativo, abajo).
+  - **`doubles_finitos`:** ni `±inf` ni `NaN` en las columnas de datos.
+- `informativo`: cifras que **no** suman a `violaciones`, porque la sonda no ve los ticks:
+  - `energia_cero_{c,os}_{fourier,haar}`: con `ticks ≥ n_min`, el registro entero nulo. Es la serie (o la
+    cola de Haar) sin energía, porque todos sus retornos son iguales: la quinta causa de nulo de
+    [TRD-L3 §7.2.3](../TRD/l3.md#723-salida--spectrumparquet-familia-f). No se decide sin los ticks.
+  - `energia_total_cero_{c,os}`: con `ticks ≥ n_min`, `<fase>_energy_loc` nula: todos los retornos de la
+    fase son cero (Σ r² = 0). Tampoco se decide sin los ticks.
+  - `fase_corta_{c,os}`: fases con `ticks < n_min`; explican sus nulos.
+  - `sobre_presupuesto`: eventos sobre `budget_ticks`; es el `over_budget` de la última línea y debe
+    coincidir con los `event_over_budget` y el `over_budget_events` del backfill de F.
+
+**Última línea:** `spectrum check: mes=… theta=… state_version=… filas=… violaciones=… over_budget=…
+pared_s=… veredicto=ok|violaciones|fallo`. `violaciones` suma todas las invariantes y ninguna cifra
+informativa. Con `veredicto=fallo` (falta un archivo o un metadato, no se lee un pie o DuckDB falla) lo que
+no se pudo medir sale `-`.
+
+**Códigos:** **0** sin violaciones; **1** con violaciones, sin alguno de los tres archivos, con un metadato
+de `spectrum.parquet` que falta o no es entero, con un esquema que no cuadra con `bands` (columna de F que
+falta o que sobra), si un pie no se lee o si DuckDB falla; **2** por uso (`--theta` o `--month` ausentes o inválidos, sin las dos raíces ni
+`OPS_RESULTS_URI`, `--out` `gs://` fuera de `results/`). Si el CSV no se puede escribir, la sonda sale con
+**0** (si no hay violaciones) y lo avisa en el log con `no se guardó la tabla en …`. Una violación **nunca
+se tolera**: es un defecto del motor de F o del dato de entrada; la card se bloquea con las cifras y el
+arquitecto decide.
+
+**Memoria.** Un θ y un mes por corrida: el pico es O(partición), porque las medianas retienen los valores de
+las 30 columnas (≈ 36 000 filas × 30 × 8 B ≈ 9 MB para 2023-03).
+
+**Cómo correrla.** Necesita `spectrum.parquet` del θ y el mes: el backfill de F a 1.2.0 (presupuesto de
+130 M, ITSC-418) ya cubre los 111 meses y los 50 θ. `ops-script` solo ve los scripts que el apply del stack
+`ops` publicó tras el merge, así que se corre después del merge de ITSC-414 y de ese apply.
+*Actions → Run job*: `job` = `ops-script`, `script` = `gs://<proyecto>-ops/scripts/l3_spectrum_check.py` (la
+URI completa: `run-job-tasks.sh` rechaza otra cosa con código 2), `args` = `--theta <θ> --month <mes>`. Las
+corridas las lanza y aprueba el humano; pega la última línea en ITSC-414.
+
+**Corrida real (ITSC-414):** pendiente. La tabla se llena con la última línea cuando el humano la corra
+sobre 2023-03 con θ `0.00098052`.
+
+| Mes | θ | `state_version` | Filas | Violaciones | `over_budget` | Pared | Run |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 2023-03 | `0.00098052` | pendiente | pendiente | pendiente | pendiente | pendiente | pendiente |
 
 ### `l3_version_audit.py`
 
