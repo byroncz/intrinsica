@@ -1,25 +1,30 @@
 """La frontera de cada θ y la disponibilidad de L2: dos listados recursivos (TRD-L3 §8.2).
 
-La frontera de un θ y una familia es el último mes de su serie de `<familia>.parquet`,
-**contigua desde `series_start`**, cuyo archivo es **válido**: existe, se lee, su esquema, su
+La frontera de un θ y una familia es el fin del **prefijo contiguo de meses válidos** de su
+serie de `<familia>.parquet`, contado desde `series_start`: ningún mes anterior a la frontera
+puede ser inválido (ITSC-419). Un archivo es **válido** si existe, se lee, su esquema, su
 `theta` y su `state_version` son los de la familia en la imagen y su número de filas por row
-group es el de `events.parquet` de L2 del mismo mes. La frontera de una familia distinta de S
-nunca supera la de S del θ: su archivo repite el esqueleto de `summaries.parquet` (§7.3). Contigua porque cada mes se escribe en orden y un
-hueco es un mes que falta; sin carry-over (ADR-L3-12) los meses no dependen unos de otros,
-pero la frontera dice "hasta aquí está todo" y eso solo vale sin huecos.
+group es el de `events.parquet` de L2 del mismo mes. Con un inválido en el mes `m` la frontera
+es `m − 1` (o ninguna si `m` es el primero), aunque haya archivos válidos después: una corrida
+de un solo mes en medio de la serie deja un válido rodeado de archivos de otra versión, y una
+regla que se queda con el último válido daría por buenos los meses anteriores. La frontera de
+una familia distinta de S nunca supera la de S del θ: su archivo repite el esqueleto de
+`summaries.parquet` (§7.3). Contigua porque cada mes se escribe en orden y un hueco es un mes
+que falta; sin carry-over (ADR-L3-12) los meses no dependen unos de otros, pero la frontera
+dice "hasta aquí está todo" y eso solo vale sin huecos.
 
 No hay manifiesto: la frontera sale de **un listado recursivo** de la raíz de L3 del activo
-(una llamada paginada, no un `get_file_info` por partición) más la lectura del pie del
-archivo de la frontera de cada θ y del de L2 del mismo mes. La disponibilidad de L2 sale de
-**otro listado** de la raíz de eventos. Ninguna de las dos funciones guarda estado: reciben
-los listados y devuelven valores.
+(una llamada paginada, no un `get_file_info` por partición) más la lectura del pie de cada
+archivo del prefijo y del de L2 del mismo mes (solo pies: ningún dato). La disponibilidad de
+L2 sale de **otro listado** de la raíz de eventos. Ninguna de las dos funciones guarda estado:
+reciben los listados y devuelven valores.
 """
 
-import logging
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
+from dataclasses import dataclass, field
 from decimal import Decimal
 from types import MappingProxyType
 
@@ -44,8 +49,6 @@ from l3_dc_descriptors.schema import (
     STATE_VERSION,
     SUMMARIES_SCHEMA,
 )
-
-logger = logging.getLogger(__name__)
 
 # Lecturas simultáneas de los pies de la frontera (un archivo de familia y uno de L2 por θ).
 READ_WORKERS = 8
@@ -190,7 +193,36 @@ def invalid_reason(
     return None
 
 
-def _frontier(
+@dataclass(frozen=True)
+class Frontier:
+    """La frontera de un θ y lo que la verificación encontró.
+
+    `reached` es el ordinal del último mes del prefijo contiguo de meses válidos (`None` si no
+    hay). `invalid` son los meses de la serie contigua cuyo archivo **de la familia** es
+    inválido, ordinal → motivo (con el archivo delante: `path.parquet: ...`); solo trae los que
+    la verificación leyó, es decir, hasta el primer hueco de la serie. `ceiling_invalid` son los
+    de `summaries.parquet` cuando la familia no es S (su techo, §7.3): una pasada de la familia
+    no los repara, por eso van aparte (vacío en S). `checked` cuenta los meses cuyo pie se leyó
+    (cada uno son dos pies: el de la familia y el de `events.parquet`).
+    """
+
+    reached: int | None
+    invalid: Mapping[int, str] = field(default_factory=dict)
+    checked: int = 0
+    ceiling_invalid: Mapping[int, str] = field(default_factory=dict)
+
+    @property
+    def all_invalid(self) -> Mapping[int, str]:
+        """Los inválidos de la familia y de su techo, con el motivo de la familia si coinciden."""
+        return {**self.ceiling_invalid, **self.invalid}
+
+    @property
+    def first_invalid(self) -> int | None:
+        """El primer mes inválido: el que retrocede la frontera (`None` si no hay)."""
+        return min(self.all_invalid, default=None)
+
+
+def _scan(
     theta: int,
     months: set[int],
     start: int,
@@ -198,22 +230,91 @@ def _frontier(
     events_root: str,
     key: tuple[str, str, str],
     family: str,
-) -> int | None:
-    """La frontera de un θ: el fin de su serie contigua con un archivo válido."""
-    last = start
-    while last in months:
-        last += 1
-    # `last` es el primer mes que falta: la serie llega hasta el anterior.
-    for n in range(last - 1, start - 1, -1):
+) -> Frontier:
+    """Verifica cada mes de la serie contigua de un θ; la frontera es el fin de su prefijo válido.
+
+    Lee todos los meses de la serie contigua, también los posteriores a un inválido: así la
+    cuenta de inválidos es completa y ningún mes anterior a la frontera queda sin verificar.
+    """
+    end = start
+    while end in months:
+        end += 1
+    # `end` es el primer mes que falta: la serie contigua llega hasta el anterior.
+    invalid = {}
+    for n in range(start, end):
         problem = invalid_reason(
             summaries_root, events_root, key, theta, month_of(n), family
         )
-        if problem is None:
-            return n
-        logger.warning(
-            "θ=%d %s: archivo de %s inválido (%s)", theta, label(n), family, problem
+        if problem is not None:
+            invalid[n] = f"{family_file(family)}: {problem}"
+    first = min(invalid, default=end)
+    return Frontier(
+        reached=first - 1 if first > start else None,
+        invalid=invalid,
+        checked=end - start,
+    )
+
+
+def _scan_all(
+    thetas: list[int],
+    listed: Listing,
+    start: int,
+    summaries_root: str,
+    events_root: str,
+    key: tuple[str, str, str],
+    family: str,
+) -> dict[int, Frontier]:
+    def one(theta: int) -> Frontier:
+        months = set(listed.get(theta, {}))
+        return _scan(theta, months, start, summaries_root, events_root, key, family)
+
+    with ThreadPoolExecutor(max_workers=READ_WORKERS) as pool:
+        return dict(zip(thetas, pool.map(one, thetas), strict=True))
+
+
+def scan_frontiers(
+    thetas: Iterable[int],
+    listed: Listing,
+    series_start: Month,
+    summaries_root: str,
+    events_root: str,
+    key: tuple[str, str, str],
+    family: str = FAMILY,
+    summaries: Listing | None = None,
+) -> dict[int, Frontier]:
+    """La frontera de cada θ con lo que su verificación encontró (`frontiers` solo da el ordinal).
+
+    `listed` son los archivos de la `family`. Se verifica **cada mes** de la serie contigua del
+    θ desde `series_start` (solo pies, con el pool de lectura): la frontera es el fin del prefijo
+    de meses válidos y un inválido en `m` la deja en `m − 1`. La de una familia distinta de S
+    nunca supera la de S: `summaries`, el listado de `summaries.parquet`, es obligatorio,
+    porque su archivo repite ese esqueleto; sus inválidos quedan aparte, en `ceiling_invalid`.
+    """
+    thetas = list(thetas)
+    start = month_ordinal(series_start)
+    own = _scan_all(thetas, listed, start, summaries_root, events_root, key, family)
+    if family == FAMILY:
+        return own
+    if summaries is None:
+        raise ValueError(f"la frontera de {family!r} necesita el listado de {FAMILY!r}")
+    ceiling = _scan_all(
+        thetas, summaries, start, summaries_root, events_root, key, FAMILY
+    )
+    result = {}
+    for theta, found in own.items():
+        top = ceiling[theta]
+        reached = (
+            None
+            if found.reached is None or top.reached is None
+            else min(found.reached, top.reached)
         )
-    return None
+        result[theta] = Frontier(
+            reached=reached,
+            invalid=found.invalid,
+            checked=found.checked + top.checked,
+            ceiling_invalid=top.invalid,
+        )
+    return result
 
 
 def frontiers(
@@ -228,30 +329,16 @@ def frontiers(
 ) -> dict[int, int | None]:
     """La frontera (ordinal del último mes cerrado) de cada θ; `None` si no tiene.
 
-    `listed` son los archivos de la `family`. Un archivo inválido en la frontera la retrocede
-    al mes anterior, que se verifica a su vez: el θ se reprocesa desde el último mes
-    utilizable. La de una familia distinta de S nunca supera la de S: `summaries`, el listado
-    de `summaries.parquet`, es obligatorio, porque su archivo repite ese esqueleto.
+    Es `scan_frontiers` sin el detalle de la verificación.
     """
-    thetas = list(thetas)
-    start = month_ordinal(series_start)
-
-    def one(theta: int) -> int | None:
-        months = set(listed.get(theta, {}))
-        return _frontier(theta, months, start, summaries_root, events_root, key, family)
-
-    with ThreadPoolExecutor(max_workers=READ_WORKERS) as pool:
-        found = dict(zip(thetas, pool.map(one, thetas), strict=True))
-    if family == FAMILY:
-        return found
-    if summaries is None:
-        raise ValueError(f"la frontera de {family!r} necesita el listado de {FAMILY!r}")
-    ceiling = frontiers(
-        thetas, summaries, series_start, summaries_root, events_root, key
+    found = scan_frontiers(
+        thetas,
+        listed,
+        series_start,
+        summaries_root,
+        events_root,
+        key,
+        family,
+        summaries,
     )
-    return {
-        theta: None
-        if reached is None or ceiling[theta] is None
-        else min(reached, ceiling[theta])
-        for theta, reached in found.items()
-    }
+    return {theta: frontier.reached for theta, frontier in found.items()}

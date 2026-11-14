@@ -165,6 +165,31 @@ conciliación, esqueleto; o `monthly` sin ningún θ listo con rezagados) o **2*
 
 ## Backfill histórico por rangos
 
+**Un backfill sin `from` ni `to` continúa desde la frontera (ITSC-419).** Cada θ de la familia
+avanza desde el primer mes que su frontera no cubre. La frontera es el **fin del prefijo contiguo de
+meses válidos** desde `--series-start` ([TRD-L3 §8.2](../TRD/l3.md#82-modo-backfill-histórico)):
+con un archivo inválido (otra `state_version`, otro esquema, ilegible) en el mes `m`, la frontera es
+`m − 1` aunque haya archivos válidos después, y el backfill reescribe desde `m`. Antes la frontera
+era el último válido y una corrida de un solo mes en medio de la serie hacía que el backfill
+saltara en silencio todo lo anterior (2026-11-12, F: 45 de 111 meses, código 0). Para eso, ahora:
+
+- **Al empezar**, el log dice `fronteras: N archivos verificados (… pies) de … θ en … s`: es el costo
+  de verificar todos los meses (solo pies). Con 111 meses y 50 θ, una familia distinta de S lee
+  22 200 pies y S, 11 100. Si ese tiempo molesta en la nube, se decide con esa cifra.
+- **Por cada θ cuya frontera retrocedió** por archivos inválidos hay un hallazgo
+  `theta_frontier_regressed` (warning, uno por θ): `first_invalid_month`, `invalid_months` y el
+  `reason` del primero. Dice desde dónde se va a reescribir y por qué.
+- **Al terminar**, la línea `backfill: N meses procesados, K saltados por estar al día, de M en el
+  rango` y el hallazgo `backfill_summary` con la misma cifra. **Cómo leerla:** tras un cambio de
+  versión de una familia, `N` debe ser casi `M`. Si `N` es mucho menor y `K` el resto, algo dio por
+  buenos meses que no lo eran: corre `l3_version_audit.py` (abajo). Si `N + K` es menor que `M`, el
+  resto son meses cuyo θ salió del rango (`l2_input_missing` o `family_skeleton_missing`).
+- **Código 1** si, sin `force`, queda un θ con un archivo inválido dentro del rango que la corrida
+  no reescribió (el `from` empezó después de él): el log dice cuál es el primero. Se relanza sin
+  `from`, o con `from` en ese mes. En `path`, `fit` o `spectrum` también sale 1 si `summaries.parquet`
+  tiene un mes inválido en el rango: esa pasada no lo repara, el log pide correr primero el
+  backfill de `summaries`.
+
 **Con el núcleo nuevo cabe en una sola ejecución.** El backfill completo de 110 meses a
 2 vCPU con la imagen 0.19.0 y los valores por defecto (ITSC-378, 2026-10-25) tardó 6 638 s
 (1,84 h; Σ `wall_s` 6 556 s), bajo las 6 h que espera el run de Actions: `from` = `2017-08`,
@@ -1121,6 +1146,7 @@ locales (`uv run`).
 | `l3_fit_bridge_probe.py` | Sonda de la familia A (ITSC-397): compara `c_accel` y `c_jump_share` observados con 20 puentes brownianos por evento sobre un θ y un mes; da D de Kolmogorov-Smirnov y el veredicto `sigue\|retirada` | `--theta 0.00098052 --month 2023-03` |
 | `l3_fit_check.py` | Prueba `fit.parquet` (familia A) contra `summaries.parquet` y `events.parquet` sobre un θ y un mes: resumen por columna, esqueleto, invariantes, regla de nulos y cifras informativas en un CSV | `--theta 0.00098052 --month 2023-03` |
 | `l3_spectrum_probe.py` | Sonda doble de la familia F (ITSC-410, ITSC-416): energía por banda de retornos y de precios por fase contra sus nulos, Haar contra Fourier, ubicación en el tiempo de la energía por nivel de Haar y total, redundancia con A y T, fases bajo 16 ticks por θ y pico de ticks en vuelo desde L2; da D y ρ, la regla de la ubicación y el veredicto `sigue\|retirada` | `--theta 0.00098052 --month 2023-03` |
+| `l3_version_audit.py` | Audita las versiones de las cuatro familias (ITSC-419): lee solo el pie de cada archivo de cada θ y mes con `events.parquet` en L2, anota `state_version` (y `budget_ticks` en `spectrum`) y dice si cada familia tiene una sola versión y si falta algún archivo; da `veredicto=ok\|mezcla\|faltantes` | sin `args` |
 
 El apply del stack `ops` publica todos estos scripts en `scripts/`; verifica con
 `gcloud storage ls gs://<proyecto>-ops/scripts/`.
@@ -1860,6 +1886,45 @@ ubicación la escribe el arquitecto en la Épica ITSC-410, bajo el veredicto.
 | Mes | θ | Eventos | `D_ret_fast` | `D_ret_slow` | `D_price_fast` | `D_price_slow` | `f32_err` | `n_lt16` | Pico en vuelo | Pared | Veredicto | Run |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | 2023-03 | `0.00098052` | pendiente | pendiente | pendiente | pendiente | pendiente | pendiente | pendiente | pendiente | pendiente | pendiente | pendiente |
+
+### `l3_version_audit.py`
+
+Dice si **cada familia de L3 tiene una única versión** y si no falta ningún archivo (ITSC-419). Para
+cada familia (`summaries`, `path`, `fit`, `spectrum`), cada θ del catálogo y cada mes con
+`events.parquet` en L2, lee **solo el pie** del archivo (los metadatos de Parquet; ningún dato) y
+anota `state_version` y, en `spectrum`, `budget_ticks`. Se corre tras un backfill, o cuando la línea
+`backfill: N meses procesados…` no cuadra. **No importa ninguna capa** (una importación cambiaría
+`uv.lock`) y abre cada pie por su ruta completa, por la [trampa del 403](#la-trampa-del-403-por-prefijo).
+
+El apply del stack `ops` lo publica en `scripts/`; verifica con
+`gcloud storage ls gs://<proyecto>-ops/scripts/l3_version_audit.py`.
+
+| `args` | Efecto |
+| --- | --- |
+| (vacío) | Deduce el proyecto de `OPS_RESULTS_URI` y usa el catálogo `gs://<proyecto>-manifest/l2/thetas.yaml`, `gs://<proyecto>-dc-events/l2` y `gs://<proyecto>-dc-descriptors/l3` |
+| `--catalog`, `--l2-root`, `--l3-root` | Otras rutas (también locales, con la misma disposición hive) |
+| `--provider`, `--market`, `--asset` | Por defecto `binance`, `spot`, `BTCUSDT` |
+| `--out` | Dónde deja el CSV (por defecto, `l3_version_audit.csv` en `results/<ejecución>/`) |
+
+**El CSV** (`l3_version_audit.csv`) trae una fila `version` por familia y versión (en `archivos`,
+cuántos archivos la tienen) y una fila `excepcion` por cada `(familia, θ, mes)` que falte o que no
+tenga la versión mayoritaria de su familia, con el `motivo`. La versión de `spectrum` incluye
+`budget_ticks`: cambiar el presupuesto es versión nueva. Un archivo que no se lee cuenta como la
+versión `ilegible`.
+
+**La última línea** es `version audit: familias=4 archivos=… faltantes=… versiones_mezcladas=…
+veredicto=ok|mezcla|faltantes`. `archivos` son los que existen y se leyeron; `faltantes`, los
+`(familia, θ, mes)` con `events.parquet` en L2 y sin archivo de la familia; `versiones_mezcladas`,
+cuántas familias tienen más de una versión. El veredicto es `faltantes` si falta algún archivo, si no
+`mezcla` si alguna familia mezcla versiones, si no `ok`. Código **0** solo con `ok`; **1** con
+`mezcla` o `faltantes`, o si no se puede listar o leer el catálogo; **2** por uso.
+
+**Cómo correrla.** *Actions → Run job*: `job` = `ops-script`, `script` =
+`gs://<proyecto>-ops/scripts/l3_version_audit.py` (la URI completa) y sin `args`. El humano pega la
+última línea en la card. Esperado tras el backfill de F a 1.2.0: `veredicto=ok`. Con `mezcla` o
+`faltantes`, las filas `excepcion` del CSV dicen qué familia y qué meses reprocesar; el rango lo
+decide el arquitecto, y se relanza el backfill de esa familia con `from` en el primer mes de la
+excepción.
 
 ### La trampa del 403 por prefijo
 

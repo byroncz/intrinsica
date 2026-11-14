@@ -1077,10 +1077,22 @@ mismo que traen las excepciones del resumidor, de las que sale la mayoría de lo
   `details.family`: `summaries`, `path`, `fit` o `spectrum`, la pasada mensual que lo dejó rezagado, ITSC-396). `reason` es
   `l2_missing` si L2 no tiene el mes de ese θ, `summaries_missing` si la familia no es
   `summaries` y falta `summaries.parquet` del mes, y `l3_frontier` si la serie de L3 de la familia
-  no llega al mes previo (se agregó al catálogo sin backfill, o tiene un hueco); si pasan
+  no llega al mes previo (se agregó al catálogo sin backfill, tiene un hueco o un archivo inválido); si pasan
   varias, la primera de ese orden, que es lo que bloquea. No falla la unidad mientras otros θ avancen o ya
   tengan el mes; si ninguno está listo ni lo tiene, `monthly` termina con código 1 sin leer
   L1. Se resuelve lanzando `backfill` sin `--from`.
+- **`theta_frontier_regressed`** (`warning`, `fail`; ITSC-419): la frontera de un θ quedó por
+  debajo del último mes que existe porque hay archivos inválidos en la serie de su familia.
+  Uno por θ y familia, no uno por mes; en `backfill` y en `monthly`. `year` y `month` son los
+  del primer mes inválido. `details`: `theta`, `family` (`summaries`, `path`, `fit` o
+  `spectrum`), `first_invalid_month` (`YYYY-MM`), `invalid_months` (cuántos; también
+  `metric_value`), `reason` (el del primero, con el archivo delante) y `frontier` (`YYYY-MM` o
+  `null`). No falla la corrida: el `backfill` sin `--from` reescribe desde ese mes.
+- **`backfill_summary`** (`info`, `pass`; ITSC-419): el cierre de un `backfill`, uno por corrida
+  (no lo emite una corrida cuya unidad falló). `metric_value` son los meses procesados.
+  `details`: `family`, `processed`, `skipped` (meses que ningún θ necesitaba), `months` (los del
+  rango), `first` y `last` (`YYYY-MM`); la misma cifra que la línea de log `backfill: N meses
+  procesados, K saltados por estar al día, de M en el rango`.
 - **`theta_config_drift`** (`info`, `pass`): el lago de L3 tiene particiones de un θ que el
   catálogo ya no incluye (`details.theta`, `details.months`, `details.last_month`;
   `metric_value` = meses). Informa, nunca es error: quitar un θ no borra nada.

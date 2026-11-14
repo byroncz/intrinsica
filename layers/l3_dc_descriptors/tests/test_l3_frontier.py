@@ -15,6 +15,7 @@ from l3_dc_descriptors.frontier import (
     l2_missing,
     list_l2,
     list_summaries,
+    scan_frontiers,
     theta_text,
 )
 from l3_lake import KEY, M1, M2, M3, build_lake, fixture_ticks, month_cuts
@@ -75,7 +76,9 @@ def test_a_series_that_does_not_start_at_the_series_start_has_no_frontier(lake):
 
 
 def rewrite(path: Path, change) -> None:
-    size = pq.ParquetFile(path).metadata.row_group(0).num_rows
+    meta = pq.ParquetFile(path).metadata
+    # Un mes sin eventos del θ no tiene row groups: se reescribe sin tamaño.
+    size = meta.row_group(0).num_rows if meta.num_row_groups else None
     pq.write_table(change(pq.read_table(path)), path, row_group_size=size)
 
 
@@ -133,7 +136,10 @@ def test_every_invalid_month_leaves_no_frontier(lake):
     assert frontier_of(lake) is None
 
 
-def test_only_the_frontier_file_of_each_theta_is_opened(lake, monkeypatch):
+def test_every_month_of_the_series_is_verified_not_only_the_last_valid_one(
+    lake, monkeypatch
+):
+    """Verificar todos los meses lee más pies (ITSC-419), nunca datos: cada (θ, mes) una vez."""
     calls = []
     real = frontier.invalid_reason
 
@@ -145,7 +151,7 @@ def test_only_the_frontier_file_of_each_theta_is_opened(lake, monkeypatch):
     listed = list_summaries(str(lake.l3), KEY)
     result = frontiers(lake.thetas, listed, START, str(lake.l3), str(lake.l2), KEY)
     assert set(result.values()) == {ordinal(M3)}
-    assert sorted(calls) == sorted((t, M3) for t in lake.thetas)
+    assert sorted(calls) == sorted((t, m) for t in lake.thetas for m in lake.months)
 
 
 def test_the_listing_covers_every_theta_of_the_lake_not_only_the_catalog(lake):
@@ -669,3 +675,251 @@ def test_monthly_spectrum_names_summaries_as_the_reason_when_the_month_has_none(
     }
     assert file_of(lake.l3, SMALL, M2, "spectrum.parquet").exists()
     assert not file_of(lake.l3, BIG, M2, "spectrum.parquet").exists()
+
+
+# El incidente de ITSC-419: un archivo válido en medio de archivos de la versión anterior.
+
+
+def test_a_valid_file_after_an_invalid_one_does_not_hide_it(lake):
+    """Con un inválido en el mes `m` la frontera es `m − 1`, aunque `m + 1` sea válido."""
+    rewrite(
+        file_of(lake.l3, SMALL, M2, "summaries.parquet"),
+        lambda t: with_state_version(t, "0.9.0"),
+    )
+    assert frontier_of(lake) == ordinal(M1)
+    assert frontier_of(lake, BIG) == ordinal(M3)
+
+
+def test_an_invalid_first_month_leaves_no_frontier_even_with_valid_ones_after(lake):
+    rewrite(
+        file_of(lake.l3, SMALL, M1, "summaries.parquet"),
+        lambda t: with_state_version(t, "0.9.0"),
+    )
+    assert frontier_of(lake) is None
+
+
+def test_the_scan_reports_every_invalid_month_with_the_first_reason(lake):
+    for month in (M1, M3):
+        rewrite(
+            file_of(lake.l3, SMALL, month, "summaries.parquet"),
+            lambda t: with_state_version(t, "0.9.0"),
+        )
+    listed = list_summaries(str(lake.l3), KEY)
+    found = scan_frontiers([SMALL, BIG], listed, START, str(lake.l3), str(lake.l2), KEY)
+    assert found[SMALL].reached is None
+    assert sorted(found[SMALL].invalid) == [ordinal(M1), ordinal(M3)]
+    assert found[SMALL].first_invalid == ordinal(M1)
+    assert "summaries.parquet: state_version 0.9.0" in found[SMALL].invalid[ordinal(M1)]
+    assert found[SMALL].checked == 3
+    assert found[BIG].reached == ordinal(M3) and not found[BIG].invalid
+
+
+FAMILIES = ("summaries", "path", "fit", "spectrum")
+OLD = "0.9.0"
+INCIDENT_THETAS = (SMALL, BIG)
+
+
+@pytest.fixture(params=FAMILIES)
+def family(request) -> str:
+    return request.param
+
+
+@pytest.fixture
+def incident(tmp_path, family):
+    """Cinco meses de la familia, todos con la versión anterior salvo el tercero (2023-01 del
+    incidente): un válido rodeado de archivos de otra versión.
+    """
+    cuts = month_cuts(TICKS, 800, 1600, 2400, 3200)
+    lake = build_lake(tmp_path, TICKS, cuts, thetas=INCIDENT_THETAS)
+    assert len(lake.months) == 5
+    for name in dict.fromkeys(("summaries", family)):
+        for month in lake.months:
+            summarize_month(
+                lake.l1,
+                lake.l2,
+                lake.l3,
+                month,
+                lake.theta_texts,
+                series_start=M1,
+                family=name,
+            )
+    for month in lake.months:
+        if month != lake.months[2]:
+            for theta in INCIDENT_THETAS:
+                rewrite(
+                    file_of(lake.l3, theta, month, f"{family}.parquet"),
+                    lambda t: with_state_version(t, OLD),
+                )
+    return lake
+
+
+def family_scan(lake, family: str):
+    summaries = list_summaries(str(lake.l3), KEY)
+    listed = list_summaries(str(lake.l3), KEY, family)
+    return scan_frontiers(
+        INCIDENT_THETAS,
+        listed,
+        START,
+        str(lake.l3),
+        str(lake.l2),
+        KEY,
+        family,
+        summaries,
+    )
+
+
+def run_family(lake, tmp_path, family: str, *argv: str) -> int:
+    catalog = write_catalog(tmp_path / "thetas.yaml", lake.thetas)
+    base = ["--series-start", "2017-08", "--family", family]
+    return main([*argv, *base], env_for(lake, tmp_path, catalog))
+
+
+def test_the_incident_gives_no_frontier_not_the_third_month(incident, family):
+    found = family_scan(incident, family)
+    third, others = incident.months[2], incident.months[:2] + incident.months[3:]
+    for theta in INCIDENT_THETAS:
+        assert found[theta].reached is None
+        assert sorted(found[theta].invalid) == sorted(ordinal(m) for m in others)
+        assert ordinal(third) not in found[theta].invalid
+        assert (
+            f"{family}.parquet: state_version {OLD}"
+            in (found[theta].invalid[ordinal(others[0])])
+        )
+
+
+def test_backfill_without_from_or_to_rewrites_the_five_months(
+    incident, tmp_path, family, caplog
+):
+    caplog.set_level("INFO")
+    assert run_family(incident, tmp_path, family, "--mode", "backfill") == 0
+    # Los cinco quedan en la versión vigente, también el tercero (reescribirlo es inocuo).
+    for theta in INCIDENT_THETAS:
+        for month in incident.months:
+            assert (
+                invalid_reason(
+                    str(incident.l3), str(incident.l2), KEY, theta, month, family
+                )
+                is None
+            )
+    assert set(family_scan(incident, family)[SMALL].invalid) == set()
+    assert family_scan(incident, family)[SMALL].reached == ordinal(incident.months[-1])
+    (row,) = emitted(tmp_path, "backfill_summary")
+    assert row["details"] == {
+        "family": family,
+        "processed": 5,
+        "skipped": 0,
+        "months": 5,
+        "first": "2017-08",
+        "last": "2017-12",
+    }
+    assert row["severity"] == "info"
+    assert (
+        "backfill: 5 meses procesados, 0 saltados por estar al día, de 5 en el rango"
+        in caplog.text
+    )
+
+
+def test_the_regression_leaves_one_warning_per_theta_not_one_per_month(
+    incident, tmp_path, family
+):
+    assert run_family(incident, tmp_path, family, "--mode", "backfill") == 0
+    rows = emitted(tmp_path, "theta_frontier_regressed")
+    assert len(rows) == len(INCIDENT_THETAS)
+    assert {r["severity"] for r in rows} == {"warning"}
+    assert {r["details"]["theta"] for r in rows} == {
+        theta_text(t) for t in INCIDENT_THETAS
+    }
+    for row in rows:
+        details = row["details"]
+        assert details["family"] == family
+        assert details["first_invalid_month"] == "2017-08"
+        assert details["invalid_months"] == 4
+        assert details["frontier"] is None
+        assert f"{family}.parquet: state_version {OLD}" in details["reason"]
+
+
+def test_monthly_on_the_incident_series_leaves_the_theta_behind_and_writes_nothing(
+    incident, tmp_path, family
+):
+    before = {p: p.read_bytes() for p in incident.l3.rglob("*.parquet")}
+    assert (
+        run_family(incident, tmp_path, family, "--mode", "monthly", "--from", "2017-12")
+        == 1
+    )
+    rows = emitted(tmp_path, "theta_behind_frontier")
+    assert len(rows) == len(INCIDENT_THETAS)
+    assert {r["details"]["reason"] for r in rows} == {"l3_frontier"}
+    assert {r["details"]["frontier"] for r in rows} == {None}
+    assert {r["details"]["family"] for r in rows} == {family}
+    assert before == {p: p.read_bytes() for p in incident.l3.rglob("*.parquet")}
+    assert len(emitted(tmp_path, "theta_frontier_regressed")) == len(INCIDENT_THETAS)
+
+
+def test_a_backfill_that_starts_after_the_invalid_month_exits_with_1(
+    incident, tmp_path, family
+):
+    """El rango no repara el primer mes inválido: el cierre no puede pasar como éxito."""
+    code = run_family(
+        incident, tmp_path, family, "--mode", "backfill", "--from", "2017-10"
+    )
+    assert code == 1
+    (row,) = emitted(tmp_path, "backfill_summary")
+    assert row["details"]["processed"] == 3
+
+
+def test_a_backfill_inside_the_valid_prefix_skips_and_counts_the_months(lake, tmp_path):
+    rewrite(
+        file_of(lake.l3, SMALL, M3, "summaries.parquet"),
+        lambda t: with_state_version(t, OLD),
+    )
+    argv = ["--mode", "backfill", "--from", "2017-08", "--to", "2017-09"]
+    assert run_family(lake, tmp_path, "summaries", *argv) == 0
+    (row,) = emitted(tmp_path, "backfill_summary")
+    assert (row["details"]["processed"], row["details"]["skipped"]) == (0, 2)
+    # El inválido está fuera del rango: se avisa, pero el rango pedido llegó a su fin.
+    (warning,) = emitted(tmp_path, "theta_frontier_regressed")
+    assert warning["details"]["first_invalid_month"] == "2017-10"
+    assert warning["details"]["frontier"] == "2017-09"
+
+
+def test_a_family_backfill_over_an_invalid_summaries_month_exits_with_1(
+    path_lake, tmp_path, caplog
+):
+    """La pasada de T no reescribe `summaries.parquet`: no puede dejar el cierre en 0."""
+    rewrite(
+        file_of(path_lake.l3, SMALL, M2, "summaries.parquet"),
+        lambda t: with_state_version(t, OLD),
+    )
+    assert run_family(path_lake, tmp_path, "path", "--mode", "backfill") == 1
+    assert "corre primero el backfill de summaries" in caplog.text
+    # El inválido sigue ahí: la frontera de T no lo oculta.
+    assert family_scan(path_lake, "path")[SMALL].ceiling_invalid.keys() == {ordinal(M2)}
+
+
+def test_the_months_after_every_theta_left_the_range_are_not_counted_as_up_to_date(
+    lake, tmp_path
+):
+    """Con L2 ausente para todos los θ desde M2, `N + K < M` delata los meses que no se miraron."""
+    for theta in lake.thetas:
+        for month in (M2, M3):
+            file_of(lake.l2, theta, month, "events.parquet").unlink()
+    assert run_family(lake, tmp_path, "summaries", "--mode", "backfill") == 1
+    (row,) = emitted(tmp_path, "backfill_summary")
+    details = row["details"]
+    assert (details["processed"], details["skipped"], details["months"]) == (0, 1, 3)
+
+
+def test_the_log_reports_how_many_footers_the_frontier_read(
+    incident, tmp_path, family, caplog
+):
+    """El costo medido de ITSC-419: un archivo por mes y θ (el doble fuera de S), dos pies cada uno."""
+    caplog.set_level("INFO")
+    run_family(incident, tmp_path, family, "--mode", "backfill")
+    files = (
+        len(incident.months)
+        * len(INCIDENT_THETAS)
+        * (1 if family == "summaries" else 2)
+    )
+    assert f"fronteras: {files} archivos verificados ({2 * files} pies) de 2 θ en " in (
+        caplog.text
+    )

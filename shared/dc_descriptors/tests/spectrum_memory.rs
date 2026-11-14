@@ -10,6 +10,10 @@ use dc_descriptors::{close_spectrum, EventIn, Region, SpectrumAcc, TickColumns};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 
+#[path = "common/closing.rs"]
+mod closing;
+use closing::{bluestein_inner, closing_bound};
+
 struct Counting;
 
 static LIVE: AtomicUsize = AtomicUsize::new(0);
@@ -68,26 +72,6 @@ fn next_prime(from: usize) -> usize {
     (from..)
         .find(|&n| n > 1 && largest_prime_factor(n) == n)
         .unwrap()
-}
-
-/// La longitud de la FFT interna de Bluestein para `n` primo, como la elige `rustfft` 6.4.1
-/// (`plan.rs`, `design_prime`): la menor entre `3·2^(k−2)` y `2^k` que alcanza `2n − 1`.
-fn bluestein_inner(n: usize) -> usize {
-    let pow2 = (2 * n - 1).next_power_of_two();
-    if pow2 / 4 * 3 >= 2 * n - 1 {
-        pow2 / 4 * 3
-    } else {
-        pow2
-    }
-}
-
-/// La cota del pico absoluto del cierre de una fase de `n` retornos, en bytes. Vale para `n` primo
-/// con Bluestein, el peor plan de `rustfft`: el búfer de `n` complejos, los twiddles de longitud
-/// `n` de Bluestein, y tres tramos de la longitud interna `m` (el multiplicador precomputado, el
-/// scratch en el sitio, que ya es `m` más el de la FFT interna, y los twiddles de esta), cada uno
-/// de 16 B. Los `f32` del búfer ya se liberaron cuando la FFT arranca.
-fn closing_bound(n: usize) -> usize {
-    16 * (2 * n + 4 * bluestein_inner(n))
 }
 
 fn measure(n: usize) -> (usize, usize) {
@@ -183,27 +167,6 @@ fn check(n: usize, what: &str) -> usize {
         closing_bound(n)
     );
     peak
-}
-
-/// El job de F (ITSC-418): 32 GiB, con una cota de pico del 75 %.
-const JOB_BOUND: usize = 24_576 << 20;
-
-/// El peor cierre que admite el presupuesto, `n` = `DEFAULT_BUDGET_TICKS` retornos, no se mide
-/// (pediría ≈ 20 GiB): se comprueba la cota, que las mediciones de abajo respaldan a escala chica.
-/// Con 130 M, `3·2^26` no alcanza `2n − 1` y la FFT interna de Bluestein es de 2^28: la cota es
-/// 21 339 869 184 B (20 351 MiB), bajo la del job. Un presupuesto que la pase tiene que subir el
-/// job antes que esta cifra.
-#[test]
-fn the_closing_bound_at_the_budget_fits_the_job() {
-    let n = dc_descriptors::DEFAULT_BUDGET_TICKS as usize;
-    assert_eq!(bluestein_inner(n), 1 << 28);
-    assert_eq!(closing_bound(n), 21_339_869_184);
-    assert!(
-        closing_bound(n) <= JOB_BOUND,
-        "la cota del cierre con n = {n} pasa de la del job"
-    );
-    // Los cierres de n ≥ 2^20 siguen de a uno: el pico del job es el de una sola fase.
-    assert!(n >= dc_descriptors::spectrum::SERIAL_CLOSE_MIN);
 }
 
 #[test]

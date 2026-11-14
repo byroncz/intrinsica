@@ -3,6 +3,8 @@
 //! redondea con otra fórmula que `divide_half_even`: no comparte código con el motor.
 #![allow(dead_code)]
 
+pub mod closing;
+
 use dc_descriptors::{
     col, Config, Engine, EngineError, EventBatch, Region, Row, RowGroupInput, SealedRowGroup,
     ThetaStats, TickColumns, WIDTH,
