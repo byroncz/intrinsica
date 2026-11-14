@@ -649,7 +649,7 @@ cifra medida. Con la regla de [TRD-L3 §10.2](../docs/TRD/l3.md#102-dimensionami
 
 | Job | Cuenta | timeout |
 |---|---|---|
-| `l3-monthly` (S) | ≈ 880 s (derivado: lee 11 100 pies) + 6 × 183,7 = 1 982 s | 3 600 s, sin cambio |
+| `l3-monthly` (S) | 1 316 + 6 × 183,7 = 2 418 s (verificación medida, conservadora: S lee menos pies) | 3 600 s, sin cambio |
 | `l3-monthly-path` (T) | 1 316 + 6 × 186 = 2 432 s | 5 400 s, sin cambio |
 | `l3-monthly-fit` (A) | 1 316 + 6 × 1 240 = 8 756 s | **9 000 s** (antes 7 500 s, que no cumplía la regla) |
 | `l3-monthly-spectrum` (F) | 1 316 + 6 × 774 = 5 960 s | **7 200 s** (job nuevo) |

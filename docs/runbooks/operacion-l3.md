@@ -479,7 +479,7 @@ verificación + 6 × el mes más lento**. Con la cifra medida: 1 946 + 6 × 183,
 no cambió en ITSC-420 y **no cumplía la regla** con la verificación medida. **ITSC-415 la aplica con la
 cifra medida después de optimizar la verificación** (ITSC-420: 1 315,5 s para una familia distinta de S, con 64 lectores, 2 vCPU,
 ejecución `l3-backfill-6m6t5`; la meta de 300 s no se cumplió y su diagnóstico va en otra card):
-- `l3-monthly` y `l3-monthly-path` no cambian: S verifica menos (≈ 880 s, derivado de los 11 100 pies que lee) y 880 + 6 × 183,7 = 1 982 s; T, 1 316 + 6 × 186 = 2 432 s. Sus 3 600 s y 5 400 s los cubren.
+- `l3-monthly` y `l3-monthly-path` no cambian: S: 1 316 + 6 × 183,7 = 2 418 s (verificación medida, conservadora: S lee menos pies); T, 1 316 + 6 × 186 = 2 432 s. Sus 3 600 s y 5 400 s los cubren.
 - `l3-monthly-fit` sube a **9 000 s**: 1 316 + 6 × 1 240 = 8 756 s.
 - `l3-monthly-spectrum` fija **7 200 s**: 1 316 + 6 × 774 s (2023-02, el mes más lento de F, del backfill de 130 M en el job de 32 GiB y 8 vCPU) = 5 960 s. La verificación de F en ese job no se midió aparte: se usa la de T.
 
