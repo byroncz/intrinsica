@@ -26,6 +26,10 @@ from dq import configure_logging
 from l3_dc_descriptors import findings, memory
 from l3_dc_descriptors.context import RunContext, Unit
 from l3_dc_descriptors.frontier import (
+    DEFAULT_FRONTIER_WORKERS,
+    FRONTIER_WORKERS_ENV,
+    MAX_FRONTIER_WORKERS,
+    FooterReader,
     Frontier,
     Listing,
     family_file,
@@ -186,6 +190,9 @@ def _context(
         meta_workers=_count(
             env, "L3_META_WORKERS", minimum=1, maximum=MAX_META_WORKERS
         ),
+        frontier_workers=_count(
+            env, FRONTIER_WORKERS_ENV, minimum=1, maximum=MAX_FRONTIER_WORKERS
+        ),
         unit_process=_flag(env, "L3_UNIT_PROCESS", default=True),
         memory_sample_s=_sample_period(env),
         trim_rss_mib=_trim_rss_mib(env),
@@ -305,11 +312,19 @@ def _scan(
     """Las fronteras de los θ, verificadas mes a mes, y el aviso de las que retrocedieron.
 
     Lee los pies de todos los archivos de la serie contigua de cada θ (§8.2): deja en el log
-    cuántos y cuánto tardó, la cifra con que se decide si el costo en la nube importa. Por
-    cada θ cuya frontera quedó por debajo del último mes que existe porque hay archivos
-    inválidos emite **un** `theta_frontier_regressed` (no uno por mes), también en `monthly`.
+    cuántos archivos verificó, cuántos pies pidió de verdad (el de `events.parquet` de un mes
+    se lee una vez aunque lo pidan la familia y el techo de S), con cuántos lectores y cuánto
+    tardó, la cifra con que se decide si el costo en la nube importa. Por cada θ cuya
+    frontera quedó por debajo del último mes que existe porque hay archivos inválidos emite
+    **un** `theta_frontier_regressed` (no uno por mes), también en `monthly`.
     """
     began = time.monotonic()
+    workers = (
+        DEFAULT_FRONTIER_WORKERS
+        if ctx.frontier_workers is None
+        else ctx.frontier_workers
+    )
+    reader = FooterReader(share_events=args.family != FAMILY)
     scans = scan_frontiers(
         thetas,
         listed,
@@ -319,12 +334,15 @@ def _scan(
         asset.key,
         args.family,
         summaries,
+        workers,
+        reader,
     )
     logger.info(
-        "fronteras: %d archivos verificados (%d pies) de %d θ en %.1f s",
+        "fronteras: %d archivos verificados (%d pies leídos) de %d θ con %d lectores en %.1f s",
         sum(found.checked for found in scans.values()),
-        2 * sum(found.checked for found in scans.values()),
+        reader.opened,
         len(scans),
+        workers,
         time.monotonic() - began,
     )
     regressed = []

@@ -75,6 +75,11 @@ module "layer" {
   # le suma a 2021-01), sobre el mínimo de 6 veces de TRD-L2 §10.2 (984 s). 900 s,
   # el valor de ITSC-364 para 4 vCPU, ya no lo cumplen. Es una estimación: la
   # pared de 2022-11 a 2 vCPU sale del backfill de 110 meses.
+  #
+  # Es solo el valor por defecto del módulo: desde ITSC-420 cada modo fija el suyo
+  # explícito (abajo), para que ninguno herede estos 1 200 s sin decidirlo. Ya no
+  # alcanzan en un modo mensual: la verificación de la frontera (TRD-L3 §8.2) midió
+  # 1 945,8 s a 2 vCPU en la nube (ITSC-420).
   timeout = 1200
 
   # 1 y no 0, como L1 y L2: el reintento cubre fallos transitorios de
@@ -103,7 +108,17 @@ module "layer" {
     # a las 6 h (21 600 s) mientras la ejecución sigue en Cloud Run: el runbook
     # explica cómo seguirla.
     backfill = { timeout = 43200, access = local.access }
-    monthly  = { access = local.access }
+
+    # ITSC-420: 3 600 s. La frontera verifica cada mes de la serie de cada θ y en la nube
+    # tardó 1 945,8 s (11 100 archivos, 22 200 pies, 50 θ, 2 vCPU, imagen 0.25.1, ejecución
+    # l3-backfill-m7thd, familia path, 8 lectores). La regla de TRD-L3 §10.2 es que el
+    # timeout de un job mensual cubra la verificación más 6 veces el mes más lento (183,7 s,
+    # 2022-11, ITSC-378): 1 946 + 6 × 183,7 = 3 048 s. 3 600 s son 1,18 veces eso y 1,85
+    # veces la verificación sola; S no verifica un techo aparte, así que lee menos pies
+    # que esa cifra y el margen es mayor. Con los 1 200 s de antes, la cadena del
+    # 2026-12-01 habría muerto por timeout. Se mide de nuevo con la verificación más rápida
+    # de esta misma card (meta 300 s).
+    monthly = { timeout = 3600, access = local.access }
 
     # El backfill de la familia F (ITSC-413): el modo backfill de la CLI con
     # --family spectrum, en un job de 32 GiB y 8 vCPU. F guarda en RAM los retornos de
@@ -137,9 +152,17 @@ module "layer" {
     # de S y un fallo de T no toque lo que S ya publicó. Mismos recursos que
     # monthly (los heredados del módulo) y misma imagen. El nombre del modo no es
     # el de la CLI, de ahí los args propios.
+    #
+    # ITSC-420: 5 400 s. Una familia distinta de S verifica la serie de la familia y el techo
+    # de S, y esa verificación midió 1 945,8 s en la nube (ver monthly). Con la misma regla
+    # de TRD-L3 §10.2: 1 946 + 6 × 183,7 s (el mes de S; T tarda un 11 % menos, ITSC-395) =
+    # 3 048 s, y 5 400 s son 1,77 veces eso. La holgura es mayor que en monthly a propósito,
+    # hasta que se mida la verificación nueva; la hija ITSC-415 ajusta los timeouts
+    # mensuales con esa cifra.
     monthly-path = {
-      args   = ["--mode", "monthly", "--family", "path"]
-      access = local.access
+      args    = ["--mode", "monthly", "--family", "path"]
+      timeout = 5400
+      access  = local.access
     }
 
     # La pasada de la familia A (ITSC-402): el mismo patrón que monthly-path, con

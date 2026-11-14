@@ -39,7 +39,7 @@ enteros ≥ 1 (otro valor es código 2; `L3_LOT_EVENTS` admite 0): `L3_READERS` 
 `L3_INFLIGHT` (row groups en el motor, K; 4), `L3_WRITERS` (escritores, W; 12),
 `L3_ENGINE_THREADS` (hilos del motor; por defecto `round(vCPU efectivos)`), `L3_THREADS` (pool de
 E/S; por defecto `ceil(3 × vCPU)`, nunca más que θ), `L3_META_WORKERS` (pool de metadatos: compuerta,
-apertura de `events.parquet` y de los escritores, pie de L1 y publicación; entre 1 y 64, por defecto 16) y `L3_INFLIGHT_BYTES` (tope de bytes de eventos
+apertura de `events.parquet` y de los escritores, pie de L1 y publicación; entre 1 y 64, por defecto 16), `L3_FRONTIER_WORKERS` (lectores de la verificación de la frontera, solo pies; por defecto 64, ITSC-420) y `L3_INFLIGHT_BYTES` (tope de bytes de eventos
 abiertos; 805 306 368 = 768 MiB), `L3_LOT_EVENTS` (eventos de un tramo; 1 000 000; 0 desactiva el
 corte), `L3_MEMORY_SAMPLE_S` (segundos entre ticks del muestreador de memoria; número > 0, por
 defecto 0,25), `L3_TRIM_RSS_MIB` (marca de agua del trim periódico, en MiB; entero ≥ 0, por
@@ -135,7 +135,7 @@ frontera puede ser inválido, y con un archivo inválido en el mes `m` es `m −
 después. Un archivo de la familia (`summaries.parquet`, `path.parquet`, `fit.parquet` o
 `spectrum.parquet`) es válido si su esquema, `theta`, `state_version` y filas por row group son los
 de la imagen y los de `events.parquet` de L2 del mes. Sale de un listado de la raíz de L3 más el
-pie de **cada** archivo de la serie (solo pies; el log dice cuántos y cuánto tardó). Si la frontera
+pie de **cada** archivo de la serie (solo pies; el log dice cuántos archivos, cuántos pies se leyeron de verdad, con cuántos lectores y cuánto tardó). Si la frontera
 retrocede por archivos inválidos, un `theta_frontier_regressed` por θ lo avisa, y el cierre de
 `backfill` deja `backfill: N meses procesados, K saltados por estar al día, de M en el rango` y
 un `backfill_summary`. Un mes sin `events.parquet` y `carry_over.parquet` de L2 detiene el rango de ese θ con
