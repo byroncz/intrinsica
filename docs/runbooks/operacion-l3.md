@@ -469,8 +469,10 @@ midió 1 945,8 s con 8 lectores (imagen 0.25.1, 2 vCPU, familia `path`, 50 θ, 1
 del 2026-12-01 habría muerto por timeout. La regla para un job mensual pasa a ser: **timeout ≥ la
 verificación + 6 × el mes más lento**. Con la cifra medida: 1 946 + 6 × 183,7 = 3 048 s, y los
 3 600 s de `l3-monthly` y 5 400 s de `l3-monthly-path` la cubren con 1,18 × y 1,77 ×. `l3-monthly-fit`
-no cambia: sus 7 500 s ya eran 6,05 × el mes más lento de A y siguen cubriendo con holgura los 1 946 s
-de verificación. Cada modo de `l3` fija su `timeout` explícito (ya no hereda el de la capa, 1 200 s). La
+no cambia por decisión de la card, pero **no cumple la regla** con la verificación medida: 1 946 + 6 × 1 240 =
+9 386 s es más que sus 7 500 s (le quedan 5 554 s para el mes, 4,48 × el más lento de A, bajo 6 ×). Sí cubre
+la pared real esperada (≈ 3 186 s). Lo revisa ITSC-415 con la medición nueva; subirlo a ≥ 9 386 s es una
+opción del arquitecto fuera del alcance de ITSC-420. Cada modo de `l3` fija su `timeout` explícito (ya no hereda el de la capa, 1 200 s). La
 espera del workflow `l1-run-job` en `monthly-close` sondea cada 30 s hasta `completionTime` y no tiene tope
 propio: admite estos timeouts (5 400 s son ≈ 180 sondeos, muy bajo el límite de pasos de Workflows).
 La verificación más rápida de ITSC-420 (más lectores, un pie de `events.parquet` por mes, sin el viaje de
@@ -811,7 +813,7 @@ Python lee, escribe y mide; los hilos nativos del motor calculan. Son opcionales
 | `L3_ENGINE_THREADS` | Hilos nativos del motor. Entero ≥ 1 | los vCPU efectivos redondeados (`round(cores)` de `unit_timing`): 2 en `l3-backfill` |
 | `L3_THREADS` | Pool de E/S: lectura de las fronteras de L2 y conciliación. Entero ≥ 1; nunca se usan más que θ | `ceil(3 × cores)`, nunca más que θ: 7 a 2 vCPU, 12 a 4 y 26 a 8 (con los `cores` medidos en T5: 2,086, 3,945 y 8,342) |
 | `L3_META_WORKERS` | Pool de metadatos (ITSC-369): pasada de entrada de cada θ (`events.parquet`, carry-over, huella), pie de L1, apertura de los escritores y publicación. Son esperas de red de un viaje, no CPU: no sigue a los vCPU. Entero entre 1 y 64; nunca se usan más que θ | 16 (nunca más que θ) |
-| `L3_FRONTIER_WORKERS` | Lectores de la verificación de la frontera (ITSC-420): una tarea por (θ, mes), solo pies. Es E/S de un viaje, no CPU: no sigue a los vCPU, y con 8 lectores la verificación midió 1 945,8 s en la nube. Entero ≥ 1 (0, negativo o no entero es error de uso, código 2); se puede subir sin cambiar el resultado, que no depende del número de lectores. Memoria: a lo sumo un pie por lector a la vez (64 por defecto) más el caché de filas por row group de `events.parquet` (8 B por row group no vacío y por (θ, mes), solo fuera de S, liberado al terminar la verificación) | 64 |
+| `L3_FRONTIER_WORKERS` | Lectores de la verificación de la frontera (ITSC-420): una tarea por (θ, mes), solo pies. Es E/S de un viaje, no CPU: no sigue a los vCPU, y con 8 lectores la verificación midió 1 945,8 s en la nube. Entero de 1 a 256 (0, negativo, mayor que 256 o no entero es error de uso, código 2; cada lector es un hilo); se puede subir sin cambiar el resultado, que no depende del número de lectores. Memoria: a lo sumo un pie por lector a la vez (64 por defecto) más el caché de filas por row group de `events.parquet` (solo fuera de S, liberado al terminar la verificación; por entrada, 8 B por row group no vacío más ≈ 200 B fijos de ruta y objeto, ≈ 1,1 MB de costo fijo con 5 550 entradas) | 64 |
 
 El stack `l3` no fija ninguna: los valores siguen a los vCPU y el resultado (tablas y
 `content_hash`) es el mismo en cualquier combinación. Un valor que no sea un entero ≥ 1 termina

@@ -630,7 +630,7 @@ para un job mensual es *timeout ≥ la verificación + 6 × el mes más lento* (
 |---|---|---|
 | `l3-monthly` | **3 600 s** (antes 1 200 s) | 1,18 × la regla; 1,85 × la verificación sola |
 | `l3-monthly-path` | **5 400 s** (antes 1 200 s) | 1,77 × la regla; T verifica la serie y el techo de S |
-| `l3-monthly-fit` | 7 500 s (sin cambio) | 6,05 × el mes más lento de A; cubre la verificación |
+| `l3-monthly-fit` | 7 500 s (sin cambio) | No cumple la regla con la verificación medida: 1 946 + 6 × 1 240 = 9 386 s > 7 500 s (4,48 × el mes más lento de A tras la verificación). Cubre la pared real esperada (≈ 3 186 s). Lo revisa ITSC-415; subirlo a ≥ 9 386 s es decisión del arquitecto |
 
 La espera del workflow `l1-run-job` (módulo `orchestration`) sondea cada 30 s hasta que la ejecución trae
 `completionTime` y no tiene tope propio: admite estos timeouts (5 400 s son ≈ 180 sondeos, bajo el límite
