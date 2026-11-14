@@ -127,8 +127,9 @@ module "orchestration" {
       # l3-monthly-spectrum; no afecta a S ni a T, que ya publicaron.
       # l3-monthly-spectrum (ITSC-415) es la pasada de la familia F. Como A, solo
       # necesita el summaries.parquet de S, pero la Épica ITSC-410 la pone al final: si
-      # T o A fallan un mes, F no corre y el humano la relanza con l3-monthly y
-      # family = spectrum. Es el último, así que su fallo no afecta a S, T ni A, que ya
+      # T o A fallan un mes, F no corre y el humano la relanza con
+      # l3-backfill-spectrum (no con l3-monthly y family = spectrum, que corre en
+      # 4 GiB y F pide 32 GiB). Es el último, así que su fallo no afecta a S, T ni A, que ya
       # publicaron. La espera del workflow no tiene tope propio (sondea cada 30 s), así
       # que admite la suma de los timeouts de los jobs que espera.
       # Los nombres siguen la convención <capa>-<modo> del módulo layer y no
