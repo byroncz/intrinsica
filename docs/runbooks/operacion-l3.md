@@ -13,6 +13,9 @@ rango con la sección siguiente.
 
 ## Cambios requeridos
 
+**ITSC-415 (solo infraestructura; la imagen de L3 no cambia): dos applies, en este orden, que lanza el humano.**
+Primero `l3` (crea el job `l3-monthly-spectrum`, 32 GiB y 8 vCPU, `timeoutSeconds: 7200`, `args` `--mode monthly --family spectrum`, `L3_INFLIGHT_BYTES` = `4294967296`, y sube `l3-monthly-fit` de 7 500 s a `timeoutSeconds: 9000`) y después `l1` (el workflow encadena `l3-monthly-spectrum` y recibe `run.invoker` sobre él y `run.viewer` sobre `l3-monthly-fit`, que ahora espera). Si `l1` va primero, falla: el IAM se da sobre un job que debe existir. El plan de `l3` debe mostrar solo el job, su service account y el timeout de `l3-monthly-fit`; `l3-backfill` no se toca (la pared de F, 12 088 s, no pasa de 28 800 s). El de `l1`, solo el IAM nuevo y el workflow. Después, prueba `l3-monthly-spectrum` solo desde *Cloud Run → Jobs → l3-monthly-spectrum → Ejecutar* (toma el mes anterior; no desde *Run job*: `l3-monthly` con `family` = `spectrum` corre en 4 GiB, que no alcanzan para F) o con `l1-monthly-close` del mes en curso: `spectrum.parquet` del mes para los 50 θ y `summaries_summary` de la familia `spectrum` en los hallazgos. Pega el enlace del run en la card.
+
 **ITSC-418 (imagen de L3 ≥ 0.25.0; las otras cuatro imágenes solo suben el parche): el Deploy actualiza las cinco, y el apply del stack `l3` (lo lanza el humano) cambia el job `l3-backfill-spectrum`.**
 El apply deja el job en 32 GiB y 8 vCPU (antes 8 GiB y 2), con `L3_INFLIGHT_BYTES` = `4294967296` (4 GiB) y la imagen nueva; mismo nombre, mismos `args` y mismo timeout (43 200 s). El plan de `l3` debe mostrar solo ese cambio de recursos y de `env` y el de la imagen. `spectrum.parquet` pasa a `state_version` 1.2.0 con presupuesto de 130 M de ticks: un archivo 1.1.0 queda detrás de la frontera y el backfill lo reescribe. Antes de la corrida, el apply; después, el mes previo y el backfill completo (ver «Backfill de la familia F»).
 
@@ -106,13 +109,14 @@ relanza los mismos inputs.
      --format='yaml(spec.template.spec.template.spec)'
    ```
 
-   Deben existir `l3-backfill`, `l3-backfill-spectrum`, `l3-monthly`, `l3-monthly-path` y `l3-monthly-fit`.
+   Deben existir `l3-backfill`, `l3-backfill-spectrum`, `l3-monthly`, `l3-monthly-path`, `l3-monthly-fit` y `l3-monthly-spectrum`.
    `l3-backfill-spectrum` lleva `args` `--mode backfill --family spectrum`, `memory: 32Gi`, `cpu: '8'`, `L3_INFLIGHT_BYTES` = `4294967296` y `timeoutSeconds: 43200` (ITSC-413 e ITSC-418; `gcloud run jobs describe l3-backfill-spectrum`).
    `l3-monthly-path` lleva `args` `--mode monthly --family path`, los mismos recursos que
    `l3-monthly` y `timeoutSeconds: 5400` (ITSC-396 e ITSC-420; compruébalo con
    `gcloud run jobs describe l3-monthly-path`). `l3-monthly` lleva `timeoutSeconds: 3600` (ITSC-420).
    `l3-monthly-fit` lleva `args` `--mode monthly --family fit`, los mismos recursos salvo el
-   timeout, `timeoutSeconds: 7500` (ITSC-402; `gcloud run jobs describe l3-monthly-fit`).
+   timeout, `timeoutSeconds: 9000` (ITSC-402 y ITSC-415; `gcloud run jobs describe l3-monthly-fit`).
+   `l3-monthly-spectrum` lleva `args` `--mode monthly --family spectrum`, `memory: 32Gi`, `cpu: '8'`, `L3_INFLIGHT_BYTES` = `4294967296` y `timeoutSeconds: 7200` (ITSC-415; `gcloud run jobs describe l3-monthly-spectrum`).
    `l3-backfill` tiene `timeoutSeconds: 43200` (ITSC-402; antes 10800, y antes de ITSC-352,
    86400), `maxRetries: 1`, `cpu: '2'` y `memory: 4Gi` en `limits` (desde el apply de ITSC-352;
    antes `'4'`). Las raíces
@@ -146,9 +150,10 @@ orden. `l3-monthly` resume un mes.
 | --- | --- | --- | --- |
 | `l3-backfill` | Vacío: la frontera de cada θ decide desde dónde avanza | Vacío: hasta el último mes con consolidado en L1. Si lo pasas, el workflow lo manda siempre, aunque sea igual a `from` | Reprocesa desde `from` e ignora la frontera; **exige `from`** |
 | `l3-backfill-spectrum` | Igual que `l3-backfill` | Igual que `l3-backfill` | Igual que `l3-backfill`. Es el job de 32 GiB de la familia F: corre `--mode backfill --family spectrum` y `family` solo puede quedar en `summaries` o `spectrum` |
-| `l3-monthly` | El mes; vacío = el mes anterior | Vacío o igual a `from`; **la CLI rechaza otro valor** (código 2) | **No lo admite**: el workflow falla antes de lanzar. Usa `l3-backfill` con `from`. Acepta `family` = `spectrum`, pero corre en 4 GiB: el cierre de la FFT de una fase de F cerca del presupuesto pesa varios GiB, hasta ≈ 20 GiB (20 351 MiB con n = 130 M, ADR-L3-19), y no cabe (ADR-L3-19), así que **no es el job de F**; la pasada mensual de F es de la hija 5 de la Épica ITSC-410 |
+| `l3-monthly` | El mes; vacío = el mes anterior | Vacío o igual a `from`; **la CLI rechaza otro valor** (código 2) | **No lo admite**: el workflow falla antes de lanzar. Usa `l3-backfill` con `from`. Acepta `family` = `spectrum`, pero corre en 4 GiB: el cierre de la FFT de una fase de F cerca del presupuesto pesa varios GiB, hasta ≈ 20 GiB (20 351 MiB con n = 130 M, ADR-L3-19), y no cabe (ADR-L3-19), así que **no es el job de F**; la pasada mensual de F es el job `l3-monthly-spectrum` (ITSC-415), que no está en la lista |
 | `l3-monthly-path` | **No está en la lista de *Run job***: la cadena mensual lo corre solo. A mano, se lanza como `l3-monthly` con `family` = `path` | Igual que `l3-monthly` | Igual que `l3-monthly`: no lo admite |
 | `l3-monthly-fit` | **No está en la lista de *Run job***: la cadena mensual lo corre solo, después de `l3-monthly-path`. A mano, se lanza como `l3-monthly` con `family` = `fit` | Igual que `l3-monthly` | Igual que `l3-monthly`: no lo admite |
+| `l3-monthly-spectrum` | **No está en la lista de *Run job***: la cadena mensual lo corre solo, después de `l3-monthly-fit` (ITSC-415). **No se lanza como `l3-monthly` con `family` = `spectrum`**: ese corre en 4 GiB y F pide 32 GiB. A mano, *Cloud Run → Jobs → l3-monthly-spectrum → Ejecutar* (el mes anterior) o, para un mes puntual o rezagado, `l3-backfill-spectrum` | Igual que `l3-monthly` | Igual que `l3-monthly`: no lo admite |
 
 `series_start` vacío usa el del stack. `family` (solo `l3-backfill`, `l3-monthly` y `l3-backfill-spectrum`;
 `summaries` por defecto, `path`, `fit` o `spectrum`) agrega `--family=<f>`; los demás jobs rechazan `path`, `fit` y `spectrum`.
@@ -355,8 +360,9 @@ No lo relances: dos `l3-backfill` a la vez escriben las mismas particiones.
    timeout, la frontera retoma donde quedó: relanza `l3-backfill` con `family` = `fit`, sin
    `from` ni `to` (el paso 2 de la primera lista de esta sección, no el 2 de esta).
 
-La pasada mensual de A (`l3-monthly-fit`) tiene su propio timeout de 7 500 s, 6 veces el mes más
-lento de A (2023-03, 1 240 s). Los 1 200 s de `l3-monthly` no alcanzarían para ese mes.
+La pasada mensual de A (`l3-monthly-fit`) tiene su propio timeout, 9 000 s desde ITSC-415 (7 500 s
+antes): la verificación de la frontera más 6 veces el mes más lento de A (2023-03, 1 240 s).
+Los 1 200 s de `l3-monthly` no alcanzarían para ese mes.
 
 Tras el apply del stack `l3` con la imagen nueva, pega en la card el resultado del paso 2: pared
 total, mes más lento, `rss_peak_mib` máximo y el enlace al run (los registra la hija 4 de ITSC-397
@@ -437,8 +443,8 @@ relanza los mismos inputs.
 **Timeouts.** Los mismos de `l3-backfill`: la ejecución puede pasar de las 6 h que espera Actions
 y seguir viva en Cloud Run (ver «El backfill de A no cabe en las 6 h que espera Actions»: el
 seguimiento y el «no la relances» valen igual; dos `l3-backfill-spectrum` a la vez escriben las
-mismas particiones). Si la pared total pasa de 28 800 s, la hija 5 de ITSC-410 sube el timeout por
-la regla de TRD-L2 §10.2.
+mismas particiones). Si la pared total pasa de 28 800 s, el timeout sube por
+la regla de TRD-L2 §10.2 (la de F, 12 088 s, no pasó: ITSC-415 no lo toca).
 
 Tras el apply del stack `l3` con la imagen nueva (lo lanza el humano), pega en la card el
 resultado: pared total, mes más lento, `rss_peak_mib` máximo, `inflight_ticks_max` máximo, conteo
@@ -458,7 +464,8 @@ estimadas (por 1,16). ITSC-378 las reemplazó por el backfill completo de 110 me
 | --- | --- | --- | --- | --- |
 | `l3-monthly` | 10 800 s | 1 200 s | **3 600 s** (ITSC-420; 1 200 s hasta ITSC-402) | verificación + 6 × 183,7 = 1 946 + 1 102 = 3 048 s: 1,18 × (1,85 × la verificación sola) |
 | `l3-monthly-path` | (no existía) | (los de `l3-monthly`) | **5 400 s** (ITSC-420; 1 200 s hasta ITSC-402) | verificación + 6 × 183,7 = 3 048 s (S; T tarda un 11 % menos): 1,77 × con 5 400 s |
-| `l3-monthly-fit` | (no existía) | (no existía) | **7 500 s** | 6 × 1 240 (2023-03, A) = 7 440 s: 6,05 × con 7 500 s |
+| `l3-monthly-fit` | (no existía) | (no existía) | **9 000 s** (ITSC-415; 7 500 s hasta ITSC-420) | verificación + 6 × 1 240 (2023-03, A) = 1 316 + 7 440 = 8 756 s: 1,03 × con 9 000 s |
+| `l3-monthly-spectrum` | (no existía) | (no existía) | **7 200 s** (ITSC-415) | verificación + 6 × 774 (2023-02, F, backfill de 130 M) = 1 316 + 4 644 = 5 960 s: 1,21 × con 7 200 s |
 | `l3-backfill-spectrum` | (no existía) | (no existía) | **43 200 s** (ITSC-413) | El de `l3-backfill`; la pared de F sale del mes previo y del backfill completo (ver «Backfill de la familia F») |
 | `l3-backfill` | 86 400 s | 10 800 s | **43 200 s** | S: 1,5 × 6 638 = 9 957 s (1,63 × con 10 800 s); A: 1,5 × 27 556 = 41 334 s (1,57 × con 43 200 s) |
 
@@ -469,23 +476,29 @@ midió 1 945,8 s con 8 lectores (imagen 0.25.1, 2 vCPU, familia `path`, 50 θ, 1
 del 2026-12-01 habría muerto por timeout. La regla para un job mensual pasa a ser: **timeout ≥ la
 verificación + 6 × el mes más lento**. Con la cifra medida: 1 946 + 6 × 183,7 = 3 048 s, y los
 3 600 s de `l3-monthly` y 5 400 s de `l3-monthly-path` la cubren con 1,18 × y 1,77 ×. `l3-monthly-fit`
-no cambia por decisión de la card, pero **no cumple la regla** con la verificación medida: 1 946 + 6 × 1 240 =
-9 386 s es más que sus 7 500 s (le quedan 5 554 s para el mes, 4,48 × el más lento de A, bajo 6 ×). Sí cubre
-la pared real esperada (≈ 3 186 s). Lo revisa ITSC-415 con la medición nueva; subirlo a ≥ 9 386 s es una
-opción del arquitecto fuera del alcance de ITSC-420. Cada modo de `l3` fija su `timeout` explícito (ya no hereda el de la capa, 1 200 s). La
+no cambió en ITSC-420 y **no cumplía la regla** con la verificación medida. **ITSC-415 la aplica con la
+cifra medida después de optimizar la verificación** (ITSC-420: 1 315,5 s para una familia distinta de S, con 64 lectores, 2 vCPU,
+ejecución `l3-backfill-6m6t5`; la meta de 300 s no se cumplió y su diagnóstico va en otra card):
+- `l3-monthly` y `l3-monthly-path` no cambian: S: 1 316 + 6 × 183,7 = 2 418 s (verificación medida, conservadora: S lee menos pies); T, 1 316 + 6 × 186 = 2 432 s. Sus 3 600 s y 5 400 s los cubren.
+- `l3-monthly-fit` sube a **9 000 s**: 1 316 + 6 × 1 240 = 8 756 s.
+- `l3-monthly-spectrum` fija **7 200 s**: 1 316 + 6 × 774 s (2023-02, el mes más lento de F, del backfill de 130 M en el job de 32 GiB y 8 vCPU) = 5 960 s. La verificación de F en ese job no se midió aparte: se usa la de T.
+
+Los cuatro están bajo el tope de 86 400 s del módulo `layer`. Cada modo de `l3` fija su `timeout` explícito (ya no hereda el de la capa, 1 200 s). La
 espera del workflow `l1-run-job` en `monthly-close` sondea cada 30 s hasta `completionTime` y no tiene tope
-propio: admite estos timeouts (5 400 s son ≈ 180 sondeos, muy bajo el límite de pasos de Workflows).
-La verificación más rápida de ITSC-420 (más lectores, un pie de `events.parquet` por mes, sin el viaje de
-existencia) debería bajar esa cifra a menos de 300 s; con la medida nueva la hija ITSC-415 ajusta los
-timeouts mensuales y los umbrales de subida.
+propio: admite la suma de los jobs que espera, `l3-monthly` + `l3-monthly-path` + `l3-monthly-fit` =
+3 600 + 5 400 + 9 000 = 18 000 s (con `maxRetries: 1`, hasta el doble), más `l2-monthly` y `viz-tiles`: unos 600 sondeos
+(1 200 con el reintento), muy bajo el límite de pasos de Workflows. `l3-monthly-spectrum` es el último y no se espera.
+Los timeouts mensuales se revisan de nuevo cuando la card de diagnóstico de la verificación mida una cifra distinta.
 
 Los valores de ITSC-402 **los aplica el humano** con el `apply` del stack `l3`; hasta entonces rigen
 los desplegados. La regla de subida de `l3-monthly` no cambia: si 2022-11 pasa de 200 s, sube.
 La de `l3-backfill` es la misma, con el timeout nuevo: si un backfill completo pasa de **28 800 s**
 (43 200 ÷ 1,5, el margen de 1,5 ×), sube en el siguiente PR de infra. La familia A la
 cumple (27 556 s, un margen de 1,57 ×): el arquitecto fijó los 43 200 s el 2026-11-06 para
-cubrir el 1,5 × sobre esa pared (41 334 s), y quedan bajo el tope de 86 400 s. Para `l3-monthly-fit` el umbral
-es 1 250 s en el mes más lento (7 500 ÷ 6); 2023-03 ya está en 1 240 s. Mientras ninguna se
+cubrir el 1,5 × sobre esa pared (41 334 s), y quedan bajo el tope de 86 400 s. F no la mueve: su backfill
+midió 12 088 s, bajo los 28 800 s, y `l3-backfill` no se toca en ITSC-415. Para `l3-monthly-fit` el umbral
+es (9 000 − 1 316) ÷ 6 = 1 280 s en el mes más lento; 2023-03 está en 1 240 s. Para `l3-monthly-spectrum`
+es (7 200 − 1 316) ÷ 6 = 980 s; 2023-02 está en 774 s. Mientras ninguna se
 cumpla, nadie los sube «por si acaso». Si un job termina por timeout con estos valores, mira primero `unit_timing` del mes:
 una unidad que pasa de 3 × su pared habitual es un hallazgo, no una razón para subir el timeout.
 
@@ -515,8 +528,8 @@ causa en el log de la ejecución:
 - **Timeout**: la tarea se corta sin mensaje de memoria. El de `l3-monthly` es de
   3 600 s desde ITSC-420 (1 200 s antes; cubre la verificación de la frontera, 1 945,8 s medidos,
   más 6 veces el mes más lento a 2 vCPU, 183,7 s en 2022-11, ITSC-378); el de `l3-monthly-path`,
-  de 5 400 s; el de `l3-monthly-fit`, de 7 500 s, y el de `l3-backfill`, de 43 200 s desde
-  ITSC-402 (ver «Timeouts»).
+  de 5 400 s; el de `l3-monthly-fit`, de 9 000 s (ITSC-415); el de `l3-monthly-spectrum`, de 7 200 s, y el de
+  `l3-backfill`, de 43 200 s desde ITSC-402 (ver «Timeouts»).
 - **Un hallazgo `error`**: lee su `check_type` en la tabla siguiente.
 
 Los 17 `check_type` de [TRD-L3 §9.3](../TRD/l3.md#93-tipos-de-chequeo-check_type),
@@ -672,7 +685,7 @@ histórico). L2 no cambió de contenido; sí cambió L3 desde 2026-02.
 ## La cadena mensual
 
 `monthly-close` de L1 dispara el workflow `l1-run-job`, que encadena
-**`l1-monthly-close` → `l2-monthly` → `viz-tiles` → `l3-monthly` → `l3-monthly-path` → `l3-monthly-fit`**,
+**`l1-monthly-close` → `l2-monthly` → `viz-tiles` → `l3-monthly` → `l3-monthly-path` → `l3-monthly-fit` → `l3-monthly-spectrum`**,
 cada uno solo si el anterior terminó bien y sin overrides (cada job toma el mes
 anterior). L3 va al final porque depende del cierre de L2 y de que viz no quede
 detrás (decisión del 2026-10-13, [TRD-L3 §11](../TRD/l3.md#11-operaciones)).
@@ -682,9 +695,13 @@ esqueleto: por eso el workflow espera a `l3-monthly` y T corre solo si S termin�
 con código 0. Desde ITSC-402 el workflow también espera a `l3-monthly-path`, y
 `l3-monthly-fit`, la pasada de la familia A (`--mode monthly --family fit`), corre solo si T
 terminó con código 0. A solo necesita `summaries.parquet`, no `path.parquet`, pero la cadena
-es lineal y la Épica ITSC-397 fija ese orden. El workflow no espera a `l3-monthly-fit`: sigue
-su ejecución en *Cloud Run → Jobs → l3-monthly-fit*. Así `path.parquet` y `fit.parquet` del
-mes nuevo existen sin intervención y las fronteras de T y de A siguen a la de S mes a mes.
+es lineal y la Épica ITSC-397 fija ese orden. Desde ITSC-415 el workflow también espera a
+`l3-monthly-fit`, y `l3-monthly-spectrum`, la pasada de la familia F (`--mode monthly --family spectrum`,
+32 GiB y 8 vCPU), corre solo si A terminó con código 0. F tampoco necesita `path.parquet` ni
+`fit.parquet`, solo `summaries.parquet`, pero el orden lo fija la Épica ITSC-410. El workflow no espera a
+`l3-monthly-spectrum`: sigue su ejecución en *Cloud Run → Jobs → l3-monthly-spectrum*. Así `path.parquet`,
+`fit.parquet` y `spectrum.parquet` del mes nuevo existen sin intervención y las fronteras de T, de A y de F
+siguen a la de S mes a mes.
 
 **Si `viz-tiles` falla un mes, `l3-monthly` no corre.** Costo asumido del diseño.
 Qué hacer:
@@ -700,27 +717,42 @@ Qué hacer:
 4. Lanza **`l3-monthly` con `family` = `fit`** (mismo mes, `to` y `force` vacíos):
    la cadena tampoco llegó a `l3-monthly-fit`, y sin este paso la frontera de A
    queda un mes detrás.
-5. Verifica que no queden `theta_behind_frontier`, de S (`details.family` =
-   `summaries`), de T (`path`) ni de A (`fit`): si los hay, `l3-backfill` sin `from`
+5. Lanza **`l3-backfill-spectrum`**, sin `from` ni `to` (o con `from` = el mes): la cadena tampoco llegó a
+   `l3-monthly-spectrum`, y sin este paso la frontera de F queda un mes detrás. No lo lances como
+   `l3-monthly` con `family` = `spectrum`: corre en 4 GiB y F pide 32 GiB.
+6. Verifica que no queden `theta_behind_frontier`, de S (`details.family` =
+   `summaries`), de T (`path`), de A (`fit`) ni de F (`spectrum`): si los hay, `l3-backfill` (o
+   `l3-backfill-spectrum` para F) sin `from`
    ni `to`, con la familia que corresponda, los pone al día.
 
-**Si `l3-monthly-path` falla un mes, S no se ve afectada, pero A tampoco corre**: S
+**Si `l3-monthly-path` falla un mes, S no se ve afectada, pero A y F tampoco corren**: S
 ya publicó, y el workflow termina con error en ese eslabón sin lanzar
-`l3-monthly-fit` (la cadena es lineal). El fallo se ve en *Cloud Run → Jobs →
+`l3-monthly-fit` ni `l3-monthly-spectrum` (la cadena es lineal). El fallo se ve en *Cloud Run → Jobs →
 l3-monthly-path* y en los hallazgos de T. Relánzalo a mano como `l3-monthly` con
-`family` = `path` y el mes, y después `l3-monthly` con `family` = `fit` y el mes. Si el
+`family` = `path` y el mes, después `l3-monthly` con `family` = `fit` y el mes, y al final `l3-backfill-spectrum` (F). Si el
 mes quedó rezagado (`theta_behind_frontier` con `family` = `path`), `l3-backfill`
 con `family` = `path`, sin `from` ni `to`, lo pone al día. `l3-monthly-path` termina
 con código 1 en las mismas condiciones que `l3-monthly`: ningún θ listo y rezagados.
 
-**Si `l3-monthly-fit` falla un mes, S y T no se ven afectadas**: ya publicaron, y el
-workflow ya había terminado bien porque no espera al último eslabón; el fallo solo
-se ve en *Cloud Run → Jobs → l3-monthly-fit* y en los hallazgos de A. Relánzalo a
-mano como `l3-monthly` con `family` = `fit` y el mes. Si el mes quedó rezagado
+**Si `l3-monthly-fit` falla un mes, S y T no se ven afectadas, pero F tampoco corre**: ya
+publicaron, y desde ITSC-415 el workflow espera a `l3-monthly-fit`: termina con error en ese eslabón
+sin lanzar `l3-monthly-spectrum`. El fallo se ve en *Cloud Run → Jobs → l3-monthly-fit* y en los hallazgos
+de A. Relánzalo a
+mano como `l3-monthly` con `family` = `fit` y el mes, y después `l3-backfill-spectrum` (F). Si el mes quedó rezagado
 (`theta_behind_frontier` con `family` = `fit`), `l3-backfill` con `family` = `fit`,
 sin `from` ni `to`, lo pone al día. Termina con código 1 en las mismas condiciones
-que `l3-monthly`. Su timeout es de 7 500 s (el mes más lento de A, 2023-03, tomó
+que `l3-monthly`. Su timeout es de 9 000 s (el mes más lento de A, 2023-03, tomó
 1 240 s).
+
+**Si `l3-monthly-spectrum` falla un mes, S, T y A no se ven afectadas**: ya publicaron, y el
+workflow ya había terminado bien porque no espera al último eslabón; el fallo solo
+se ve en *Cloud Run → Jobs → l3-monthly-spectrum* y en los hallazgos de F. Relánzalo desde
+*Cloud Run → Jobs → l3-monthly-spectrum → Ejecutar* (toma el mes anterior) o, para un mes puntual,
+`l3-backfill-spectrum` con `from` = el mes (*Run job*, `to` y `force` vacíos). Si el mes quedó rezagado
+(`theta_behind_frontier` con `family` = `spectrum`), `l3-backfill-spectrum` sin `from` ni `to` lo pone al día.
+Termina con código 1 en las mismas condiciones que `l3-monthly`. Su timeout es de 7 200 s (el mes más
+lento de F, 2023-02, tomó 774 s en el backfill de 130 M). Un `event_over_budget` o un OOM de F se leen en la sección
+«Leer un fallo»; no se arreglan subiendo el timeout.
 
 Un `l3-monthly` solo termina con código 1 si ningún θ estaba listo y había
 rezagados (un mes perdido no pasa como éxito); con algún θ al día o nada que

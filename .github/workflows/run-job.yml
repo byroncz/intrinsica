@@ -26,7 +26,11 @@
 # --family path, después de l3-monthly) y l3-monthly-fit (ITSC-402: --mode monthly
 # --family fit, después de l3-monthly-path). Ninguno está en la lista: a mano, la
 # pasada de T se lanza como l3-monthly con family = path y la de A como l3-monthly
-# con family = fit, que dan los mismos argumentos.
+# con family = fit, que dan los mismos argumentos. La pasada de F, l3-monthly-spectrum (ITSC-415: --mode
+# monthly --family spectrum, después de l3-monthly-fit), tampoco está en la lista, pero a
+# diferencia de las otras a mano no se lanza como l3-monthly con family = spectrum, que corre en
+# 4 GiB y F pide 32 GiB. Un mes de F se lanza con l3-backfill-spectrum (de 32 GiB, en la
+# lista) o desde Cloud Run con el job l3-monthly-spectrum.
 #
 # ops-script (ITSC-298) no es una capa de datos: corre un script Python de
 # gs://<proyecto>-ops/scripts/ (input script, con args libres en args) y deja
@@ -85,7 +89,7 @@ on:
         type: string
         required: false
       family:
-        description: "Solo l3-backfill, l3-monthly y l3-backfill-spectrum: familia de descriptores que se escribe. summaries (por defecto), path (la familia T), fit (la familia A) o spectrum (la familia F); path, fit y spectrum necesitan summaries.parquet del mes: corre antes el backfill de summaries. El backfill de spectrum se lanza con el job l3-backfill-spectrum (32 GiB; ahí family puede quedar en summaries o en spectrum); l3-monthly con spectrum corre en 4 GiB, que no alcanzan para el cierre de la FFT de F (la pasada mensual de F es de la hija 5 de ITSC-410). Los demás jobs la rechazan si no es summaries"
+        description: "Solo l3-backfill, l3-monthly y l3-backfill-spectrum: familia de descriptores que se escribe. summaries (por defecto), path (la familia T), fit (la familia A) o spectrum (la familia F); path, fit y spectrum necesitan summaries.parquet del mes: corre antes el backfill de summaries. El backfill de spectrum se lanza con el job l3-backfill-spectrum (32 GiB; ahí family puede quedar en summaries o en spectrum); l3-monthly con spectrum corre en 4 GiB, que no alcanzan para el cierre de la FFT de F (la pasada mensual de F es el job l3-monthly-spectrum, que no está en esta lista: ITSC-415). Los demás jobs la rechazan si no es summaries"
         type: choice
         options:
           - summaries
