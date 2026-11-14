@@ -3,6 +3,11 @@
 Se monta en el contenedor y lee `/data`. Uso:
   python smoke_check.py rows <archivos esperados>
   python smoke_check.py hashes <meses esperados dos veces>
+  python smoke_check.py idle <meses saltados>
+
+`idle` comprueba la segunda corrida, la que la frontera deja sin trabajo: desde `/data/marker`
+no se escribió nada bajo `l3/` y, bajo `dq/`, solo el hallazgo `backfill_summary` con
+`processed: 0` y `skipped` igual al argumento.
 """
 
 import json
@@ -42,6 +47,38 @@ def rows(expected: int) -> None:
     print(f"filas OK: {events} eventos en {len(files)} archivos")
 
 
+def written_since_marker(root: Path) -> list[Path]:
+    """Los archivos de `root` más nuevos que `/data/marker`, como `find -newer`."""
+    marker = (DATA / "marker").stat().st_mtime_ns
+    return sorted(
+        path
+        for path in root.rglob("*")
+        if path.is_file() and path.stat().st_mtime_ns > marker
+    )
+
+
+def idle(skipped: int) -> None:
+    """La corrida al día no escribe datos; deja un solo hallazgo, el cierre del backfill."""
+    data = written_since_marker(DATA / "l3")
+    if data:
+        fail(f"la segunda corrida escribió {len(data)} archivos bajo l3: {data}")
+    files = written_since_marker(DATA / "dq")
+    if len(files) != 1:
+        fail(f"la segunda corrida escribió {len(files)} archivos bajo dq: {files}")
+    found = pq.read_table(files[0]).to_pylist()
+    if [row["check_type"] for row in found] != ["backfill_summary"]:
+        fail(f"{files[0]}: se esperaba solo backfill_summary y hay {found}")
+    details = json.loads(found[0]["details"])
+    if details["processed"] != 0 or details["skipped"] != skipped:
+        fail(
+            f"backfill_summary de la segunda corrida: processed {details['processed']} y "
+            f"skipped {details['skipped']}, se esperaban 0 y {skipped}"
+        )
+    print(
+        f"corrida al día OK: nada en l3, un backfill_summary (processed 0, skipped {skipped})"
+    )
+
+
 def hashes(twice: int) -> None:
     """Tras `--force`, los meses reprocesados dan el mismo content_hash que la primera vez."""
     found = ds.dataset(DATA / "dq", partitioning="hive").to_table().to_pylist()
@@ -66,4 +103,4 @@ def hashes(twice: int) -> None:
 
 if __name__ == "__main__":
     command, number = sys.argv[1], int(sys.argv[2])
-    {"rows": rows, "hashes": hashes}[command](number)
+    {"rows": rows, "hashes": hashes, "idle": idle}[command](number)

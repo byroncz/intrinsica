@@ -33,7 +33,7 @@ push(row group k) ──► cola de ítems (θ₀,k) (θ₁,k) … (θ₄₉,k) 
   | `Family::Summaries` (por defecto) | `summaries.parquet` | 18 (`COLUMNS`) | uno por row group, en cualquier orden |
   | `Family::Path` | `path.parquet` | 14 (`PATH_COLUMNS`: la clave y T-01 a T-13) | corridas de row groups vecinos, fusión ordenada |
   | `Family::Fit` | `fit.parquet` | 10 (`FIT_COLUMNS`: la clave y A-01 a A-09) | uno por row group, en cualquier orden (momentos aditivos) |
-  | `Family::Spectrum` | `spectrum.parquet` | 29 (`SPECTRUM_COLUMNS`: la clave y F-01 a F-04, 7 por registro) | corridas de row groups vecinos, fusión ordenada (búfer de retornos) |
+  | `Family::Spectrum` | `spectrum.parquet` | 31 (`SPECTRUM_COLUMNS`: la clave, F-01 a F-04 con 7 por registro y `c_energy_loc` y `os_energy_loc`) | corridas de row groups vecinos, fusión ordenada (búfer de retornos) |
 
   La familia T usa además `Config.silence_us` (µs): un hueco entre ticks de una fase cuenta
   como inactividad si es estrictamente mayor. S no lo usa. Los registros de T, sus fórmulas y
@@ -95,7 +95,7 @@ push(row group k) ──► cola de ítems (θ₀,k) (θ₁,k) … (θ₄₉,k) 
   que une dos tramos se calcula al unir: el búfer final es el mismo con cualquier corte y orden de
   `push`. El primer retorno (del ancla al primer tick) se calcula al cerrar. Es la excepción
   declarada a «estado de cientos de bytes por evento»: acotada por `Config.budget_ticks`
-  (20 000 000: un evento con `extreme − reference` mayor **no lee ningún tick**, no guarda retornos,
+  (130 000 000, `DEFAULT_BUDGET_TICKS`: un evento con `extreme − reference` mayor **no lee ningún tick**, no guarda retornos,
   su fila sale nula y `SealedRowGroup.over_budget` lo avisa) y por el tope del orquestador.
   `Engine::buffered_ticks()` dice cuántos retornos hay en vuelo (cuesta 4 B cada uno); el costo fijo
   por evento abierto es `size_of::<SpectrumRun>()` = 120 B, fijado por una prueba de `engine.rs`.
@@ -107,17 +107,23 @@ push(row group k) ──► cola de ítems (θ₀,k) (θ₁,k) … (θ₄₉,k) 
   `2^⌊log₂ n⌋` retornos) da 7 niveles. Todo en `f64` sobre los `f32` convertidos y siempre en el
   mismo orden, en el hilo que cierra el evento. Nulos: fase de menos de 16 retornos, overshoot
   vacío, banda o nivel sin bins (5, 6 y 7 con menos de 32, 64 y 128 retornos) y serie sin energía.
-  El trabajo transitorio de la FFT (el búfer de `n` complejos de 16 B más el plan y el scratch de
+  Antes de la FFT, el cierre calcula además la **ubicación de la energía total** de la fase
+  (`c_energy_loc`, `os_energy_loc`; ITSC-417): `Σ t_k·r_k² / Σ r_k²` con `t_k = (k − 0,5)/n`, sobre
+  los retornos sin centrar y sin ventana, en una pasada sobre el búfer `f32` con dos acumuladores
+  `f64` compensados (no copia la serie y `SpectrumRun` no crece). Es nula solo si todos los
+  retornos son cero: una fase de retornos iguales y no nulos no tiene Fourier pero sí ubicación,
+  0,5. La máscara de columnas presentes es un `u32`: `SPECTRUM_WIDTH` = 31 cabe y una aserción de
+  compilación en `layout.rs` lo fija. El trabajo transitorio de la FFT (el búfer de `n` complejos de 16 B más el plan y el scratch de
   `rustfft`) no está en `buffered_ticks`. Peor caso, con `n` primo (Bluestein): `16 B × (2n + 4m)`,
   con `m` la longitud de la FFT interna (`3·2^(k−2)` si alcanza `2n − 1`, si no `2^k`, con
-  `k = ⌈log₂(2n−1)⌉`): ≈ 3,6 GiB con `n` = 20 M (`m` = 3·2^24). Es una medida, no una estimación:
+  `k = ⌈log₂(2n−1)⌉`): ≈ 3,6 GiB con `n` = 20 M (`m` = 3·2^24). Con el presupuesto de 130 M (ITSC-418), `3·2^26` no alcanza `2n − 1`, `m` = 2^28 y la cota da 21 339 869 184 B (20 351 MiB), bajo los 24 576 MiB del job de 32 GiB; es la fórmula, no una medición, y `the_closing_bound_at_the_budget_fits_the_job` la fija. La fórmula está medida a `n` ≈ 1 M:
   `tests/spectrum_memory.rs` cuenta los bytes con un asignador global y la cota queda dentro de
-  32 B del pico en los dos casos de Bluestein que prueba. Los otros planes pesan menos (48 a 64 B
+  32 B del pico en los dos casos de Bluestein que prueba. A 20 M y a 130 M es la misma fórmula, sin medir. Los otros planes pesan menos (48 a 64 B
   por retorno). Se acota serializando los cierres de fases con `n ≥ 2^20` retornos
   (`SERIAL_CLOSE_MIN`), uno a la vez por proceso; por debajo, el peor cierre es de 160 MiB por hilo
   y corren en paralelo. **Con 20 M de retornos y `n` primo el cierre no cabe en el job de 4 GiB
   junto con la base del proceso:** bajar el umbral no lo arregla (el pico es el de una sola fase).
-  Lo resuelve la hija 3 (job mayor, presupuesto de F menor o un plan sin Bluestein), no este crate.
+  Lo resuelve el job de F (32 GiB desde ITSC-418), no este crate.
 - **Momentos de A.** La familia A (`src/fit.rs`) lleva, por evento, tres acumuladores
   (`FitAcc`): la confirmación `c`, el overshoot `os` y el evento entero `ev`, cada uno en sus
   coordenadas `τ = (t − t₀)/(t_fin − t₀)`, `y = (p − p₀)/(p_fin − p₀)` con el ancla y el
@@ -182,7 +188,7 @@ let engine = Engine::<B>::new(Config {
     row_groups,  // por θ, las filas de cada row group de salida
     family,      // Family::Summaries (por defecto), Family::Path, Family::Fit o Family::Spectrum
     silence_us,  // umbral de silencio de la familia T, en µs (S, A y F no lo usan)
-    budget_ticks, // presupuesto de la familia F: ticks por evento (20_000_000; S, T y A no lo usan)
+    budget_ticks, // presupuesto de la familia F: ticks por evento (130_000_000; S, T y A no lo usan)
 })?;
 // Por lotes, en orden y sin copiar: filas consecutivas de events.parquet de L2 del θ, por
 // delante del row group que las toca (antes o después de empezar los push).
@@ -268,7 +274,11 @@ sobre el presupuesto (no lee un tick: un precio en 0 dentro de él no falla; el 
 sobre el presupuesto; un aviso por evento aunque cruce row groups), un evento de tres row groups con
 los mismos bits en **todos** los órdenes de `push`, `R` como último tick de un row group, un row
 group intermedio con ticks de una sola fase, `buffered_ticks` mientras el evento está abierto y
-cero al cerrar, y una DFT de O(n²) sin `rustfft` sobre series aleatorias con 1 y 4 hilos. Las
+cero al cerrar, y una DFT de O(n²) sin `rustfft` sobre series aleatorias con 1 y 4 hilos. La
+ubicación de la energía se prueba contra una suma ingenua (1e-12, valores en (0, 1)), con los casos
+de nulos (menos de 16 retornos, overshoot vacío, todos los retornos en cero, evento sobre el
+presupuesto), el de retornos iguales y no nulos (0,5) y los mismos bits con 1 a 4 hilos, cortes de
+tick y lotes de eventos. Las
 pruebas unitarias de `src/spectrum.rs` cubren las bandas, Haar, la fusión de vecinos y el
 planificador escalar.
 

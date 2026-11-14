@@ -3,18 +3,22 @@
 from decimal import Decimal
 from pathlib import Path
 
+import dc_frames.lake as lake_module
 import pyarrow as pa
+import pyarrow.fs as pafs
 import pyarrow.parquet as pq
 import pytest
 from cli_support import emitted, env_for, write_catalog
 from l3_dc_descriptors import frontier, summarize_month
 from l3_dc_descriptors.cli import main
 from l3_dc_descriptors.frontier import (
+    FooterReader,
     frontiers,
     invalid_reason,
     l2_missing,
     list_l2,
     list_summaries,
+    scan_frontiers,
     theta_text,
 )
 from l3_lake import KEY, M1, M2, M3, build_lake, fixture_ticks, month_cuts
@@ -75,7 +79,9 @@ def test_a_series_that_does_not_start_at_the_series_start_has_no_frontier(lake):
 
 
 def rewrite(path: Path, change) -> None:
-    size = pq.ParquetFile(path).metadata.row_group(0).num_rows
+    meta = pq.ParquetFile(path).metadata
+    # Un mes sin eventos del θ no tiene row groups: se reescribe sin tamaño.
+    size = meta.row_group(0).num_rows if meta.num_row_groups else None
     pq.write_table(change(pq.read_table(path)), path, row_group_size=size)
 
 
@@ -133,7 +139,10 @@ def test_every_invalid_month_leaves_no_frontier(lake):
     assert frontier_of(lake) is None
 
 
-def test_only_the_frontier_file_of_each_theta_is_opened(lake, monkeypatch):
+def test_every_month_of_the_series_is_verified_not_only_the_last_valid_one(
+    lake, monkeypatch
+):
+    """Verificar todos los meses lee más pies (ITSC-419), nunca datos: cada (θ, mes) una vez."""
     calls = []
     real = frontier.invalid_reason
 
@@ -145,7 +154,7 @@ def test_only_the_frontier_file_of_each_theta_is_opened(lake, monkeypatch):
     listed = list_summaries(str(lake.l3), KEY)
     result = frontiers(lake.thetas, listed, START, str(lake.l3), str(lake.l2), KEY)
     assert set(result.values()) == {ordinal(M3)}
-    assert sorted(calls) == sorted((t, M3) for t in lake.thetas)
+    assert sorted(calls) == sorted((t, m) for t in lake.thetas for m in lake.months)
 
 
 def test_the_listing_covers_every_theta_of_the_lake_not_only_the_catalog(lake):
@@ -540,6 +549,40 @@ def test_an_invalid_spectrum_file_moves_the_spectrum_frontier_back(
     assert frontier_of(spectrum_lake) == ordinal(M3)
 
 
+@pytest.mark.parametrize(
+    ("damage", "reason"),
+    [
+        # Un `spectrum.parquet` 1.0.0 de verdad (la corrida de prueba de 2023-03): sus 28
+        # columnas, sin `c_energy_loc` ni `os_energy_loc`, y su versión. Lo frena el esquema.
+        (
+            lambda t: with_state_version(
+                t.drop_columns(["c_energy_loc", "os_energy_loc"]), "1.0.0"
+            ),
+            "esquema",
+        ),
+        # Las dos columnas de más con la versión vieja, o solo una de ellas: también atrás.
+        (lambda t: with_state_version(t, "1.0.0"), "state_version"),
+        (lambda t: t.drop_columns(["os_energy_loc"]), "esquema"),
+        # Un `spectrum.parquet` 1.1.0 (presupuesto de 20 M, ITSC-417): mismo esquema de 30
+        # columnas, otra versión. Cambiar el presupuesto es versión nueva (decisión 7): el
+        # backfill lo reescribe para que sus eventos entre 20 M y 130 M dejen de ser nulos.
+        (lambda t: with_state_version(t, "1.1.0"), "state_version"),
+    ],
+    ids=["file_1_0_0", "version_1_0_0", "one_location_missing", "version_1_1_0"],
+)
+def test_a_spectrum_file_of_an_older_version_is_behind_the_frontier(
+    spectrum_lake, damage, reason
+):
+    """El backfill de F lo reescribe: la frontera de F queda antes de ese mes, la de S no."""
+    rewrite(file_of(spectrum_lake.l3, SMALL, M3, "spectrum.parquet"), damage)
+    problem = invalid_reason(
+        str(spectrum_lake.l3), str(spectrum_lake.l2), KEY, SMALL, M3, "spectrum"
+    )
+    assert problem is not None and reason in problem
+    assert spectrum_frontier_of(spectrum_lake) == ordinal(M2)
+    assert frontier_of(spectrum_lake) == ordinal(M3)
+
+
 def test_the_spectrum_frontier_does_not_look_at_the_parameters_in_the_footer(
     spectrum_lake,
 ):
@@ -635,3 +678,444 @@ def test_monthly_spectrum_names_summaries_as_the_reason_when_the_month_has_none(
     }
     assert file_of(lake.l3, SMALL, M2, "spectrum.parquet").exists()
     assert not file_of(lake.l3, BIG, M2, "spectrum.parquet").exists()
+
+
+# El incidente de ITSC-419: un archivo válido en medio de archivos de la versión anterior.
+
+
+def test_a_valid_file_after_an_invalid_one_does_not_hide_it(lake):
+    """Con un inválido en el mes `m` la frontera es `m − 1`, aunque `m + 1` sea válido."""
+    rewrite(
+        file_of(lake.l3, SMALL, M2, "summaries.parquet"),
+        lambda t: with_state_version(t, "0.9.0"),
+    )
+    assert frontier_of(lake) == ordinal(M1)
+    assert frontier_of(lake, BIG) == ordinal(M3)
+
+
+def test_an_invalid_first_month_leaves_no_frontier_even_with_valid_ones_after(lake):
+    rewrite(
+        file_of(lake.l3, SMALL, M1, "summaries.parquet"),
+        lambda t: with_state_version(t, "0.9.0"),
+    )
+    assert frontier_of(lake) is None
+
+
+def test_the_scan_reports_every_invalid_month_with_the_first_reason(lake):
+    for month in (M1, M3):
+        rewrite(
+            file_of(lake.l3, SMALL, month, "summaries.parquet"),
+            lambda t: with_state_version(t, "0.9.0"),
+        )
+    listed = list_summaries(str(lake.l3), KEY)
+    found = scan_frontiers([SMALL, BIG], listed, START, str(lake.l3), str(lake.l2), KEY)
+    assert found[SMALL].reached is None
+    assert sorted(found[SMALL].invalid) == [ordinal(M1), ordinal(M3)]
+    assert found[SMALL].first_invalid == ordinal(M1)
+    assert "summaries.parquet: state_version 0.9.0" in found[SMALL].invalid[ordinal(M1)]
+    assert found[SMALL].checked == 3
+    assert found[BIG].reached == ordinal(M3) and not found[BIG].invalid
+
+
+FAMILIES = ("summaries", "path", "fit", "spectrum")
+OLD = "0.9.0"
+INCIDENT_THETAS = (SMALL, BIG)
+
+
+@pytest.fixture(params=FAMILIES)
+def family(request) -> str:
+    return request.param
+
+
+@pytest.fixture
+def incident(tmp_path, family):
+    """Cinco meses de la familia, todos con la versión anterior salvo el tercero (2023-01 del
+    incidente): un válido rodeado de archivos de otra versión.
+    """
+    cuts = month_cuts(TICKS, 800, 1600, 2400, 3200)
+    lake = build_lake(tmp_path, TICKS, cuts, thetas=INCIDENT_THETAS)
+    assert len(lake.months) == 5
+    for name in dict.fromkeys(("summaries", family)):
+        for month in lake.months:
+            summarize_month(
+                lake.l1,
+                lake.l2,
+                lake.l3,
+                month,
+                lake.theta_texts,
+                series_start=M1,
+                family=name,
+            )
+    for month in lake.months:
+        if month != lake.months[2]:
+            for theta in INCIDENT_THETAS:
+                rewrite(
+                    file_of(lake.l3, theta, month, f"{family}.parquet"),
+                    lambda t: with_state_version(t, OLD),
+                )
+    return lake
+
+
+def family_scan(lake, family: str, workers: int | None = None, reader=None):
+    summaries = list_summaries(str(lake.l3), KEY)
+    listed = list_summaries(str(lake.l3), KEY, family)
+    return scan_frontiers(
+        INCIDENT_THETAS,
+        listed,
+        START,
+        str(lake.l3),
+        str(lake.l2),
+        KEY,
+        family,
+        summaries,
+        workers,
+        reader,
+    )
+
+
+def run_family(lake, tmp_path, family: str, *argv: str) -> int:
+    catalog = write_catalog(tmp_path / "thetas.yaml", lake.thetas)
+    base = ["--series-start", "2017-08", "--family", family]
+    return main([*argv, *base], env_for(lake, tmp_path, catalog))
+
+
+def test_the_incident_gives_no_frontier_not_the_third_month(incident, family):
+    found = family_scan(incident, family)
+    third, others = incident.months[2], incident.months[:2] + incident.months[3:]
+    for theta in INCIDENT_THETAS:
+        assert found[theta].reached is None
+        assert sorted(found[theta].invalid) == sorted(ordinal(m) for m in others)
+        assert ordinal(third) not in found[theta].invalid
+        assert (
+            f"{family}.parquet: state_version {OLD}"
+            in (found[theta].invalid[ordinal(others[0])])
+        )
+
+
+def test_backfill_without_from_or_to_rewrites_the_five_months(
+    incident, tmp_path, family, caplog
+):
+    caplog.set_level("INFO")
+    assert run_family(incident, tmp_path, family, "--mode", "backfill") == 0
+    # Los cinco quedan en la versión vigente, también el tercero (reescribirlo es inocuo).
+    for theta in INCIDENT_THETAS:
+        for month in incident.months:
+            assert (
+                invalid_reason(
+                    str(incident.l3), str(incident.l2), KEY, theta, month, family
+                )
+                is None
+            )
+    assert set(family_scan(incident, family)[SMALL].invalid) == set()
+    assert family_scan(incident, family)[SMALL].reached == ordinal(incident.months[-1])
+    (row,) = emitted(tmp_path, "backfill_summary")
+    assert row["details"] == {
+        "family": family,
+        "processed": 5,
+        "skipped": 0,
+        "months": 5,
+        "first": "2017-08",
+        "last": "2017-12",
+    }
+    assert row["severity"] == "info"
+    assert (
+        "backfill: 5 meses procesados, 0 saltados por estar al día, de 5 en el rango"
+        in caplog.text
+    )
+
+
+def test_the_regression_leaves_one_warning_per_theta_not_one_per_month(
+    incident, tmp_path, family
+):
+    assert run_family(incident, tmp_path, family, "--mode", "backfill") == 0
+    rows = emitted(tmp_path, "theta_frontier_regressed")
+    assert len(rows) == len(INCIDENT_THETAS)
+    assert {r["severity"] for r in rows} == {"warning"}
+    assert {r["details"]["theta"] for r in rows} == {
+        theta_text(t) for t in INCIDENT_THETAS
+    }
+    for row in rows:
+        details = row["details"]
+        assert details["family"] == family
+        assert details["first_invalid_month"] == "2017-08"
+        assert details["invalid_months"] == 4
+        assert details["frontier"] is None
+        assert f"{family}.parquet: state_version {OLD}" in details["reason"]
+
+
+def test_monthly_on_the_incident_series_leaves_the_theta_behind_and_writes_nothing(
+    incident, tmp_path, family
+):
+    before = {p: p.read_bytes() for p in incident.l3.rglob("*.parquet")}
+    assert (
+        run_family(incident, tmp_path, family, "--mode", "monthly", "--from", "2017-12")
+        == 1
+    )
+    rows = emitted(tmp_path, "theta_behind_frontier")
+    assert len(rows) == len(INCIDENT_THETAS)
+    assert {r["details"]["reason"] for r in rows} == {"l3_frontier"}
+    assert {r["details"]["frontier"] for r in rows} == {None}
+    assert {r["details"]["family"] for r in rows} == {family}
+    assert before == {p: p.read_bytes() for p in incident.l3.rglob("*.parquet")}
+    assert len(emitted(tmp_path, "theta_frontier_regressed")) == len(INCIDENT_THETAS)
+
+
+def test_a_backfill_that_starts_after_the_invalid_month_exits_with_1(
+    incident, tmp_path, family
+):
+    """El rango no repara el primer mes inválido: el cierre no puede pasar como éxito."""
+    code = run_family(
+        incident, tmp_path, family, "--mode", "backfill", "--from", "2017-10"
+    )
+    assert code == 1
+    (row,) = emitted(tmp_path, "backfill_summary")
+    assert row["details"]["processed"] == 3
+
+
+def test_a_backfill_inside_the_valid_prefix_skips_and_counts_the_months(lake, tmp_path):
+    rewrite(
+        file_of(lake.l3, SMALL, M3, "summaries.parquet"),
+        lambda t: with_state_version(t, OLD),
+    )
+    argv = ["--mode", "backfill", "--from", "2017-08", "--to", "2017-09"]
+    assert run_family(lake, tmp_path, "summaries", *argv) == 0
+    (row,) = emitted(tmp_path, "backfill_summary")
+    assert (row["details"]["processed"], row["details"]["skipped"]) == (0, 2)
+    # El inválido está fuera del rango: se avisa, pero el rango pedido llegó a su fin.
+    (warning,) = emitted(tmp_path, "theta_frontier_regressed")
+    assert warning["details"]["first_invalid_month"] == "2017-10"
+    assert warning["details"]["frontier"] == "2017-09"
+
+
+def test_a_family_backfill_over_an_invalid_summaries_month_exits_with_1(
+    path_lake, tmp_path, caplog
+):
+    """La pasada de T no reescribe `summaries.parquet`: no puede dejar el cierre en 0."""
+    rewrite(
+        file_of(path_lake.l3, SMALL, M2, "summaries.parquet"),
+        lambda t: with_state_version(t, OLD),
+    )
+    assert run_family(path_lake, tmp_path, "path", "--mode", "backfill") == 1
+    assert "corre primero el backfill de summaries" in caplog.text
+    # El inválido sigue ahí: la frontera de T no lo oculta.
+    assert family_scan(path_lake, "path")[SMALL].ceiling_invalid.keys() == {ordinal(M2)}
+
+
+def test_the_months_after_every_theta_left_the_range_are_not_counted_as_up_to_date(
+    lake, tmp_path
+):
+    """Con L2 ausente para todos los θ desde M2, `N + K < M` delata los meses que no se miraron."""
+    for theta in lake.thetas:
+        for month in (M2, M3):
+            file_of(lake.l2, theta, month, "events.parquet").unlink()
+    assert run_family(lake, tmp_path, "summaries", "--mode", "backfill") == 1
+    (row,) = emitted(tmp_path, "backfill_summary")
+    details = row["details"]
+    assert (details["processed"], details["skipped"], details["months"]) == (0, 1, 3)
+
+
+def test_the_log_reports_how_many_footers_the_frontier_read(
+    incident, tmp_path, family, caplog
+):
+    """Un archivo por mes y θ (el doble fuera de S) y los pies que se pidieron de verdad (ITSC-420).
+
+    En S son dos por archivo (el suyo y el de `events.parquet`); fuera de S, el de
+    `events.parquet` de un mes se lee una vez aunque lo pidan la familia y el techo de S: el
+    de la familia, el de `summaries.parquet` y el de `events.parquet`, tres por (θ, mes).
+    """
+    caplog.set_level("INFO")
+    run_family(incident, tmp_path, family, "--mode", "backfill")
+    cells = len(incident.months) * len(INCIDENT_THETAS)
+    files, footers = (
+        (cells, 2 * cells) if family == "summaries" else (2 * cells, 3 * cells)
+    )
+    assert (
+        f"fronteras: {files} archivos verificados ({footers} pies leídos) de 2 θ "
+        f"con 64 lectores en " in caplog.text
+    )
+
+
+# El costo de la verificación (ITSC-420): menos viajes y más lectores, el mismo resultado.
+
+
+class CountingFs(pafs.FileSystemHandler):
+    """Un sistema de archivos local que cuenta los `get_file_info` por ruta y las aperturas."""
+
+    def __init__(self) -> None:
+        self.inner = pafs.LocalFileSystem()
+        self.exists_trips = 0
+        self.opened: list[str] = []
+
+    def get_type_name(self):
+        return "counting"
+
+    def normalize_path(self, path):
+        return path
+
+    def get_file_info(self, paths):
+        self.exists_trips += 1
+        return self.inner.get_file_info(list(paths))
+
+    def get_file_info_selector(self, selector):
+        return self.inner.get_file_info(selector)
+
+    def open_input_file(self, path):
+        self.opened.append(path)
+        return self.inner.open_input_file(path)
+
+    def open_input_stream(self, path):
+        return self.inner.open_input_stream(path)
+
+    def __eq__(self, other):
+        return self is other
+
+    def __ne__(self, other):
+        return self is not other
+
+    def _read_only(self, *args, **kwargs):
+        raise NotImplementedError
+
+    create_dir = delete_dir = delete_dir_contents = delete_root_dir_contents = (
+        _read_only
+    )
+    delete_file = move = copy_file = open_output_stream = open_append_stream = (
+        _read_only
+    )
+
+
+@pytest.fixture
+def counting(monkeypatch):
+    """El sistema de archivos de la verificación, contado, y las raíces que se resolvieron."""
+    handler, resolved = CountingFs(), []
+    real = frontier.resolve_fs
+
+    def resolve(root):
+        resolved.append(str(root))
+        return pafs.PyFileSystem(handler), real(root)[1]
+
+    monkeypatch.setattr(frontier, "resolve_fs", resolve)
+    return handler, resolved
+
+
+def test_the_events_footer_is_opened_once_per_theta_and_month(incident, family):
+    """También fuera de S, donde lo piden la familia y el techo de S (cuenta las aperturas)."""
+    reader = FooterReader(share_events=family != "summaries")
+    handler = CountingFs()
+    cells = len(incident.months) * len(INCIDENT_THETAS)
+    real = frontier.resolve_fs
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(
+            frontier,
+            "resolve_fs",
+            lambda root: (pafs.PyFileSystem(handler), real(root)[1]),
+        )
+        family_scan(incident, family, reader=reader)
+    events = [p for p in handler.opened if p.endswith("events.parquet")]
+    assert len(events) == cells == len(set(events))
+    # Fuera de S: el archivo de la familia, el de summaries y el de events, una vez cada uno.
+    assert (
+        reader.opened
+        == len(handler.opened)
+        == cells * (2 if family == "summaries" else 3)
+    )
+
+
+def test_without_sharing_a_family_reads_the_events_footer_twice(incident, family):
+    """El caché es lo que evita la segunda lectura: sin él, la familia y el techo la repiten."""
+    if family == "summaries":
+        pytest.skip("S no tiene techo aparte: un solo recorrido")
+    reader = FooterReader(share_events=False)
+    family_scan(incident, family, reader=reader)
+    cells = len(incident.months) * len(INCIDENT_THETAS)
+    assert reader.opened == 4 * cells
+
+
+def test_the_footers_are_read_without_the_existence_trip_and_with_one_filesystem_per_root(
+    incident, family, counting
+):
+    handler, resolved = counting
+    summaries = list_summaries(str(incident.l3), KEY)
+    listed = list_summaries(str(incident.l3), KEY, family)
+    resolved.clear()
+    scan_frontiers(
+        INCIDENT_THETAS,
+        listed,
+        START,
+        str(incident.l3),
+        str(incident.l2),
+        KEY,
+        family,
+        summaries,
+    )
+    assert handler.exists_trips == 0
+    assert sorted(resolved) == sorted([str(incident.l3), str(incident.l2)])
+
+
+def test_the_old_open_path_would_pay_the_existence_trip(incident, counting):
+    """La razón de `FooterReader`: `open_parquet` hace un `get_file_info` por apertura."""
+    handler, _ = counting
+    month = incident.months[0]
+    path = str(file_of(incident.l3, SMALL, month, "summaries.parquet"))
+    # `open_parquet` vive en dc_frames y resuelve con su propio `resolve_fs`.
+    with pytest.MonkeyPatch.context() as patch:
+        real = lake_module.resolve_fs
+        patch.setattr(
+            lake_module,
+            "resolve_fs",
+            lambda root: (pafs.PyFileSystem(handler), real(root)[1]),
+        )
+        lake_module.open_parquet(path, "la familia").close()
+    assert handler.exists_trips == 1
+
+
+def test_a_file_that_vanishes_between_the_listing_and_the_reading_is_invalid(lake):
+    listed = list_summaries(str(lake.l3), KEY)
+    file_of(lake.l3, SMALL, M3, "summaries.parquet").unlink()
+    found = scan_frontiers([SMALL], listed, START, str(lake.l3), str(lake.l2), KEY)
+    assert found[SMALL].reached == ordinal(M2)
+    assert "no se pudo leer" in found[SMALL].invalid[ordinal(M3)]
+    assert "falta la familia" in found[SMALL].invalid[ordinal(M3)]
+
+
+def test_the_result_does_not_depend_on_the_number_of_readers(incident, family):
+    def outcome(workers: int):
+        found = family_scan(incident, family, workers)
+        return {
+            theta: (f.reached, dict(f.invalid), dict(f.ceiling_invalid), f.checked)
+            for theta, f in found.items()
+        }
+
+    one = outcome(1)
+    assert one[SMALL][0] is None and one[SMALL][1]
+    assert outcome(8) == one
+    assert outcome(64) == one
+
+
+def test_a_scan_needs_at_least_one_reader(lake):
+    listed = list_summaries(str(lake.l3), KEY)
+    with pytest.raises(ValueError, match="workers"):
+        scan_frontiers(
+            [SMALL], listed, START, str(lake.l3), str(lake.l2), KEY, workers=0
+        )
+
+
+def test_the_log_says_how_many_readers_the_frontier_used(lake, tmp_path, caplog):
+    caplog.set_level("INFO")
+    catalog = write_catalog(tmp_path / "thetas.yaml", lake.thetas)
+    env = env_for(lake, tmp_path, catalog, L3_FRONTIER_WORKERS="3")
+    argv = ["--mode", "backfill", "--series-start", "2017-08"]
+    assert main(argv, env) == 0
+    assert " con 3 lectores en " in caplog.text
+
+
+def test_an_unreadable_events_footer_is_cached_as_text_and_read_once(tmp_path):
+    """H2/H3 de ITSC-420: se guarda el motivo (un `str`), no la excepción ni su traceback."""
+    broken = tmp_path / "events.parquet"
+    broken.write_bytes(b"no es un parquet")
+    reader = FooterReader()
+    first = reader.event_rows(str(tmp_path), str(broken))
+    assert isinstance(first, str) and first.startswith("no se pudo leer (")
+    assert reader.event_rows(str(tmp_path), str(broken)) is first
+    assert reader.opened == 1
+    missing = reader.event_rows(str(tmp_path), str(tmp_path / "ausente.parquet"))
+    assert isinstance(missing, str) and "falta L2" in missing

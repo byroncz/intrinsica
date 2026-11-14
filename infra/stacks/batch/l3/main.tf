@@ -25,6 +25,21 @@ locals {
     (local.buckets["dc-descriptors"]) = { role = "roles/storage.objectUser", prefixes = ["l3/"] }
     (local.buckets["dq-findings"])    = { role = "roles/storage.objectUser", prefixes = ["l3/"] }
   }
+
+  # El env común de los modos. En el módulo layer el env de un modo reemplaza a var.env, no
+  # se mezcla: un modo que agrega una variable pasa merge(local.env, {...}).
+  env = {
+    L3_LANDING_ROOT   = "gs://${local.buckets["landing"]}/l1"
+    L3_EVENTS_ROOT    = "gs://${local.buckets["dc-events"]}/l2"
+    L3_SUMMARIES_ROOT = "gs://${local.buckets["dc-descriptors"]}/l3"
+    L3_DQ_ROOT        = "gs://${local.buckets["dq-findings"]}/l3"
+    # Primer mes de la serie de L2: el único sin mes anterior. Se declara, no se
+    # infiere.
+    L3_SERIES_START = "2017-08"
+    # El mismo objeto que usa L2. L3 no siembra ni copia el catálogo: agregar un
+    # θ es editarlo en GCS (TRD-L2 §7.3) y lanzar l3-backfill sin from.
+    L3_THETAS_URI = "gs://${local.buckets["manifest"]}/l2/thetas.yaml"
+  }
 }
 
 provider "google" {
@@ -60,6 +75,11 @@ module "layer" {
   # le suma a 2021-01), sobre el mínimo de 6 veces de TRD-L2 §10.2 (984 s). 900 s,
   # el valor de ITSC-364 para 4 vCPU, ya no lo cumplen. Es una estimación: la
   # pared de 2022-11 a 2 vCPU sale del backfill de 110 meses.
+  #
+  # Es solo el valor por defecto del módulo: desde ITSC-420 cada modo fija el suyo
+  # explícito (abajo), para que ninguno herede estos 1 200 s sin decidirlo. Ya no
+  # alcanzan en un modo mensual: la verificación de la frontera (TRD-L3 §8.2) midió
+  # 1 945,8 s a 2 vCPU en la nube (ITSC-420).
   timeout = 1200
 
   # 1 y no 0, como L1 y L2: el reintento cubre fallos transitorios de
@@ -68,18 +88,7 @@ module "layer" {
   # salta los meses cuyo summaries.parquet ya es válido.
   max_retries = 1
 
-  env = {
-    L3_LANDING_ROOT   = "gs://${local.buckets["landing"]}/l1"
-    L3_EVENTS_ROOT    = "gs://${local.buckets["dc-events"]}/l2"
-    L3_SUMMARIES_ROOT = "gs://${local.buckets["dc-descriptors"]}/l3"
-    L3_DQ_ROOT        = "gs://${local.buckets["dq-findings"]}/l3"
-    # Primer mes de la serie de L2: el único sin mes anterior. Se declara, no se
-    # infiere.
-    L3_SERIES_START = "2017-08"
-    # El mismo objeto que usa L2. L3 no siembra ni copia el catálogo: agregar un
-    # θ es editarlo en GCS (TRD-L2 §7.3) y lanzar l3-backfill sin from.
-    L3_THETAS_URI = "gs://${local.buckets["manifest"]}/l2/thetas.yaml"
-  }
+  env = local.env
 
   # Una service account por modo. Ambos modos leen y escriben lo mismo; la
   # separación deja revocar o auditar cada uno por su cuenta.
@@ -99,25 +108,42 @@ module "layer" {
     # a las 6 h (21 600 s) mientras la ejecución sigue en Cloud Run: el runbook
     # explica cómo seguirla.
     backfill = { timeout = 43200, access = local.access }
-    monthly  = { access = local.access }
+
+    # ITSC-420: 3 600 s. La frontera verifica cada mes de la serie de cada θ y en la nube
+    # tardó 1 945,8 s (11 100 archivos, 22 200 pies, 50 θ, 2 vCPU, imagen 0.25.1, ejecución
+    # l3-backfill-m7thd, familia path, 8 lectores). La regla de TRD-L3 §10.2 es que el
+    # timeout de un job mensual cubra la verificación más 6 veces el mes más lento (183,7 s,
+    # 2022-11, ITSC-378): 1 946 + 6 × 183,7 = 3 048 s. 3 600 s son 1,18 veces eso y 1,85
+    # veces la verificación sola; S no verifica un techo aparte, así que lee menos pies
+    # que esa cifra y el margen es mayor. Con los 1 200 s de antes, la cadena del
+    # 2026-12-01 habría muerto por timeout. Se mide de nuevo con la verificación más rápida
+    # de esta misma card (meta 300 s).
+    monthly = { timeout = 3600, access = local.access }
 
     # El backfill de la familia F (ITSC-413): el modo backfill de la CLI con
-    # --family spectrum, en un job de 8 GiB. F guarda en RAM los retornos de cada
-    # evento abierto (4 B cada uno) y calcula una FFT exacta al cerrarlo, cuyo
+    # --family spectrum, en un job de 32 GiB y 8 vCPU. F guarda en RAM los retornos de
+    # cada evento abierto (4 B cada uno) y calcula una FFT exacta al cerrarlo, cuyo
     # transitorio pasa de lo que cabe en los 4 GiB de backfill (TRD-L3 ADR-L3-19).
-    # El veredicto de la Épica ITSC-410 (arquitecto, 2026-11-10) fija 8 GiB para F;
-    # la cota de pico es 6 144 MiB, el 75 % de la memoria. Cloud Run exige al menos
-    # 2 vCPU para pasar de 4 GiB: los 2 de la capa cumplen, y se declaran aquí para
-    # que bajar el cpu de la capa no deje este modo inválido sin que el apply lo
-    # diga. Mismo timeout que backfill (43 200 s); la pared de F se mide en el mes
-    # previo y en el backfill completo (runbook de L3). El nombre del modo no es el
-    # de la CLI, de ahí los args propios; run-job-args.sh arma los mismos para
-    # l3-backfill-spectrum.
+    # ITSC-418 (decisión del humano con el arquitecto, 2026-11-12, Épica ITSC-410) sube
+    # el presupuesto de F a 130 M de ticks por evento y el job de 8 GiB a 32 GiB, el
+    # máximo de Cloud Run: la cota de pico es 24 576 MiB, el 75 % de la memoria, y el
+    # cierre del peor evento (n = 130 M) pide 20 351 MiB según 16 B × (2n + 4m), con
+    # m = 2^28 (TRD-L3 ADR-L3-19), más hasta 4 096 MiB de retornos en vuelo: 24 447 MiB
+    # antes de la base del proceso, con ≈ 130 MiB de margen. Cloud Run pide 8 vCPU para 32 GiB (la cifra de la
+    # card; el apply la valida: no se pudo consultar su documentación desde el
+    # contenedor); se declaran aquí para que bajar el cpu de la capa no deje este modo
+    # inválido sin que el apply lo diga. Mismo timeout que backfill (43 200 s); la
+    # pared de F se mide en el mes previo y en el backfill completo (runbook de L3).
+    # L3_INFLIGHT_BYTES sube de 768 MiB a 4 GiB: con el presupuesto nuevo los eventos
+    # gigantes guardan sus retornos y el tope por defecto frenaría la unidad a un
+    # tramo a la vez durante meses enteros. El nombre del modo no es el de la CLI, de
+    # ahí los args propios; run-job-args.sh arma los mismos para l3-backfill-spectrum.
     backfill-spectrum = {
       args    = ["--mode", "backfill", "--family", "spectrum"]
-      cpu     = "2"
-      memory  = "8Gi"
+      cpu     = "8"
+      memory  = "32Gi"
       timeout = 43200
+      env     = merge(local.env, { L3_INFLIGHT_BYTES = "4294967296" })
       access  = local.access
     }
 
@@ -126,9 +152,17 @@ module "layer" {
     # de S y un fallo de T no toque lo que S ya publicó. Mismos recursos que
     # monthly (los heredados del módulo) y misma imagen. El nombre del modo no es
     # el de la CLI, de ahí los args propios.
+    #
+    # ITSC-420: 5 400 s. Una familia distinta de S verifica la serie de la familia y el techo
+    # de S, y esa verificación midió 1 945,8 s en la nube (ver monthly). Con la misma regla
+    # de TRD-L3 §10.2: 1 946 + 6 × 183,7 s (el mes de S; T tarda un 11 % menos, ITSC-395) =
+    # 3 048 s, y 5 400 s son 1,77 veces eso. La holgura es mayor que en monthly a propósito,
+    # hasta que se mida la verificación nueva; la hija ITSC-415 ajusta los timeouts
+    # mensuales con esa cifra.
     monthly-path = {
-      args   = ["--mode", "monthly", "--family", "path"]
-      access = local.access
+      args    = ["--mode", "monthly", "--family", "path"]
+      timeout = 5400
+      access  = local.access
     }
 
     # La pasada de la familia A (ITSC-402): el mismo patrón que monthly-path, con

@@ -1,7 +1,7 @@
 """La familia F (`spectrum.parquet`, TRD-L3 §7.2.3): un fixture calculado a mano, el oráculo con
 `numpy.fft` y el motor nativo sobre el lago de pruebas (ITSC-412, ADR-L3-19).
 
-Tres cosas se sostienen mutuamente: las 28 fracciones de cada fila de un fixture chico, escritas
+Tres cosas se sostienen mutuamente: los 30 valores de cada fila de un fixture chico, escritos
 a mano en esta prueba con sus operaciones a la vista (ocho eventos: alza y baja, overshoot vacío,
 fases de 15 y 16 retornos, retornos alternados, senoide de período 8, una fase plana, un evento que
 cruza row groups y tramos y un evento sobre el presupuesto); el oráculo `specref` (Python con
@@ -11,7 +11,9 @@ retornos ideales y el búfer guarda `f32`: se comparan con 1e-6 (veredicto de la
 """
 
 import math
+import re
 from decimal import Decimal
+from pathlib import Path
 
 import numpy as np
 import pyarrow.parquet as pq
@@ -45,6 +47,9 @@ from pyutils import content_hash
 ROW_GROUP = 50
 # Entre el motor (`rustfft`) y el oráculo (`numpy.fft`): las fracciones son de orden 1.
 TOLERANCE = 1e-9
+# La ubicación de la energía no pasa por la FFT: motor y oráculo son dos caminos de suma en `f64`.
+LOCATION_TOLERANCE = 1e-12
+LOCATIONS = ("c_energy_loc", "os_energy_loc")
 # Contra los valores a mano: salen de retornos ideales y el motor guarda `f32`.
 HAND_TOLERANCE = 1e-6
 NAMES = specref.COLUMNS
@@ -55,27 +60,29 @@ SQRT2 = math.sqrt(2)
 # El esquema es el contrato
 
 
-def test_the_schema_is_the_key_and_28_nullable_doubles_in_the_inventory_order():
+def test_the_schema_is_the_key_and_30_nullable_doubles_in_the_inventory_order():
     names = [f.name for f in SPECTRUM_SCHEMA]
     assert names[:2] == ["theta", "confirm_agg_trade_id"]
     assert names[2:] == list(NAMES)
-    assert len(names) == 30
+    assert len(names) == 32
     expected = [
         f"{phase}_{register}_{unit}_{band}"
         for register, unit in (("fourier", "band"), ("haar", "level"))
         for phase in ("c", "os")
         for band in range(1, 8)
     ]
-    assert names[2:] == expected
+    # Las dos ubicaciones de la energía total van al final, después de `os_haar_level_7`.
+    assert names[2:] == [*expected, "c_energy_loc", "os_energy_loc"]
+    assert names[-3] == "os_haar_level_7"
     assert names[2] == "c_fourier_band_1" and names[16] == "c_haar_level_1"
     assert all(
         str(f.type) == "double" and f.nullable for f in list(SPECTRUM_SCHEMA)[2:]
     )
     assert not SPECTRUM_SCHEMA.field("theta").nullable
     assert not SPECTRUM_SCHEMA.field("confirm_agg_trade_id").nullable
-    assert (SPECTRUM_FAMILY, SPECTRUM_STATE_VERSION) == ("spectrum", "1.0.0")
+    assert (SPECTRUM_FAMILY, SPECTRUM_STATE_VERSION) == ("spectrum", "1.2.0")
     assert (SPECTRUM_N_MIN, SPECTRUM_BANDS, SPECTRUM_WINDOW) == (16, 7, "hann")
-    assert SPECTRUM_BUDGET_TICKS == 20_000_000
+    assert SPECTRUM_BUDGET_TICKS == 130_000_000
 
 
 # ---------------------------------------------------------------------------------------
@@ -91,20 +98,31 @@ def rows_of(path: str) -> dict[tuple[Decimal, int], dict]:
     return {(r["theta"], r["confirm_agg_trade_id"]): r for r in table.to_pylist()}
 
 
-def assert_row(got: dict, wanted: tuple, where, tolerance: float) -> None:
-    """Una fila: nulidad exacta y fracciones a `tolerance` absoluta."""
+def assert_row(
+    got: dict, wanted: tuple, where, tolerance: float, location_tolerance=None
+) -> None:
+    """Una fila: nulidad exacta y fracciones a `tolerance` absoluta (las ubicaciones, a
+    `location_tolerance` si se da).
+    """
     for name, value in zip(NAMES, wanted, strict=True):
         if value is None:
             assert got[name] is None, (where, name, got[name])
         else:
             assert got[name] is not None, (where, name)
-            assert abs(got[name] - value) <= tolerance, (where, name, got[name], value)
+            limit = (
+                location_tolerance
+                if name in LOCATIONS and location_tolerance
+                else tolerance
+            )
+            assert abs(got[name] - value) <= limit, (where, name, got[name], value)
 
 
-def assert_rows(got: dict, wanted: dict, tolerance: float) -> int:
+def assert_rows(
+    got: dict, wanted: dict, tolerance: float, location_tolerance=None
+) -> int:
     assert got.keys() == wanted.keys()
     for key, row in got.items():
-        assert_row(row, wanted[key], key, tolerance)
+        assert_row(row, wanted[key], key, tolerance, location_tolerance)
     return len(got)
 
 
@@ -197,7 +215,7 @@ BLOCKS = [
         0,
         (NOTHING, SQUARE_F16, NOTHING, SQUARE_H16),
     ),
-    # 15 retornos y overshoot vacío: las 28 columnas nulas.
+    # 15 retornos y overshoot vacío: las 30 columnas nulas.
     ("fifteen_only", +1, shifted(SINE[:15], DRIFT), [], 0, (NOTHING,) * 4),
     # Una confirmación plana (todos los retornos 0) no tiene energía: nulas sus columnas.
     (
@@ -217,13 +235,13 @@ BLOCKS = [
         0,
         (SINE_F128, SINE_F64, SINE_H128, SINE_H64),
     ),
-    # Sobre el presupuesto: 25 M de ids entre R y E con 5 ticks. No se calcula nada.
+    # Sobre el presupuesto: 150 M de ids entre R y E con 5 ticks. No se calcula nada.
     (
         "over_budget",
         +1,
         [R, R, R],
         [-R, R],
-        25_000_000,
+        150_000_000,
         (NOTHING,) * 4,
     ),
 ]
@@ -273,11 +291,29 @@ def hand_layout():
 TICKS, EVENT_ROWS, CONFIRM_IDS, OVER_BUDGET = hand_layout()
 
 
+def hand_location(returns: list[float]) -> float | None:
+    """La ubicación de los retornos ideales de una fase, con una suma simple de Python: sin
+    `numpy`, sin el oráculo y sin el motor. Nula con menos de 16 retornos o sin energía.
+    """
+    n = len(returns)
+    energy = sum(r * r for r in returns)
+    if n < SPECTRUM_N_MIN or energy == 0:
+        return None
+    return sum((k - 0.5) / n * r * r for k, r in enumerate(returns, start=1)) / energy
+
+
 def hand_wanted() -> dict[tuple[Decimal, int], tuple]:
     theta = Decimal(TEXT)
     return {
-        (theta, CONFIRM_IDS[name]): (*c_f, *os_f, *c_h, *os_h)
-        for name, *_, (c_f, os_f, c_h, os_h) in BLOCKS
+        (theta, CONFIRM_IDS[name]): (
+            *c_f,
+            *os_f,
+            *c_h,
+            *os_h,
+            hand_location(c_returns),
+            hand_location(os_returns),
+        )
+        for name, _, c_returns, os_returns, _, (c_f, os_f, c_h, os_h) in BLOCKS
     }
 
 
@@ -389,9 +425,51 @@ def test_the_engine_matches_the_oracle_on_the_hand_lake(hand):
     for key, wanted in oracle.items():
         if key[1] == over:
             continue
-        assert_row(got[key], wanted, key, TOLERANCE)
+        assert_row(got[key], wanted, key, TOLERANCE, LOCATION_TOLERANCE)
         compared += 1
     assert compared == len(BLOCKS) - 1
+
+
+def test_the_location_by_hand():
+    """`LOC_X` de la sonda da 41,5/80; la energía al inicio o al final, 1/(2n) y 1 − 1/(2n); pareja,
+    0,5; y sin energía, nula. El oráculo y la suma simple de Python dan lo mismo.
+    """
+    loc_x = [6.0, 0.0, 0.0, 0.0, 2.0, 0.0, -2.0, -6.0]
+    assert specref.location(np.array(loc_x)) == pytest.approx(41.5 / 80, abs=1e-15)
+    assert hand_location([*loc_x, *loc_x]) == pytest.approx(
+        specref.location(np.array([*loc_x, *loc_x])), abs=1e-15
+    )
+    assert specref.location(np.array([1.0] + [0.0] * 15)) == pytest.approx(1 / 32)
+    assert specref.location(np.array([0.0] * 15 + [1.0])) == pytest.approx(31 / 32)
+    assert specref.location(np.full(20, -0.003)) == pytest.approx(0.5, abs=1e-15)
+    assert specref.location(np.zeros(20)) is None
+
+
+def test_constant_nonzero_returns_have_location_one_half_and_no_fourier(tmp_path):
+    """Una fase de retornos iguales y no nulos no tiene energía tras centrar (Fourier y Haar
+    nulos) pero sí ubicación: 0,5. Cada tick duplica el precio, así los retornos son `ln 2`, exactos.
+    """
+    prices = [1_000_000 << k for k in range(21)]  # R y 20 ticks de la confirmación
+    ticks = [
+        Tick(i + 1, BASE + 10 * i, Decimal(p).scaleb(-8), Decimal(1), False)
+        for i, p in enumerate(prices)
+    ]
+    row = {"direction": 1}
+    for label, k in (("reference", 0), ("confirm", 20), ("extreme", 20)):
+        row[f"{label}_price"] = Decimal(prices[k]).scaleb(-8)
+        row[f"{label}_time"] = BASE + 10 * k
+        row[f"{label}_agg_trade_id"] = k + 1
+    l1, l2, l3 = tmp_path / "l1", tmp_path / "l2", tmp_path / "l3"
+    write_ticks(l1, ticks, M1, 4)
+    write_l2(l2, THETA, [row], 1, M1)
+    result = spectrum_native(l1, l2, l3, M1, [TEXT])[Decimal(TEXT)]
+    got = rows_of(result.path)[Decimal(TEXT), 21]
+    for name in NAMES[:-2]:
+        assert got[name] is None, name
+    assert abs(got["c_energy_loc"] - 0.5) <= 1e-12
+    assert got["os_energy_loc"] is None  # overshoot vacío
+    wanted = specref.from_lake(l1, l2, M1, [TEXT])[Decimal(TEXT), 21]
+    assert_row(got, wanted, "retornos constantes", 1e-12)
 
 
 def test_the_event_over_the_budget_is_all_null_and_warns_once(hand):
@@ -424,7 +502,7 @@ def test_the_event_over_the_budget_is_all_null_and_warns_once(hand):
         "theta": TEXT,
         "confirm_agg_trade_id": OVER_BUDGET[0][0],
         "ticks": OVER_BUDGET[0][1],
-        "budget": 20_000_000,
+        "budget": 130_000_000,
         "family": "spectrum",
     }
 
@@ -452,6 +530,59 @@ def test_a_lower_budget_nulls_exactly_the_events_over_it(hand, tmp_path):
             assert row == base[key], key
     footer = pq.read_schema(result.path).metadata
     assert footer[b"budget_ticks"] == str(limit).encode()
+
+
+def test_the_same_event_is_null_below_its_ticks_and_full_above(hand, tmp_path):
+    """Subir el presupuesto no cambia ningún valor: solo el evento que antes lo pasaba deja de ser
+    nulo (ITSC-418). Se baja el presupuesto a los ticks de un evento y a uno menos."""
+    l1, l2, _, baseline = hand
+    base = rows_of(baseline.path)
+    span = {
+        r["confirm_agg_trade_id"]: r["extreme_agg_trade_id"]
+        - r["reference_agg_trade_id"]
+        for r in EVENT_ROWS
+    }
+    over = OVER_BUDGET[0][0]
+    full = [
+        c
+        for c, n in span.items()
+        if c != over and any(base[Decimal(TEXT), c][name] is not None for name in NAMES)
+    ]
+    assert full, "el fixture necesita un evento con valores"
+    target = max(full, key=span.__getitem__)
+
+    def run(budget):
+        # Los dos presupuestos escriben el mismo archivo: se leen antes de la corrida siguiente.
+        result = spectrum_native(l1, l2, tmp_path, M1, [TEXT], budget_ticks=budget)
+        result = result[Decimal(TEXT)]
+        return result, rows_of(result.path)
+
+    (below, got_below), (at, got_at) = run(span[target] - 1), run(span[target])
+    assert all(got_below[Decimal(TEXT), target][n] is None for n in NAMES)
+    assert (target, span[target]) in below.over_budget
+    assert (target, span[target]) not in at.over_budget
+    # Con el presupuesto en el límite el evento tiene sus valores, los del archivo base, y
+    # ninguna otra fila cambia: salvo las de los eventos que el presupuesto menor ya anulaba.
+    assert got_at[Decimal(TEXT), target] == base[Decimal(TEXT), target]
+    nulled = {c for c, _ in below.over_budget}
+    for key, row in got_below.items():
+        if key[1] not in nulled:
+            assert row == base[key], key
+    for key, row in got_at.items():
+        if key[1] not in {c for c, _ in at.over_budget}:
+            assert row == base[key], key
+
+
+def test_the_layer_budget_is_the_engine_default():
+    """`SPECTRUM_BUDGET_TICKS` (el que va al pie del archivo) y el valor por defecto del motor
+    (`DEFAULT_BUDGET_TICKS` de dc_descriptors, también el del binding) son el mismo número."""
+    root = Path(__file__).resolve().parents[3]
+    rust = (root / "shared/dc_descriptors/src/spectrum.rs").read_text()
+    match = re.search(r"pub const DEFAULT_BUDGET_TICKS: u64 = ([\d_]+);", rust)
+    assert match and int(match[1].replace("_", "")) == SPECTRUM_BUDGET_TICKS
+    stub = (root / "shared/dc_pyo3/dc_pyo3.pyi").read_text()
+    match = re.search(r"budget_ticks: int = ([\d_]+),", stub)
+    assert match and int(match[1].replace("_", "")) == SPECTRUM_BUDGET_TICKS
 
 
 def permutation_ids():
@@ -498,7 +629,7 @@ def assert_skeleton_and_footer(path: str, summaries: str, budget: int | None = N
         k: v for k, v in pq.read_schema(path).metadata.items() if k != b"ARROW:schema"
     }
     assert meta == {
-        b"state_version": b"1.0.0",
+        b"state_version": b"1.2.0",
         b"n_min": b"16",
         b"bands": b"7",
         b"window": b"hann",
@@ -515,7 +646,7 @@ def test_the_orchestrator_would_write_the_footer_of_the_hand_file(hand):
         "n_min": "16",
         "bands": "7",
         "window": "hann",
-        "budget_ticks": "20000000",
+        "budget_ticks": "130000000",
     }
     footer = pq.read_schema(result.path).metadata
     for key, value in {"state_version": version, **metadata}.items():
@@ -671,12 +802,22 @@ def test_the_rows_hold_the_invariants(lake, baseline):
                         assert values[: len(present)] == present
                         assert all(0.0 <= v <= 1.0 for v in present), (key, values)
                         assert abs(sum(present) - 1.0) <= 1e-9, (key, values)
+                    # La ubicación: nula con menos de 16 retornos, con overshoot vacío o con todos
+                    # los retornos en cero (precios iguales, ancla incluida); si no, en (0, 1).
+                    loc = row[f"{phase}_energy_loc"]
+                    zero_energy = n >= SPECTRUM_N_MIN and is_flat(
+                        phase, "fourier", events[key[1]], series, n
+                    )
+                    if n < SPECTRUM_N_MIN or zero_energy:
+                        assert loc is None, (key, phase, loc)
+                    else:
+                        assert loc is not None and 0.0 < loc < 1.0, (key, phase, loc)
                 checked += 1
     assert checked == sum(len(rows) for rows in lake_.events.values())
 
 
 def test_the_engine_matches_the_oracle_over_the_reader_frames(lake, baseline):
-    """Todos los θ y meses del lago: los 28 valores del motor son los del oráculo, que lee cada
+    """Todos los θ y meses del lago: los 30 valores del motor son los del oráculo, que lee cada
     evento con el lector de `dc_frames` (1e-9, nulos exactos).
     """
     lake_, _ = lake
@@ -685,7 +826,7 @@ def test_the_engine_matches_the_oracle_over_the_reader_frames(lake, baseline):
         wanted = specref.from_lake(lake_.l1, lake_.l2, month, lake_.theta_texts)
         got = {k: v for r in results.values() for k, v in rows_of(r.path).items()}
         compared += assert_rows(
-            got, {k: tuple(v) for k, v in wanted.items()}, TOLERANCE
+            got, {k: tuple(v) for k, v in wanted.items()}, TOLERANCE, LOCATION_TOLERANCE
         )
     assert compared == sum(len(rows) for rows in lake_.events.values())
 

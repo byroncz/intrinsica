@@ -604,8 +604,11 @@ partición, así que se une 1:1 por `(theta, confirm_agg_trade_id)`. Si falta el
 Las dos fases son la confirmación `c` (ticks de `(R, C]`) y el overshoot `os` (ticks de `(C, E]`).
 La serie de una fase de `n` ticks son sus **`n` retornos** `r_k = ln(p_k / p_{k−1})`, con `p_k` el
 precio del tick `k` y el primer paso desde el **ancla** `p_0`: `p_R = reference_price` en la
-confirmación y `p_C = confirm_price` en el overshoot. Cada registro trae **siete** columnas, una por
-banda o nivel, numeradas de 1 a 7.
+confirmación y `p_C = confirm_price` en el overshoot. Cada registro de F-01 a F-04 trae **siete**
+columnas, una por banda o nivel, numeradas de 1 a 7. Al final van dos columnas más, una por fase,
+con la ubicación de la energía total (desde `state_version = "1.1.0"`, ITSC-417): F dice cuánta
+energía hay en cada ritmo y `c_energy_loc` y `os_energy_loc` dicen en qué parte de la fase se
+concentra. Son **30 columnas de datos**.
 
 | Columna | Tipo Arrow/Parquet | Nulable | Descripción |
 |---|---|---|---|
@@ -639,6 +642,8 @@ banda o nivel, numeradas de 1 a 7.
 | `os_haar_level_5` | double | sí | F-04. Lo mismo en el overshoot; nula si `os_ticks = 0` (nivel 5); nula con menos de 32 retornos |
 | `os_haar_level_6` | double | sí | F-04. Lo mismo en el overshoot; nula si `os_ticks = 0` (nivel 6); nula con menos de 64 retornos |
 | `os_haar_level_7` | double | sí | F-04. Lo mismo en el overshoot; nula si `os_ticks = 0` (nivel 7); nula con menos de 128 retornos |
+| `c_energy_loc` | double | sí | Ubicación en el tiempo de la energía total de los retornos de la confirmación, en (0, 1): 0,5 si se reparte pareja, menos si se concentra al inicio de la fase, más si al final; nula con menos de 16 retornos o si todos son cero |
+| `os_energy_loc` | double | sí | Lo mismo en el overshoot; nula si `os_ticks = 0`, con menos de 16 retornos o si todos son cero |
 
 Las bandas de período `n/k` (en ticks) son: 1 = [2, 4), 2 = [4, 8), 3 = [8, 16), 4 = [16, 32),
 5 = [32, 64), 6 = [64, 128) y 7 = 128 o más.
@@ -647,11 +652,14 @@ La **regla de nulos** es exacta, nada más es nulo: todas las columnas de una fa
 retornos** (`n_min = 16`); todas las `os_*` con `os_ticks = 0`; una banda o nivel **sin bins**
 (la 5 con menos de 32 retornos, la 6 con menos de 64 y la 7 con menos de 128; es nulo, no cero);
 las siete columnas de Fourier de una fase cuyos retornos son todos iguales (energía total 0), y las
-siete de Haar si lo son los últimos `2^⌊log₂ n⌋`; y las **28 columnas de datos** de un evento
-sobre el presupuesto de ticks (`extreme_agg_trade_id − reference_agg_trade_id` mayor que
-`budget_ticks`, 20 000 000), que se decide con la fila de L2 antes de leer un tick y se avisa con
-`event_over_budget`. Las columnas nunca guardan `±inf` ni `NaN`; cada fracción está en `[0, 1]` y
-las bandas no nulas de un registro de una fase suman 1.
+siete de Haar si lo son los últimos `2^⌊log₂ n⌋`; la ubicación de una fase solo es nula, además de
+las dos primeras reglas, si **todos sus retornos son cero** (`Σ r² = 0`): una fase de retornos
+iguales y no nulos deja Fourier y Haar nulos pero sí tiene ubicación, 0,5; y las **30 columnas de
+datos** de un evento sobre el presupuesto de ticks (`extreme_agg_trade_id −
+reference_agg_trade_id` mayor que `budget_ticks`, 130 000 000), que se decide con la fila de L2
+antes de leer un tick y se avisa con `event_over_budget`. Las columnas nunca guardan `±inf` ni
+`NaN`; cada fracción está en `[0, 1]`, las bandas no nulas de un registro de una fase suman 1 y
+cada ubicación no nula está en `(0, 1)`.
 
 ### Fórmulas de `spectrum.parquet`
 
@@ -667,16 +675,25 @@ las bandas no nulas de un registro de una fase suman 1.
   nivel `j` es `Σ d²` en la pasada `j`; los niveles 1 a 6 son las escalas de 2, 4, 8, 16, 32 y 64
   ticks y el séptimo junta las de 128 en adelante. Cada columna es la energía del nivel entre la
   suma de las de todos los niveles.
+- **Ubicación de la energía (`c_energy_loc`, `os_energy_loc`).** `Σ t_k·r_k² / Σ r_k²` con
+  `t_k = (k − 0,5)/n`, `k = 1..n`, sobre los mismos `n` retornos de la fase, **sin centrar y sin
+  ventana**: el centro de masa de `r²` a lo largo de la fase. Con la energía en el primer retorno
+  vale `1/(2n)` y en el último, `1 − 1/(2n)`. Se calcula al cerrar la fase, antes de la FFT, con
+  dos acumuladores `f64` de suma compensada, sin copiar la serie.
 - **Determinismo.** La FFT corre al cerrar el evento, sobre el búfer completo y en un solo hilo
   (`rustfft` con el planificador escalar, sin instrucciones SIMD): el mismo archivo con cualquier
   número de hilos, tamaño de tramo u orden de entrada.
 
 ### Metadatos y lectura de `spectrum.parquet`
 
-- **Metadatos del archivo**: `state_version = "1.0.0"`, `n_min = "16"`, `bands = "7"`,
-  `window = "hann"` y `budget_ticks = "20000000"` (los metadatos de Parquet son texto). Cambiar
-  cualquiera de los cuatro parámetros exige una `state_version` nueva. No entran en el
-  `content_hash`.
+- **Metadatos del archivo**: `state_version = "1.2.0"`, `n_min = "16"`, `bands = "7"`,
+  `window = "hann"` y `budget_ticks = "130000000"` (los metadatos de Parquet son texto). Cambiar
+  cualquiera de los cuatro parámetros exige una `state_version` nueva: la `1.1.0` (columnas nuevas:
+  las dos ubicaciones) no cambió ninguno, y la `1.2.0` (ITSC-418) sube el presupuesto de 20 M a
+  130 M de ticks sin cambiar ningún valor calculado: solo dejan de ser nulos los eventos entre 20 M
+  y 130 M de ticks. No entran en el `content_hash`. Un `spectrum.parquet` `1.1.0` o `1.0.0` (28
+  columnas de datos) queda detrás de la frontera de F por versión (el `1.0.0`, también por
+  esquema), y el backfill lo reescribe.
 - **Disposición física**: la de `summaries.parquet` (misma partición, ZSTD nivel 3, sin
   diccionario, `sorting_columns` por `confirm_agg_trade_id`, mismos row groups). El
   `content_hash` lo calcula `pyutils.ContentHasher`, que hashea las columnas `double`
@@ -1005,8 +1022,8 @@ Cada hallazgo, además de la fila en el lago, deja una línea de log JSON
   corrida y el de `events_summary` no puede.
 
 `check_type` de L3 (`layer = l3`, `stage = canonical`, `mode` `backfill` o `monthly`). Son
-los de [TRD-L3 §9.3](TRD/l3.md#93-tipos-de-chequeo-check_type) que aplican a la familia
-`summaries` (`event_over_budget` es de las familias de serie completa y no existe todavía).
+los de [TRD-L3 §9.3](TRD/l3.md#93-tipos-de-chequeo-check_type); `event_over_budget` solo lo
+emite la familia `spectrum` (la única de serie completa por ahora).
 A diferencia de L2, el θ de `details` es el texto de la partición (`"0.00010000"`), el
 mismo que traen las excepciones del resumidor, de las que sale la mayoría de los
 `details`. Cada unidad (un mes) emite sus hallazgos al terminar, también si falla; `year` y
@@ -1017,8 +1034,14 @@ mismo que traen las excepciones del resumidor, de las que sale la mayoría de lo
   En `backfill`, antes de procesar el mes, detiene el rango de ese θ (los demás siguen) y
   la corrida termina con código 1. También lo lanza la compuerta de entrada si falta el
   `carry_over.parquet` del mes anterior.
-- **`family_skeleton_missing`** (`error`, `fail`): una familia distinta de `summaries` (`path`
-  o `fit`) no encontró `summaries.parquet` de `(θ, mes)`, su esqueleto (`details.theta`,
+- **`event_over_budget`** (`warning`, `fail`, desde el 2.19.0 del TRD-L3, ITSC-413): un evento
+  supera el presupuesto de ticks (`extreme_agg_trade_id − reference_agg_trade_id` mayor que
+  `budget_ticks`, 130 000 000) y sus columnas de datos quedan nulas en `spectrum.parquet`.
+  `details`: `theta`, `confirm_agg_trade_id`, `ticks` (esa diferencia), `budget` y `family`
+  (`spectrum`). Uno por evento; no falla la unidad. Se cuentan por θ y mes en
+  `over_budget_events` del `summaries_summary`.
+- **`family_skeleton_missing`** (`error`, `fail`): una familia distinta de `summaries` (`path`,
+  `fit` o `spectrum`) no encontró `summaries.parquet` de `(θ, mes)`, su esqueleto (`details.theta`,
   `details.month`, `details.family`, `details.file` = `summaries.parquet`). Detiene el rango de
   ese θ (los demás siguen) y la corrida termina con código 1. Se resuelve corriendo antes la
   pasada de `summaries`.
@@ -1051,13 +1074,25 @@ mismo que traen las excepciones del resumidor, de las que sale la mayoría de lo
   Código 2, sin escribir datos; `year` y `month` son los del primer mes que iba a procesar.
 - **`theta_behind_frontier`** (`warning`, `fail`): `monthly` no procesó un θ
   (`details.theta`, `details.frontier` en `YYYY-MM` o `null`, `details.reason`,
-  `details.family`: `summaries`, `path` o `fit`, la pasada mensual que lo dejó rezagado, ITSC-396). `reason` es
+  `details.family`: `summaries`, `path`, `fit` o `spectrum`, la pasada mensual que lo dejó rezagado, ITSC-396). `reason` es
   `l2_missing` si L2 no tiene el mes de ese θ, `summaries_missing` si la familia no es
   `summaries` y falta `summaries.parquet` del mes, y `l3_frontier` si la serie de L3 de la familia
-  no llega al mes previo (se agregó al catálogo sin backfill, o tiene un hueco); si pasan
+  no llega al mes previo (se agregó al catálogo sin backfill, tiene un hueco o un archivo inválido); si pasan
   varias, la primera de ese orden, que es lo que bloquea. No falla la unidad mientras otros θ avancen o ya
   tengan el mes; si ninguno está listo ni lo tiene, `monthly` termina con código 1 sin leer
   L1. Se resuelve lanzando `backfill` sin `--from`.
+- **`theta_frontier_regressed`** (`warning`, `fail`; ITSC-419): la frontera de un θ quedó por
+  debajo del último mes que existe porque hay archivos inválidos en la serie de su familia.
+  Uno por θ y familia, no uno por mes; en `backfill` y en `monthly`. `year` y `month` son los
+  del primer mes inválido. `details`: `theta`, `family` (`summaries`, `path`, `fit` o
+  `spectrum`), `first_invalid_month` (`YYYY-MM`), `invalid_months` (cuántos; también
+  `metric_value`), `reason` (el del primero, con el archivo delante) y `frontier` (`YYYY-MM` o
+  `null`). No falla la corrida: el `backfill` sin `--from` reescribe desde ese mes.
+- **`backfill_summary`** (`info`, `pass`; ITSC-419): el cierre de un `backfill`, uno por corrida
+  (no lo emite una corrida cuya unidad falló). `metric_value` son los meses procesados.
+  `details`: `family`, `processed`, `skipped` (meses que ningún θ necesitaba), `months` (los del
+  rango), `first` y `last` (`YYYY-MM`); la misma cifra que la línea de log `backfill: N meses
+  procesados, K saltados por estar al día, de M en el rango`.
 - **`theta_config_drift`** (`info`, `pass`): el lago de L3 tiene particiones de un θ que el
   catálogo ya no incluye (`details.theta`, `details.months`, `details.last_month`;
   `metric_value` = meses). Informa, nunca es error: quitar un θ no borra nada.
@@ -1066,9 +1101,10 @@ mismo que traen las excepciones del resumidor, de las que sale la mayoría de lo
   `summaries.parquet`, `l2_events_content_hash` y `l2_carry_over_content_hash` (los de las
   entradas de L2 que usó, leídos de su `content_hash.json` desde la 2.4.0 del TRD-L3 y
   no recalculados; son los mismos que L2 registra en su `events_summary`, que es donde
-  se comparan) y, solo en `summaries`, `unassigned_ticks` (`U_M` de la conciliación; `path` y `fit` no concilian
-  y no lo publican). `family` es `summaries`, `path` o `fit` y `content_hash` es el del archivo de esa
-  familia. Es la huella de la
+  se comparan) y, solo en `summaries`, `unassigned_ticks` (`U_M` de la conciliación; `path`, `fit` y
+  `spectrum` no concilian y no lo publican). `family` es `summaries`, `path`, `fit` o `spectrum` y
+  `content_hash` es el del archivo de esa familia. Solo `spectrum` lleva además `over_budget_events`:
+  cuántos eventos del θ en el mes pasaron el presupuesto y dejaron su fila nula (0 si ninguno). Es la huella de la
   corrida y el linaje contra L2: si L2 se reprocesa y cambia, estos hashes ya no coinciden
   con los suyos y el mes está obsoleto (`--force --from <mes> --thetas <θ>`).
 - **`unit_timing`** (`info`, `pass`): uno por unidad (mes), no por θ. `metric_value` es la
@@ -1133,7 +1169,10 @@ mismo que traen las excepciones del resumidor, de las que sale la mayoría de lo
   (`rss_mib` de `mem_peak` ÷ `rss_peak_mib`), desde la 2.9.0; y `trims` (los `malloc_trim(0)` que
   hizo el muestreador durante la unidad), `trim_s` (la suma de lo que tardaron, tres decimales) y
   `trim_rss_mib` (la marca de agua con que corrió, `L3_TRIM_RSS_MIB`; 0 si estaba desactivado), desde
-  la 2.10.0. No cuenta las lecturas de la conciliación (solo
+  la 2.10.0; y, solo en `spectrum` (desde la 2.19.0, ITSC-413), `inflight_ticks_max` (el máximo de
+  retornos que el motor guardó a la vez, `Engine.buffered_ticks()`, que el estimador cobra a 4 B
+  cada uno) y `budget_ticks` (el presupuesto de ticks con que corrió la unidad; las demás familias
+  no llevan esas dos claves). No cuenta las lecturas de la conciliación (solo
   `agg_trade_id` de los row groups de las fronteras). Va aparte de `summaries_summary`
   porque sus tiempos cambian en cada corrida y el de `summaries_summary` no puede.
 - **`unit_process_died`** (`error`, `fail`, desde la 2.6.0 del TRD-L3): el proceso hijo de la

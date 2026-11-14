@@ -127,7 +127,11 @@ def test_backfill_findings_carry_the_hashes_and_the_lineage(lake, tmp_path, cata
     assert {r["mode"] for r in rows} == {"backfill"}
     assert {r["stage"] for r in rows} == {"canonical"}
     assert {r["image_version"] for r in rows} == {"0.4.0+test"}
-    assert {r["check_type"] for r in rows} == {"summaries_summary", "unit_timing"}
+    assert {r["check_type"] for r in rows} == {
+        "summaries_summary",
+        "unit_timing",
+        "backfill_summary",
+    }
 
     summary = emitted(tmp_path, "summaries_summary")
     assert len(summary) == len(lake.thetas) * len(lake.months)
@@ -162,7 +166,10 @@ def test_a_second_run_writes_nothing_and_does_not_need_l1(lake, tmp_path, catalo
         path.unlink()
     assert run(lake, tmp_path, catalog, *BACKFILL, "--to", "2017-10") == 0
     assert {p: p.stat().st_mtime_ns for p in l3_files(lake)} == before
-    assert len(emitted(tmp_path)) == findings
+    # Lo único nuevo es el cierre del backfill: ningún mes procesado, los tres al día.
+    assert len(emitted(tmp_path)) == findings + 1
+    closing = emitted(tmp_path, "backfill_summary")[-1]["details"]
+    assert (closing["processed"], closing["skipped"], closing["months"]) == (0, 3, 3)
 
 
 def test_the_default_end_is_the_last_consolidated_month(lake, tmp_path, catalog):
@@ -597,6 +604,10 @@ def test_without_the_knobs_the_defaults_apply(lake, tmp_path, catalog):
         ("L3_META_WORKERS", "0"),
         ("L3_META_WORKERS", "65"),
         ("L3_META_WORKERS", "ocho"),
+        ("L3_FRONTIER_WORKERS", "0"),
+        ("L3_FRONTIER_WORKERS", "-4"),
+        ("L3_FRONTIER_WORKERS", "257"),
+        ("L3_FRONTIER_WORKERS", "sesenta"),
     ],
 )
 def test_a_bad_l3_knob_is_a_usage_error(lake, tmp_path, catalog, name, value):

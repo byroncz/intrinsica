@@ -32,6 +32,12 @@
 //!   `Σ d²`, el nivel `j` alinea con la banda `j` y el séptimo junta las escalas de 128 en
 //!   adelante.
 //!
+//! * Ubicación de la energía (`c_energy_loc`, `os_energy_loc`). `Σ t_k·r_k² / Σ r_k²` con
+//!   `t_k = (k − 0,5)/n`, sobre los retornos sin centrar y sin ventana: dónde se concentra la
+//!   energía de la fase, en (0, 1). Se calcula antes que Haar y la FFT, en una pasada sobre el
+//!   búfer `f32` con dos acumuladores compensados. Es nula solo si todos los retornos son cero:
+//!   una serie de retornos iguales y no nulos no tiene Fourier pero sí ubicación (0,5).
+//!
 //! Una banda o nivel sin bins (la banda 5 con menos de 32 retornos, la 6 con menos de 64 y la 7
 //! con menos de 128, y los niveles de Haar igual) es nula, no cero. Una serie con todos los
 //! retornos iguales no tiene energía: deja nulas las columnas de su registro. Una fase con
@@ -54,7 +60,7 @@ pub const N_MIN: usize = 16;
 pub const BANDS: usize = 7;
 
 /// Ticks por evento a partir de los cuales no se calcula (`extreme − reference` de L2).
-pub const DEFAULT_BUDGET_TICKS: u64 = 20_000_000;
+pub const DEFAULT_BUDGET_TICKS: u64 = 130_000_000;
 
 /// Retornos de una fase a partir de los cuales su cierre se serializa en todo el proceso. El
 /// cierre tiene un transitorio que depende del plan de `rustfft`. El peor es el de `n` primo, que
@@ -62,8 +68,11 @@ pub const DEFAULT_BUDGET_TICKS: u64 = 20_000_000;
 /// `2^k` si no, con `k = ⌈log₂(2n − 1)⌉`): el pico del cierre, con el búfer de `n` complejos de
 /// `f64` incluido, es `16 B × (2n + 4m)`. Lo fija `tests/spectrum_memory.rs` con un asignador
 /// que cuenta, y vale para cualquier plan (Rader y los compuestos pesan 48 a 64 B por retorno,
-/// medidos). Con `n` = 20 M, `m` = 3·2^24 y el pico es ≈ 3,6 GiB (≈ 193 B por retorno). Cada hilo
-/// del motor puede estar cerrando un evento: sin acotarlo, el pico suma un transitorio por hilo.
+/// medidos). Con `n` = 20 M, `m` = 3·2^24 y el pico es ≈ 3,6 GiB (≈ 193 B por retorno). Con el
+/// presupuesto de 130 M (ITSC-418), `3·2^26` no alcanza `2n − 1` y `m` = 2^28: la cota da
+/// 21 339 869 184 B (20 351 MiB, ≈ 164 B por retorno), bajo los 24 576 MiB (75 % de 32 GiB) del
+/// job de F. Cada hilo del motor puede estar cerrando un evento: sin acotarlo, el pico suma un
+/// transitorio por hilo.
 /// Por debajo de este umbral el peor transitorio es de 160 MiB por hilo (`n` = 1 048 573, primo)
 /// y los cierres corren en paralelo.
 pub const SERIAL_CLOSE_MIN: usize = 1 << 20;
@@ -217,27 +226,62 @@ pub fn accumulate<B: AsRef<[u8]>>(
 /// `[None; 7]` si la serie no tiene energía.
 type Fractions = [Option<f64>; BANDS];
 
-/// Los dos registros de una fase.
+/// Los dos registros de una fase y la ubicación de su energía total.
 #[derive(Debug, PartialEq)]
 pub struct PhaseSpectrum {
     pub fourier: Fractions,
     pub haar: Fractions,
+    /// Ubicación en el tiempo de la energía total (`c_energy_loc`, `os_energy_loc`): `None` si
+    /// todos los retornos son cero.
+    pub location: Option<f64>,
 }
 
-/// Suma compensada (Neumaier): la media de una serie larga no pierde dígitos, y el orden de las
-/// operaciones es siempre el mismo.
-fn mean(values: impl Iterator<Item = f64>, n: usize) -> f64 {
-    let (mut sum, mut compensation) = (0.0f64, 0.0f64);
-    for value in values {
-        let t = sum + value;
-        if sum.abs() >= value.abs() {
-            compensation += (sum - t) + value;
+/// Suma compensada (Neumaier): una serie larga no pierde dígitos, y el orden de las operaciones
+/// es siempre el mismo.
+#[derive(Default)]
+struct Neumaier {
+    sum: f64,
+    compensation: f64,
+}
+
+impl Neumaier {
+    fn add(&mut self, value: f64) {
+        let t = self.sum + value;
+        if self.sum.abs() >= value.abs() {
+            self.compensation += (self.sum - t) + value;
         } else {
-            compensation += (value - t) + sum;
+            self.compensation += (value - t) + self.sum;
         }
-        sum = t;
+        self.sum = t;
     }
-    (sum + compensation) / n as f64
+
+    fn total(&self) -> f64 {
+        self.sum + self.compensation
+    }
+}
+
+/// La media de `n` valores con suma compensada.
+fn mean(values: impl Iterator<Item = f64>, n: usize) -> f64 {
+    let mut sum = Neumaier::default();
+    for value in values {
+        sum.add(value);
+    }
+    sum.total() / n as f64
+}
+
+/// Ubicación en el tiempo de la energía total de una fase de `n` retornos, sin centrar y sin
+/// ventana: `Σ t_k·r_k² / Σ r_k²` con `t_k = (k − 0,5)/n` y `k = 1..n`. Cae en (0, 1): 0,5 si la
+/// energía se reparte pareja, menos si se concentra al inicio y más si al final. `None` si la
+/// energía es cero. Una sola pasada con dos acumuladores: no copia la serie.
+fn energy_location(values: impl Iterator<Item = f32>, n: usize) -> Option<f64> {
+    let (mut moment, mut energy) = (Neumaier::default(), Neumaier::default());
+    for (k, value) in values.enumerate() {
+        let square = f64::from(value) * f64::from(value);
+        moment.add(square * ((k as f64 + 0.5) / n as f64));
+        energy.add(square);
+    }
+    let energy = energy.total();
+    (energy > 0.0 && energy.is_finite()).then(|| moment.total() / energy)
 }
 
 /// Los retornos de la fase en orden: el del ancla y los trozos del búfer.
@@ -342,6 +386,9 @@ fn analyse(first: f32, chunks: Vec<Vec<f32>>, n: usize) -> PhaseSpectrum {
     debug_assert!(n >= N_MIN);
     // El turno cubre todo el cierre de la fase: la copia de la cola de Haar y la FFT.
     let _turn = close_turn(n);
+    // La ubicación va primero: recorre el búfer f32 tal cual, antes de que Haar y la FFT lo
+    // conviertan o lo consuman.
+    let location = energy_location(series(first, &chunks), n);
     let (mut low, mut high) = (first, first);
     for &value in chunks.iter().flatten() {
         low = low.min(value);
@@ -358,16 +405,19 @@ fn analyse(first: f32, chunks: Vec<Vec<f32>>, n: usize) -> PhaseSpectrum {
         return PhaseSpectrum {
             fourier: [None; BANDS],
             haar,
+            location,
         };
     }
     let center = mean(series(first, &chunks).map(f64::from), n);
     PhaseSpectrum {
         fourier: fourier_fractions(first, chunks, n, center),
         haar,
+        location,
     }
 }
 
-/// Cierra un evento de la familia F: los 28 registros con la regla de nulos del contrato. El
+/// Cierra un evento de la familia F: los 28 registros y las 2 ubicaciones con la regla de nulos
+/// del contrato. El
 /// acumulador se consume, así que su búfer se libera aquí.
 ///
 /// Comprueba solo lo que el cálculo necesita para no producir `inf` ni `NaN`: anclas positivas y
@@ -408,18 +458,27 @@ pub fn close_spectrum(acc: SpectrumAcc, event: &EventIn) -> Result<SpectrumRow, 
         (
             confirmation,
             event.reference_price,
-            sc::C_FOURIER,
-            sc::C_HAAR,
+            [sc::C_FOURIER, sc::C_HAAR],
+            sc::C_ENERGY_LOC,
         ),
-        (overshoot, event.confirm_price, sc::OS_FOURIER, sc::OS_HAAR),
+        (
+            overshoot,
+            event.confirm_price,
+            [sc::OS_FOURIER, sc::OS_HAAR],
+            sc::OS_ENERGY_LOC,
+        ),
     ];
-    for (phase, anchor, fourier_at, haar_at) in phases {
+    for (phase, anchor, [fourier_at, haar_at], location_at) in phases {
         if phase.ticks < N_MIN as u64 {
             continue;
         }
         let n = phase.ticks as usize;
         let first = log_return(anchor, phase.first_price);
-        let PhaseSpectrum { fourier, haar } = analyse(first, phase.chunks, n);
+        let PhaseSpectrum {
+            fourier,
+            haar,
+            location,
+        } = analyse(first, phase.chunks, n);
         for (base, fractions) in [(fourier_at, fourier), (haar_at, haar)] {
             for (band, fraction) in fractions.into_iter().enumerate() {
                 if let Some(value) = fraction {
@@ -427,6 +486,10 @@ pub fn close_spectrum(acc: SpectrumAcc, event: &EventIn) -> Result<SpectrumRow, 
                     valid |= 1 << (base + band);
                 }
             }
+        }
+        if let Some(value) = location {
+            cells[location_at] = value.to_bits() as i64;
+            valid |= 1 << location_at;
         }
     }
     Ok(SpectrumRow {
@@ -604,6 +667,34 @@ mod tests {
         let got = fractions_of(&series);
         assert_eq!(got.haar, [None; BANDS]);
         assert!(got.fourier.iter().flatten().count() == 5);
+    }
+
+    #[test]
+    fn the_energy_location_by_hand() {
+        // LOC_X de la sonda: 41,5/80 con n = 8 (los 8 retornos son el ancla y los siete que siguen).
+        let loc_x = [6.0f32, 0.0, 0.0, 0.0, 2.0, 0.0, -2.0, -6.0];
+        let got = energy_location(loc_x.iter().copied(), 8).unwrap();
+        assert!((got - 41.5 / 80.0).abs() < 1e-15, "{got}");
+        // Toda la energía en el primer retorno y en el último: ubicación de 1/(2n) y de 1 − 1/(2n).
+        let mut series = [0.0f32; 16];
+        series[0] = 1.0;
+        assert_eq!(energy_location(series.into_iter(), 16), Some(0.5 / 16.0));
+        series.reverse();
+        assert_eq!(
+            energy_location(series.into_iter(), 16),
+            Some(1.0 - 0.5 / 16.0)
+        );
+    }
+
+    #[test]
+    fn the_energy_location_of_equal_returns_is_one_half_and_of_zeros_is_null() {
+        // Retornos constantes y no nulos: sin Fourier ni Haar, pero con ubicación.
+        let got = fractions_of(&[0.001f32; 40]);
+        assert_eq!(got.fourier, [None; BANDS]);
+        let loc = got.location.expect("la ubicación existe");
+        assert!((loc - 0.5).abs() < 1e-15, "{loc}");
+        // Todos en cero: la energía es cero y la ubicación es nula.
+        assert_eq!(fractions_of(&[0.0f32; 40]).location, None);
     }
 
     #[test]

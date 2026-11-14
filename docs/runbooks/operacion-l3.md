@@ -13,8 +13,17 @@ rango con la sección siguiente.
 
 ## Cambios requeridos
 
+**ITSC-418 (imagen de L3 ≥ 0.25.0; las otras cuatro imágenes solo suben el parche): el Deploy actualiza las cinco, y el apply del stack `l3` (lo lanza el humano) cambia el job `l3-backfill-spectrum`.**
+El apply deja el job en 32 GiB y 8 vCPU (antes 8 GiB y 2), con `L3_INFLIGHT_BYTES` = `4294967296` (4 GiB) y la imagen nueva; mismo nombre, mismos `args` y mismo timeout (43 200 s). El plan de `l3` debe mostrar solo ese cambio de recursos y de `env` y el de la imagen. `spectrum.parquet` pasa a `state_version` 1.2.0 con presupuesto de 130 M de ticks: un archivo 1.1.0 queda detrás de la frontera y el backfill lo reescribe. Antes de la corrida, el apply; después, el mes previo y el backfill completo (ver «Backfill de la familia F»).
+
+**ITSC-417 (imagen de L3 ≥ 0.24.0; las otras cuatro imágenes solo suben el parche): el Deploy actualiza las cinco, sin orden entre ellas.**
+`spectrum.parquet` pasa a `state_version` 1.1.0 con 30 columnas de datos (`c_energy_loc` y
+`os_energy_loc`). No hay apply ni cambio de infraestructura: el job `l3-backfill-spectrum` ya existe.
+El backfill de F (y el mes previo, 2023-03) debe correr con la imagen 0.24.0 o posterior; un
+`spectrum.parquet` 1.0.0 que ya exista queda detrás de la frontera y esa corrida lo reescribe.
+
 **ITSC-413 (imagen de L3 ≥ 0.23.0): el job `l3-backfill-spectrum` va primero, el backfill de la familia F después.**
-El apply del stack `l3` crea el job `l3-backfill-spectrum` (8 GiB, 2 vCPU, `timeoutSeconds: 43200`, `args` `--mode backfill --family spectrum`) y el workflow `run-job.yml` lo ofrece en la lista de jobs. No cambia `l3-backfill` ni `summaries`, `path` o `fit`. Tras el merge y el apply (los lanza el humano), corre el mes previo y después el backfill de los 110 meses (ver «Backfill de la familia F»).
+El apply del stack `l3` crea el job `l3-backfill-spectrum` (creado con 8 GiB y 2 vCPU; desde ITSC-418, 32 GiB y 8 vCPU; `timeoutSeconds: 43200`, `args` `--mode backfill --family spectrum`) y el workflow `run-job.yml` lo ofrece en la lista de jobs. No cambia `l3-backfill` ni `summaries`, `path` o `fit`. Tras el merge y el apply (los lanza el humano), corre el mes previo y después el backfill de los 110 meses (ver «Backfill de la familia F»).
 
 **ITSC-416 (solo `ops_tools` 0.6.16; la imagen de L3 no cambia): la corrida de la sonda va después del apply de `ops`.**
 El apply del stack `ops` (lo lanza el humano) publica la sonda nueva en `gs://<proyecto>-ops/scripts/`; sin él,
@@ -98,9 +107,10 @@ relanza los mismos inputs.
    ```
 
    Deben existir `l3-backfill`, `l3-backfill-spectrum`, `l3-monthly`, `l3-monthly-path` y `l3-monthly-fit`.
-   `l3-backfill-spectrum` lleva `args` `--mode backfill --family spectrum`, `memory: 8Gi`, `cpu: '2'` y `timeoutSeconds: 43200` (ITSC-413; `gcloud run jobs describe l3-backfill-spectrum`).
-   `l3-monthly-path` lleva `args` `--mode monthly --family path` y los mismos recursos que
-   `l3-monthly` (ITSC-396; compruébalo con `gcloud run jobs describe l3-monthly-path`).
+   `l3-backfill-spectrum` lleva `args` `--mode backfill --family spectrum`, `memory: 32Gi`, `cpu: '8'`, `L3_INFLIGHT_BYTES` = `4294967296` y `timeoutSeconds: 43200` (ITSC-413 e ITSC-418; `gcloud run jobs describe l3-backfill-spectrum`).
+   `l3-monthly-path` lleva `args` `--mode monthly --family path`, los mismos recursos que
+   `l3-monthly` y `timeoutSeconds: 5400` (ITSC-396 e ITSC-420; compruébalo con
+   `gcloud run jobs describe l3-monthly-path`). `l3-monthly` lleva `timeoutSeconds: 3600` (ITSC-420).
    `l3-monthly-fit` lleva `args` `--mode monthly --family fit`, los mismos recursos salvo el
    timeout, `timeoutSeconds: 7500` (ITSC-402; `gcloud run jobs describe l3-monthly-fit`).
    `l3-backfill` tiene `timeoutSeconds: 43200` (ITSC-402; antes 10800, y antes de ITSC-352,
@@ -108,7 +118,7 @@ relanza los mismos inputs.
    antes `'4'`). Las raíces
    (`L3_LANDING_ROOT`, `L3_EVENTS_ROOT`, `L3_SUMMARIES_ROOT`, `L3_DQ_ROOT`),
    `L3_SERIES_START` y `L3_THETAS_URI` van en `env`; `L3_THREADS`, `L3_READERS`, `L3_INFLIGHT`,
-   `L3_WRITERS`, `L3_ENGINE_THREADS`, `L3_META_WORKERS`, `L3_INFLIGHT_BYTES`, `L3_LOT_EVENTS`, `L3_TRIM_RSS_MIB`, `L3_TRIM_MIN_S` y `L3_UNIT_PROCESS` son opcionales (ver "Hilos y topes de la unidad" y "Memoria acotada").
+   `L3_WRITERS`, `L3_ENGINE_THREADS`, `L3_META_WORKERS`, `L3_FRONTIER_WORKERS`, `L3_INFLIGHT_BYTES`, `L3_LOT_EVENTS`, `L3_TRIM_RSS_MIB`, `L3_TRIM_MIN_S` y `L3_UNIT_PROCESS` son opcionales (ver "Hilos y topes de la unidad" y "Memoria acotada").
 2. **Imagen `l3_dc_descriptors`** de `layers/l3_dc_descriptors/VERSION`. El stack
    `l3` deriva el tag de ese archivo: sin `apply` posterior al merge, el job
    sigue con la imagen vieja.
@@ -135,8 +145,8 @@ orden. `l3-monthly` resume un mes.
 | Job | `from` | `to` | `force` |
 | --- | --- | --- | --- |
 | `l3-backfill` | Vacío: la frontera de cada θ decide desde dónde avanza | Vacío: hasta el último mes con consolidado en L1. Si lo pasas, el workflow lo manda siempre, aunque sea igual a `from` | Reprocesa desde `from` e ignora la frontera; **exige `from`** |
-| `l3-backfill-spectrum` | Igual que `l3-backfill` | Igual que `l3-backfill` | Igual que `l3-backfill`. Es el job de 8 GiB de la familia F: corre `--mode backfill --family spectrum` y `family` solo puede quedar en `summaries` o `spectrum` |
-| `l3-monthly` | El mes; vacío = el mes anterior | Vacío o igual a `from`; **la CLI rechaza otro valor** (código 2) | **No lo admite**: el workflow falla antes de lanzar. Usa `l3-backfill` con `from`. Acepta `family` = `spectrum`, pero corre en 4 GiB: el cierre de la FFT de una fase de F cerca del presupuesto pesa ≈ 3,6 GiB y no cabe (ADR-L3-19), así que **no es el job de F**; la pasada mensual de F es de la hija 5 de la Épica ITSC-410 |
+| `l3-backfill-spectrum` | Igual que `l3-backfill` | Igual que `l3-backfill` | Igual que `l3-backfill`. Es el job de 32 GiB de la familia F: corre `--mode backfill --family spectrum` y `family` solo puede quedar en `summaries` o `spectrum` |
+| `l3-monthly` | El mes; vacío = el mes anterior | Vacío o igual a `from`; **la CLI rechaza otro valor** (código 2) | **No lo admite**: el workflow falla antes de lanzar. Usa `l3-backfill` con `from`. Acepta `family` = `spectrum`, pero corre en 4 GiB: el cierre de la FFT de una fase de F cerca del presupuesto pesa varios GiB, hasta ≈ 20 GiB (20 351 MiB con n = 130 M, ADR-L3-19), y no cabe (ADR-L3-19), así que **no es el job de F**; la pasada mensual de F es de la hija 5 de la Épica ITSC-410 |
 | `l3-monthly-path` | **No está en la lista de *Run job***: la cadena mensual lo corre solo. A mano, se lanza como `l3-monthly` con `family` = `path` | Igual que `l3-monthly` | Igual que `l3-monthly`: no lo admite |
 | `l3-monthly-fit` | **No está en la lista de *Run job***: la cadena mensual lo corre solo, después de `l3-monthly-path`. A mano, se lanza como `l3-monthly` con `family` = `fit` | Igual que `l3-monthly` | Igual que `l3-monthly`: no lo admite |
 
@@ -155,6 +165,37 @@ conciliación, esqueleto; o `monthly` sin ningún θ listo con rezagados) o **2*
 [TRD-L3 §8.4](../TRD/l3.md#84-códigos-de-salida).
 
 ## Backfill histórico por rangos
+
+**Un backfill sin `from` ni `to` continúa desde la frontera (ITSC-419).** Cada θ de la familia
+avanza desde el primer mes que su frontera no cubre. La frontera es el **fin del prefijo contiguo de
+meses válidos** desde `--series-start` ([TRD-L3 §8.2](../TRD/l3.md#82-modo-backfill-histórico)):
+con un archivo inválido (otra `state_version`, otro esquema, ilegible) en el mes `m`, la frontera es
+`m − 1` aunque haya archivos válidos después, y el backfill reescribe desde `m`. Antes la frontera
+era el último válido y una corrida de un solo mes en medio de la serie hacía que el backfill
+saltara en silencio todo lo anterior (2026-11-12, F: 45 de 111 meses, código 0). Para eso, ahora:
+
+- **Al empezar**, el log dice `fronteras: N archivos verificados (P pies leídos) de … θ con L lectores en … s`: es el costo
+  de verificar todos los meses (solo pies). `N` son los archivos de la serie (con 111 meses y 50 θ,
+  5 550 en S y 11 100 en una familia distinta de S, que verifica también el techo de S) y `P` los pies
+  que se pidieron de verdad: el de `events.parquet` de un mes se lee una vez aunque lo pidan la familia
+  y el techo de S, así que en una familia distinta de S son 16 650 y no 22 200 (3 por θ y mes), y en S
+  11 100. La verificación midió **1 945,8 s** con 8 lectores (imagen 0.25.1, 2 vCPU, familia `path`;
+  ITSC-420) y desde ITSC-420 corre con `L3_FRONTIER_WORKERS` lectores, 64 por defecto; la meta del
+  arquitecto es **menos de 300 s** en ese caso, y se mide en la nube, no en CI. Si pasa de 300 s, decide
+  el arquitecto con esa cifra (los timeouts mensuales de «Timeouts» ya cubren el costo medido).
+- **Por cada θ cuya frontera retrocedió** por archivos inválidos hay un hallazgo
+  `theta_frontier_regressed` (warning, uno por θ): `first_invalid_month`, `invalid_months` y el
+  `reason` del primero. Dice desde dónde se va a reescribir y por qué.
+- **Al terminar**, la línea `backfill: N meses procesados, K saltados por estar al día, de M en el
+  rango` y el hallazgo `backfill_summary` con la misma cifra. **Cómo leerla:** tras un cambio de
+  versión de una familia, `N` debe ser casi `M`. Si `N` es mucho menor y `K` el resto, algo dio por
+  buenos meses que no lo eran: corre `l3_version_audit.py` (abajo). Si `N + K` es menor que `M`, el
+  resto son meses cuyo θ salió del rango (`l2_input_missing` o `family_skeleton_missing`).
+- **Código 1** si, sin `force`, queda un θ con un archivo inválido dentro del rango que la corrida
+  no reescribió (el `from` empezó después de él): el log dice cuál es el primero. Se relanza sin
+  `from`, o con `from` en ese mes. En `path`, `fit` o `spectrum` también sale 1 si `summaries.parquet`
+  tiene un mes inválido en el rango: esa pasada no lo repara, el log pide correr primero el
+  backfill de `summaries`.
 
 **Con el núcleo nuevo cabe en una sola ejecución.** El backfill completo de 110 meses a
 2 vCPU con la imagen 0.19.0 y los valores por defecto (ITSC-378, 2026-10-25) tardó 6 638 s
@@ -328,38 +369,55 @@ La familia F escribe `spectrum.parquet` junto a `summaries.parquet` de cada θ y
 RL3-11): va **después** de S, y es independiente de `path` y `fit`. Una pasada de F lee L1 y L2
 completas otra vez (una pasada por familia, ADR-L3-11).
 
-**Corre en su propio job, `l3-backfill-spectrum`, de 8 GiB.** El veredicto de la Épica ITSC-410
-(arquitecto, 2026-11-10) fija 8 GiB para F: guarda en RAM los retornos de cada evento abierto (4 B
-cada uno) y, al cerrarlo, calcula una FFT exacta cuyo transitorio pasa de lo que cabe en los 4 GiB de
-`l3-backfill` ([ADR-L3-19](../TRD/l3.md#619-adr-l3-19--familia-f-el-motor-guarda-los-retornos-de-cada-fase-y-calcula-una-fft-exacta-al-cerrar)).
-El job lleva `args` `--mode backfill --family spectrum`, `cpu: '2'` (Cloud Run exige al menos 2 vCPU
-para pasar de 4 GiB), `memory: 8Gi` y el timeout de `l3-backfill`, 43 200 s. En *Run job* se elige
+**Corre en su propio job, `l3-backfill-spectrum`, de 32 GiB y 8 vCPU.** F guarda en RAM los retornos
+de cada evento abierto (4 B cada uno) y, al cerrarlo, calcula una FFT exacta cuyo transitorio pasa de
+lo que cabe en los 4 GiB de `l3-backfill`. El veredicto de la Épica ITSC-410 (2026-11-10) fijó 8 GiB
+con un presupuesto de 20 M de ticks; la decisión del humano con el arquitecto (2026-11-12, ITSC-418)
+lo sube a 130 M de ticks y el job a 32 GiB, el máximo de Cloud Run
+([ADR-L3-19](../TRD/l3.md#619-adr-l3-19--familia-f-el-motor-guarda-los-retornos-de-cada-fase-y-calcula-una-fft-exacta-al-cerrar)).
+El job lleva `args` `--mode backfill --family spectrum`, `cpu: '8'` (la cifra de la card ITSC-418 para
+32 GiB en Cloud Run; el apply la valida), `memory: 32Gi`, `L3_INFLIGHT_BYTES` = `4294967296` (4 GiB;
+el tope por defecto, 768 MiB, frenaría la unidad a un tramo a la vez cuando los eventos gigantes
+guardan sus retornos) y el timeout de `l3-backfill`, 43 200 s. **La cota de pico es 24 576 MiB**, el
+75 % de 32 GiB; el peor cierre (n = 130 M retornos) pide 21 339 869 184 B (20 351 MiB) según
+16 B × (2n + 4m), con m = 2^28, y los cierres con n ≥ 2^20 corren de a uno. El pico esperado es ese
+transitorio más los retornos en vuelo (hasta `L3_INFLIGHT_BYTES`, 4 096 MiB) más la base del proceso:
+20 351 + 4 096 = 24 447 MiB antes de la base, así que el margen frente a la cota es de ≈ 130 MiB. En *Run job* se elige
 `job` = `l3-backfill-spectrum`; `family` puede quedar en `summaries` (el valor por defecto) o en
 `spectrum`, y cualquier otro valor se rechaza antes de lanzar. `l3-backfill` con `family` =
 `spectrum` también existe, pero corre con 4 GiB: no es el job de F.
 
-**El presupuesto.** Un evento con más de 20 000 000 de ticks (`extreme_agg_trade_id −
+**El presupuesto.** Un evento con más de 130 000 000 de ticks (`extreme_agg_trade_id −
 reference_agg_trade_id`, ADR-L3-13) no guarda retornos: su fila de `spectrum.parquet` queda nula y la
 unidad **no falla**. Cada uno deja un hallazgo `event_over_budget` (`warning`) con `theta`,
 `confirm_agg_trade_id`, `ticks`, `budget` y `family` = `spectrum`, y `summaries_summary` de F lleva
 `over_budget_events`, cuántos fueron en ese θ y mes. Cómo leerlos: son los eventos más grandes, los
 de los θ más lentos (RL3-12); no se arreglan relanzando. Si el conteo total es una fracción
 relevante de los eventos, es una cifra para el arquitecto, no un fallo. El presupuesto va en el pie
-de cada archivo (`budget_ticks`); cambiarlo es una `state_version` nueva.
+de cada archivo (`budget_ticks`); cambiarlo es una `state_version` nueva (ITSC-418 lo subió de 20 M a 130 M: `state_version` 1.2.0).
 
-**Paso previo: un mes (2023-03).** Antes del backfill completo, corre `l3-backfill-spectrum` con
-`from` = `to` = `2023-03` y los demás valores por defecto (`summaries.parquet` de ese mes debe
+**Paso previo: un mes (el del evento de 124 M de ticks).** Antes del backfill completo, corre
+`l3-backfill-spectrum` con `from` = `to` = el mes que indica el arquitecto (el del evento más
+grande, de 124 025 129 ticks) y los demás valores por defecto (`summaries.parquet` de ese mes debe
 existir). Pega en la card, del *Summary* y del hallazgo `unit_timing` de la unidad
-(`details.family` = `spectrum`): `rss_peak_mib`, `wall_s`, `cpu_s`, `inflight_ticks_max` y el
-tamaño de `spectrum.parquet` del mes. `cpu_s` es el tiempo de CPU del proceso durante la unidad, y
+(`details.family` = `spectrum`): `rss_peak_mib`, `wall_s`, `cpu_s`, `inflight_ticks_max`,
+`inflight_bytes_max` y el conteo de `event_over_budget` (esperado: 0). `cpu_s` es el tiempo de CPU del proceso durante la unidad, y
 el uso de la máquina es `cpu_s / (wall_s × vCPU)` (`cpu_utilization` ya lo trae, con los `cores`
 que Cloud Run entregó): las FFT con n ≥ 2^20 corren de a una y sin SIMD, así que ese uso se mide, no
 se supone. **El backfill de los 110 meses espera esa cifra y el veredicto de la sonda de ubicación
-(ITSC-416).** La cota de la Épica es `rss_peak_mib` ≤ 6 144 MiB.
+(ITSC-416).** La cota es `rss_peak_mib` ≤ 24 576 MiB. Si la pasa o el job muere por memoria, el
+arquitecto baja el presupuesto a 100 M (queda un evento nulo) con una card de una línea.
+
+Desde ITSC-418 `spectrum.parquet` es `state_version` 1.2.0 (presupuesto de 130 M de ticks); desde
+ITSC-417 lleva 30 columnas de datos (las dos de ubicación de la energía total de cada fase,
+`c_energy_loc` y `os_energy_loc`). Un `spectrum.parquet` 1.1.0 o 1.0.0 queda detrás de la frontera
+de F, por versión (y el 1.0.0 también por esquema): este paso, o el backfill, lo reescribe; no hace
+falta borrarlo. Ningún valor calculado cambia: solo dejan de ser nulos los eventos entre 20 M y 130 M
+de ticks.
 
 1. `l3-backfill` con `family` = `summaries` y los valores por defecto, hasta que termine con
    código 0 (S al día).
-2. El mes previo de arriba, con su cifra pegada en la card.
+2. El mes previo de arriba, con sus cifras pegadas en la card.
 3. `l3-backfill-spectrum`, **sin `from` ni `to`** y con los valores por defecto: la frontera de cada
    θ en `spectrum` decide desde dónde avanza.
 4. Al terminar, el *Summary* y los `unit_timing` (`details.family` = `spectrum`) traen la pared
@@ -398,11 +456,28 @@ estimadas (por 1,16). ITSC-378 las reemplazó por el backfill completo de 110 me
 
 | Job | Desplegado hasta el apply de ITSC-352 | Definitivo (ITSC-352) | Vigente con ITSC-402 | Cuenta (medida) |
 | --- | --- | --- | --- | --- |
-| `l3-monthly` | 10 800 s | 1 200 s | **1 200 s** | 6 × 183,7 = 1 102 s: 6,5 × |
-| `l3-monthly-path` | (no existía) | (los de `l3-monthly`) | **1 200 s** | los de `l3-monthly` |
+| `l3-monthly` | 10 800 s | 1 200 s | **3 600 s** (ITSC-420; 1 200 s hasta ITSC-402) | verificación + 6 × 183,7 = 1 946 + 1 102 = 3 048 s: 1,18 × (1,85 × la verificación sola) |
+| `l3-monthly-path` | (no existía) | (los de `l3-monthly`) | **5 400 s** (ITSC-420; 1 200 s hasta ITSC-402) | verificación + 6 × 183,7 = 3 048 s (S; T tarda un 11 % menos): 1,77 × con 5 400 s |
 | `l3-monthly-fit` | (no existía) | (no existía) | **7 500 s** | 6 × 1 240 (2023-03, A) = 7 440 s: 6,05 × con 7 500 s |
 | `l3-backfill-spectrum` | (no existía) | (no existía) | **43 200 s** (ITSC-413) | El de `l3-backfill`; la pared de F sale del mes previo y del backfill completo (ver «Backfill de la familia F») |
 | `l3-backfill` | 86 400 s | 10 800 s | **43 200 s** | S: 1,5 × 6 638 = 9 957 s (1,63 × con 10 800 s); A: 1,5 × 27 556 = 41 334 s (1,57 × con 43 200 s) |
+
+**La verificación de la frontera entra en la regla (ITSC-420).** Desde ITSC-419 cada backfill y cada monthly
+verifican todos los meses de la serie de cada θ antes de procesar nada (TRD-L3 §8.2), y en la nube eso
+midió 1 945,8 s con 8 lectores (imagen 0.25.1, 2 vCPU, familia `path`, 50 θ, 111 meses; ejecución
+`l3-backfill-m7thd`). Con los 1 200 s de `l3-monthly` y `l3-monthly-path` la cadena del cierre mensual
+del 2026-12-01 habría muerto por timeout. La regla para un job mensual pasa a ser: **timeout ≥ la
+verificación + 6 × el mes más lento**. Con la cifra medida: 1 946 + 6 × 183,7 = 3 048 s, y los
+3 600 s de `l3-monthly` y 5 400 s de `l3-monthly-path` la cubren con 1,18 × y 1,77 ×. `l3-monthly-fit`
+no cambia por decisión de la card, pero **no cumple la regla** con la verificación medida: 1 946 + 6 × 1 240 =
+9 386 s es más que sus 7 500 s (le quedan 5 554 s para el mes, 4,48 × el más lento de A, bajo 6 ×). Sí cubre
+la pared real esperada (≈ 3 186 s). Lo revisa ITSC-415 con la medición nueva; subirlo a ≥ 9 386 s es una
+opción del arquitecto fuera del alcance de ITSC-420. Cada modo de `l3` fija su `timeout` explícito (ya no hereda el de la capa, 1 200 s). La
+espera del workflow `l1-run-job` en `monthly-close` sondea cada 30 s hasta `completionTime` y no tiene tope
+propio: admite estos timeouts (5 400 s son ≈ 180 sondeos, muy bajo el límite de pasos de Workflows).
+La verificación más rápida de ITSC-420 (más lectores, un pie de `events.parquet` por mes, sin el viaje de
+existencia) debería bajar esa cifra a menos de 300 s; con la medida nueva la hija ITSC-415 ajusta los
+timeouts mensuales y los umbrales de subida.
 
 Los valores de ITSC-402 **los aplica el humano** con el `apply` del stack `l3`; hasta entonces rigen
 los desplegados. La regla de subida de `l3-monthly` no cambia: si 2022-11 pasa de 200 s, sube.
@@ -438,9 +513,10 @@ causa en el log de la ejecución:
   `rss_before_trim_mib` y `rss_after_trim_mib` de los meses anteriores y la sección
   «El asignador».
 - **Timeout**: la tarea se corta sin mensaje de memoria. El de `l3-monthly` es de
-  1 200 s desde el apply de ITSC-352 (10 800 s antes; 6,5 veces la pared medida del mes más
-  lento a 2 vCPU, 183,7 s en 2022-11, ITSC-378); el de `l3-monthly-fit`, de 7 500 s, y el de
-  `l3-backfill`, de 43 200 s desde ITSC-402 (ver «Timeouts»).
+  3 600 s desde ITSC-420 (1 200 s antes; cubre la verificación de la frontera, 1 945,8 s medidos,
+  más 6 veces el mes más lento a 2 vCPU, 183,7 s en 2022-11, ITSC-378); el de `l3-monthly-path`,
+  de 5 400 s; el de `l3-monthly-fit`, de 7 500 s, y el de `l3-backfill`, de 43 200 s desde
+  ITSC-402 (ver «Timeouts»).
 - **Un hallazgo `error`**: lee su `check_type` en la tabla siguiente.
 
 Los 17 `check_type` de [TRD-L3 §9.3](../TRD/l3.md#93-tipos-de-chequeo-check_type),
@@ -453,7 +529,7 @@ repares un archivo de `l3/` a mano.
 | `phase_quantity_mismatch` | `error` | `buy + sell` de una fase no es la suma de `quantity` de sus ticks | No debería ocurrir: es un defecto del núcleo o de los datos. Abre una card con `task-create` con `details` (θ, `confirm_agg_trade_id`, fase, los dos valores). No relances: dará lo mismo |
 | `family_skeleton_mismatch` | `error` | Un archivo de familia no repite filas, orden, claves o row groups del esqueleto | Compara `details` con `events.parquet` de L2 del mes. Si L2 cambió después, relanza el mes con `force` (ver "Relanzar un mes"). Si persiste, card |
 | `family_skeleton_missing` | `error` | Una familia distinta de `summaries` (`path`, `fit` o `spectrum`) no encontró `summaries.parquet` del mes de `(θ, M)`; `details` trae `theta`, `month`, `family` y `file` | Corre `l3-backfill` con `family` = `summaries` para ese rango y relanza los mismos inputs. Ese θ salió del rango y los demás siguieron (código 1) |
-| `event_over_budget` | `warning` | Un evento supera el presupuesto de ticks de la familia de serie completa (hoy solo `spectrum`, 20 M): su fila queda nula. `details` trae `theta`, `confirm_agg_trade_id`, `ticks`, `budget` y `family` | `summaries`, `path` y `fit` no tienen presupuesto y no lo emiten. Informa; no falla la unidad. Se cuenta por θ y mes en `over_budget_events` del `summaries_summary` de F (ver «Backfill de la familia F») |
+| `event_over_budget` | `warning` | Un evento supera el presupuesto de ticks de la familia de serie completa (hoy solo `spectrum`, 130 M): su fila queda nula. `details` trae `theta`, `confirm_agg_trade_id`, `ticks`, `budget` y `family` | `summaries`, `path` y `fit` no tienen presupuesto y no lo emiten. Informa; no falla la unidad. Se cuenta por θ y mes en `over_budget_events` del `summaries_summary` de F (ver «Backfill de la familia F») |
 | `l2_input_missing` | `error` | Falta `events.parquet` o `carry_over.parquet` de `(θ, M)` | Completa L2 para ese θ y mes ([runbook de L2](operacion-l2.md)); luego relanza `l3-backfill` con los mismos inputs. Ese θ salió del rango y los demás siguieron (código 1) |
 | `l2_lineage_missing` | `error` | La partición de L2 de `(θ, M)` no tiene `content_hash.json` o no es válido; `details` trae θ, mes, archivo y `reason` | Corre el backfill del linaje ([L2](operacion-l2.md#linaje-publicado-y-su-backfill-itsc-368)), que escribe el de las particiones que no lo tienen; si el mes es nuevo (publicado por una imagen de L2 anterior a la 0.11.0), vuelve a correr el backfill. Luego relanza `l3-backfill` con los mismos inputs. L3 no recalcula el linaje por su cuenta, a propósito |
 | `l2_state_inconsistent` | `error` | L2 contradice a L1 o a un invariante de fila (TRD-L3 §9.2); `details` trae θ, mes, campo y los dos valores | Descarta primero L1: ids repetidos o marcas del proveedor (ver "Cascada"). Si L1 está sano, es un defecto de L2 o de L3: card con `details`. Es el hallazgo que detectó los duplicados de 2026-02 |
@@ -737,6 +813,7 @@ Python lee, escribe y mide; los hilos nativos del motor calculan. Son opcionales
 | `L3_ENGINE_THREADS` | Hilos nativos del motor. Entero ≥ 1 | los vCPU efectivos redondeados (`round(cores)` de `unit_timing`): 2 en `l3-backfill` |
 | `L3_THREADS` | Pool de E/S: lectura de las fronteras de L2 y conciliación. Entero ≥ 1; nunca se usan más que θ | `ceil(3 × cores)`, nunca más que θ: 7 a 2 vCPU, 12 a 4 y 26 a 8 (con los `cores` medidos en T5: 2,086, 3,945 y 8,342) |
 | `L3_META_WORKERS` | Pool de metadatos (ITSC-369): pasada de entrada de cada θ (`events.parquet`, carry-over, huella), pie de L1, apertura de los escritores y publicación. Son esperas de red de un viaje, no CPU: no sigue a los vCPU. Entero entre 1 y 64; nunca se usan más que θ | 16 (nunca más que θ) |
+| `L3_FRONTIER_WORKERS` | Lectores de la verificación de la frontera (ITSC-420): una tarea por (θ, mes), solo pies. Es E/S de un viaje, no CPU: no sigue a los vCPU, y con 8 lectores la verificación midió 1 945,8 s en la nube. Entero de 1 a 256 (0, negativo, mayor que 256 o no entero es error de uso, código 2; cada lector es un hilo); se puede subir sin cambiar el resultado, que no depende del número de lectores. Memoria: a lo sumo un pie por lector a la vez (64 por defecto) más el caché de filas por row group de `events.parquet` (solo fuera de S, liberado al terminar la verificación; por entrada, 8 B por row group no vacío más ≈ 200 B fijos de ruta y objeto, ≈ 1,1 MB de costo fijo con 5 550 entradas) | 64 |
 
 El stack `l3` no fija ninguna: los valores siguen a los vCPU y el resultado (tablas y
 `content_hash`) es el mismo en cualquier combinación. Un valor que no sea un entero ≥ 1 termina
@@ -1096,6 +1173,7 @@ locales (`uv run`).
 | `l3_fit_check.py` | Prueba `fit.parquet` (familia A) contra `summaries.parquet` y `events.parquet` sobre un θ y un mes: resumen por columna, esqueleto, invariantes, regla de nulos y cifras informativas en un CSV | `--theta 0.00098052 --month 2023-03` |
 | `l3_spectrum_probe.py` | Sonda doble de la familia F (ITSC-410, ITSC-416): energía por banda de retornos y de precios por fase contra sus nulos, Haar contra Fourier, ubicación en el tiempo de la energía por nivel de Haar y total, redundancia con A y T, fases bajo 16 ticks por θ y pico de ticks en vuelo desde L2; da D y ρ, la regla de la ubicación y el veredicto `sigue\|retirada` | `--theta 0.00098052 --month 2023-03` |
 | `l3_spectrum_check.py` | Prueba `spectrum.parquet` (familia F) contra `summaries.parquet` y `events.parquet` sobre un θ y un mes: resumen por columna, esqueleto, invariantes, regla de nulos y presupuesto en un CSV | `--theta 0.00098052 --month 2023-03` |
+| `l3_version_audit.py` | Audita las versiones de las cuatro familias (ITSC-419): lee solo el pie de cada archivo de cada θ y mes con `events.parquet` en L2, anota `state_version` (y `budget_ticks` en `spectrum`) y dice si cada familia tiene una sola versión y si falta algún archivo; da `veredicto=ok\|mezcla\|faltantes` | sin `args` |
 
 El apply del stack `ops` publica todos estos scripts en `scripts/`; verifica con
 `gcloud storage ls gs://<proyecto>-ops/scripts/`.
@@ -1748,7 +1826,8 @@ veredicto de ITSC-410): cada banda de Fourier de retornos y cada nivel de Haar c
 
 Qué entra lo decide el arquitecto con las cifras, en la Épica ITSC-410 bajo el veredicto. Si la ubicación pasa,
 entra al motor como columnas nuevas de `spectrum.parquet` en una card aparte, antes del backfill de F; si no,
-queda documentado y F sigue con sus 28 columnas.
+queda documentado y F sigue con sus 28 columnas. (ITSC-417 lo hizo para la ubicación de la energía total,
+`c_energy_loc` y `os_energy_loc`; la ubicación por nivel de Haar no entra.)
 
 **El CSV** (`l3_spectrum_probe_<mes>_<θ>.csv`, en `results/<ejecución>/`) tiene el encabezado
 `seccion,candidato,fase,banda,fuente,medida,valor`:
@@ -1917,6 +1996,44 @@ sobre 2023-03 con θ `0.00098052`.
 | Mes | θ | `state_version` | Filas | Violaciones | `over_budget` | Pared | Run |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | 2023-03 | `0.00098052` | pendiente | pendiente | pendiente | pendiente | pendiente | pendiente |
+### `l3_version_audit.py`
+
+Dice si **cada familia de L3 tiene una única versión** y si no falta ningún archivo (ITSC-419). Para
+cada familia (`summaries`, `path`, `fit`, `spectrum`), cada θ del catálogo y cada mes con
+`events.parquet` en L2, lee **solo el pie** del archivo (los metadatos de Parquet; ningún dato) y
+anota `state_version` y, en `spectrum`, `budget_ticks`. Se corre tras un backfill, o cuando la línea
+`backfill: N meses procesados…` no cuadra. **No importa ninguna capa** (una importación cambiaría
+`uv.lock`) y abre cada pie por su ruta completa, por la [trampa del 403](#la-trampa-del-403-por-prefijo).
+
+El apply del stack `ops` lo publica en `scripts/`; verifica con
+`gcloud storage ls gs://<proyecto>-ops/scripts/l3_version_audit.py`.
+
+| `args` | Efecto |
+| --- | --- |
+| (vacío) | Deduce el proyecto de `OPS_RESULTS_URI` y usa el catálogo `gs://<proyecto>-manifest/l2/thetas.yaml`, `gs://<proyecto>-dc-events/l2` y `gs://<proyecto>-dc-descriptors/l3` |
+| `--catalog`, `--l2-root`, `--l3-root` | Otras rutas (también locales, con la misma disposición hive) |
+| `--provider`, `--market`, `--asset` | Por defecto `binance`, `spot`, `BTCUSDT` |
+| `--out` | Dónde deja el CSV (por defecto, `l3_version_audit.csv` en `results/<ejecución>/`) |
+
+**El CSV** (`l3_version_audit.csv`) trae una fila `version` por familia y versión (en `archivos`,
+cuántos archivos la tienen) y una fila `excepcion` por cada `(familia, θ, mes)` que falte o que no
+tenga la versión mayoritaria de su familia, con el `motivo`. La versión de `spectrum` incluye
+`budget_ticks`: cambiar el presupuesto es versión nueva. Un archivo que no se lee cuenta como la
+versión `ilegible`.
+
+**La última línea** es `version audit: familias=4 archivos=… faltantes=… versiones_mezcladas=…
+veredicto=ok|mezcla|faltantes`. `archivos` son los que existen y se leyeron; `faltantes`, los
+`(familia, θ, mes)` con `events.parquet` en L2 y sin archivo de la familia; `versiones_mezcladas`,
+cuántas familias tienen más de una versión. El veredicto es `faltantes` si falta algún archivo, si no
+`mezcla` si alguna familia mezcla versiones, si no `ok`. Código **0** solo con `ok`; **1** con
+`mezcla` o `faltantes`, o si no se puede listar o leer el catálogo; **2** por uso.
+
+**Cómo correrla.** *Actions → Run job*: `job` = `ops-script`, `script` =
+`gs://<proyecto>-ops/scripts/l3_version_audit.py` (la URI completa) y sin `args`. El humano pega la
+última línea en la card. Esperado tras el backfill de F a 1.2.0: `veredicto=ok`. Con `mezcla` o
+`faltantes`, las filas `excepcion` del CSV dicen qué familia y qué meses reprocesar; el rango lo
+decide el arquitecto, y se relanza el backfill de esa familia con `from` en el primer mes de la
+excepción.
 
 ### La trampa del 403 por prefijo
 

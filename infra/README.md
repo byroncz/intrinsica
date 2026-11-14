@@ -454,17 +454,18 @@ revisa antes de aprobar el `apply`.
 ## Stack l3 (Descriptores por evento)
 
 Instancia del módulo `layer` con cinco modos: `l3-backfill`, `l3-backfill-spectrum` (el backfill de la
-familia F, ITSC-413: `args = ["--mode", "backfill", "--family", "spectrum"]`, `memory = "8Gi"`, `cpu = "2"`
-y el timeout de `l3-backfill`; el veredicto de la Épica ITSC-410 fija 8 GiB para F, y Cloud Run exige al menos
-2 vCPU para pasar de 4 GiB), `l3-monthly`,
+familia F, ITSC-413: `args = ["--mode", "backfill", "--family", "spectrum"]`, `memory = "32Gi"`, `cpu = "8"`,
+`L3_INFLIGHT_BYTES = "4294967296"` (4 GiB; el `env` de un modo reemplaza al de la capa, así que se pasa
+`merge(local.env, {...})`) y el timeout de `l3-backfill`; ITSC-418 sube el job de 8 GiB y 2 vCPU a 32 GiB, el
+máximo de Cloud Run, con 8 vCPU, la cifra de la card; la cota de pico es 24 576 MiB, el 75 % de la memoria),
+`l3-monthly`,
 `l3-monthly-path` (la pasada mensual de la familia T, ITSC-396) y `l3-monthly-fit`
 (la de la familia A, ITSC-402), cada uno con su
 service account y una sola tarea (sin task array). `l3-monthly-path` es el mismo
 modo `monthly` de la CLI con `--family path`: usa `args = ["--mode", "monthly",
-"--family", "path"]` del módulo `layer` y hereda imagen, CPU, memoria y timeout de
-`l3-monthly` (la pared de T fue 11,4 % menor que la de S en el backfill de T
-de ITSC-394, TRD-L3 §10.2, así que los 1 200 s
-alcanzan). `l3-monthly-fit` es el mismo modo `monthly` con `--family fit`
+"--family", "path"]` del módulo `layer` y hereda imagen, CPU y memoria de
+`l3-monthly`, pero fija su propio timeout (5 400 s desde ITSC-420; ver «Timeouts mensuales
+y verificación de la frontera»). `l3-monthly-fit` es el mismo modo `monthly` con `--family fit`
 (`args = ["--mode", "monthly", "--family", "fit"]`): hereda imagen, CPU y memoria,
 pero no el timeout (ver «Timeouts de la familia A»). Imagen
 `l3_dc_descriptors:<VERSION>`, de `layers/l3_dc_descriptors/VERSION`. Diseño y
@@ -618,6 +619,25 @@ medida de A en ITSC-401
   (decisión del arquitecto, 2026-11-06). Con 10 800 s habría hecho falta partir el
   backfill de A en rangos de menos de 7 200 s cada uno.
 
+**Timeouts mensuales y verificación de la frontera (ITSC-420).** Cada modo del stack `l3` fija su
+`timeout` explícito; el `1200` de la capa queda solo como valor por defecto del módulo y ningún modo lo
+hereda. La verificación de la frontera (TRD-L3 §8.2, ITSC-419) midió **1 945,8 s** en la nube (11 100
+archivos, 22 200 pies, 50 θ, 8 lectores, 2 vCPU, imagen 0.25.1, ejecución `l3-backfill-m7thd`), y los
+1 200 s de `l3-monthly` y `l3-monthly-path` no la cubrían. La regla de [TRD-L3 §10.2](../docs/TRD/l3.md#102-dimensionamiento--hipótesis-de-partida-y-primera-medición)
+para un job mensual es *timeout ≥ la verificación + 6 × el mes más lento* (1 946 + 6 × 183,7 = 3 048 s):
+
+| Job | timeout | Cuenta |
+|---|---|---|
+| `l3-monthly` | **3 600 s** (antes 1 200 s) | 1,18 × la regla; 1,85 × la verificación sola |
+| `l3-monthly-path` | **5 400 s** (antes 1 200 s) | 1,77 × la regla; T verifica la serie y el techo de S |
+| `l3-monthly-fit` | 7 500 s (sin cambio) | No cumple la regla con la verificación medida: 1 946 + 6 × 1 240 = 9 386 s > 7 500 s (4,48 × el mes más lento de A tras la verificación). Cubre la pared real esperada (≈ 3 186 s). Lo revisa ITSC-415; subirlo a ≥ 9 386 s es decisión del arquitecto |
+
+La espera del workflow `l1-run-job` (módulo `orchestration`) sondea cada 30 s hasta que la ejecución trae
+`completionTime` y no tiene tope propio: admite estos timeouts (5 400 s son ≈ 180 sondeos, bajo el límite
+de pasos de Workflows). El código baja el costo de la verificación (`L3_FRONTIER_WORKERS`, 64 lectores por
+defecto; un pie de `events.parquet` por mes; sin el viaje de existencia): la meta es menos de 300 s y se
+mide en la nube. Los timeouts nuevos **los aplica el humano** con el `apply` del stack `l3`.
+
 Consecuencia: la espera de *Run job* muere a las 6 h (21 600 s) y un backfill de A
 dura más. El run de Actions falla por tiempo de espera, pero **la ejecución sigue en
 Cloud Run** hasta su propio timeout. Cómo seguirla y cómo leer sus `unit_timing`
@@ -686,6 +706,10 @@ cambio es una sorpresa y se revisa antes de aprobar.
 En el PR de ITSC-413, el plan de `l3` crea solo el job `l3-backfill-spectrum` con su service account
 y sus bindings (los de `l3-backfill`) y actualiza la imagen de los jobs existentes (VERSION menor). El plan
 de `l1` no cambia: la cadena mensual de F es de otra card.
+
+En el PR de ITSC-418, el plan de `l3` muestra solo el cambio de `memory` (8Gi → 32Gi), `cpu` (2 → 8) y `env`
+(`L3_INFLIGHT_BYTES`) de `l3-backfill-spectrum` y la imagen de los jobs (VERSION menor). Mismo nombre, mismos
+`args` y mismo timeout; no se crea un job nuevo.
 
 **Lanzar los jobs.** *Actions → Run job* (nunca un agente):
 

@@ -5,6 +5,7 @@
 
 mod common;
 
+use common::closing::{bluestein_inner, closing_bound};
 use common::{batches, skeleton, Columns, Ev, Rng, Series, Shared};
 use dc_descriptors::{
     spectrum_col as sc, Config, Engine, EngineError, EventErrorKind, Family, OverBudget,
@@ -13,7 +14,7 @@ use dc_descriptors::{
 use std::f64::consts::PI;
 use std::time::Duration;
 
-const BUDGET: u64 = 20_000_000;
+const BUDGET: u64 = 130_000_000;
 /// Las bandas de una fase: siete fracciones, nulas donde la banda no tiene bins.
 type Fractions = [Option<f64>; 7];
 
@@ -477,6 +478,130 @@ fn an_empty_overshoot_and_a_flat_phase_leave_their_columns_null() {
     let wanted = naive_row(&s, &ev);
     near(&got[1], &wanted[1], 1e-9, "os_fourier");
     near(&got[3], &wanted[3], 1e-9, "os_haar");
+    // La confirmación plana tampoco tiene ubicación (Σ r² = 0); el overshoot sí.
+    assert_eq!(locations(&row)[0], None);
+    assert!(locations(&row)[1].is_some());
+}
+
+// ---------------------------------------------------------------------------------------------
+// Ubicación de la energía total
+// ---------------------------------------------------------------------------------------------
+
+/// `c_energy_loc` y `os_energy_loc` de una fila.
+fn locations(row: &Out) -> [Option<f64>; 2] {
+    [sc::C_ENERGY_LOC, sc::OS_ENERGY_LOC].map(|c| row[c].map(|bits| f64::from_bits(bits as u64)))
+}
+
+/// La ubicación `Σ t_k r_k² / Σ r_k²` con `t_k = (k − 0,5)/n`, en una suma simple.
+fn naive_location(x: &[f64]) -> Option<f64> {
+    let n = x.len() as f64;
+    let energy: f64 = x.iter().map(|r| r * r).sum();
+    let moment: f64 = x
+        .iter()
+        .enumerate()
+        .map(|(i, r)| (i as f64 + 0.5) / n * r * r)
+        .sum();
+    (energy > 0.0).then(|| moment / energy)
+}
+
+fn naive_locations(s: &Series, ev: &Ev) -> [Option<f64>; 2] {
+    let anchor = ev.reference_price(s);
+    [(ev.r, ev.c, anchor), (ev.c, ev.e, ev.confirm_price)].map(|(from, to, anchor)| {
+        (to - from >= 16)
+            .then(|| naive_location(&naive_returns(s, from, to, anchor)))
+            .flatten()
+    })
+}
+
+#[test]
+fn the_energy_location_follows_the_oracle_and_stays_inside_zero_one() {
+    let mut rng = Rng::new(21);
+    let prices = walk(&mut rng, 900);
+    let s = series(&prices);
+    // Tamaños de fase de 16 a 300 retornos, con y sin overshoot, y el caso de 15 (nulo).
+    for (n, os) in [
+        (15usize, 20usize),
+        (16, 0),
+        (17, 16),
+        (31, 33),
+        (64, 15),
+        (127, 128),
+        (300, 300),
+    ] {
+        let ev = event(&s, 1, 1 + n, 1 + n + os);
+        let row = whole(&s, &ev);
+        let got = locations(&row);
+        let wanted = naive_locations(&s, &ev);
+        for (what, g, w) in [("c", got[0], wanted[0]), ("os", got[1], wanted[1])] {
+            match (g, w) {
+                (None, None) => {}
+                (Some(g), Some(w)) => {
+                    assert!((g - w).abs() <= 1e-12, "{what}, n = {n}: {g} y {w}");
+                    assert!(g > 0.0 && g < 1.0, "{what}, n = {n}: {g}");
+                }
+                other => panic!("{what}, n = {n}: {other:?}"),
+            }
+        }
+        assert_eq!(got[0].is_some(), n >= 16, "n = {n}");
+        assert_eq!(got[1].is_some(), os >= 16, "os = {os}");
+    }
+}
+
+#[test]
+fn constant_nonzero_returns_have_location_one_half_and_no_fourier() {
+    // Cada tick duplica el precio: 20 retornos iguales a ln 2. Sin energía tras centrar, con
+    // ubicación 0,5.
+    let prices: Vec<i64> = (0..=20).map(|k| 1_000i64 << k).collect();
+    let s = series(&prices);
+    let mut ev = event(&s, 1, 21, 21);
+    ev.direction = 1;
+    ev.confirm_price = 5_000;
+    let row = whole(&s, &ev);
+    assert_eq!(register(&row, sc::C_FOURIER), [None; 7]);
+    assert_eq!(register(&row, sc::C_HAAR), [None; 7]);
+    let [c, os] = locations(&row);
+    assert!(
+        (c.expect("la ubicación existe") - 0.5).abs() < 1e-15,
+        "{c:?}"
+    );
+    assert_eq!(os, None, "overshoot vacío");
+}
+
+#[test]
+fn an_event_over_the_budget_has_null_locations() {
+    let mut rng = Rng::new(22);
+    let s = series(&walk(&mut rng, 70));
+    let ev = event(&s, 1, 30, 60);
+    let run = run_spectrum(&s, &[ev], &[], &[0], 1, &[1], &[1], 35).unwrap();
+    assert_eq!(locations(&run.rows[0]), [None, None]);
+    assert_eq!(run.over_budget.len(), 1);
+}
+
+#[test]
+fn the_locations_are_bit_identical_with_any_threads_cuts_and_lots() {
+    let mut rng = Rng::new(23);
+    let s = series(&walk(&mut rng, 400));
+    let evs = [
+        event(&s, 1, 40, 70),
+        event(&s, 70, 110, 150),
+        event(&s, 150, 190, 230),
+        event(&s, 230, 270, 300),
+        event(&s, 300, 340, 370),
+        event(&s, 370, 390, 400),
+    ];
+    let reference = run_spectrum(&s, &evs, &[], &[0], 1, &[6], &[6], BUDGET).unwrap();
+    assert!(reference.rows.iter().all(|r| locations(r)[0].is_some()));
+    // Lotes de eventos de 1 a 100 (el tamaño es solo un tope), cortes de tick y hilos.
+    for (threads, cuts, lots) in [
+        (4usize, vec![50, 140, 250], vec![1usize; 6]),
+        (4, vec![100, 220], vec![6]),
+        (2, vec![30, 31, 200], vec![2, 3, 1]),
+        (3, vec![120, 121, 122, 300], vec![1, 5]),
+    ] {
+        let order: Vec<usize> = (0..=cuts.len()).rev().collect();
+        let run = run_spectrum(&s, &evs, &cuts, &order, threads, &lots, &[3, 3], BUDGET).unwrap();
+        assert_eq!(run.rows, reference.rows, "{threads} hilos, cortes {cuts:?}");
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -829,4 +954,31 @@ fn bad_events_and_ticks_are_errors_not_values() {
         run_spectrum(&bad, &[ev], &[], &[0], 1, &[1], &[1], BUDGET),
         Err(EngineError::Ticks(TickError::ZeroPrice))
     ));
+}
+
+#[test]
+fn the_default_budget_is_the_one_the_layer_declares() {
+    // `SPECTRUM_BUDGET_TICKS` de L3 (schema.py) vale lo mismo; lo comprueba test_l3_spectrum.py.
+    assert_eq!(dc_descriptors::DEFAULT_BUDGET_TICKS, BUDGET);
+}
+
+/// El job de F (ITSC-418): 32 GiB, con una cota de pico del 75 %.
+const JOB_BOUND: usize = 24_576 << 20;
+
+/// El peor cierre que admite el presupuesto, `n` = `DEFAULT_BUDGET_TICKS` retornos, no se mide
+/// (pediría ≈ 20 GiB): se comprueba la cota, que las mediciones de `spectrum_memory.rs` respaldan
+/// a escala chica. Con 130 M, `3·2^26` no alcanza `2n − 1` y la FFT interna de Bluestein es de 2^28: la cota es
+/// 21 339 869 184 B (20 351 MiB), bajo la del job. Un presupuesto que la pase tiene que subir el
+/// job antes que esta cifra.
+#[test]
+fn the_closing_bound_at_the_budget_fits_the_job() {
+    let n = dc_descriptors::DEFAULT_BUDGET_TICKS as usize;
+    assert_eq!(bluestein_inner(n), 1 << 28);
+    assert_eq!(closing_bound(n), 21_339_869_184);
+    assert!(
+        closing_bound(n) <= JOB_BOUND,
+        "la cota del cierre con n = {n} pasa de la del job"
+    );
+    // Los cierres de n ≥ 2^20 siguen de a uno: el pico del job es el de una sola fase.
+    assert!(n >= dc_descriptors::spectrum::SERIAL_CLOSE_MIN);
 }

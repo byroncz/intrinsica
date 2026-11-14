@@ -39,7 +39,7 @@ enteros ≥ 1 (otro valor es código 2; `L3_LOT_EVENTS` admite 0): `L3_READERS` 
 `L3_INFLIGHT` (row groups en el motor, K; 4), `L3_WRITERS` (escritores, W; 12),
 `L3_ENGINE_THREADS` (hilos del motor; por defecto `round(vCPU efectivos)`), `L3_THREADS` (pool de
 E/S; por defecto `ceil(3 × vCPU)`, nunca más que θ), `L3_META_WORKERS` (pool de metadatos: compuerta,
-apertura de `events.parquet` y de los escritores, pie de L1 y publicación; entre 1 y 64, por defecto 16) y `L3_INFLIGHT_BYTES` (tope de bytes de eventos
+apertura de `events.parquet` y de los escritores, pie de L1 y publicación; entre 1 y 64, por defecto 16), `L3_FRONTIER_WORKERS` (lectores de la verificación de la frontera, solo pies; por defecto 64, ITSC-420) y `L3_INFLIGHT_BYTES` (tope de bytes de eventos
 abiertos; 805 306 368 = 768 MiB), `L3_LOT_EVENTS` (eventos de un tramo; 1 000 000; 0 desactiva el
 corte), `L3_MEMORY_SAMPLE_S` (segundos entre ticks del muestreador de memoria; número > 0, por
 defecto 0,25), `L3_TRIM_RSS_MIB` (marca de agua del trim periódico, en MiB; entero ≥ 0, por
@@ -75,13 +75,17 @@ fija), así que un evento de S que cruza row groups pesa más de 240 B. La cifra
 | `spectrum` (F) | 120 B (una `SpectrumRun`) **más 4 B por retorno guardado** | 97 B | **217 B** más `4 × Engine.buffered_ticks()` | 3,7 M de eventos sin retornos | ≈ 217 MB más 4 MB por millón de retornos |
 
 F (ITSC-412, ADR-L3-19) es la única familia cuyo estado crece con los ticks del evento abierto: guarda los
-retornos de sus fases hasta cerrarlo (`f32`, 4 B cada uno), con un tope de 20 M de ticks por evento (80 MB).
+retornos de sus fases hasta cerrarlo (`f32`, 4 B cada uno), con un tope de 130 M de ticks por evento (520 MB por evento en el peor caso, sumando sus dos fases).
 `summarize._unclosed` suma `SPECTRUM_RETURN_BYTES × buffered_ticks()` al costo fijo; lo que no cuenta es el
 trabajo transitorio de la FFT al cerrar (16 B × (2n + 4m), ver ADR-L3-19). `--family spectrum` (ITSC-413)
 corre la unidad con esta cifra: `unit_timing` lleva `inflight_ticks_max` (el máximo de retornos que el motor
-guardó a la vez), `budget_ticks` y `cpu_s`, y cada evento sobre el presupuesto de 20 M de ticks deja su fila
-nula y un `event_over_budget`. F corre en un job de 8 GiB (`l3-backfill-spectrum`); la cadena mensual es de la
-hija siguiente de ITSC-410.
+guardó a la vez), `budget_ticks` y `cpu_s`, y cada evento sobre el presupuesto de 130 M de ticks deja su fila
+nula y un `event_over_budget`. F corre en un job de 32 GiB y 8 vCPU (`l3-backfill-spectrum`, con `L3_INFLIGHT_BYTES` de 4 GiB; la cota de pico del job es 24 576 MiB); la cadena mensual es de la
+hija siguiente de ITSC-410. Desde ITSC-417 `spectrum.parquet` tiene 30 columnas de datos (`state_version`
+`1.1.0`; con el presupuesto de 130 M de ITSC-418, `1.2.0`): a las 28 de energía por banda y nivel se suman `c_energy_loc` y `os_energy_loc`, la ubicación en el
+tiempo de la energía total de cada fase (`Σ t_k·r_k² / Σ r_k²`, en (0, 1); [TRD-L3
+§7.2.3](../../docs/TRD/l3.md#723-salida--spectrumparquet-familia-f)). Un `spectrum.parquet` `1.0.0` o `1.1.0` queda detrás de
+la frontera y el backfill lo reescribe.
 
 T guarda una `Run` por cada tramo suelto de un evento que cruza row groups (fusión ordenada,
 ADR-L3-17), así que su estado crece con los row groups que el evento cruza: el estimador toma una
@@ -125,12 +129,16 @@ por delante (un lote de 32 768 eventos por θ) también cuentan como abiertas.
 de la unidad (entrada de L1 o L2 ausente, L2 incoherente, esqueleto, conciliación) o `monthly`
 sin ningún θ listo y con rezagados; 2 uso o configuración (no escribe nada).
 
-**Frontera** ([§8.2](../../docs/TRD/l3.md#82-modo-backfill-histórico)): por θ y familia, el último mes de
-su serie contigua desde `--series-start` cuyo archivo de la familia (`summaries.parquet` o
-`path.parquet`) es válido (esquema, `theta`,
-`state_version` y filas por row group iguales a `events.parquet` de L2 del mes). Sale de un
-listado de la raíz de L3 más el pie del archivo de cada θ; no se consulta cada partición. Un
-mes sin `events.parquet` y `carry_over.parquet` de L2 detiene el rango de ese θ con
+**Frontera** ([§8.2](../../docs/TRD/l3.md#82-modo-backfill-histórico)): por θ y familia, el fin del
+**prefijo contiguo de meses válidos** desde `--series-start` (ITSC-419): ningún mes anterior a la
+frontera puede ser inválido, y con un archivo inválido en el mes `m` es `m − 1` aunque haya válidos
+después. Un archivo de la familia (`summaries.parquet`, `path.parquet`, `fit.parquet` o
+`spectrum.parquet`) es válido si su esquema, `theta`, `state_version` y filas por row group son los
+de la imagen y los de `events.parquet` de L2 del mes. Sale de un listado de la raíz de L3 más el
+pie de **cada** archivo de la serie (solo pies; el log dice cuántos archivos, cuántos pies se leyeron de verdad, con cuántos lectores y cuánto tardó). Si la frontera
+retrocede por archivos inválidos, un `theta_frontier_regressed` por θ lo avisa, y el cierre de
+`backfill` deja `backfill: N meses procesados, K saltados por estar al día, de M en el rango` y
+un `backfill_summary`. Un mes sin `events.parquet` y `carry_over.parquet` de L2 detiene el rango de ese θ con
 `l2_input_missing` (los demás siguen, la corrida termina con código 1). Una partición de L2
 con sus dos Parquet pero sin `content_hash.json` (el linaje que L2 publica, ITSC-368) falla la
 unidad con `l2_lineage_missing`: se cubre con el backfill del linaje antes del apply de la

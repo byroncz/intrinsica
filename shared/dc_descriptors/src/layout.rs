@@ -1,7 +1,7 @@
 //! Las 18 columnas de datos de `summaries.parquet` (TRD-L3 §7.2), las 14 de `path.parquet`
 //! (la clave y los 13 registros de la familia T), las 10 de `fit.parquet` (la clave y los 9
-//! de la familia A), las 29 de `spectrum.parquet` (la clave y las 28 de la familia F) y la
-//! fila de un evento de cada una.
+//! de la familia A), las 31 de `spectrum.parquet` (la clave, las 28 de la familia F y las 2 de
+//! ubicación de la energía) y la fila de un evento de cada una.
 //!
 //! Es el contrato con `l3_dc_descriptors.schema` (`_COLUMNS`, `PATH_SCHEMA`, `FIT_SCHEMA` y
 //! `SPECTRUM_SCHEMA`): mismo orden, mismos tipos. Los decimales (`DECIMAL(18,8)`) viajan sin escalar: el entero de 64 bits es
@@ -137,9 +137,13 @@ pub const FIT_COLUMNS: [ColumnSpec; FIT_WIDTH] = [
     nullable(int("ev_jump_share")),
 ];
 
-/// Columnas de datos por fila de `spectrum.parquet` (sin `theta`): la clave y 28 de F, una por
-/// banda o nivel (7) y por registro (F-01 a F-04).
-pub const SPECTRUM_WIDTH: usize = 29;
+/// Columnas de datos por fila de `spectrum.parquet` (sin `theta`): la clave, 28 de F (una por
+/// banda o nivel (7) y por registro, F-01 a F-04) y las 2 de ubicación de la energía total de
+/// cada fase (`c_energy_loc` y `os_energy_loc`).
+pub const SPECTRUM_WIDTH: usize = 31;
+
+// La máscara de presentes de una fila (`SpectrumRow::valid`) es un `u32`: un bit por columna.
+const _: () = assert!(SPECTRUM_WIDTH <= u32::BITS as usize);
 
 const fn band(name: &'static str) -> ColumnSpec {
     nullable(int(name))
@@ -175,6 +179,8 @@ pub const SPECTRUM_COLUMNS: [ColumnSpec; SPECTRUM_WIDTH] = [
     band("os_haar_level_5"),
     band("os_haar_level_6"),
     band("os_haar_level_7"),
+    band("c_energy_loc"),
+    band("os_energy_loc"),
 ];
 
 /// Posición de cada columna de `spectrum.parquet` en la fila: la banda o nivel `b` (1 a 7) de
@@ -185,6 +191,8 @@ pub mod spectrum_col {
     pub const OS_FOURIER: usize = 8;
     pub const C_HAAR: usize = 15;
     pub const OS_HAAR: usize = 22;
+    pub const C_ENERGY_LOC: usize = 29;
+    pub const OS_ENERGY_LOC: usize = 30;
 }
 
 /// Posición de cada columna de `fit.parquet` en la fila.
@@ -229,7 +237,7 @@ pub struct PathRow {
     pub ticks: u64,
 }
 
-/// La fila de un evento de `spectrum.parquet`: como [`PathRow`], con 29 columnas (el mapa de
+/// La fila de un evento de `spectrum.parquet`: como [`PathRow`], con 31 columnas (el mapa de
 /// presentes es un `u32`). `ticks` son los retornos de sus dos fases (0 si el evento está sobre
 /// el presupuesto) y `over_budget` trae, si lo está, los ticks que L2 dice que tiene
 /// (`extreme_agg_trade_id − reference_agg_trade_id`).
