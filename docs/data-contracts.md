@@ -351,12 +351,12 @@ con `--family summaries` (la predeterminada), `--family path` (la familia T, ITS
 `L3_DQ_ROOT`. El catálogo de θ no es de L3: `L3_THETAS_URI` (o `--thetas-uri`) apunta al
 mismo objeto `l2/thetas.yaml` que usa L2, y sin él la corrida termina con código 2.
 
-La cadena mensual (workflow de `monthly-close`) corre las tres familias en jobs propios y en
+La cadena mensual (workflow de `monthly-close`) corre las cuatro familias en jobs propios y en
 este orden: `l3-monthly` (S, `summaries.parquet`), `l3-monthly-path` (T, `path.parquet`,
-ITSC-396) y `l3-monthly-fit` (A, `fit.parquet`, ITSC-402), cada uno solo si el anterior terminó
-con código 0. T y A repiten el esqueleto de S, así que S va primero; A no lee `path.parquet`,
-pero la cadena es lineal. `l3-monthly-fit` es el único que no se espera: su fallo no afecta a
-S ni a T.
+ITSC-396), `l3-monthly-fit` (A, `fit.parquet`, ITSC-402) y `l3-monthly-spectrum` (F,
+`spectrum.parquet`, ITSC-415), cada uno solo si el anterior terminó con código 0. T, A y F repiten
+el esqueleto de S, así que S va primero; A y F no leen `path.parquet`, pero la cadena es lineal.
+`l3-monthly-spectrum` es el único que no se espera: su fallo no afecta a S, T ni A.
 
 No hay manifiesto de L3: la **frontera** de un θ y una familia, hasta qué mes llegó, sale
 del lago. Es el último mes de su serie de `<familia>.parquet` contigua desde `--series-start`
@@ -932,7 +932,7 @@ documentan aquí, con su porqué:
   calendario. `severity = error`, `status = fail`, `metric_value` = días de
   retraso (`details.reason` lo dice con palabras). La CLI sale con 3, la tarea
   falla y la orquestación no ejecuta los `next_jobs` (`l2-monthly`,
-  `viz-tiles`, `l3-monthly`, `l3-monthly-path` y `l3-monthly-fit`). No escribe Parquet ni manifiesto. Solo existe cuando ocurre.
+  `viz-tiles`, `l3-monthly`, `l3-monthly-path`, `l3-monthly-fit` y `l3-monthly-spectrum`). No escribe Parquet ni manifiesto. Solo existe cuando ocurre.
   Los jobs de L1 tienen `max_retries = 1`: Cloud Run reintenta la tarea con
   salida 3, que repite el 404 y deja una segunda fila `source_delayed` (otro
   `finding_id`) en el lago. Se acepta: el resumen de `run-job.yml` las junta

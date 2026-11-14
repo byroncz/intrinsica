@@ -102,14 +102,16 @@ module "orchestration" {
       schedule    = "0 6 8 * *"
       paused      = false
       description = "Cierre mensual de L1, tras el primer lunes de M+1."
-      # El cierre mensual encadena cinco jobs, en este orden: el workflow espera
+      # El cierre mensual encadena seis jobs, en este orden: el workflow espera
       # el fin de monthly-close y, solo si fue exitoso, ejecuta l2-monthly; espera
       # su fin y, solo si fue exitoso, ejecuta viz-tiles; espera su fin y, solo si
       # fue exitoso, ejecuta l3-monthly; espera su fin y, solo si fue exitoso,
       # ejecuta l3-monthly-path; espera su fin y, solo si fue exitoso, ejecuta
-      # l3-monthly-fit (el último no se espera). Los cinco corren sin overrides:
+      # l3-monthly-fit; espera su fin y, solo si fue exitoso, ejecuta
+      # l3-monthly-spectrum (el último no se espera). Los seis corren sin overrides:
       # l2-monthly procesa el mes que L1 acaba de cerrar, y viz-tiles, l3-monthly,
-      # l3-monthly-path y l3-monthly-fit toman el mes anterior, el mismo.
+      # l3-monthly-path, l3-monthly-fit y l3-monthly-spectrum toman el mes anterior,
+      # el mismo.
       # L3 va al final y viz no queda detrás de ella (decisión del humano,
       # 2026-10-13). Costo asumido: si viz-tiles falla un mes, l3-monthly no corre
       # y el humano lo lanza desde run-job.yml.
@@ -121,14 +123,21 @@ module "orchestration" {
       # summaries.parquet de S, no el path.parquet de T, pero la cadena de Cloud
       # Workflows es lineal y la Épica ITSC-397 fija ese orden: si T falla un mes, A
       # no corre y el humano la relanza con l3-monthly y family = fit, como T.
-      # Es el último, así que su fallo no afecta a S ni a T, que ya publicaron.
+      # Desde ITSC-415 se espera: si falla, la cadena se detiene antes de
+      # l3-monthly-spectrum; no afecta a S ni a T, que ya publicaron.
+      # l3-monthly-spectrum (ITSC-415) es la pasada de la familia F. Como A, solo
+      # necesita el summaries.parquet de S, pero la Épica ITSC-410 la pone al final: si
+      # T o A fallan un mes, F no corre y el humano la relanza con l3-monthly y
+      # family = spectrum. Es el último, así que su fallo no afecta a S, T ni A, que ya
+      # publicaron. La espera del workflow no tiene tope propio (sondea cada 30 s), así
+      # que admite la suma de los timeouts de los jobs que espera.
       # Los nombres siguen la convención <capa>-<modo> del módulo layer y no
       # salen de los outputs job_names de los stacks l2, viz y l3: leerlos exigiría
       # remote_state y outputs que estos stacks no necesitan, porque el nombre no
       # cambia sin cambiar la convención. Los stacks l2, viz y l3 deben estar
       # aplicados antes: el IAM se da sobre esos jobs. El apply de l3 va antes que
       # el de l1.
-      next_jobs = ["l2-monthly", "viz-tiles", "l3-monthly", "l3-monthly-path", "l3-monthly-fit"]
+      next_jobs = ["l2-monthly", "viz-tiles", "l3-monthly", "l3-monthly-path", "l3-monthly-fit", "l3-monthly-spectrum"]
     }
   }
 }
