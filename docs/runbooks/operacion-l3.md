@@ -1205,6 +1205,7 @@ locales (`uv run`).
 | `l3_fit_check.py` | Prueba `fit.parquet` (familia A) contra `summaries.parquet` y `events.parquet` sobre un θ y un mes: resumen por columna, esqueleto, invariantes, regla de nulos y cifras informativas en un CSV | `--theta 0.00098052 --month 2023-03` |
 | `l3_spectrum_probe.py` | Sonda doble de la familia F (ITSC-410, ITSC-416): energía por banda de retornos y de precios por fase contra sus nulos, Haar contra Fourier, ubicación en el tiempo de la energía por nivel de Haar y total, redundancia con A y T, fases bajo 16 ticks por θ y pico de ticks en vuelo desde L2; da D y ρ, la regla de la ubicación y el veredicto `sigue\|retirada` | `--theta 0.00098052 --month 2023-03` |
 | `l3_spectrum_check.py` | Prueba `spectrum.parquet` (familia F) contra `summaries.parquet` y `events.parquet` sobre un θ y un mes: resumen por columna, esqueleto, invariantes, regla de nulos y presupuesto en un CSV | `--theta 0.00098052 --month 2023-03` |
+| `l3_spectrum_xcheck.py` | Verifica los **valores** de `spectrum.parquet` (familia F) contra el oráculo (ITSC-422): lee L1, `events.parquet` y `spectrum.parquet` de un θ y un mes, recalcula las 30 columnas de cada fase con la aritmética del motor y compara con tolerancia 1e-9; cuenta las colas de Haar planas en `float64` y en `float32` | sin `args` (por defecto `--theta 0.00098052 --month 2023-03`) |
 | `l3_version_audit.py` | Audita las versiones de las cuatro familias (ITSC-419): lee solo el pie de cada archivo de cada θ y mes con `events.parquet` en L2, anota `state_version` (y `budget_ticks` en `spectrum`) y dice si cada familia tiene una sola versión y si falta algún archivo; da `veredicto=ok\|mezcla\|faltantes` | sin `args` |
 
 El apply del stack `ops` publica todos estos scripts en `scripts/`; verifica con
@@ -2039,6 +2040,82 @@ sobre 2023-03 con θ `0.00098052`.
 | Mes | θ | `state_version` | Filas | Violaciones | `over_budget` | Pared | Run |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | 2023-03 | `0.00098052` | pendiente | pendiente | pendiente | pendiente | pendiente | pendiente |
+
+### `l3_spectrum_xcheck.py`
+
+Verifica los **valores** de `spectrum.parquet` (familia F) contra el oráculo, sobre **un θ y un mes** reales
+(ITSC-422). [`l3_spectrum_check.py`](#l3_spectrum_checkpy) comprueba la forma del archivo (esqueleto, rangos,
+sumas, regla de nulos); esta sonda recalcula en Python las 30 columnas de cada fase y las compara con lo que
+escribió el motor. Lee `consolidated.parquet` de L1, `events.parquet` de L2 y `spectrum.parquet` de L3 por su
+ruta completa, **no importa ninguna capa** (el oráculo de `l3_spectrum_probe.py` va copiado: el script se
+publica suelto en GCS) y solo lee; lo único que escribe es el CSV. No cambia el motor ni ningún
+comportamiento de L3.
+
+El apply del stack `ops` lo publica en `scripts/`; verifica con
+`gcloud storage ls gs://<proyecto>-ops/scripts/l3_spectrum_xcheck.py`.
+
+| `args` | Efecto |
+| --- | --- |
+| `--theta`, `--month` | Un θ (8 decimales como máximo) y un mes `YYYY-MM`; por defecto `0.00098052` y `2023-03` |
+| `--max-ticks` | Las fases con más ticks se omiten y se cuentan (por defecto `2000000`) |
+| `--l1-root`, `--l2-root`, `--l3-root` | Otras raíces, también locales (por defecto `gs://<proyecto>-landing/l1`, `…-dc-events/l2` y `…-dc-descriptors/l3`) |
+| `--provider`, `--market`, `--asset` | Otra serie (por defecto `binance`, `spot`, `BTCUSDT`) |
+| `--out` | Otra ruta del CSV; una ruta que termina en `/` es un directorio |
+
+**Qué recalcula.** Por evento, la fase `c` son los ticks de L1 en `(R, C]` con ancla `reference_price` y la
+`os` los de `(C, E]` con ancla `confirm_price`. La **aritmética es la del motor**, no la de la sonda
+exploratoria: el retorno es `ln_1p(Δp / p_previo)` sobre los precios enteros, guardado como `float32` y
+llevado después a `float64`, como el búfer del motor. La sonda exploratoria calcula `ln(p_k / p_{k−1})` en
+`float64`. La regla de nulos es la del contrato: una banda o un nivel sin bins (`ticks < 2^b`) es nulo, y
+una fase con menos de `n_min` ticks o vacía debe traer sus 15 columnas nulas (también se compara).
+`n_min`, `bands` y `budget_ticks` salen del pie de `spectrum.parquet`.
+
+**Veredicto (la regla se fijó antes de medir).** Tolerancia absoluta 1e-9 por columna. `ok` si y solo si
+`fuera_tolerancia = 0` y `nulos_distintos = 0` en las 30 columnas; si no, `revisar`. `fallo` si no se pudo
+medir (falta un archivo, un metadato o una columna, los archivos no cuadran o no quedó ninguna fase por
+comparar). Las cifras de energía cero **no** cambian el veredicto.
+
+**El CSV** (`l3_spectrum_xcheck_<mes>_<θ>.csv`, en `results/<ejecución>/`) tiene el encabezado
+`seccion,columna,comparadas,fuera_tolerancia,nulos_distintos,max_diff,conteo,detalle`:
+
+- `columna`: una fila por cada una de las 30 columnas, con las fases `comparadas`, las `fuera_tolerancia`
+  (`|a − b| > 1e-9` o un `NaN`), los `nulos_distintos` (uno nulo y el otro no) y la `max_diff`.
+- `informativo`: `filas` (las del `spectrum.parquet`) y `comparadas` (fases), y lo que **no** se comparó:
+  `omitidas_max_ticks` (más de `--max-ticks` ticks; es el `omitidas` de la última línea),
+  `antes_del_mes` (empiezan antes del primer tick de L1 del mes: a lo sumo una por mes y θ),
+  `despues_del_mes`, `sobre_presupuesto` (el motor no leyó ningún tick). Además `fases_vacias` y
+  `fases_cortas` (comparadas: deben traer todo nulo) y la **energía cero de Haar**.
+- **Energía cero de Haar.** La cola de Haar de una fase con `n ≥ n_min` son sus últimos `2^⌊log₂ n⌋`
+  retornos; si es plana, el registro de Haar es nulo. `haar_cero_f64` y `haar_cero_f32` cuentan las colas
+  planas con cada aritmética (`…_motor_nulo` y `…_motor_valor`: qué tiene el motor en esas filas).
+  `haar_discrepancias` cuenta las fases en que el motor y alguna de las dos aritméticas no coinciden, y
+  `haar_discrepancia` lista hasta 20 con el `event_id` (`columna`), la fase, `n`, los dos indicadores y los
+  dos valores del primer nivel (`motor` y `oraculo`, este con la aritmética del motor).
+
+**Última línea:** `spectrum xcheck: mes=… theta=… filas=… comparadas=… omitidas=… fuera_tolerancia=…
+nulos_distintos=… max_diff=… haar_cero_f64=… haar_cero_f32=… veredicto=ok|revisar`. Con `veredicto=fallo`,
+lo que no se pudo medir sale `-`.
+
+**Códigos:** **0** con `ok`; **1** con `revisar` o `fallo`; **2** por uso (`--theta`, `--month` o `--max-ticks`
+inválidos, sin las tres raíces ni `OPS_RESULTS_URI`, `--out` `gs://` fuera de `results/`). Si el CSV no se
+puede escribir, la sonda lo avisa en el log y no cambia el código.
+
+**Memoria.** Una fase a la vez, liberada al terminar: L1 se lee un row group a la vez y de la fase abierta
+solo se guardan sus precios enteros (8 B por tick, a lo sumo `--max-ticks`); `events.parquet` y
+`spectrum.parquet` se leen en lotes. El pico es O(lote + `--max-ticks`), nunca el mes.
+
+**Cómo correrla.** `ops-script` solo ve los scripts que el apply del stack `ops` publicó tras el merge. *Actions
+→ Run job*: `job` = `ops-script`, `script` = `gs://<proyecto>-ops/scripts/l3_spectrum_xcheck.py` (la URI
+completa: `run-job-tasks.sh` rechaza otra cosa con código 2), sin `args`. Las corridas las lanza y aprueba el
+humano; pega la última línea en ITSC-422. El arquitecto cierra con ella los dos huecos (los valores de F y
+las fases de energía cero de Haar) o abre la card del arreglo; la interpretación va en la Épica ITSC-410.
+
+**Corrida real (ITSC-422):** pendiente. La tabla se llena con la última línea cuando el humano la corra
+sobre 2023-03 con θ `0.00098052`.
+
+| Mes | θ | Filas | Comparadas | Omitidas | Fuera de tolerancia | Nulos distintos | `max_diff` | `haar_cero_f64` | `haar_cero_f32` | Veredicto | Run |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 2023-03 | `0.00098052` | pendiente | pendiente | pendiente | pendiente | pendiente | pendiente | pendiente | pendiente | pendiente | pendiente |
 
 ### `l3_version_audit.py`
 
