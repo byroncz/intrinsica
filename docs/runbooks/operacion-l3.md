@@ -1,4 +1,4 @@
-# Runbook: operación de L3 (backfill histórico y de las familias T, A y F, lectura de fallos, cascada, cadena mensual, volumen y costo, perfil de una unidad, hilos de la unidad, verificación cruzada, comparación de corridas, vista derived)
+# Runbook: operación de L3 (backfill histórico y de las familias T, A y F, lectura de fallos, cascada, cadena mensual, volumen y costo, perfil de una unidad, hilos de la unidad, verificación cruzada, comparación de corridas, vista derived, sonda de la verificación de la frontera)
 
 Lo ejecuta el humano desde *Actions → Run job* y Cloud Shell; ningún agente
 dispara `terraform.yml` ni `run-job.yml`. Dice cómo se opera L3 una vez construido
@@ -1187,7 +1187,7 @@ se decodifican a lo sumo 2 row groups más que con 1, al final.
 
 ## Scripts de operación
 
-Diez scripts de `layers/ops_tools/scripts/`, para el job `ops-script`
+Trece scripts de `layers/ops_tools/scripts/`, para el job `ops-script`
 ([runbook de operación ad hoc](operacion-ops.md)). El apply del stack `ops` los publica en
 `gs://<proyecto>-ops/scripts/` (ya no se suben a mano) y se lanzan con `job` = `ops-script`. Todos solo
 leen, toman las raíces del proyecto de `OPS_RESULTS_URI` y también aceptan rutas
@@ -1207,6 +1207,7 @@ locales (`uv run`).
 | `l3_spectrum_check.py` | Prueba `spectrum.parquet` (familia F) contra `summaries.parquet` y `events.parquet` sobre un θ y un mes: resumen por columna, esqueleto, invariantes, regla de nulos y presupuesto en un CSV | `--theta 0.00098052 --month 2023-03` |
 | `l3_spectrum_xcheck.py` | Verifica los **valores** de `spectrum.parquet` (familia F) contra el oráculo (ITSC-422): lee L1, `events.parquet` y `spectrum.parquet` de un θ y un mes, recalcula las 30 columnas de cada fase con la aritmética del motor y compara con tolerancia 1e-9; cuenta las colas de Haar planas en `float64` y en `float32` | sin `args` (por defecto `--theta 0.00098052 --month 2023-03`) |
 | `l3_version_audit.py` | Audita las versiones de las cuatro familias (ITSC-419): lee solo el pie de cada archivo de cada θ y mes con `events.parquet` en L2, anota `state_version` (y `budget_ticks` en `spectrum`) y dice si cada familia tiene una sola versión y si falta algún archivo; da `veredicto=ok\|mezcla\|faltantes` | sin `args` |
+| `l3_frontier_probe.py` | Mide en la nube por qué la verificación de la frontera no escala con los lectores (ITSC-421): sobre 600 `(θ, mes)` repite la secuencia de `invalid_reason` por etapa con 1, 8 y 64 hilos y tres variantes (solo pie, cliente de GCS sin `GcsFileSystem`, 4 procesos); da CPU ÷ pared, pies por segundo y `veredicto=cpu\|gil\|espera\|mixto` | sin `args` |
 
 El apply del stack `ops` publica todos estos scripts en `scripts/`; verifica con
 `gcloud storage ls gs://<proyecto>-ops/scripts/`.
@@ -2155,6 +2156,114 @@ cuántas familias tienen más de una versión. El veredicto es `faltantes` si fa
 `faltantes`, las filas `excepcion` del CSV dicen qué familia y qué meses reprocesar; el rango lo
 decide el arquitecto, y se relanza el backfill de esa familia con `from` en el primer mes de la
 excepción.
+
+### `l3_frontier_probe.py`
+
+Mide **dónde se va el tiempo** de la verificación de la frontera y **qué la limita** (ITSC-421). Desde
+ITSC-419 la frontera verifica cada mes de la serie de cada θ (`invalid_reason`: abrir el archivo de la
+familia y el `events.parquet` del mes, leer sus pies, recorrer las estadísticas de `theta` por row group
+y comparar las filas). Con 64 lectores tarda 1 316 s, casi lo mismo que con 8 y con 8 vCPU: ≈ 12 pies por
+segundo sin importar los lectores. Dos diagnósticos previos estimaron en vez de medir; esta sonda mide.
+**No arregla nada:** no cambia `frontier.py` ni ningún comportamiento de L3, **no importa ninguna capa** y
+solo lee pies; lo único que escribe es el CSV. La memoria la acota la muestra, no el lago.
+
+El apply del stack `ops` lo publica en `scripts/`; verifica con
+`gcloud storage ls gs://<proyecto>-ops/scripts/l3_frontier_probe.py`.
+
+| `args` | Efecto |
+| --- | --- |
+| `--sample`, `--seed` | Cuántos `(θ, mes)` y la semilla del sorteo (por defecto `600` y `421`) |
+| `--readers` | Lectores de las corridas con hilos (por defecto `1,8,64`) |
+| `--variants` | Qué corridas (por defecto `base,a,b,c`; `base` siempre) |
+| `--processes` | Procesos de la variante `c` (por defecto `4`) |
+| `--budget-s` | Pasado ese tiempo no empieza más corridas (por defecto `2700`; `ops-script` corta a los 3 600 s) |
+| `--l3-root`, `--l2-root` | Otras raíces, también locales (por defecto `gs://<proyecto>-dc-descriptors/l3` y `…-dc-events/l2`) |
+| `--provider`, `--market`, `--asset`, `--family` | Otra serie o familia (por defecto `binance`, `spot`, `BTCUSDT`, `path`) |
+| `--out` | Otra ruta del CSV; una ruta que termina en `/` es un directorio |
+
+**La muestra.** Los `(θ, mes)` con archivo de la familia y `events.parquet`, en cuatro estratos: θ chicos
+o grandes (la mitad de los θ por valor) × meses viejos o recientes (la mitad de los meses por fecha), un
+cuarto de la muestra de cada uno, sorteados con la semilla; el estrato que no llena su cuota la cede a los
+demás. Con la misma semilla y el mismo lago sale la misma muestra.
+
+**Qué cronometra.** Cada tarea, por etapa y en pared y en CPU del hilo (`time.thread_time`); las etapas
+suman la pared de la tarea:
+
+| Etapa | Qué es |
+| --- | --- |
+| `abrir` | `fs.open_input_file` de los dos archivos: el viaje de metadatos |
+| `pie` | `pq.ParquetFile(handle)`: leer y decodificar el pie de los dos archivos |
+| `estadisticas` | `schema_arrow`, `state_version` y las estadísticas de `theta` de cada row group |
+| `filas` | filas por row group de `events.parquet` y de la familia, y su comparación |
+| `cierre` | cerrar los dos archivos |
+
+`invalid_reason` hace `abrir` y `pie` en una sola llamada (`pq.ParquetFile(ruta, filesystem=fs)`); la sonda
+las separa para verlas. No compara el esquema con el de la imagen (sería importar una capa); el costo de
+`schema_arrow` sí está. Un sistema de archivos por raíz y por corrida, como `FooterReader`.
+
+**Las corridas.** Todas sobre la misma muestra y en este orden, para que lo que decide el veredicto no se
+pierda si se acaba el tiempo: `base`, `c`, `a`, `b`.
+
+| Corrida | Qué hace | Qué aísla |
+| --- | --- | --- |
+| `base` (1, 8 y 64 hilos) | la secuencia completa | la línea de comparación |
+| `c` (4 procesos) | la base con procesos en vez de hilos | si el límite está dentro de un proceso (el GIL o un candado de pyarrow o del cliente) |
+| `a` (1, 8 y 64 hilos) | solo abrir y leer el pie, sin el recorrido por row group | si el recorrido por row group pesa |
+| `b` (1, 8 y 64 hilos) | la cola del objeto con el cliente de `google-cloud-storage` (`bytes=-65536`, otra petición si el pie es mayor) y el pie decodificado con `pq.read_metadata` sobre un búfer, sin `GcsFileSystem`; el grupo de conexiones del cliente se ajusta a los lectores (el de `requests` trae 10) | si el límite es `GcsFileSystem` |
+
+**Qué reporta por corrida.** La pared, los pies por segundo (dos por tarea, el de la familia y el de L2),
+la CPU del proceso (`time.process_time`; en `c`, la suma de los procesos hijos), su razón con la pared
+(`cpu_ratio`: ≈ 1 es un hilo ocupado, ≈ número de vCPU es CPU saturada, mucho menos es espera de red o de
+un candado), la **ocupación** de los lectores (suma de las paredes de las tareas ÷ pared × lectores; ≈ 1 es que los lectores
+siempre están dentro de una tarea, y baja si hay poco que repartir) y, por etapa, mediana y p95 por tarea, el total y
+la CPU del hilo. La razón CPU del hilo ÷ pared de una etapa dice si esa etapa trabaja o espera. De la
+muestra: row groups y tamaño del pie por archivo (mediana, p95 y máximo), cores del contenedor (el menor
+entre las CPU permitidas y la cuota de cgroup) y versión de pyarrow.
+
+**Veredicto (la regla se fijó antes de medir).** Con `N` el mayor número de lectores, `r` el `cpu_ratio`
+de `base` con `N`, `A` sus pies por segundo, `escala` el mejor de `base` ÷ el de `base` con 1 lector y `C`
+los pies por segundo de `c`:
+
+1. `cpu` si `r ≥ 0,7 × cores`.
+2. `mixto` si `escala ≥ 4` (la base sí escala: el problema no se reproduce) o si `c` no corrió.
+3. `gil` si `C ≥ 2 × A`: el límite está dentro de un proceso (el GIL o un candado) y los procesos lo levantan.
+4. `espera` si `r < 0,7` y `C < 2 × A`: ni un núcleo ocupado y los procesos no ayudan; el límite está fuera
+   del proceso (red, servidor, cuotas).
+5. `mixto` en cualquier otro caso.
+
+`mejor_variante` es la corrida con más pies por segundo: orienta el arreglo, no cambia el veredicto. Qué
+etapa carga el tiempo lo dicen las filas `etapa` del CSV.
+
+**El CSV** (`l3_frontier_probe.csv`, en `results/<ejecución>/`) tiene el encabezado
+`seccion,variante,lectores,etapa,medida,valor`: `entorno` (cores, pyarrow, python, muestra, semilla),
+`muestra` (tareas por estrato), `archivo` (row groups y bytes del pie de `familia` y `events`: mediana, p95
+y máximo), `corrida` (`pared_s`, `pies_por_s`, `cpu_s`, `cpu_ratio`, `ocupacion`, `errores`) y `etapa`
+(`mediana_ms`, `p95_ms`, `total_s`, `cpu_hilo_s` por corrida y etapa).
+
+**Última línea:** `frontier probe: muestra=… base_1=…s base_8=…s base_64=…s cpu_ratio_64=… mejor_variante=…
+pies_por_s_mejor=… veredicto=cpu|gil|espera|mixto`. Con `veredicto=fallo`, lo que no se pudo medir sale `-`.
+
+**Códigos:** **0** si midió; **1** si el listado falla, la muestra queda vacía, falta alguna corrida `base`
+o más del 5 % de las tareas de una corrida falla (cada tarea fallida se cuenta y el primer error se
+imprime); **2** por uso (`--readers`, `--variants` o `--sample` inválidos, sin las dos raíces ni
+`OPS_RESULTS_URI`, `--out` `gs://` fuera de `results/`). Una variante que no arranca (por ejemplo `c`) se
+avisa en el log y la medición sigue; el veredicto sale `mixto` sin ella. Si el CSV no se puede escribir, la
+sonda lo avisa y no cambia el código.
+
+**Cómo correrla.** `ops-script` solo ve los scripts que el apply del stack `ops` publicó tras el merge.
+*Actions → Run job*: `job` = `ops-script`, `script` = `gs://<proyecto>-ops/scripts/l3_frontier_probe.py` (la
+URI completa: `run-job-tasks.sh` rechaza otra cosa con código 2), sin `args`. Las corridas las lanza y
+aprueba el humano; pega la última línea en ITSC-421. Con ella el arquitecto decide el arreglo y, si procede,
+abre su card. Duración esperada: a ≈ 12 pies por segundo, cada corrida con hilos de 600 tareas tarda
+≈ 100 s y la sonda entera, 15 a 20 minutos; el job `ops-script` corta a los 3 600 s y `--budget-s` lo
+protege. Un caché de verificación por huella del listado (tamaño y fecha de cada objeto) queda fuera de esta
+card: se decide después con la medición.
+
+**Corrida real (ITSC-421):** pendiente. La tabla se llena con la última línea cuando el humano la corra.
+
+| Muestra | `base_1` | `base_8` | `base_64` | `cpu_ratio_64` | Mejor variante | Pies por segundo | Veredicto | Run |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| pendiente | pendiente | pendiente | pendiente | pendiente | pendiente | pendiente | pendiente | pendiente |
 
 ### La trampa del 403 por prefijo
 
