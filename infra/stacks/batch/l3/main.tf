@@ -169,11 +169,39 @@ module "layer" {
     # --family fit, en su propio job para que un fallo de A no toque lo que S y T ya
     # publicaron. Misma imagen y mismos recursos que monthly, salvo el timeout: A
     # tarda más que S. El mes más lento de A es 2023-03, con 1 240 s (ITSC-401), que
-    # ya supera los 1 200 s de monthly. 7 500 s son 6,05 veces esa pared, la regla de
-    # TRD-L2 §10.2 que sigue el resto de los timeouts, bajo el tope de 86 400 s.
+    # ya supera los 1 200 s de monthly.
+    #
+    # ITSC-415: 9 000 s. Con la verificación de la frontera medida (1 315,5 s, ITSC-420), la
+    # regla de TRD-L3 §10.2 pide 1 316 + 6 × 1 240 = 8 756 s, y los 7 500 s anteriores no la
+    # cumplían (dejaban 5,0 veces el mes más lento, no 6). 9 000 s son 1,03 veces eso, bajo
+    # el tope de 86 400 s. Desde esta card el workflow espera a este job.
     monthly-fit = {
       args    = ["--mode", "monthly", "--family", "fit"]
-      timeout = 7500
+      timeout = 9000
+      access  = local.access
+    }
+
+    # La pasada de la familia F (ITSC-415): el mismo patrón que monthly-fit, con
+    # --family spectrum, en su propio job para que un fallo de F no toque lo que S, T y A
+    # ya publicaron. Es el último de la cadena y el único que el workflow no espera.
+    # Mismos recursos que backfill-spectrum (nota del arquitecto del 2026-11-12): un mes
+    # cualquiera puede cerrar un evento gigante, y el presupuesto de 130 M de ticks pide
+    # 32 GiB y 8 vCPU (ver ese modo para la cuenta; Cloud Run exige al menos 2 vCPU para
+    # pasar de 4 GiB). L3_INFLIGHT_BYTES sube a 4 GiB con merge sobre el env común,
+    # porque el env de un modo reemplaza al de la capa. El nombre del modo no es el de
+    # la CLI, de ahí los args propios.
+    #
+    # Timeout 7 200 s: la regla de TRD-L3 §10.2 es la verificación más 6 veces el mes más
+    # lento. El mes más lento de F es 2023-02, con 774 s en el backfill de 130 M (ITSC-414,
+    # job de 32 GiB y 8 vCPU), y la verificación de F en ese job no se midió aparte: se usa
+    # la de T, 1 315,5 s (ITSC-420). 1 316 + 6 × 774 = 5 960 s, y 7 200 s son 1,21 veces
+    # eso, bajo el tope de 86 400 s.
+    monthly-spectrum = {
+      args    = ["--mode", "monthly", "--family", "spectrum"]
+      cpu     = "8"
+      memory  = "32Gi"
+      timeout = 7200
+      env     = merge(local.env, { L3_INFLIGHT_BYTES = "4294967296" })
       access  = local.access
     }
   }

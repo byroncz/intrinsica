@@ -26,13 +26,13 @@ TRD-L1 §10.1 y §11.
 `next_jobs` en una entrada de `schedules` es una lista ordenada de nombres de
 Cloud Run Jobs (de la capa o de otras). Corren uno tras otro: cada uno solo
 cuando el anterior terminó bien, y el primero cuando termina el job del modo.
-Ejemplo, el cierre mensual de L1 encadena `l2-monthly`, luego `viz-tiles`, luego `l3-monthly`, luego `l3-monthly-path` y luego `l3-monthly-fit`:
+Ejemplo, el cierre mensual de L1 encadena `l2-monthly`, luego `viz-tiles`, luego `l3-monthly`, luego `l3-monthly-path`, luego `l3-monthly-fit` y luego `l3-monthly-spectrum`:
 
 ```hcl
 monthly-close = {
   schedule = "0 6 8 * *"
   # ...
-  next_jobs = ["l2-monthly", "viz-tiles", "l3-monthly", "l3-monthly-path", "l3-monthly-fit"]
+  next_jobs = ["l2-monthly", "viz-tiles", "l3-monthly", "l3-monthly-path", "l3-monthly-fit", "l3-monthly-spectrum"]
 }
 ```
 
@@ -56,7 +56,7 @@ Casos de borde:
 - **Un eslabón falla** (o se cancela): el workflow termina con error, con un
   mensaje que nombra la ejecución fallida y el job que no se ejecuta, y los
   eslabones que siguen no corren. Si falla `l2-monthly`, ni `viz-tiles`,
-  ni `l3-monthly`, ni `l3-monthly-path`, ni `l3-monthly-fit` corren.
+  ni `l3-monthly`, ni `l3-monthly-path`, ni `l3-monthly-fit`, ni `l3-monthly-spectrum` corren.
 
 Como el workflow espera, su ejecución dura lo que duren los jobs esperados
 (hasta su timeout, más el reintento): se ve en Workflows como "Active" todo ese
@@ -65,11 +65,11 @@ tiempo.
 Requisito: los jobs de `next_jobs` deben existir antes del apply, porque el IAM
 se da sobre ellos (aplica primero sus stacks).
 
-### Cierre mensual de L1: `l2-monthly`, `viz-tiles`, `l3-monthly`, `l3-monthly-path` y `l3-monthly-fit`
+### Cierre mensual de L1: `l2-monthly`, `viz-tiles`, `l3-monthly`, `l3-monthly-path`, `l3-monthly-fit` y `l3-monthly-spectrum`
 
 `l1-run-job` con `monthly-close` ejecuta `l1-monthly-close`, luego
-`l2-monthly`, luego `viz-tiles`, luego `l3-monthly`, luego `l3-monthly-path` y
-luego `l3-monthly-fit`, sin overrides. `viz-tiles` sin argumentos construye el mes anterior al actual
+`l2-monthly`, luego `viz-tiles`, luego `l3-monthly`, luego `l3-monthly-path`, luego
+`l3-monthly-fit` y luego `l3-monthly-spectrum`, sin overrides. `viz-tiles` sin argumentos construye el mes anterior al actual
 (UTC): el mismo que `l2-monthly` acaba de cerrar, porque el scheduler corre el
 día 8. `l3-monthly` escribe `summaries.parquet` de la familia S y `l3-monthly-path`,
 la pasada de la familia T (`--mode monthly --family path`), lo necesita como
@@ -77,9 +77,14 @@ esqueleto: por eso `l3-monthly` se espera y T corre solo si S terminó con códi
 0. `l3-monthly-path` se espera desde ITSC-402, y `l3-monthly-fit`, la pasada de la
 familia A (`--mode monthly --family fit`), corre solo si T terminó con código 0. A
 solo necesita `summaries.parquet`, pero la cadena es lineal y ese es el orden que
-fija la Épica ITSC-397. `l3-monthly-fit` es el último y el único que no se espera,
-así que su fallo no afecta a S ni a T, que ya publicaron. Los stacks `l2`, `viz` y
-`l3` deben estar aplicados antes del apply de `l1` (el de `l3` crea `l3-monthly-fit`).
+fija la Épica ITSC-397. `l3-monthly-fit` se espera desde ITSC-415, y
+`l3-monthly-spectrum`, la pasada de la familia F (`--mode monthly --family spectrum`),
+corre solo si A terminó con código 0; F tampoco necesita `path.parquet` ni
+`fit.parquet`, y el orden lo fija la Épica ITSC-410. `l3-monthly-spectrum` es el último
+y el único que no se espera, así que su fallo no afecta a S, T ni A, que ya
+publicaron. La espera no tiene tope propio (sondea cada 30 s), así que admite la suma
+de los timeouts de los jobs que espera (3 600 + 5 400 + 9 000 s, ver `infra/README.md`). Los stacks `l2`, `viz` y
+`l3` deben estar aplicados antes del apply de `l1` (el de `l3` crea `l3-monthly-spectrum`).
 
 ### Probarlo a mano
 
@@ -93,19 +98,20 @@ gcloud workflows run l1-run-job --location=us-east1 --data '{"mode":"monthly-clo
 
 El comando espera el resultado. Qué se espera ver: en Cloud Run Jobs, las
 ejecuciones de `l1-monthly-close`, después de `l2-monthly`, después de
-`viz-tiles`, después de `l3-monthly`, después de `l3-monthly-path` y después de
-`l3-monthly-fit`, en ese orden, cada una iniciada cuando la anterior terminó bien.
-El comando devuelve el nombre de la operación de `l3-monthly-fit` apenas la acepta
+`viz-tiles`, después de `l3-monthly`, después de `l3-monthly-path`, después de
+`l3-monthly-fit` y después de `l3-monthly-spectrum`, en ese orden, cada una iniciada cuando la anterior terminó bien.
+El comando devuelve el nombre de la operación de `l3-monthly-spectrum` apenas la acepta
 (esa última ejecución no se espera); los tiles del mes aparecen en el bucket viz y
-los descriptores (`summaries.parquet`, `path.parquet` y `fit.parquet`) en `l3/` del
+los descriptores (`summaries.parquet`, `path.parquet`, `fit.parquet` y `spectrum.parquet`) en `l3/` del
 bucket dc-descriptors. Si `monthly-close` falló, el estado es `FAILED` con el motivo y
-no hay ejecución de `l2-monthly`, `viz-tiles`, `l3-monthly`, `l3-monthly-path` ni
-`l3-monthly-fit`; si falló `l2-monthly`, no hay ejecución de `viz-tiles`,
-`l3-monthly`, `l3-monthly-path` ni `l3-monthly-fit`; si falló `viz-tiles`, no hay
-ejecución de `l3-monthly`, `l3-monthly-path` ni `l3-monthly-fit`; si falló
-`l3-monthly`, no hay ejecución de `l3-monthly-path` ni de `l3-monthly-fit`; si falló
-`l3-monthly-path`, no hay ejecución de `l3-monthly-fit`.
-Si falla `l3-monthly-fit`, el workflow ya terminó bien (no se espera): el fallo
+no hay ejecución de `l2-monthly`, `viz-tiles`, `l3-monthly`, `l3-monthly-path`,
+`l3-monthly-fit` ni `l3-monthly-spectrum`; si falló `l2-monthly`, no hay ejecución de `viz-tiles`,
+`l3-monthly`, `l3-monthly-path`, `l3-monthly-fit` ni `l3-monthly-spectrum`; si falló `viz-tiles`, no hay
+ejecución de `l3-monthly`, `l3-monthly-path`, `l3-monthly-fit` ni `l3-monthly-spectrum`; si falló
+`l3-monthly`, no hay ejecución de `l3-monthly-path`, `l3-monthly-fit` ni `l3-monthly-spectrum`; si falló
+`l3-monthly-path`, no hay ejecución de `l3-monthly-fit` ni de `l3-monthly-spectrum`; si falló `l3-monthly-fit`,
+no hay ejecución de `l3-monthly-spectrum`.
+Si falla `l3-monthly-spectrum`, el workflow ya terminó bien (no se espera): el fallo
 solo se ve en Cloud Run. Con `{"mode":"daily"}` el workflow no encadena nada.
 
 ## Encender un scheduler
