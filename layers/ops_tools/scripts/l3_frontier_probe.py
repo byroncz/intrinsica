@@ -15,6 +15,10 @@ de L2 del mismo mes, y cronometra cada tarea por etapa (cada etapa, en pared y e
   filas         filas por row group de `events.parquet` y de la familia, y su comparación
   cierre        cerrar los dos archivos
 
+En la variante `b` las etapas no son las mismas: `abrir` es la descarga de la cola de cada objeto
+(una petición de rango, o dos si el pie es mayor) y `pie` es `pq.read_metadata` sobre ese búfer; no
+hay `estadisticas`, `filas` ni `cierre`.
+
 `invalid_reason` abre con `pq.ParquetFile(ruta, filesystem=fs)`, que hace lo mismo que abrir el
 archivo y luego el pie, pero en una sola llamada; la sonda las separa para verlas. Un sistema de
 archivos por raíz y por corrida, como `FooterReader`. No compara el esquema con el de la imagen

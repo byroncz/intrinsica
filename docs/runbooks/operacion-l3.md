@@ -2197,6 +2197,11 @@ suman la pared de la tarea:
 | `filas` | filas por row group de `events.parquet` y de la familia, y su comparación |
 | `cierre` | cerrar los dos archivos |
 
+En la variante `b` las etapas no son las mismas: `abrir` es la descarga de la cola de cada objeto (una
+petición de rango, o dos si el pie es mayor) y `pie` es `pq.read_metadata` sobre ese búfer; no hay
+`estadisticas`, `filas` ni `cierre`. No compares sus `abrir` y `pie` con los de `base` como si fueran
+el mismo trabajo.
+
 `invalid_reason` hace `abrir` y `pie` en una sola llamada (`pq.ParquetFile(ruta, filesystem=fs)`); la sonda
 las separa para verlas. No compara el esquema con el de la imagen (sería importar una capa); el costo de
 `schema_arrow` sí está. Un sistema de archivos por raíz y por corrida, como `FooterReader`.
