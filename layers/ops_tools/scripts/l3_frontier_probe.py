@@ -28,10 +28,14 @@ base, c, a, b, para que lo que decide el veredicto no se pierda si se acaba el t
         `bytes=-65536`, otra si el pie es mayor) y decodificar el pie con `pq.read_metadata` sobre
         un búfer en memoria, sin `GcsFileSystem`; el grupo de conexiones del cliente se ajusta a
         los lectores (el de `requests` trae 10)
-  c     la base con procesos en vez de hilos (`--processes`, 4); un sistema de archivos por proceso
+  c     la base con los mismos lectores que `base` con `N` (el mayor de `--readers`), repartidos en
+        `--processes` procesos (4): cada proceso corre un trozo de la muestra con `N ÷ procesos`
+        hilos y su propio sistema de archivos. Compara `N` contra `N` y solo cambia que haya un
+        GIL o varios
 
 Cada corrida reporta la pared, los pies por segundo (dos por tarea), la CPU del proceso
-(`time.process_time`; en `c`, la suma de los procesos hijos) y su razón con la pared, la ocupación
+(`time.process_time`; en `c`, la suma de los procesos hijos, medida al terminar su trozo y desde la
+línea base que cada hijo toma al arrancar) y su razón con la pared, la ocupación
 de los lectores (suma de las paredes de las tareas ÷ pared × lectores) y, por etapa, mediana y p95
 por tarea. De la muestra: row groups y tamaño del pie por archivo (mediana, p95, máximo), cores
 del contenedor (el menor entre las CPU permitidas y la cuota de cgroup) y versión de pyarrow.
@@ -50,7 +54,7 @@ mejor de `base` ÷ el de `base` con 1 lector y `C` los pies por segundo de `c`:
              está fuera del proceso (red, servidor, cuotas).
   6. mixto   en cualquier otro caso.
 
-`mejor_variante` es la corrida con más pies por segundo (`base_8`, `a_64`, `b_64`, `c_4`…): dice
+`mejor_variante` es la corrida con más pies por segundo (`base_8`, `a_64`, `b_64`, `c_64`…): dice
 cuál variante conviene al arreglo, no cambia el veredicto. Las etapas por mediana y por CPU del
 hilo dicen cuál etapa carga el tiempo.
 
@@ -58,7 +62,7 @@ Args:
   --sample 600   --seed 421
   --readers 1,8,64
   --variants base,a,b,c      (`base` siempre corre)
-  --processes 4
+  --processes 4              (procesos de `c`, que corre con el mayor de `--readers` repartido entre ellos)
   --budget-s 2700            (pasado ese tiempo no empieza más corridas; `ops-script` corta a los 3 600 s)
   --l3-root gs://<proyecto>-dc-descriptors/l3   (por defecto, los del proyecto según
   --l2-root gs://<proyecto>-dc-events/l2         OPS_RESULTS_URI; también rutas locales)
@@ -456,21 +460,33 @@ RUNNERS = {
 # ----------------------------------------------------------------------------------------------
 
 _CHILD: Reader | None = None
+_CHILD_BASE_CPU = 0.0
 
 
 def _child_init(config: Config) -> None:
-    global _CHILD
+    """Línea base de CPU del proceso (importaciones hechas, sin tareas) y su lector."""
+    global _CHILD, _CHILD_BASE_CPU
     _CHILD = Reader(config)
+    _CHILD_BASE_CPU = time.process_time()
 
 
-def _child_warm(_: int) -> tuple[int, float]:
-    """Calienta un proceso (importaciones listas) y da su CPU de partida; duerme para repartirse."""
+def _child_warm(_: int) -> int:
+    """Calienta un proceso para que su arranque quede fuera de la pared; duerme para repartirse."""
     time.sleep(0.5)
-    return os.getpid(), time.process_time()
+    return os.getpid()
 
 
-def _child_task(task: Task) -> tuple[int, float, Result]:
-    return os.getpid(), time.process_time(), check_base(_CHILD, task, True)
+def _child_slice(
+    job: tuple[list[Task], int],
+) -> tuple[int, float, float, list[Result]]:
+    """Un trozo de la muestra con `threads` hilos dentro del proceso: la base, en pequeño.
+
+    La CPU se lee al terminar el trozo y se devuelve con la línea base del proceso."""
+    tasks, threads = job
+    runner = partial(check_base, _CHILD, deep=True)
+    with ThreadPoolExecutor(max_workers=threads) as pool:
+        results = list(pool.map(runner, tasks))
+    return os.getpid(), time.process_time(), _CHILD_BASE_CPU, results
 
 
 class Run(NamedTuple):
@@ -515,10 +531,16 @@ class Run(NamedTuple):
         return self.variant in DECIDING
 
 
-def execute(variant: str, workers: int, config: Config, tasks: list[Task]) -> Run:
-    """Corre `tasks` con `workers` lectores (hilos; en la variante c, procesos)."""
+def execute(
+    variant: str,
+    workers: int,
+    config: Config,
+    tasks: list[Task],
+    processes: int = DEFAULT_PROCESSES,
+) -> Run:
+    """Corre `tasks` con `workers` lectores (hilos; en la variante c, repartidos en procesos)."""
     if variant == "c":
-        return execute_processes(workers, config, tasks)
+        return execute_processes(processes, workers, config, tasks)
     reader = Reader(config._replace(pool=workers))
     runner = partial(RUNNERS[variant], reader)
     wall0, cpu0 = time.perf_counter(), time.process_time()
@@ -533,8 +555,18 @@ def execute(variant: str, workers: int, config: Config, tasks: list[Task]) -> Ru
     )
 
 
-def execute_processes(processes: int, config: Config, tasks: list[Task]) -> Run:
-    """Variante c. El arranque de los procesos queda fuera de la pared; la CPU es la de los hijos."""
+def execute_processes(
+    processes: int, workers: int, config: Config, tasks: list[Task]
+) -> Run:
+    """Variante c: los mismos `workers` lectores de la base, repartidos en `processes` procesos.
+
+    Cada proceso corre un trozo de la muestra con sus hilos, así `c` y `base` con `workers`
+    comparan la misma concurrencia y solo cambia que haya un GIL o varios. El arranque de los
+    procesos queda fuera de la pared; la CPU es la de los hijos, desde su línea base."""
+    processes = max(1, min(processes, workers, len(tasks)))
+    threads = [
+        workers // processes + (i < workers % processes) for i in range(processes)
+    ]
     context = multiprocessing.get_context("spawn")
     with ProcessPoolExecutor(
         max_workers=processes,
@@ -542,20 +574,18 @@ def execute_processes(processes: int, config: Config, tasks: list[Task]) -> Run:
         initializer=_child_init,
         initargs=(config,),
     ) as pool:
-        baseline = dict(pool.map(_child_warm, range(processes), chunksize=1))
+        list(pool.map(_child_warm, range(processes), chunksize=1))
         wall0, cpu0 = time.perf_counter(), time.process_time()
-        rows = list(
-            pool.map(
-                _child_task, tasks, chunksize=max(1, len(tasks) // (processes * 8))
-            )
-        )
+        jobs = [(tasks[i::processes], threads[i]) for i in range(processes)]
+        slices = list(pool.map(_child_slice, jobs, chunksize=1))
         wall = time.perf_counter() - wall0
         parent_cpu = time.process_time() - cpu0
-    latest: dict[int, float] = {}
-    for pid, cpu, _ in rows:
-        latest[pid] = max(latest.get(pid, 0.0), cpu)
-    children = sum(cpu - baseline.get(pid, 0.0) for pid, cpu in latest.items())
-    return Run("c", processes, wall, parent_cpu + children, [r for _, _, r in rows])
+    latest: dict[int, tuple[float, float]] = {}
+    for pid, cpu, base, _ in slices:
+        latest[pid] = (max(cpu, latest.get(pid, (0.0, base))[0]), base)
+    children = sum(cpu - base for cpu, base in latest.values())
+    results = [r for *_, chunk in slices for r in chunk]
+    return Run("c", workers, wall, parent_cpu + children, results)
 
 
 # ----------------------------------------------------------------------------------------------
@@ -838,7 +868,7 @@ def run(parser: argparse.ArgumentParser, ns: argparse.Namespace) -> int:
     # Primero las que deciden el veredicto (base y c); si el presupuesto de tiempo se acaba, las
     # variantes a y b son las que se pierden.
     plan = [("base", n) for n in readers]
-    plan += [("c", ns.processes)] if "c" in variants else []
+    plan += [("c", readers[-1])] if "c" in variants else []
     plan += [(v, n) for v in ("a", "b") if v in variants for n in readers]
     started = time.perf_counter()
     for variant, workers in plan:
@@ -846,7 +876,7 @@ def run(parser: argparse.ArgumentParser, ns: argparse.Namespace) -> int:
             log(f"{variant}_{workers}: omitida, pasó el presupuesto de {ns.budget_s} s")
             continue
         try:
-            done = execute(variant, workers, config, tasks)
+            done = execute(variant, workers, config, tasks, ns.processes)
         except Exception as exc:  # noqa: BLE001 - una variante que no arranca no tumba la medición
             log(f"{variant}_{workers}: no corrió ({type(exc).__name__}: {exc})")
             continue

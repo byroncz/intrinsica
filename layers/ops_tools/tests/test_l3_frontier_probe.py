@@ -218,14 +218,17 @@ def test_full_run_writes_the_csv_and_the_last_line(lake, tmp_path, capsys):
     assert last["muestra"] == "16"
     assert last["mejor"] in {f"{v}_{n}" for v in "ab" for n in (1, 2, 4)} | {
         f"base_{n}" for n in (1, 2, 4)
-    } | {"c_2"}
+    } | {"c_4"}
     rows = list(csv.DictReader(out.open()))
     assert set(rows[0]) == set(probe.CSV_HEADER)
     sections = {r["seccion"] for r in rows}
     assert sections == {"entorno", "muestra", "archivo", "corrida", "etapa"}
     runs = {(r["variante"], r["lectores"]) for r in rows if r["seccion"] == "corrida"}
     assert runs == {(v, str(n)) for v in ("base", "a", "b") for n in (1, 2, 4)} | {
-        ("c", "2")
+        (
+            "c",
+            "4",
+        )  # `c` corre con el mayor de --readers, repartido en --processes procesos
     }
     stages = {r["etapa"] for r in rows if r["seccion"] == "etapa"}
     assert stages == set(probe.STAGES)
@@ -378,21 +381,50 @@ def test_summary_and_last_line_with_simulated_times():
         simulated("base", 8, 98.0, 100.0),
         simulated("base", 64, 97.0, 97.0),
         simulated("a", 64, 60.0, 60.0),
-        simulated("c", 4, 25.0, 100.0),
+        simulated("c", 64, 25.0, 100.0),
     ]
     summary = probe.summarize(runs, cores=8)
     assert summary["verdict"] == "gil"
-    assert summary["best"].label == "c_4"
+    assert summary["best"].label == "c_64"
     line = probe.final_line(600, summary, (1, 8, 64))
     assert line == (
         "frontier probe: muestra=600 base_1=100.0s base_8=98.0s base_64=97.0s cpu_ratio_64=1.00 "
-        "mejor_variante=c_4 pies_por_s_mejor=48.0 veredicto=gil"
+        "mejor_variante=c_64 pies_por_s_mejor=48.0 veredicto=gil"
     )
-    waiting = [*runs[:4], simulated("c", 4, 95.0, 20.0)]
+    waiting = [*runs[:4], simulated("c", 64, 95.0, 20.0)]
     waiting[2] = simulated("base", 64, 97.0, 20.0)
     assert probe.summarize(waiting, cores=8)["verdict"] == "espera"
     saturated = [*runs[:2], simulated("base", 64, 97.0, 600.0), *runs[3:]]
     assert probe.summarize(saturated, cores=8)["verdict"] == "cpu"
+
+
+def test_c_runs_the_same_readers_as_base_split_across_processes(lake):
+    tasks = all_tasks(lake)
+    done = probe.execute("c", 4, config(lake), tasks, processes=2)
+    assert (done.label, done.errors) == ("c_4", 0)
+    assert sorted(r.files for r in done.results) == sorted(
+        r.files for r in probe.execute("base", 4, config(lake), tasks).results
+    )
+    assert len(done.results) == len(tasks)
+    assert done.cpu > 0 and 0 < done.occupancy <= 1.01
+
+
+def test_c_never_uses_more_processes_than_readers(lake):
+    done = probe.execute("c", 1, config(lake), all_tasks(lake)[:4], processes=4)
+    assert (done.label, done.errors, len(done.results)) == ("c_1", 0, 4)
+
+
+def test_child_cpu_is_read_after_the_slice_and_from_the_baseline_of_the_initializer(
+    lake, monkeypatch
+):
+    monkeypatch.setattr(probe, "_CHILD", None)
+    monkeypatch.setattr(probe, "_CHILD_BASE_CPU", 0.0)
+    probe._child_init(config(lake))
+    base = probe._CHILD_BASE_CPU
+    assert base > 0
+    _, cpu, returned_base, results = probe._child_slice((all_tasks(lake)[:6], 3))
+    assert returned_base == base and cpu > base and len(results) == 6
+    assert all(r.error is None for r in results)
 
 
 def test_failure_line_keeps_the_format():

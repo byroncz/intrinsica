@@ -1207,7 +1207,7 @@ locales (`uv run`).
 | `l3_spectrum_check.py` | Prueba `spectrum.parquet` (familia F) contra `summaries.parquet` y `events.parquet` sobre un θ y un mes: resumen por columna, esqueleto, invariantes, regla de nulos y presupuesto en un CSV | `--theta 0.00098052 --month 2023-03` |
 | `l3_spectrum_xcheck.py` | Verifica los **valores** de `spectrum.parquet` (familia F) contra el oráculo (ITSC-422): lee L1, `events.parquet` y `spectrum.parquet` de un θ y un mes, recalcula las 30 columnas de cada fase con la aritmética del motor y compara con tolerancia 1e-9; cuenta las colas de Haar planas en `float64` y en `float32` | sin `args` (por defecto `--theta 0.00098052 --month 2023-03`) |
 | `l3_version_audit.py` | Audita las versiones de las cuatro familias (ITSC-419): lee solo el pie de cada archivo de cada θ y mes con `events.parquet` en L2, anota `state_version` (y `budget_ticks` en `spectrum`) y dice si cada familia tiene una sola versión y si falta algún archivo; da `veredicto=ok\|mezcla\|faltantes` | sin `args` |
-| `l3_frontier_probe.py` | Mide en la nube por qué la verificación de la frontera no escala con los lectores (ITSC-421): sobre 600 `(θ, mes)` repite la secuencia de `invalid_reason` por etapa con 1, 8 y 64 hilos y tres variantes (solo pie, cliente de GCS sin `GcsFileSystem`, 4 procesos); da CPU ÷ pared, pies por segundo y `veredicto=cpu\|gil\|espera\|mixto` | sin `args` |
+| `l3_frontier_probe.py` | Mide en la nube por qué la verificación de la frontera no escala con los lectores (ITSC-421): sobre 600 `(θ, mes)` repite la secuencia de `invalid_reason` por etapa con 1, 8 y 64 hilos y tres variantes (solo pie, cliente de GCS sin `GcsFileSystem`, los 64 lectores repartidos en 4 procesos); da CPU ÷ pared, pies por segundo y `veredicto=cpu\|gil\|espera\|mixto` | sin `args` |
 
 El apply del stack `ops` publica todos estos scripts en `scripts/`; verifica con
 `gcloud storage ls gs://<proyecto>-ops/scripts/`.
@@ -2175,7 +2175,7 @@ El apply del stack `ops` lo publica en `scripts/`; verifica con
 | `--sample`, `--seed` | Cuántos `(θ, mes)` y la semilla del sorteo (por defecto `600` y `421`) |
 | `--readers` | Lectores de las corridas con hilos (por defecto `1,8,64`) |
 | `--variants` | Qué corridas (por defecto `base,a,b,c`; `base` siempre) |
-| `--processes` | Procesos de la variante `c` (por defecto `4`) |
+| `--processes` | Procesos de la variante `c` (por defecto `4`); `c` corre con el mayor de `--readers` repartido entre ellos |
 | `--budget-s` | Pasado ese tiempo no empieza más corridas (por defecto `2700`; `ops-script` corta a los 3 600 s) |
 | `--l3-root`, `--l2-root` | Otras raíces, también locales (por defecto `gs://<proyecto>-dc-descriptors/l3` y `…-dc-events/l2`) |
 | `--provider`, `--market`, `--asset`, `--family` | Otra serie o familia (por defecto `binance`, `spot`, `BTCUSDT`, `path`) |
@@ -2207,12 +2207,12 @@ pierda si se acaba el tiempo: `base`, `c`, `a`, `b`.
 | Corrida | Qué hace | Qué aísla |
 | --- | --- | --- |
 | `base` (1, 8 y 64 hilos) | la secuencia completa | la línea de comparación |
-| `c` (4 procesos) | la base con procesos en vez de hilos | si el límite está dentro de un proceso (el GIL o un candado de pyarrow o del cliente) |
+| `c` (`N` lectores en 4 procesos) | la base con los mismos `N` lectores (el mayor de `--readers`), repartidos en `--processes` procesos: cada uno corre un trozo de la muestra con `N ÷ procesos` hilos | si el límite está dentro de un proceso (el GIL o un candado de pyarrow o del cliente): `c` y `base` comparan `N` lectores contra `N`, y solo cambia que haya un GIL o varios |
 | `a` (1, 8 y 64 hilos) | solo abrir y leer el pie, sin el recorrido por row group | si el recorrido por row group pesa |
 | `b` (1, 8 y 64 hilos) | la cola del objeto con el cliente de `google-cloud-storage` (`bytes=-65536`, otra petición si el pie es mayor) y el pie decodificado con `pq.read_metadata` sobre un búfer, sin `GcsFileSystem`; el grupo de conexiones del cliente se ajusta a los lectores (el de `requests` trae 10) | si el límite es `GcsFileSystem` |
 
 **Qué reporta por corrida.** La pared, los pies por segundo (dos por tarea, el de la familia y el de L2),
-la CPU del proceso (`time.process_time`; en `c`, la suma de los procesos hijos), su razón con la pared
+la CPU del proceso (`time.process_time`; en `c`, la suma de los procesos hijos, medida al terminar su trozo y desde la línea base que cada hijo toma al arrancar), su razón con la pared
 (`cpu_ratio`: ≈ 1 es un hilo ocupado, ≈ número de vCPU es CPU saturada, mucho menos es espera de red o de
 un candado), la **ocupación** de los lectores (suma de las paredes de las tareas ÷ pared × lectores; ≈ 1 es que los lectores
 siempre están dentro de una tarea, y baja si hay poco que repartir) y, por etapa, mediana y p95 por tarea, el total y
