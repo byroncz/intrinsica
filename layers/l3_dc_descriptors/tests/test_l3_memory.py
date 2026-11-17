@@ -675,13 +675,44 @@ def test_a_lot_bounds_the_open_events_to_the_lot_not_to_the_row_group(dense_runs
     ), dense_runs["lots"]
 
 
-def test_the_lot_lowers_the_peak_rss_by_what_the_open_slots_cost(dense_runs):
+def test_the_lot_lowers_the_open_slots_and_what_the_unit_counts_as_in_flight(
+    dense_runs,
+):
+    """El lote baja lo abierto de la unidad de un row group a un tramo.
+
+    ITSC-423. Antes esta prueba comparaba el pico de RSS de dos subprocesos (`bytes` contra `lots`) y
+    exigía que bajara `DENSE_MIN_GAIN` de lo que cuestan las casillas de más. Falló en el CI de los
+    PR 188 y 189 sin que tocaran nada de esto: el RSS real depende del reparto de CPU y de lo que
+    glibc retiene, que el código no controla, y aflojar el piso no converge (de 0,30 a 0,15 y volvió a
+    fallar). Tampoco sostiene la relación `uordblks` de la muestra del pico: esa muestra es la del RSS
+    más alto, no la del instante con más eventos abiertos (en 25 pares bajo carga el `engine_inflight`
+    de la muestra era 0 y la razón contra las casillas de más fue de -1,4 a 1,2). Aquí se afirma lo que
+    el proceso controla y la corrida reporta: los eventos abiertos (`inflight_events_max`) y los
+    bytes en vuelo que cuenta el estimador (`inflight_bytes_max`). Con el tope de bytes la corrida sin
+    lote tiene exactamente un row group abierto (2 400 861 eventos en 25 de 25 pares bajo carga), y no
+    depende de la carrera entre lector y motor. El RSS real se vigila en `unit_timing`
+    (`rss_peak_mib`) de cada corrida en la nube. Que el lote acota lo abierto lo prueba además
+    `test_a_lot_bounds_the_open_events_to_the_lot_not_to_the_row_group`.
+    """
     uncut, cut = dense_runs["bytes"], dense_runs["lots"]
+    assert cut["events"] == uncut["events"], dense_runs
+    one_group = uncut["events"] // DENSE_GROUPS
+    ahead = DENSE_THETAS * LOT_BATCH_ROWS
+    cap_events = DENSE_CAP // EVENT_BYTES
+    # Lo más que puede tener abierto la corrida con lotes (la misma cota de la prueba de arriba).
+    lot_bound = cap_events + LOT_EVENTS + ahead + 10 * DENSE_THETAS
     extra = uncut["inflight_events_max"] - cut["inflight_events_max"]
-    assert extra > 0, dense_runs
-    gain = (uncut["rss_peak_mib"] - cut["rss_peak_mib"]) * MIB
-    floor = DENSE_MIN_GAIN * extra * SLOT_BYTES
-    assert gain >= floor, (extra, gain, floor, dense_runs)
+    # Baja al menos la mitad de lo que separa un row group de esa cota (medido: 1,96 M de eventos,
+    # contra 0,93 M de piso).
+    assert extra >= (one_group - lot_bound) // 2, (extra, dense_runs)
+    # Y la cuenta de bytes en vuelo baja al menos lo que cuestan esas casillas (medido: 677 MB,
+    # contra 470 MB de piso).
+    assert (
+        uncut["inflight_bytes_max"] - cut["inflight_bytes_max"] >= extra * SLOT_BYTES
+    ), (
+        extra,
+        dense_runs,
+    )
 
 
 # ITSC-394. La familia T corre la misma unidad sobre el `summaries.parquet` que la corrida de S dejó
