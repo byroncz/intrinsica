@@ -2231,7 +2231,7 @@ los pies por segundo de `c`:
    del proceso (red, servidor, cuotas).
 5. `mixto` en cualquier otro caso.
 
-`mejor_variante` es la corrida con más pies por segundo: orienta el arreglo, no cambia el veredicto. Qué
+`mejor_variante` es la corrida con más pies por segundo, sin contar las que superan el 5 % de fallas: orienta el arreglo, no cambia el veredicto. Qué
 etapa carga el tiempo lo dicen las filas `etapa` del CSV.
 
 **El CSV** (`l3_frontier_probe.csv`, en `results/<ejecución>/`) tiene el encabezado
@@ -2244,10 +2244,12 @@ y máximo), `corrida` (`pared_s`, `pies_por_s`, `cpu_s`, `cpu_ratio`, `ocupacion
 pies_por_s_mejor=… veredicto=cpu|gil|espera|mixto`. Con `veredicto=fallo`, lo que no se pudo medir sale `-`.
 
 **Códigos:** **0** si midió; **1** si el listado falla, la muestra queda vacía, falta alguna corrida `base`
-o más del 5 % de las tareas de una corrida falla (cada tarea fallida se cuenta y el primer error se
-imprime); **2** por uso (`--readers`, `--variants` o `--sample` inválidos, sin las dos raíces ni
-`OPS_RESULTS_URI`, `--out` `gs://` fuera de `results/`). Una variante que no arranca (por ejemplo `c`) se
-avisa en el log y la medición sigue; el veredicto sale `mixto` sin ella. Si el CSV no se puede escribir, la
+o más del 5 % de las tareas de `base` o de `c` falla (las corridas que deciden el veredicto; cada tarea
+fallida se cuenta y el primer error se imprime); **2** por uso (`--readers`, `--variants` o `--sample` inválidos, sin las dos raíces ni
+`OPS_RESULTS_URI`, `--out` `gs://` fuera de `results/`). Una `a` o una `b` con más del 5 % de fallas (la `b`
+usa el cliente de GCS, que no se probó en la nube) se avisa en el log (`AVISO`), queda fuera de
+`mejor_variante` y no tumba la medición. Una variante que no arranca (por ejemplo `c`) se avisa en el log
+y la medición sigue; el veredicto sale `mixto` sin ella. Si el CSV no se puede escribir, la
 sonda lo avisa y no cambia el código.
 
 **Cómo correrla.** `ops-script` solo ve los scripts que el apply del stack `ops` publicó tras el merge.

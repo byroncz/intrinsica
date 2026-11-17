@@ -80,8 +80,10 @@ Salida: la tabla de corridas, la de etapas, el CSV (`seccion,variante,lectores,e
 y, como última línea, `frontier probe: muestra=… base_1=…s base_8=…s base_64=…s cpu_ratio_64=…
 mejor_variante=… pies_por_s_mejor=… veredicto=cpu|gil|espera|mixto|fallo`.
 
-Códigos: 0 si midió; 1 si el listado falla, la muestra queda vacía o más del 5 % de las tareas de
-alguna corrida falla; 2 por uso. Solo lee; lo único que escribe es el CSV.
+Códigos: 0 si midió; 1 si el listado falla, la muestra queda vacía, falta alguna corrida `base` o más
+del 5 % de las tareas de `base` o de `c` falla (las que deciden el veredicto); 2 por uso. Una `a` o
+una `b` con más del 5 % de fallas se avisa en el log y queda fuera de `mejor_variante`: no tumba la
+medición. Solo lee; lo único que escribe es el CSV.
 """
 
 import argparse
@@ -124,6 +126,7 @@ CPU_SHARE = 0.7
 SCALE_OK = 4.0
 PROCESS_GAIN = 2.0
 MAX_ERROR_SHARE = 0.05
+DECIDING = ("base", "c")
 CSV_HEADER = ["seccion", "variante", "lectores", "etapa", "medida", "valor"]
 FILE_PATTERN = r"/theta=0\.(\d{{{digits}}})/year=(\d{{4}})/month=(\d{{2}})/{name}$"
 
@@ -501,6 +504,16 @@ class Run(NamedTuple):
     def label(self) -> str:
         return f"{self.variant}_{self.workers}"
 
+    @property
+    def over_limit(self) -> bool:
+        """Más del 5 % de las tareas falla: sus pies por segundo no se pueden creer."""
+        return self.errors > MAX_ERROR_SHARE * len(self.results)
+
+    @property
+    def decides(self) -> bool:
+        """`base` y `c` deciden el veredicto; `a` y `b` solo orientan el arreglo."""
+        return self.variant in DECIDING
+
 
 def execute(variant: str, workers: int, config: Config, tasks: list[Task]) -> Run:
     """Corre `tasks` con `workers` lectores (hilos; en la variante c, procesos)."""
@@ -593,7 +606,7 @@ def summarize(runs: list[Run], cores: int) -> dict:
     """Lo que entra a la última línea: `base_<n>`, la razón, la mejor corrida y el veredicto."""
     base = {r.workers: r for r in runs if r.variant == "base"}
     biggest, smallest = max(base), min(base)
-    best = max(runs, key=lambda r: r.pies_per_s)
+    best = max((r for r in runs if not r.over_limit), key=lambda r: r.pies_per_s)
     process = next((r for r in runs if r.variant == "c"), None)
     scale = max(r.pies_per_s for r in base.values()) / base[smallest].pies_per_s
     return {
@@ -860,10 +873,14 @@ def run(parser: argparse.ArgumentParser, ns: argparse.Namespace) -> int:
         log(f"tabla en {out}")
     except Exception as exc:  # noqa: BLE001 - la sonda no falla por no poder guardar el CSV
         log(f"no se guardó la tabla en {out}: {type(exc).__name__}: {exc}")
-    if any(r.errors > MAX_ERROR_SHARE * len(r.results) for r in runs):
-        log(
-            f"FALLO más del {MAX_ERROR_SHARE:.0%} de las tareas de alguna corrida falla"
-        )
+    for r in runs:
+        if r.over_limit and not r.decides:
+            log(
+                f"AVISO {r.label}: más del {MAX_ERROR_SHARE:.0%} de sus tareas falla; "
+                "no entra en mejor_variante y no cambia el veredicto"
+            )
+    if any(r.over_limit for r in runs if r.decides):
+        log(f"FALLO más del {MAX_ERROR_SHARE:.0%} de las tareas de base o c falla")
         log(final_line(len(tasks), None, readers))
         return 1
     if {r.workers for r in runs if r.variant == "base"} != set(readers):

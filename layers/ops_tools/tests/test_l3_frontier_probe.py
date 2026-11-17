@@ -278,6 +278,54 @@ def test_more_than_five_percent_of_errors_fails(lake, tmp_path, capsys):
     assert (tmp_path / "x.csv").exists()
 
 
+def test_a_broken_b_variant_warns_and_does_not_decide_or_win(
+    lake, tmp_path, capsys, monkeypatch
+):
+    # `b` es la única que usa el cliente de GCS: si falla, la medición de `base` sigue valiendo.
+    def broken(self, root, rel, size):
+        raise ConnectionError("sin red")
+
+    monkeypatch.setattr(probe.Reader, "tail", broken)
+    code = probe.main(
+        ["--l3-root", str(lake[0]), "--l2-root", str(lake[1]), "--sample", "8",
+         "--readers", "1,2", "--variants", "base,b", "--out", str(tmp_path / "x.csv")]
+    )  # fmt: skip
+    out = capsys.readouterr().out
+    last = out.strip().splitlines()[-1]
+    assert code == 0
+    assert "AVISO b_1" in out and "AVISO b_2" in out
+    assert "primer error de b_1" in out
+    assert "veredicto=fallo" not in last and "mejor_variante=base_" in last
+
+
+def test_a_broken_base_still_fails_even_with_a_healthy_b(lake, tmp_path, capsys):
+    broken = tmp_path / "l2"
+    for task in all_tasks(lake):
+        target = broken / probe.partition_rel(
+            ("binance", "spot", "BTCUSDT"), task, "events.parquet"
+        )
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"no es parquet")
+    code = probe.main(
+        ["--l3-root", str(lake[0]), "--l2-root", str(broken), "--sample", "8",
+         "--readers", "1", "--variants", "base,a", "--out", str(tmp_path / "x.csv")]
+    )  # fmt: skip
+    assert code == 1
+    assert "de base o c falla" in capsys.readouterr().out
+
+
+def test_best_variant_skips_runs_over_the_error_limit():
+    broken = probe.Result(0.0, (0.0,) * 5, (0.0,) * 5, (), "ConnectionError: x")
+    fast_and_broken = probe.Run("b", 64, 1.0, 1.0, [broken] * 600)
+    runs = [
+        simulated("base", 1, 100.0, 90.0),
+        simulated("base", 8, 98.0, 100.0),
+        fast_and_broken,
+    ]
+    assert fast_and_broken.over_limit and not fast_and_broken.decides
+    assert probe.summarize(runs, cores=8)["best"].label == "base_8"
+
+
 def test_usage_errors_exit_with_two(lake, monkeypatch):
     monkeypatch.setenv("OPS_RESULTS_URI", "gs://p-ops/results/x/")
     roots = ["--l3-root", str(lake[0]), "--l2-root", str(lake[1])]
