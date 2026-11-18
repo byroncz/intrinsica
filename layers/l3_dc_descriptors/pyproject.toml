@@ -7,6 +7,7 @@ dependencies = [
     "dc_frames",
     "dc_pyo3",
     "dq",
+    "google-cloud-storage>=3.0.0",
     "numpy>=2.0",
     "pyarrow>=25.0.1",
     "pyutils",

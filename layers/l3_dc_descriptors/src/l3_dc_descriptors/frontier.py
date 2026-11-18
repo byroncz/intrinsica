@@ -22,20 +22,26 @@ reciben los listados y devuelven valores.
 **Cuánto cuesta (ITSC-420).** Verificar cada mes midió 1 945,8 s en la nube (11 100 archivos,
 22 200 pies, 8 lectores): ≈ 0,7 s por pie y lector, de la latencia de cada viaje y no de la
 CPU. Se acota sin aflojar la comprobación: (a) una tarea por `(θ, mes)` en un pool de
-`L3_FRONTIER_WORKERS` lectores (por defecto 64), en vez de una por θ, que con 50 θ dejaba
+`L3_FRONTIER_WORKERS` lectores, en vez de una por θ, que con 50 θ dejaba
 ociosos a todos los lectores de más; (b) el pie de `events.parquet` de un `(θ, mes)` se lee una
 sola vez por corrida aunque lo pidan la familia y el techo de S; (c) sin el `get_file_info` de
 existencia, porque el listado ya dijo que el archivo estaba; (d) un solo sistema de archivos
 por raíz. Memoria: a lo sumo un pie por lector a la vez, más el caché de (b), que guarda solo
 las filas por row group de cada `events.parquet` y se libera al terminar.
+
+**Transporte (ITSC-424).** El acceso de pyarrow a GCS tiene un tope por proceso de ≈ 12 a 16
+archivos por segundo (sonda de ITSC-421): la verificación tardó 1 316 s con 64 lectores, casi lo
+mismo que con 8. En `gs://`, `FooterReader` baja la cola de cada archivo (64 KiB) con el cliente
+de `google-cloud-storage` (`gcs_tail`) y pyarrow solo decodifica el pie en memoria: lo que se
+comprueba y cómo se decide no cambia. Con 8 lectores el cliente midió 201,7 pies por segundo.
 """
 
 import re
 import threading
 from array import array
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import closing
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from decimal import Decimal
 from types import MappingProxyType
@@ -63,14 +69,18 @@ from l3_dc_descriptors.schema import (
     SUMMARIES_SCHEMA,
 )
 
-# Lectores simultáneos de la verificación (`L3_FRONTIER_WORKERS`). Es E/S de pies, no CPU: lo que
-# manda es cuántos viajes a la vez, y 8 lectores medían ≈ 0,7 s por pie y lector (ITSC-420).
+# Lectores simultáneos de la verificación (`L3_FRONTIER_WORKERS`). Es E/S de pies, no CPU. 8 es la
+# configuración que midió 201,7 pies por segundo con el cliente de Google (ITSC-424).
 FRONTIER_WORKERS_ENV = "L3_FRONTIER_WORKERS"
-DEFAULT_FRONTIER_WORKERS = 64
+DEFAULT_FRONTIER_WORKERS = 8
 # Tope: `pool.map` encola todas las tareas y cada lector es un hilo; más de esto no acelera (E/S de
 # un viaje) y solo gasta hilos.
 MAX_FRONTIER_WORKERS = 256
 THETA_DIGITS = 8
+# Bytes que se piden de la cola de cada archivo: casi siempre traen el pie entero y su longitud.
+# Si el pie es mayor, una segunda petición trae el pie justo.
+TAIL_BYTES = 64 * 1024
+GCS_PREFIX = "gs://"
 # Por familia: su esquema y su `state_version`, lo que hace válido el archivo de la frontera.
 _CONTRACTS = MappingProxyType(
     {
@@ -155,11 +165,15 @@ def skeleton_missing(summaries: Listing, theta: int, n: int) -> bool:
     return family_file(FAMILY) not in summaries.get(theta, {}).get(n, set())
 
 
-def row_group_sizes(parquet) -> list[int]:
-    meta = parquet.metadata
+def footer_row_groups(meta: pq.FileMetaData) -> list[int]:
+    """Las filas de cada row group del pie `meta`."""
     sizes = (meta.row_group(i).num_rows for i in range(meta.num_row_groups))
     # Los row groups vacíos no se escriben (`FamilyWriter`): no cuentan.
     return [rows for rows in sizes if rows]
+
+
+def row_group_sizes(parquet) -> list[int]:
+    return footer_row_groups(parquet.metadata)
 
 
 class FooterReader:
@@ -182,10 +196,24 @@ class FooterReader:
     fallaron. Es seguro desde varios hilos.
     """
 
-    def __init__(self, share_events: bool = True) -> None:
+    def __init__(
+        self,
+        share_events: bool = True,
+        connections: int | None = None,
+        client=None,
+    ) -> None:
+        """`connections` es el grupo de conexiones del cliente de GCS: los lectores simultáneos.
+
+        Sin valor, `scan_frontiers` lo iguala a sus lectores. `client` es el cliente de
+        `google-cloud-storage`; solo lo pasan las pruebas (sin él, se crea uno, y solo si alguna
+        raíz es `gs://`).
+        """
         self._lock = threading.Lock()
         self._roots: dict[str, tuple[pafs.FileSystem, str]] = {}
         self._rows: dict[str, array | str] | None = {} if share_events else None
+        self.connections = connections
+        self._client = client
+        self._gcs = None
         self.opened = 0
 
     def _locate(self, root: str, path: str) -> tuple[pafs.FileSystem, str]:
@@ -199,24 +227,61 @@ class FooterReader:
         fs, base = found
         return fs, base + path[len(prefix) :]
 
-    def open(self, root: str, path: str, what: str) -> pq.ParquetFile:
-        """Abre `path`, que cuelga de `root`, y lee su pie; quien llama lo cierra.
+    @contextmanager
+    def _tails(self, root: str, path: str) -> Iterator[Callable[[int], bytes]]:
+        """Da `read(n)`: los últimos `n` bytes de `path` (el archivo entero si es menor).
 
-        `FramesInputError` si no existe.
+        En `gs://`, con el cliente de Google (`gcs_tail`: tiempo límite e intentos acotados); en
+        cualquier otra raíz, con el sistema de archivos de la raíz, que abre el archivo una sola
+        vez aunque el pie obligue a una segunda lectura.
         """
+        if str(root).startswith(GCS_PREFIX):
+            with self._lock:
+                if self._gcs is None:
+                    # Solo con una raíz `gs://` se necesita el cliente de Google.
+                    from l3_dc_descriptors.gcs_tail import GcsTail
+
+                    self._gcs = GcsTail(
+                        self.connections or DEFAULT_FRONTIER_WORKERS, self._client
+                    )
+            gcs = self._gcs
+            yield lambda size: gcs.read(path, size)
+            return
         fs, resolved = self._locate(root, path)
+        with fs.open_input_file(resolved) as handle:
+            total = handle.size()
+
+            def read(size: int) -> bytes:
+                wanted = min(size, total)
+                return handle.read_at(wanted, total - wanted)
+
+            yield read
+
+    def read_footer(self, root: str, path: str, what: str) -> pq.FileMetaData:
+        """El pie de `path`, que cuelga de `root`: una lectura de la cola y, si el pie es mayor, otra.
+
+        pyarrow lo decodifica en memoria; el buffer de la cola se libera al volver. `FramesInputError`
+        si el archivo no existe.
+        """
         with self._lock:
             self.opened += 1
         try:
-            return pq.ParquetFile(resolved, filesystem=fs)
+            with self._tails(root, path) as read:
+                tail = read(TAIL_BYTES)
+                if tail[-4:] != b"PAR1":
+                    raise pa.ArrowInvalid(f"{path} no termina en PAR1")
+                needed = int.from_bytes(tail[-8:-4], "little") + 8
+                # Con menos de lo pedido, la cola ya es el archivo entero: no hay más que pedir.
+                if needed > len(tail) and len(tail) >= TAIL_BYTES:
+                    tail = read(needed)
+            return pq.read_metadata(pa.BufferReader(tail))
         except FileNotFoundError:
             raise FramesInputError(f"falta {what}: {path}") from None
 
     def _read_rows(self, root: str, path: str) -> array | str:
         """Las filas por row group de `path`, o el motivo (texto) de que no se pudo leer."""
         try:
-            with closing(self.open(root, path, "L2")) as events:
-                return array("q", row_group_sizes(events))
+            return array("q", footer_row_groups(self.read_footer(root, path, "L2")))
         except (FramesError, pa.ArrowException, OSError) as exc:
             return f"no se pudo leer ({exc})"
 
@@ -259,34 +324,34 @@ def invalid_reason(
     path = family_path(summaries_root, key, text, month, family)
     events = l2_path(events_root, key, text, month)
     try:
-        with closing(reader.open(summaries_root, path, "la familia")) as table:
-            # Antes de cualquier comprobación, como siempre: si L2 no se lee, eso manda.
-            skeleton = reader.event_rows(events_root, events)
-            if isinstance(skeleton, str):
-                return skeleton
-            schema = table.schema_arrow
-            if not schema.remove_metadata().equals(expected):
-                return "su esquema no es el de la imagen"
-            version = (schema.metadata or {}).get(b"state_version")
-            if version != version_wanted.encode():
-                got = version.decode() if version else None
-                return f"state_version {got} y la imagen es {version_wanted}"
-            wanted = Decimal(theta).scaleb(-THETA_DIGITS)
-            index = schema.get_field_index("theta")
-            for i in range(table.metadata.num_row_groups):
-                group = table.metadata.row_group(i)
-                if not group.num_rows:
-                    continue
-                stats = group.column(index).statistics
-                if (
-                    stats is None
-                    or not stats.has_min_max
-                    or stats.min != wanted
-                    or stats.max != wanted
-                ):
-                    return f"el row group {i} no es del θ {text}"
-            if array("q", row_group_sizes(table)) != skeleton:
-                return "sus filas por row group no son las de events.parquet de L2"
+        meta = reader.read_footer(summaries_root, path, "la familia")
+        # Antes de cualquier comprobación, como siempre: si L2 no se lee, eso manda.
+        skeleton = reader.event_rows(events_root, events)
+        if isinstance(skeleton, str):
+            return skeleton
+        schema = meta.schema.to_arrow_schema()
+        if not schema.remove_metadata().equals(expected):
+            return "su esquema no es el de la imagen"
+        version = (schema.metadata or {}).get(b"state_version")
+        if version != version_wanted.encode():
+            got = version.decode() if version else None
+            return f"state_version {got} y la imagen es {version_wanted}"
+        wanted = Decimal(theta).scaleb(-THETA_DIGITS)
+        index = schema.get_field_index("theta")
+        for i in range(meta.num_row_groups):
+            group = meta.row_group(i)
+            if not group.num_rows:
+                continue
+            stats = group.column(index).statistics
+            if (
+                stats is None
+                or not stats.has_min_max
+                or stats.min != wanted
+                or stats.max != wanted
+            ):
+                return f"el row group {i} no es del θ {text}"
+        if array("q", footer_row_groups(meta)) != skeleton:
+            return "sus filas por row group no son las de events.parquet de L2"
     except (FramesError, pa.ArrowException, OSError) as exc:
         return f"no se pudo leer ({exc})"
     return None
@@ -389,7 +454,7 @@ def scan_frontiers(
     """La frontera de cada θ con lo que su verificación encontró (`frontiers` solo da el ordinal).
 
     `listed` son los archivos de la `family`. Se verifica **cada mes** de la serie contigua del
-    θ desde `series_start` (solo pies, con un pool de `workers` lectores, 64 por defecto): la
+    θ desde `series_start` (solo pies, con un pool de `workers` lectores, 8 por defecto): la
     frontera es el fin del prefijo de meses válidos y un inválido en `m` la deja en `m − 1`.
     La de una familia distinta de S nunca supera la de S: `summaries`, el listado de
     `summaries.parquet`, es obligatorio, porque su archivo repite ese esqueleto; sus inválidos
@@ -405,6 +470,9 @@ def scan_frontiers(
     if family != FAMILY and summaries is None:
         raise ValueError(f"la frontera de {family!r} necesita el listado de {FAMILY!r}")
     reader = FooterReader(share_events=family != FAMILY) if reader is None else reader
+    if reader.connections is None:
+        # Ningún lector espera por una conexión: el grupo del cliente de GCS es de su tamaño.
+        reader.connections = workers
     thetas = list(thetas)
     start = month_ordinal(series_start)
     own = _scan_all(

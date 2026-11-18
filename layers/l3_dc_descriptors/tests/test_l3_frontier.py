@@ -1,5 +1,6 @@
 """La frontera por θ y familia (TRD-L3 §8.2): serie contigua desde el inicio y archivo válido."""
 
+import threading
 from decimal import Decimal
 from pathlib import Path
 
@@ -8,7 +9,10 @@ import pyarrow as pa
 import pyarrow.fs as pafs
 import pyarrow.parquet as pq
 import pytest
+import requests.exceptions
 from cli_support import emitted, env_for, write_catalog
+from dc_frames import FramesInputError
+from google.api_core import exceptions as api_exceptions
 from l3_dc_descriptors import frontier, summarize_month
 from l3_dc_descriptors.cli import main
 from l3_dc_descriptors.frontier import (
@@ -931,7 +935,7 @@ def test_the_log_reports_how_many_footers_the_frontier_read(
     )
     assert (
         f"fronteras: {files} archivos verificados ({footers} pies leídos) de 2 θ "
-        f"con 64 lectores en " in caplog.text
+        f"con 8 lectores en " in caplog.text
     )
 
 
@@ -1119,3 +1123,299 @@ def test_an_unreadable_events_footer_is_cached_as_text_and_read_once(tmp_path):
     assert reader.opened == 1
     missing = reader.event_rows(str(tmp_path), str(tmp_path / "ausente.parquet"))
     assert isinstance(missing, str) and "falta L2" in missing
+
+
+# El transporte de los pies en `gs://` (ITSC-424): el cliente de Google, sin red.
+
+
+class FakeBlob:
+    def __init__(self, client, bucket: str, name: str) -> None:
+        self.client, self.bucket, self.name = client, bucket, name
+
+    def download_as_bytes(self, start=None, timeout=None, retry=None, checksum=None):
+        return self.client.download(
+            self.bucket, self.name, start, timeout, retry, checksum
+        )
+
+
+class FakeBucket:
+    def __init__(self, client, name: str) -> None:
+        self.client, self.name = client, name
+
+    def blob(self, name: str) -> FakeBlob:
+        return FakeBlob(self.client, self.name, name)
+
+
+class FakeClient:
+    """Un cliente de `google-cloud-storage` que sirve archivos de un directorio local.
+
+    `buckets` dice qué directorio es cada bucket. `fail(bucket, name, attempt)` puede levantar
+    una excepción en el intento `attempt` (desde 1) de un objeto. Cada petición queda en `calls`.
+    """
+
+    def __init__(self, buckets: dict[str, Path], fail=None) -> None:
+        self.buckets, self.fail = buckets, fail
+        self.calls: list[tuple[str, str, int, dict]] = []
+        self.attempts: dict[tuple[str, str], int] = {}
+        self._lock = threading.Lock()
+
+    def bucket(self, name: str) -> FakeBucket:
+        return FakeBucket(self, name)
+
+    def download(self, bucket, name, start, timeout, retry, checksum) -> bytes:
+        with self._lock:
+            attempt = self.attempts[(bucket, name)] = (
+                self.attempts.get((bucket, name), 0) + 1
+            )
+            self.calls.append(
+                (
+                    bucket,
+                    name,
+                    start,
+                    {"timeout": timeout, "retry": retry, "checksum": checksum},
+                )
+            )
+        if self.fail is not None:
+            self.fail(bucket, name, attempt)
+        path = self.buckets[bucket] / name
+        if not path.exists():
+            raise api_exceptions.NotFound(f"no existe {name}")
+        return path.read_bytes()[start:]
+
+
+def gs_roots(lake) -> dict[str, Path]:
+    return {"l3-bucket": lake.l3, "l2-bucket": lake.l2}
+
+
+def gs_scan(lake, family: str, client, workers: int | None = None, reader=None):
+    """`family_scan` con las raíces como `gs://`: los pies salen del cliente falso."""
+    reader = (
+        FooterReader(share_events=family != "summaries", client=client)
+        if reader is None
+        else reader
+    )
+    summaries = list_summaries(str(lake.l3), KEY)
+    listed = list_summaries(str(lake.l3), KEY, family)
+    found = scan_frontiers(
+        INCIDENT_THETAS,
+        listed,
+        START,
+        "gs://l3-bucket",
+        "gs://l2-bucket",
+        KEY,
+        family,
+        summaries,
+        workers,
+        reader,
+    )
+    return found, reader
+
+
+def outcome(found):
+    return {
+        theta: (f.reached, dict(f.invalid), dict(f.ceiling_invalid), f.checked)
+        for theta, f in found.items()
+    }
+
+
+def test_the_default_is_eight_readers():
+    assert frontier.DEFAULT_FRONTIER_WORKERS == 8
+
+
+def test_the_result_is_the_same_by_the_file_system_and_by_the_google_client(
+    incident, family
+):
+    local_reader = FooterReader(share_events=family != "summaries")
+    local = family_scan(incident, family, reader=local_reader)
+    assert one_invalid(local), "el lago del incidente debe tener inválidos"
+    client = FakeClient(gs_roots(incident))
+    remote, reader = gs_scan(incident, family, client)
+    assert outcome(remote) == outcome(local)
+    assert reader.opened == local_reader.opened
+    # Una petición por pie, de la cola y con tiempo límite; una segunda solo si el pie es mayor.
+    assert opened_objects(client) == reader.opened
+    assert len(client.calls) >= reader.opened
+    for sizes in requests_by_object(client).values():
+        assert sizes[0] == -frontier.TAIL_BYTES
+        assert len(sizes) == 1 or (len(sizes) == 2 and sizes[1] < -frontier.TAIL_BYTES)
+    assert all(
+        call[3] == {"timeout": 10, "retry": None, "checksum": None}
+        for call in client.calls
+    )
+    assert local_reader._gcs is None, "una raíz local no crea el cliente de Google"
+
+
+def requests_by_object(client) -> dict[tuple[str, str], list[int]]:
+    """El `start` de cada petición, por objeto y en orden."""
+    found: dict[tuple[str, str], list[int]] = {}
+    for bucket, name, start, _ in client.calls:
+        found.setdefault((bucket, name), []).append(start)
+    return found
+
+
+def opened_objects(client) -> int:
+    return len(requests_by_object(client))
+
+
+def one_invalid(found) -> bool:
+    return any(f.invalid or f.ceiling_invalid for f in found.values())
+
+
+def test_a_footer_larger_than_the_tail_takes_a_second_request(
+    incident, family, monkeypatch
+):
+    local = family_scan(incident, family)
+    monkeypatch.setattr(frontier, "TAIL_BYTES", 64)  # menor que cualquier pie
+    client = FakeClient(gs_roots(incident))
+    remote, reader = gs_scan(incident, family, client)
+    assert outcome(remote) == outcome(local)
+    assert len(client.calls) == 2 * reader.opened
+    for sizes in requests_by_object(client).values():
+        first, second = sizes
+        assert first == -64 and second < -64
+
+
+def test_an_object_smaller_than_the_tail_comes_whole_in_one_request(lake, monkeypatch):
+    tail = 64 * 1024 * 1024
+    monkeypatch.setattr(frontier, "TAIL_BYTES", tail)
+    name = f"{PARTITION}/theta={theta_text(SMALL)}/year=2017/month=08/summaries.parquet"
+    path = lake.l3 / name
+    assert path.stat().st_size < tail
+    client = FakeClient(gs_roots(lake))
+    reader = FooterReader(client=client)
+    meta = reader.read_footer("gs://l3-bucket", f"gs://l3-bucket/{name}", "la familia")
+    assert [call[2] for call in client.calls] == [-tail]
+    expected = pq.read_metadata(path)
+    assert meta.num_rows == expected.num_rows
+    assert meta.num_row_groups == expected.num_row_groups
+    assert meta.schema.to_arrow_schema().equals(pq.read_schema(path))
+
+
+def test_a_missing_object_is_missing_not_unreadable(lake):
+    client = FakeClient(gs_roots(lake))
+    reader = FooterReader(client=client)
+    with pytest.raises(FramesInputError, match="falta la familia"):
+        reader.read_footer(
+            "gs://l3-bucket", "gs://l3-bucket/no/existe.parquet", "la familia"
+        )
+    assert len(client.calls) == 1  # un 404 no se reintenta
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        api_exceptions.ServiceUnavailable("503"),
+        api_exceptions.TooManyRequests("429"),
+        requests.exceptions.ReadTimeout("tiempo límite agotado"),
+        requests.exceptions.ConnectionError("conexión reiniciada"),
+    ],
+    ids=["503", "429", "timeout", "conexión"],
+)
+def test_a_request_that_always_fails_is_unreadable_after_three_attempts(lake, error):
+    def fail(bucket, name, attempt):
+        raise error
+
+    client = FakeClient(gs_roots(lake), fail=fail)
+    reader = FooterReader(client=client)
+    # Falla cerrada: nunca válido, y la frontera retrocede al primer mes.
+    found, reader = gs_scan_lake(lake, client, reader)
+    assert found[SMALL].reached is None
+    assert all("no se pudo leer" in why for why in found[SMALL].invalid.values())
+    assert all("3 intentos fallidos" in why for why in found[SMALL].invalid.values())
+    assert set(client.attempts.values()) == {3}
+    assert all(call[3]["timeout"] == 10 for call in client.calls)
+
+
+def gs_scan_lake(lake, client, reader=None):
+    reader = FooterReader(client=client) if reader is None else reader
+    listed = list_summaries(str(lake.l3), KEY)
+    found = scan_frontiers(
+        [SMALL, BIG],
+        listed,
+        START,
+        "gs://l3-bucket",
+        "gs://l2-bucket",
+        KEY,
+        reader=reader,
+    )
+    return found, reader
+
+
+def test_a_request_that_fails_once_is_retried_and_the_file_is_valid(lake):
+    def fail(bucket, name, attempt):
+        if attempt == 1:
+            raise requests.exceptions.ReadTimeout("tiempo límite agotado")
+
+    client = FakeClient(gs_roots(lake), fail=fail)
+    found, _ = gs_scan_lake(lake, client)
+    local = frontiers(
+        [SMALL, BIG],
+        list_summaries(str(lake.l3), KEY),
+        START,
+        str(lake.l3),
+        str(lake.l2),
+        KEY,
+    )
+    assert {theta: f.reached for theta, f in found.items()} == local
+    assert local[SMALL] == ordinal(M3)
+    # Cada objeto falló en su primer intento y salió en el segundo (más, si su pie fue mayor).
+    assert min(client.attempts.values()) == 2
+
+
+def test_a_refused_request_is_unreadable_and_not_retried(lake):
+    def fail(bucket, name, attempt):
+        raise api_exceptions.Forbidden("403")
+
+    client = FakeClient(gs_roots(lake), fail=fail)
+    found, _ = gs_scan_lake(lake, client)
+    assert found[SMALL].reached is None
+    assert "Forbidden" in found[SMALL].invalid[ordinal(M1)]
+    assert set(client.attempts.values()) == {1}
+
+
+def test_a_footer_that_is_not_parquet_is_unreadable_by_the_google_path_too(lake):
+    name = f"{PARTITION}/theta={theta_text(SMALL)}/year=2017/month=10/summaries.parquet"
+    (lake.l3 / name).write_bytes(b"no es un parquet")
+    found, _ = gs_scan_lake(lake, FakeClient(gs_roots(lake)))
+    assert found[SMALL].reached == ordinal(M2)
+    assert "no termina en PAR1" in found[SMALL].invalid[ordinal(M3)]
+
+
+def test_one_google_client_per_run_with_a_pool_as_large_as_the_readers(
+    lake, monkeypatch
+):
+    """Sin cliente inyectado se crea uno solo, con un grupo de conexiones del tamaño de los lectores."""
+    from google.cloud import storage
+
+    made: list = []
+
+    class FakeSession:
+        def __init__(self) -> None:
+            self.mounted: dict = {}
+
+        def mount(self, prefix, adapter) -> None:
+            self.mounted[prefix] = adapter
+
+    class FakeStorage(FakeClient):
+        def __init__(self) -> None:
+            super().__init__(gs_roots(lake))
+            self._http = FakeSession()
+            made.append(self)
+
+    monkeypatch.setattr(storage, "Client", FakeStorage)
+    reader = FooterReader()
+    listed = list_summaries(str(lake.l3), KEY)
+    found = scan_frontiers(
+        [SMALL, BIG],
+        listed,
+        START,
+        "gs://l3-bucket",
+        "gs://l2-bucket",
+        KEY,
+        workers=5,
+        reader=reader,
+    )
+    assert found[SMALL].reached == ordinal(M3)
+    assert len(made) == 1
+    adapter = made[0]._http.mounted["https://"]
+    assert adapter._pool_maxsize == adapter._pool_connections == 5
