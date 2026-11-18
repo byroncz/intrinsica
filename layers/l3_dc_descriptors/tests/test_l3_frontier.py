@@ -1304,6 +1304,23 @@ def test_a_missing_object_is_missing_not_unreadable(lake):
     assert len(client.calls) == 1  # un 404 no se reintenta
 
 
+def test_an_empty_object_is_invalid_not_unreadable(lake):
+    """Un objeto vacío no tiene cola que pedir (416): es el archivo, no el transporte."""
+
+    def fail(bucket, name, attempt):
+        raise api_exceptions.RequestRangeNotSatisfiable("416")
+
+    client = FakeClient(gs_roots(lake), fail=fail)
+    waits: list[float] = []
+    reader = FooterReader(client=client, sleep=waits.append)
+    # Si alguien reordena los `except` de `GcsTail.read`, el 416 (que también es un
+    # `GoogleAPICallError` permanente) levantaría `FooterUnreadable` y abortaría la corrida.
+    found = reader.event_rows("gs://l2-bucket", "gs://l2-bucket/vacio/events.parquet")
+    assert isinstance(found, str) and found.startswith("no se pudo leer (")
+    assert len(client.calls) == 1  # un 416 no se reintenta
+    assert waits == []
+
+
 @pytest.mark.parametrize(
     "error",
     [
