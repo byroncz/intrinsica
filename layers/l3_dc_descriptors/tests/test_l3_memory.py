@@ -120,9 +120,10 @@ UNITS_ENV = {**IMAGE_ENV, "MALLOC_ARENA_MAX": "32"}
 # + K row groups en el motor (`readers=6, inflight=6` en `UNITS`), decodificados (≈ 220 MiB), más
 # dos row groups (≈ 37 MiB) para el ruido del intérprete (± 15 MiB). Con el trim la deriva fue de 61
 # a 198 MiB en 48 corridas (40 con 4 series en paralelo): sin los dos row groups el margen era del
-# 10 %, con ellos es del 29 %. Es un techo y no lo que detecta la falta del trim (eso lo hace la
-# ganancia contra la serie sin trim, abajo): sin trim la deriva (156 a 235 MiB) también cabe. Solo vale para estas 10 unidades; con 60 el RSS tras
-# el trim sigue subiendo ≈ 2 MiB por unidad (ADR-L3-16) y aquí no se afirma lo contrario.
+# 10 %, con ellos es del 29 %. Es un techo y no lo que detecta la falta del trim (eso lo hace lo
+# que el trim devuelve, `returned` contra `UNITS_TRIM_MIN_RETURN`, abajo): sin trim la deriva
+# (156 a 235 MiB) también cabe. Solo vale para estas 10 unidades; con 60 el RSS tras el trim sigue
+# subiendo ≈ 2 MiB por unidad (ADR-L3-16) y aquí no se afirma lo contrario.
 UNITS_IN_FLIGHT_BYTES = (6 + 6 + 2) * UNITS_ROW_GROUP_BYTES
 # ITSC-377, ITSC-409. Lo que detecta la falta del trim son los bytes que devuelve al kernel: la
 # unidad los reporta (`rss_before_trim_mib` − `rss_after_trim_mib`, el RSS de su propio proceso
@@ -309,7 +310,9 @@ def write_units_lake(root) -> None:
 
 @pytest.fixture(scope="module")
 def unit_runs(tmp_path_factory) -> dict[str, list[dict]]:
-    """Las mismas 10 unidades con el trim de producción y sin él, para compararlas."""
+    """Las mismas 10 unidades con el trim de producción y sin él. La afirmación del trim solo usa
+    la serie `trim`; la `no-trim` la usa `test_without_the_trim_the_rss_does_grow`.
+    """
     root = tmp_path_factory.mktemp("units")
     write_units_lake(root)
     return {mode: units(root, mode) for mode in ("trim", "no-trim")}
@@ -362,8 +365,8 @@ def test_rss_after_closing_each_unit_does_not_grow_with_the_units(unit_runs):
 
 
 def test_without_the_trim_the_rss_does_grow(unit_runs):
-    """Contraprueba de la anterior: sin el trim el RSS al cerrar sí sube, así que la
-    comparación de arriba no pasa en vacío.
+    """Sin el trim el RSS al cerrar sí sube: es la única prueba que usa la serie `no-trim`, y
+    muestra que la deriva que la prueba de arriba acota existe cuando el trim falta.
     """
     runs = unit_runs["no-trim"]
     assert drift(runs) > UNITS_NO_TRIM_MIN_RISE * in_flight(runs), unit_runs
