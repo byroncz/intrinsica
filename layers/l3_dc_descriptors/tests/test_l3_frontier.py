@@ -1,6 +1,7 @@
 """La frontera por θ y familia (TRD-L3 §8.2): serie contigua desde el inicio y archivo válido."""
 
 import threading
+import time
 from decimal import Decimal
 from pathlib import Path
 
@@ -17,6 +18,7 @@ from l3_dc_descriptors import frontier, summarize_month
 from l3_dc_descriptors.cli import main
 from l3_dc_descriptors.frontier import (
     FooterReader,
+    FooterUnreadable,
     frontiers,
     invalid_reason,
     l2_missing,
@@ -25,6 +27,7 @@ from l3_dc_descriptors.frontier import (
     scan_frontiers,
     theta_text,
 )
+from l3_dc_descriptors.gcs_tail import GcsTail
 from l3_lake import KEY, M1, M2, M3, build_lake, fixture_ticks, month_cuts
 
 TICKS = fixture_ticks()
@@ -1311,22 +1314,86 @@ def test_a_missing_object_is_missing_not_unreadable(lake):
     ],
     ids=["503", "429", "timeout", "conexión"],
 )
-def test_a_request_that_always_fails_is_unreadable_after_three_attempts(lake, error):
+def test_a_request_that_always_fails_aborts_the_verification_after_five_attempts(
+    lake, error
+):
     def fail(bucket, name, attempt):
         raise error
 
     client = FakeClient(gs_roots(lake), fail=fail)
-    reader = FooterReader(client=client)
-    # Falla cerrada: nunca válido, y la frontera retrocede al primer mes.
-    found, reader = gs_scan_lake(lake, client, reader)
-    assert found[SMALL].reached is None
-    assert all("no se pudo leer" in why for why in found[SMALL].invalid.values())
-    assert all("3 intentos fallidos" in why for why in found[SMALL].invalid.values())
-    assert set(client.attempts.values()) == {3}
+    waits: list[float] = []
+    reader = FooterReader(client=client, sleep=waits.append)
+    # «No pude leer» no es «inválido»: no hay frontera que retroceder, la verificación aborta.
+    with pytest.raises(FooterUnreadable, match="5 intentos fallidos") as raised:
+        gs_scan_lake(lake, client, reader)
+    assert raised.value.path.startswith("gs://")
+    assert max(client.attempts.values()) == 5
     assert all(call[3]["timeout"] == 10 for call in client.calls)
+    # Espera exponencial entre intentos, y ninguna después del último.
+    assert waits
+    assert set(waits) == {0.5, 1, 2, 4}
 
 
-def gs_scan_lake(lake, client, reader=None):
+def test_the_wait_between_attempts_doubles_and_there_is_none_after_the_last(lake):
+    name = f"{PARTITION}/theta={theta_text(SMALL)}/year=2017/month=08/summaries.parquet"
+    path = f"gs://l3-bucket/{name}"
+    waits: list[float] = []
+
+    def fail_four_times(bucket, name, attempt):
+        if attempt <= 4:
+            raise api_exceptions.ServiceUnavailable("503")
+
+    client = FakeClient(gs_roots(lake), fail=fail_four_times)
+    tail = GcsTail(1, client, sleep=waits.append)
+    assert tail.read(path, 8) == (lake.l3 / name).read_bytes()[-8:]
+    # Cuatro fallos y un quinto intento que sale bien: cuatro esperas, 0,5 s el doble cada vez.
+    assert waits == [0.5, 1, 2, 4]
+
+    waits.clear()
+
+    def always(bucket, name, attempt):
+        raise api_exceptions.ServiceUnavailable("503")
+
+    exhausted = FakeClient(gs_roots(lake), fail=always)
+    with pytest.raises(FooterUnreadable, match="5 intentos fallidos"):
+        GcsTail(1, exhausted, sleep=waits.append).read(path, 8)
+    assert waits == [
+        0.5,
+        1,
+        2,
+        4,
+    ]  # no hay una quinta espera después del último intento
+    assert exhausted.attempts[("l3-bucket", name)] == 5
+
+
+def test_an_abort_does_not_wait_for_the_queued_tasks(lake):
+    """El aborto cancela la cola: no espera a las tareas que faltan, solo a las que ya corren."""
+    gate = threading.Event()
+    first = threading.Event()
+
+    def fail(bucket, name, attempt):
+        if not first.is_set():
+            first.set()
+            raise api_exceptions.Forbidden("403")
+        gate.wait(
+            10
+        )  # los demás lectores quedan en vuelo hasta que la prueba los suelte
+
+    client = FakeClient(gs_roots(lake), fail=fail)
+    began = time.monotonic()
+    try:
+        with pytest.raises(FooterUnreadable, match="Forbidden"):
+            gs_scan_lake(lake, client, workers=2)
+        elapsed = time.monotonic() - began
+    finally:
+        gate.set()
+    assert elapsed < 5, "esperó a los lectores en vuelo o a la cola"
+    tasks = 2 * len(lake.months)
+    assert len(client.calls) < tasks, "los lectores vaciaron la cola"
+    assert len(client.calls) <= 4  # la que falló, dos en vuelo y a lo más una más
+
+
+def gs_scan_lake(lake, client, reader=None, workers=None):
     reader = FooterReader(client=client) if reader is None else reader
     listed = list_summaries(str(lake.l3), KEY)
     found = scan_frontiers(
@@ -1336,6 +1403,7 @@ def gs_scan_lake(lake, client, reader=None):
         "gs://l3-bucket",
         "gs://l2-bucket",
         KEY,
+        workers=workers,
         reader=reader,
     )
     return found, reader
@@ -1362,15 +1430,18 @@ def test_a_request_that_fails_once_is_retried_and_the_file_is_valid(lake):
     assert min(client.attempts.values()) == 2
 
 
-def test_a_refused_request_is_unreadable_and_not_retried(lake):
+def test_a_refused_request_aborts_the_verification_and_is_not_retried(lake):
     def fail(bucket, name, attempt):
         raise api_exceptions.Forbidden("403")
 
     client = FakeClient(gs_roots(lake), fail=fail)
-    found, _ = gs_scan_lake(lake, client)
-    assert found[SMALL].reached is None
-    assert "Forbidden" in found[SMALL].invalid[ordinal(M1)]
+    waits: list[float] = []
+    reader = FooterReader(client=client, sleep=waits.append)
+    with pytest.raises(FooterUnreadable, match="Forbidden") as raised:
+        gs_scan_lake(lake, client, reader)
+    assert raised.value.path.startswith("gs://")
     assert set(client.attempts.values()) == {1}
+    assert waits == []
 
 
 def test_a_footer_that_is_not_parquet_is_unreadable_by_the_google_path_too(lake):
@@ -1419,3 +1490,30 @@ def test_one_google_client_per_run_with_a_pool_as_large_as_the_readers(
     assert len(made) == 1
     adapter = made[0]._http.mounted["https://"]
     assert adapter._pool_maxsize == adapter._pool_connections == 5
+
+
+def test_an_unreadable_transport_ends_the_run_with_code_one_and_processes_nothing(
+    lake, tmp_path, capsys, monkeypatch
+):
+    """La CLI dice qué archivo no pudo leer, que hay que relanzar, y no procesa ninguna unidad."""
+    from l3_dc_descriptors import cli
+
+    def unreadable(*args, **kwargs):
+        raise FooterUnreadable(
+            "gs://l2-bucket/a/events.parquet", "ServiceUnavailable: 503"
+        )
+
+    def never(*args, **kwargs):
+        raise AssertionError("no debe procesar ninguna unidad")
+
+    monkeypatch.setattr(cli, "scan_frontiers", unreadable)
+    monkeypatch.setattr(cli, "process_unit", never)
+    before = sorted(lake.l3.rglob("*.parquet"))
+    catalog = write_catalog(tmp_path / "thetas.yaml", lake.thetas)
+    env = env_for(lake, tmp_path, catalog)
+    argv = ["--mode", "backfill", "--series-start", "2017-08"]
+    assert main(argv, env) == 1
+    err = capsys.readouterr().err
+    assert "gs://l2-bucket/a/events.parquet" in err
+    assert "relanza la corrida" in err
+    assert sorted(lake.l3.rglob("*.parquet")) == before

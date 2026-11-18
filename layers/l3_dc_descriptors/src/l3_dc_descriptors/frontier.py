@@ -34,13 +34,16 @@ archivos por segundo (sonda de ITSC-421): la verificación tardó 1 316 s con 64
 mismo que con 8. En `gs://`, `FooterReader` baja la cola de cada archivo (64 KiB) con el cliente
 de `google-cloud-storage` (`gcs_tail`) y pyarrow solo decodifica el pie en memoria: lo que se
 comprueba y cómo se decide no cambia. Con 8 lectores el cliente midió 201,7 pies por segundo.
+Si el transporte falla (intentos agotados o un error permanente como 403), no se sabe si el
+archivo es válido: la verificación aborta con `FooterUnreadable` en vez de contarlo inválido y
+hacer retroceder la frontera por una falla que no es del archivo.
 """
 
 import re
 import threading
 from array import array
 from collections.abc import Callable, Iterable, Iterator, Mapping
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_EXCEPTION, ThreadPoolExecutor, wait
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from decimal import Decimal
@@ -165,6 +168,19 @@ def skeleton_missing(summaries: Listing, theta: int, n: int) -> bool:
     return family_file(FAMILY) not in summaries.get(theta, {}).get(n, set())
 
 
+class FooterUnreadable(Exception):
+    """El transporte de GCS no pudo traer un pie: se ignora si el archivo es válido (ITSC-424).
+
+    No es un `OSError` a propósito: la verificación cuenta un `OSError` como «archivo inválido»
+    y esto no lo es. Aborta la verificación entera (`_scan_all`), que sale con código 1.
+    """
+
+    def __init__(self, path: str, reason: str) -> None:
+        super().__init__(f"no se pudo leer {path} de GCS: {reason}")
+        self.path = path
+        self.reason = reason
+
+
 def footer_row_groups(meta: pq.FileMetaData) -> list[int]:
     """Las filas de cada row group del pie `meta`."""
     sizes = (meta.row_group(i).num_rows for i in range(meta.num_row_groups))
@@ -180,8 +196,9 @@ class FooterReader:
     """Lee los pies de la verificación de una corrida (ITSC-420): solo pies, nunca datos.
 
     Lo que lo distingue de `open_parquet` (que no cambia, lo usan otros lectores):
-    - un solo sistema de archivos por raíz (`resolve_fs` crea uno por llamada y, en `gs://`,
-      cada uno es una conexión y unas credenciales nuevas);
+    - un solo lector de la raíz por corrida: en `gs://`, un solo cliente de Google (`GcsTail`)
+      con un grupo de `connections` conexiones; en cualquier otra raíz, un sistema de archivos
+      por raíz (`resolve_fs` crea uno por llamada);
     - sin el `get_file_info` de existencia: el listado ya dijo que el archivo estaba. Uno que
       desapareció entre el listado y la lectura falla al abrirlo y es «no se pudo leer»;
     - con `share_events`, el pie de `events.parquet` de un `(θ, mes)` se lee una sola vez por
@@ -201,18 +218,20 @@ class FooterReader:
         share_events: bool = True,
         connections: int | None = None,
         client=None,
+        sleep: Callable[[float], None] | None = None,
     ) -> None:
         """`connections` es el grupo de conexiones del cliente de GCS: los lectores simultáneos.
 
         Sin valor, `scan_frontiers` lo iguala a sus lectores. `client` es el cliente de
-        `google-cloud-storage`; solo lo pasan las pruebas (sin él, se crea uno, y solo si alguna
-        raíz es `gs://`).
+        `google-cloud-storage` y `sleep` el reloj de la espera entre intentos; solo los pasan las
+        pruebas (sin cliente, se crea uno, y solo si alguna raíz es `gs://`).
         """
         self._lock = threading.Lock()
         self._roots: dict[str, tuple[pafs.FileSystem, str]] = {}
         self._rows: dict[str, array | str] | None = {} if share_events else None
         self.connections = connections
         self._client = client
+        self._sleep = sleep
         self._gcs = None
         self.opened = 0
 
@@ -241,8 +260,11 @@ class FooterReader:
                     # Solo con una raíz `gs://` se necesita el cliente de Google.
                     from l3_dc_descriptors.gcs_tail import GcsTail
 
+                    extra = {} if self._sleep is None else {"sleep": self._sleep}
                     self._gcs = GcsTail(
-                        self.connections or DEFAULT_FRONTIER_WORKERS, self._client
+                        self.connections or DEFAULT_FRONTIER_WORKERS,
+                        self._client,
+                        **extra,
                     )
             gcs = self._gcs
             yield lambda size: gcs.read(path, size)
@@ -273,6 +295,8 @@ class FooterReader:
                 needed = int.from_bytes(tail[-8:-4], "little") + 8
                 # Con menos de lo pedido, la cola ya es el archivo entero: no hay más que pedir.
                 if needed > len(tail) and len(tail) >= TAIL_BYTES:
+                    # Se libera la primera cola antes de pedir la segunda: nunca conviven.
+                    del tail
                     tail = read(needed)
             return pq.read_metadata(pa.BufferReader(tail))
         except FileNotFoundError:
@@ -387,6 +411,32 @@ class Frontier:
         return min(self.all_invalid, default=None)
 
 
+def _run_checks(
+    check: Callable[[tuple[int, int]], str | None],
+    tasks: list[tuple[int, int]],
+    workers: int,
+) -> list[str | None]:
+    """El motivo (o `None`) de cada tarea, en el orden de `tasks`, con un pool de `workers`.
+
+    La primera excepción aborta: las tareas en cola se cancelan y no se espera a nadie más (un
+    `with ThreadPoolExecutor` esperaría las miles de tareas que faltan). Las que ya corren
+    terminan solas, a lo más `workers`, cada una acotada por el tiempo límite de su petición.
+    """
+    pool = ThreadPoolExecutor(max_workers=workers)
+    try:
+        futures = [pool.submit(check, task) for task in tasks]
+        wait(futures, return_when=FIRST_EXCEPTION)
+        for future in futures:
+            if future.done() and future.exception() is not None:
+                raise future.exception()
+        problems = [future.result() for future in futures]
+    except BaseException:
+        pool.shutdown(wait=False, cancel_futures=True)
+        raise
+    pool.shutdown()
+    return problems
+
+
 def _scan_all(
     thetas: list[int],
     listed: Listing,
@@ -422,8 +472,7 @@ def _scan_all(
             summaries_root, events_root, key, theta, month_of(n), family, reader
         )
 
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        problems = list(pool.map(check, tasks))
+    problems = _run_checks(check, tasks, workers)
     invalid: dict[int, dict[int, str]] = {theta: {} for theta in thetas}
     for (theta, n), problem in zip(tasks, problems, strict=True):
         if problem is not None:
