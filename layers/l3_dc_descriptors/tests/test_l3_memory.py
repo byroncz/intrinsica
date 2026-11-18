@@ -102,7 +102,8 @@ for i in range(int(count)):
     result = pipeline.process_unit(Unit(2017, 8), ctx, thetas)
     assert result.ok, result.error
     details = result.timing.details()
-    keys = ("rss_after_trim_mib", "rss_peak_mib", "inflight_max")
+    keys = ("rss_before_trim_mib", "rss_after_trim_mib", "rss_peak_mib", "inflight_max",
+            "mem_close_after_trim")
     out.append({k: details[k] for k in keys})
 print(json.dumps(out))
 """
@@ -119,18 +120,22 @@ UNITS_ENV = {**IMAGE_ENV, "MALLOC_ARENA_MAX": "32"}
 # + K row groups en el motor (`readers=6, inflight=6` en `UNITS`), decodificados (≈ 220 MiB), más
 # dos row groups (≈ 37 MiB) para el ruido del intérprete (± 15 MiB). Con el trim la deriva fue de 61
 # a 198 MiB en 48 corridas (40 con 4 series en paralelo): sin los dos row groups el margen era del
-# 10 %, con ellos es del 29 %. Es un techo y no lo que detecta la falta del trim (eso lo hace la
-# ganancia contra la serie sin trim, abajo): sin trim la deriva (156 a 235 MiB) también cabe. Solo vale para estas 10 unidades; con 60 el RSS tras
-# el trim sigue subiendo ≈ 2 MiB por unidad (ADR-L3-16) y aquí no se afirma lo contrario.
+# 10 %, con ellos es del 29 %. Es un techo y no lo que detecta la falta del trim (eso lo hace lo
+# que el trim devuelve, `returned` contra `UNITS_TRIM_MIN_RETURN`, abajo): sin trim la deriva
+# (156 a 235 MiB) también cabe. Solo vale para estas 10 unidades; con 60 el RSS tras el trim sigue
+# subiendo ≈ 2 MiB por unidad (ADR-L3-16) y aquí no se afirma lo contrario.
 UNITS_IN_FLIGHT_BYTES = (6 + 6 + 2) * UNITS_ROW_GROUP_BYTES
-# ITSC-377. Lo que detecta la falta del trim es cuánto sube el RSS al cerrar las últimas unidades
-# sobre el de la primera (`rise`): sin trim sube lo que glibc va reteniendo, con él sube menos. La
-# comparación es contra lo que la propia corrida midió y no contra un número de la máquina (antes
-# 3 row groups = 57,6 MB fijos, que en CI dio 57,06): la primera unidad ya trae el nivel del
-# intérprete y de las librerías de esa máquina, y restarla lo cancela. En 68 series (10 vCPU sin
-# carga, 4 procesos en paralelo, 2 y 8 vCPU) con trim recuperó de 0,31 a 0,83 de lo que subía la
-# serie sin él; 0,15 deja más de dos veces de margen y sigue fallando si el trim no hace nada (0).
-UNITS_TRIM_MIN_SHARE = 0.15
+# ITSC-377, ITSC-409. Lo que detecta la falta del trim son los bytes que devuelve al kernel: la
+# unidad los reporta (`rss_before_trim_mib` − `rss_after_trim_mib`, el RSS de su propio proceso
+# justo antes y después de `malloc_trim`) y, sin trim, es 0. Antes se comparaba el RSS al cerrar de
+# dos series de subprocesos (con trim y sin él), y esa diferencia depende de la carga de la
+# máquina, que el código no controla: bajo 4 procesos de CPU la afirmación «la deriva con trim no
+# pasa de la de sin trim más dos row groups» falló 1 de 30 veces (por 11,5 MiB). En 30 series
+# (4 procesos en paralelo) el trim devolvió de 2,2 a 6,5 veces lo que cada unidad tuvo en vuelo, de
+# media (la suma de las 10 unidades contra `in_flight`); el piso es 1, que deja más de dos veces de
+# margen y falla si el trim no hace nada (0). Cada unidad libera ≈ lo que tuvo en vuelo y glibc lo
+# retiene, así que una serie de 10 que no devuelve ni eso no está recortando.
+UNITS_TRIM_MIN_RETURN = 1.0
 # Sin trim la serie sube al menos lo que cada unidad tuvo en vuelo (K row groups del motor, de
 # media en las 10 unidades): en las 68 series subió al menos 1,45 veces esa cuenta (mediana 2,1); el piso es 1.
 UNITS_NO_TRIM_MIN_RISE = 1.0
@@ -305,7 +310,9 @@ def write_units_lake(root) -> None:
 
 @pytest.fixture(scope="module")
 def unit_runs(tmp_path_factory) -> dict[str, list[dict]]:
-    """Las mismas 10 unidades con el trim de producción y sin él, para compararlas."""
+    """Las mismas 10 unidades con el trim de producción y sin él. La afirmación del trim solo usa
+    la serie `trim`; la `no-trim` la usa `test_without_the_trim_the_rss_does_grow`.
+    """
     root = tmp_path_factory.mktemp("units")
     write_units_lake(root)
     return {mode: units(root, mode) for mode in ("trim", "no-trim")}
@@ -317,17 +324,11 @@ def drift(runs: list[dict]) -> float:
     return max(after) - after[0]
 
 
-def tail_level(runs: list[dict]) -> float:
-    """Promedio, en bytes, del RSS al cerrar la mitad final de las unidades."""
-    tail = [r["rss_after_trim_mib"] * MIB for r in runs[len(runs) // 2 :]]
-    return sum(tail) / len(tail)
-
-
-def rise(runs: list[dict], first: dict) -> float:
-    """Bytes que el nivel final de la serie `runs` pasa del RSS al cerrar la primera unidad de
-    `first` (la de la serie con trim, que arranca sin nada retenido de antes).
+def returned(runs: list[dict]) -> float:
+    """Bytes que el trim devolvió al kernel al cerrar las unidades, sumados: lo que la unidad
+    reporta de su propio proceso (RSS antes − RSS después del trim), sin otra serie de por medio.
     """
-    return tail_level(runs) - first["rss_after_trim_mib"] * MIB
+    return sum(r["rss_before_trim_mib"] - r["rss_after_trim_mib"] for r in runs) * MIB
 
 
 def in_flight(runs: list[dict]) -> float:
@@ -342,27 +343,30 @@ def test_rss_after_closing_each_unit_does_not_grow_with_the_units(unit_runs):
     miden una unidad y no lo ven.
     """
     runs = unit_runs["trim"]
-    # Lo que queda retenido no pasa de lo que la unidad tuvo en vuelo; ver UNITS_IN_FLIGHT_BYTES. Y
-    # no sube más que la serie sin trim de la misma corrida: en 40 series la deriva con trim quedó
-    # bajo la otra por 10,6 a 123 MiB (mediana 72); la holgura son dos row groups (36,6 MiB).
+    # Lo que queda retenido no pasa de lo que la unidad tuvo en vuelo; ver UNITS_IN_FLIGHT_BYTES.
     assert drift(runs) <= UNITS_IN_FLIGHT_BYTES, runs
-    assert drift(runs) <= drift(unit_runs["no-trim"]) + 2 * UNITS_ROW_GROUP_BYTES, (
-        unit_runs
+    # El trim devuelve de verdad: la serie le entrega al kernel al menos lo que cada unidad tuvo en
+    # vuelo; ver UNITS_TRIM_MIN_RETURN. Esta es la afirmación que falla cuando falta el trim (0).
+    # Ya no se compara el RSS con el de la serie sin trim (ITSC-409): esa resta depende de la carga
+    # de la máquina y la cubre lo que la unidad reporta de sí misma.
+    assert returned(runs) >= UNITS_TRIM_MIN_RETURN * in_flight(runs), (
+        returned(runs),
+        in_flight(runs),
+        runs,
     )
-    # Y el trim recupera de verdad: las últimas unidades quedan más abajo que sin él, y lo que
-    # recuperan es una parte de lo que la serie sin trim sube; ver UNITS_TRIM_MIN_SHARE. Esta
-    # comparación es la que falla cuando falta el trim.
-    gain = tail_level(unit_runs["no-trim"]) - tail_level(runs)
-    grown = rise(unit_runs["no-trim"], runs[0])
-    assert gain >= UNITS_TRIM_MIN_SHARE * grown, (gain, grown, unit_runs)
+    # Y lo que el programa mismo retiene (el heap en uso tras el trim, sin lo libre que glibc
+    # guarda) no crece con las unidades: en 30 series el cierre de la última pasó al de la primera
+    # por 0,1 a 0,2 MiB; la holgura es un row group (18,3 MiB).
+    in_use = [r["mem_close_after_trim"]["uordblks_mib"] * MIB for r in runs]
+    assert max(in_use) <= in_use[0] + UNITS_ROW_GROUP_BYTES, in_use
     # El pico de la última unidad lo acota la unidad más grande, no la suma de las anteriores.
     peaks = [r["rss_peak_mib"] for r in runs]
     assert peaks[-1] <= 1.3 * max(peaks[:-1]), peaks
 
 
 def test_without_the_trim_the_rss_does_grow(unit_runs):
-    """Contraprueba de la anterior: sin el trim el RSS al cerrar sí sube, así que la
-    comparación de arriba no pasa en vacío.
+    """Sin el trim el RSS al cerrar sí sube: es la única prueba que usa la serie `no-trim`, y
+    muestra que la deriva que la prueba de arriba acota existe cuando el trim falta.
     """
     runs = unit_runs["no-trim"]
     assert drift(runs) > UNITS_NO_TRIM_MIN_RISE * in_flight(runs), unit_runs
