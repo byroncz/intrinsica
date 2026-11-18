@@ -30,6 +30,7 @@ from l3_dc_descriptors.frontier import (
     FRONTIER_WORKERS_ENV,
     MAX_FRONTIER_WORKERS,
     FooterReader,
+    FooterUnreadable,
     Frontier,
     Listing,
     family_file,
@@ -763,7 +764,17 @@ def main(
     _report_drift(ctx, asset, catalog, summaries)
     l2 = list_l2(events_root, asset.key)
     forced = args.force
-    scans = {} if forced else _scan(args, ctx, asset, thetas, listed, summaries)
+    try:
+        scans = {} if forced else _scan(args, ctx, asset, thetas, listed, summaries)
+    except FooterUnreadable as exc:
+        # Una falla del transporte no es un archivo inválido (ITSC-424): no se sabe dónde está la
+        # frontera, así que no se procesa ninguna unidad.
+        print(
+            f"l3_dc_descriptors: la verificación de la frontera se abortó: {exc}. "
+            "No se procesó ninguna unidad; relanza la corrida.",
+            file=sys.stderr,
+        )
+        return 1
     frontier = {theta: found.reached for theta, found in scans.items()}
     for theta in thetas:
         logger.info("θ=%d frontera=%s", theta, label(frontier.get(theta)))
