@@ -20,13 +20,69 @@ jobs:
       - run: uvx yamllint .
       - run: .github/scripts/check-workflow-yaml.sh
 
-  test:
+  # Las pruebas corren por grupo (ITSC-430): un check rojo dice en qué grupo
+  # falló y «Re-run failed jobs» repite solo ese grupo y el job final.
+  # `groups` calcula los grupos desde testpaths de pyproject.toml (nada escrito
+  # a mano): cada layers/<capa>/tests es el grupo <capa>; todo lo demás es el
+  # grupo shared. Una ruta nueva en testpaths cae sola en su grupo.
+  groups:
     runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Armar la matriz de grupos desde testpaths
+        id: matrix
+        run: |
+          python3 - <<'PY'
+          import json, os, re, tomllib
+
+          with open("pyproject.toml", "rb") as f:
+              testpaths = tomllib.load(f)["tool"]["pytest"]["ini_options"]["testpaths"]
+          groups = {}
+          for path in testpaths:
+              m = re.fullmatch(r"layers/([^/]+)/tests", path)
+              groups.setdefault(m.group(1) if m else "shared", []).append(path)
+          include = [{"group": g, "paths": " ".join(p)} for g, p in groups.items()]
+          # Cada ruta de testpaths cae en exactamente un grupo.
+          assert sorted(sum(groups.values(), [])) == sorted(testpaths)
+          print(json.dumps(include, indent=2))
+          # $GITHUB_OUTPUT solo admite `nombre=valor` por línea: va solo la
+          # línea matrix; el JSON legible queda en el log (stdout).
+          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              out.write("matrix=" + json.dumps({"include": include}) + "\n")
+          PY
+
+  test-group:
+    name: test (${{ matrix.group }})
+    needs: groups
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false # un grupo rojo no cancela a los demás
+      matrix: ${{ fromJSON(needs.groups.outputs.matrix) }}
+    env:
+      PATHS: ${{ matrix.paths }}
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v7
       - run: uv sync --locked
-      - run: uv run pytest
+      - run: uv run pytest $PATHS
+
+  # Check requerido de main (conserva el nombre `test`). Corre siempre y exige
+  # success de `groups` y de cada grupo: para GitHub un job omitido o cancelado
+  # pasa como aprobado, así que aquí cualquier resultado distinto de success
+  # es fallo.
+  test:
+    needs: [groups, test-group]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Exigir success en groups y en todos los grupos
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          jq -r 'to_entries[] | "\(.key): \(.value.result)"' <<< "$NEEDS"
+          jq -e 'to_entries | all(.value.result == "success")' <<< "$NEEDS" > /dev/null
 
   rust:
     runs-on: ubuntu-latest
