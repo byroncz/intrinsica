@@ -69,8 +69,9 @@ Args:
                                        es un directorio)
 
 Las corridas de la regla van primero (lecturas con 1, 2 y 8 hilos y escrituras con 12), para que si
-se acaba el tiempo no se pierda lo que decide el veredicto. Cada forma hace una lectura de un byte
-antes de cronometrar, para que la creación del cliente y la credencial no cuenten; el resto del
+se acaba el tiempo no se pierda lo que decide el veredicto. Cada forma, de lectura o de
+escritura, hace una lectura de un byte de L1 antes de cronometrar, para que la creación del cliente
+y la credencial no cuenten; el resto del
 costo de conexión sí cuenta, igual para todas. Todas las corridas de lectura bajan los mismos rangos.
 
 Memoria. Cada hilo retiene a lo más un rango o un objeto a la vez y lo suelta al terminar: las
@@ -314,8 +315,15 @@ class WriteArrow:
         self.gs = root.startswith("gs://")
         self.fs = open_fs(root)[0]
 
+    def path(self, uri: str) -> str:
+        return uri.removeprefix("gs://") if self.gs else str(Path(uri).resolve())
+
+    def warm(self, uri: str) -> None:
+        with self.fs.open_input_file(self.path(uri)) as handle:
+            handle.read_at(1, 0)
+
     def put(self, uri: str, payload: bytes) -> int:
-        path = uri.removeprefix("gs://") if self.gs else str(Path(uri).resolve())
+        path = self.path(uri)
         if not self.gs:
             self.fs.create_dir(str(Path(path).parent), recursive=True)
         view = memoryview(payload)
@@ -330,6 +338,12 @@ class WriteGoogle:
 
     def __init__(self, threads: int, root: str) -> None:
         self.client = GoogleClient(threads) if root.startswith("gs://") else None
+
+    def warm(self, uri: str) -> None:
+        if self.client is not None:
+            self.client.blob(uri).download_as_bytes(
+                start=0, end=0, timeout=REQUEST_TIMEOUT_S
+            )
 
     def put(self, uri: str, payload: bytes) -> int:
         if self.client is None:
@@ -438,9 +452,12 @@ def read_run(form: str, threads: int, uri: str, ranges: list[tuple[int, int]]) -
 
 
 def write_run(
-    form: str, threads: int, prefix: str, payload: bytes, objects: int
+    form: str, threads: int, prefix: str, payload: bytes, objects: int, warm_uri: str
 ) -> Run:
+    """`warm_uri` es un objeto legible (el `consolidated.parquet` de L1): el SA de `ops-script` solo
+    crea bajo `results/`, no lo lee, así que el calentamiento lee de otro lado."""
     writer = WRITERS[form](max(1, min(threads, objects)), prefix)
+    writer.warm(warm_uri)
     names = [f"{prefix}/{form}_{threads:02d}w_{i:03d}.bin" for i in range(objects)]
     return execute(WRITE, form, threads, names, lambda name: writer.put(name, payload))
 
@@ -703,7 +720,7 @@ def run(parser: argparse.ArgumentParser, ns: argparse.Namespace) -> int:
             if direction == READ:
                 done = read_run(form, threads, uri, ranges)
             else:
-                done = write_run(form, threads, prefix, payload, ns.objects)
+                done = write_run(form, threads, prefix, payload, ns.objects, uri)
         except Exception as exc:  # noqa: BLE001 - una forma que no arranca no tumba la medición
             log(f"{label}: no corrió ({type(exc).__name__}: {exc})")
             continue

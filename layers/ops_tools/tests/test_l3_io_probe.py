@@ -136,23 +136,50 @@ def test_a_read_past_the_end_is_a_counted_error_not_a_crash(lake):
 
 
 @pytest.mark.parametrize("form", probe.WRITE_FORMS)
-def test_every_write_form_creates_distinct_objects_with_the_payload(tmp_path, form):
+def test_every_write_form_creates_distinct_objects_with_the_payload(
+    tmp_path, lake, form
+):
     payload = os.urandom(3 * probe.MIB + 17)
     prefix = f"{tmp_path}/io_probe/x"
-    run = probe.write_run(form, 4, prefix, payload, objects=6)
+    run = probe.write_run(form, 4, prefix, payload, objects=6, warm_uri=uri(lake))
     files = sorted(Path(prefix).glob("*.bin"))
     assert run.errors == 0 and len(files) == 6 == len({f.name for f in files})
     assert run.moved == 6 * len(payload)
     assert all(f.read_bytes() == payload for f in files)
 
 
-def test_the_two_write_forms_never_share_an_object_name(tmp_path):
+def test_the_two_write_forms_never_share_an_object_name(tmp_path, lake):
     payload = os.urandom(1024)
     prefix = f"{tmp_path}/x"
     for form in probe.WRITE_FORMS:
         for threads in (1, 4):
-            probe.write_run(form, threads, prefix, payload, objects=3)
+            probe.write_run(
+                form, threads, prefix, payload, objects=3, warm_uri=uri(lake)
+            )
     assert len(list(Path(prefix).glob("*.bin"))) == 2 * 2 * 3
+
+
+def test_a_write_form_is_warmed_with_the_l1_object_before_the_clock_starts(
+    tmp_path, lake, monkeypatch
+):
+    events = []
+
+    class Recorder:
+        def __init__(self, threads, root):
+            pass
+
+        def warm(self, warm_uri):
+            events.append(("warm", warm_uri))
+
+        def put(self, name, payload):
+            events.append(("put", name))
+            return len(payload)
+
+    monkeypatch.setitem(probe.WRITERS, "z", Recorder)
+    run = probe.write_run("z", 1, str(tmp_path), b"x", objects=2, warm_uri=uri(lake))
+    assert run.errors == 0
+    assert [kind for kind, _ in events] == ["warm", "put", "put"]
+    assert events[0][1] == uri(lake)
 
 
 # --- la regla, con cifras simuladas -----------------------------------------------------------

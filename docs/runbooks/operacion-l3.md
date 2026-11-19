@@ -2318,8 +2318,8 @@ repiten (el prefijo lleva un sufijo único por corrida y `b` sube con `if_genera
 proceso ÷ pared (`cpu_ratio`: ≈ 1 es un hilo ocupado, ≈ número de vCPU es CPU saturada, mucho menos es espera de
 red o de un candado), la **ocupación** de los hilos (suma de las paredes de las tareas ÷ pared × hilos efectivos;
 los efectivos son `min(hilos, tareas)`: con 32 hilos y 24 rangos solo hay 24) y los errores. Del entorno: cores
-del contenedor, versión de pyarrow y tamaño de la muestra en MiB. Cada forma hace una lectura de un byte antes de
-cronometrar (la creación del cliente y la credencial no cuentan; el resto del costo de conexión sí, igual para
+del contenedor, versión de pyarrow y tamaño de la muestra en MiB. Cada forma, de lectura o de escritura, hace una lectura de
+un byte de L1 antes de cronometrar (el SA de `ops-script` no puede leer `results/`; la creación del cliente y la credencial no cuentan; el resto del costo de conexión sí, igual para
 todas).
 
 **Veredicto (la regla se fijó antes de medir).** Con `R(x, n)` y `W(x, n)` los MiB por segundo de la forma `x` con
