@@ -185,9 +185,12 @@ saltara en silencio todo lo anterior (2026-11-12, F: 45 de 111 meses, código 0)
   que se pidieron de verdad: el de `events.parquet` de un mes se lee una vez aunque lo pidan la familia
   y el techo de S, así que en una familia distinta de S son 16 650 y no 22 200 (3 por θ y mes), y en S
   11 100. La verificación midió **1 945,8 s** con 8 lectores (imagen 0.25.1, 2 vCPU, familia `path`;
-  ITSC-420) y desde ITSC-420 corre con `L3_FRONTIER_WORKERS` lectores, 64 por defecto; la meta del
-  arquitecto es **menos de 300 s** en ese caso, y se mide en la nube, no en CI. Si pasa de 300 s, decide
-  el arquitecto con esa cifra (los timeouts mensuales de «Timeouts» ya cubren el costo medido).
+  ITSC-420) y, con 64 lectores y pyarrow, 1 315,5 s. Desde ITSC-424 corre con `L3_FRONTIER_WORKERS`
+  lectores, **8 por defecto**, y baja el pie con el cliente de Google en `gs://`: midió **166,4 s**
+  (11 100 archivos, 16 650 pies, 50 θ, 8 lectores, 2 vCPU, familia `path`, ejecución `l3-backfill-6j5fq`).
+  La meta del arquitecto era **menos de 300 s** en ese caso y **se cumple**; se mide en la nube, no en CI.
+  Si un día pasa de 300 s, decide el arquitecto con la cifra (los timeouts mensuales de «Timeouts» cubren
+  de sobra el costo medido).
 - **Por cada θ cuya frontera retrocedió** por archivos inválidos hay un hallazgo
   `theta_frontier_regressed` (warning, uno por θ): `first_invalid_month`, `invalid_months` y el
   `reason` del primero. Dice desde dónde se va a reescribir y por qué.
@@ -469,6 +472,10 @@ estimadas (por 1,16). ITSC-378 las reemplazó por el backfill completo de 110 me
 | `l3-backfill-spectrum` | (no existía) | (no existía) | **43 200 s** (ITSC-413) | El de `l3-backfill`; la pared de F sale del mes previo y del backfill completo (ver «Backfill de la familia F») |
 | `l3-backfill` | 86 400 s | 10 800 s | **43 200 s** | S: 1,5 × 6 638 = 9 957 s (1,63 × con 10 800 s); A: 1,5 × 27 556 = 41 334 s (1,57 × con 43 200 s) |
 
+La columna «Cuenta (medida)» es la de cuando se fijó cada timeout, con las verificaciones de
+entonces (1 946 s y 1 316 s): es historia y sus márgenes no son los de hoy. Los de hoy están en
+«Con el transporte nuevo de la verificación (ITSC-424 medido, ITSC-426)», más abajo.
+
 **La verificación de la frontera entra en la regla (ITSC-420).** Desde ITSC-419 cada backfill y cada monthly
 verifican todos los meses de la serie de cada θ antes de procesar nada (TRD-L3 §8.2), y en la nube eso
 midió 1 945,8 s con 8 lectores (imagen 0.25.1, 2 vCPU, familia `path`, 50 θ, 111 meses; ejecución
@@ -478,17 +485,32 @@ verificación + 6 × el mes más lento**. Con la cifra medida: 1 946 + 6 × 183,
 3 600 s de `l3-monthly` y 5 400 s de `l3-monthly-path` la cubren con 1,18 × y 1,77 ×. `l3-monthly-fit`
 no cambió en ITSC-420 y **no cumplía la regla** con la verificación medida. **ITSC-415 la aplica con la
 cifra medida después de optimizar la verificación** (ITSC-420: 1 315,5 s para una familia distinta de S, con 64 lectores, 2 vCPU,
-ejecución `l3-backfill-6m6t5`; la meta de 300 s no se cumplió y su diagnóstico va en otra card):
+ejecución `l3-backfill-6m6t5`; la meta de 300 s no se cumplía entonces: ITSC-424 la cumplió, ver más abajo):
 - `l3-monthly` y `l3-monthly-path` no cambian: S: 1 316 + 6 × 183,7 = 2 418 s (verificación medida, conservadora: S lee menos pies); T, 1 316 + 6 × 186 = 2 432 s. Sus 3 600 s y 5 400 s los cubren.
 - `l3-monthly-fit` sube a **9 000 s**: 1 316 + 6 × 1 240 = 8 756 s.
 - `l3-monthly-spectrum` fija **7 200 s**: 1 316 + 6 × 774 s (2023-02, el mes más lento de F, del backfill de 130 M en el job de 32 GiB y 8 vCPU) = 5 960 s. La verificación de F en ese job no se midió aparte: se usa la de T.
+
+**Con el transporte nuevo de la verificación (ITSC-424 medido, ITSC-426): los timeouts no cambian.** La
+verificación midió **166,4 s** con 8 lectores (ejecución `l3-backfill-6j5fq`, familia `path`, 2 vCPU; antes
+1 315,5 s con 64 lectores). La cuenta de la regla con esa cifra y los mismos meses más lentos:
+
+| Job | Cuenta con la verificación medida | Timeout vigente |
+| --- | --- | --- |
+| `l3-monthly` (S) | 166 + 6 × 183,7 = 1 268 s | 3 600 s |
+| `l3-monthly-path` (T) | 166 + 6 × 186 = 1 282 s | 5 400 s |
+| `l3-monthly-fit` (A) | 166 + 6 × 1 240 = 7 606 s | 9 000 s |
+| `l3-monthly-spectrum` (F) | 166 + 6 × 774 = 4 810 s | 7 200 s |
+
+Ninguno se baja. Un timeout holgado no cuesta nada (el job se cobra por lo que dura, no por su tope) y bajarlo
+solo quita margen. Los 166,4 s son de T en el job de 2 vCPU: la verificación de F en su job de 8 vCPU **no está
+medida con el transporte nuevo** y se usa la de T; se mide sola en el cierre mensual del 2026-12-08.
 
 Los cuatro están bajo el tope de 86 400 s del módulo `layer`. Cada modo de `l3` fija su `timeout` explícito (ya no hereda el de la capa, 1 200 s). La
 espera del workflow `l1-run-job` en `monthly-close` sondea cada 30 s hasta `completionTime` y no tiene tope
 propio: admite la suma de los jobs que espera, `l3-monthly` + `l3-monthly-path` + `l3-monthly-fit` =
 3 600 + 5 400 + 9 000 = 18 000 s (con `maxRetries: 1`, hasta el doble), más `l2-monthly` y `viz-tiles`: unos 600 sondeos
 (1 200 con el reintento), muy bajo el límite de pasos de Workflows. `l3-monthly-spectrum` es el último y no se espera.
-Los timeouts mensuales se revisan de nuevo cuando la card de diagnóstico de la verificación mida una cifra distinta.
+Los timeouts mensuales se revisan de nuevo si el cierre mensual del 2026-12-08 mide una verificación de F distinta de la de T.
 
 Los valores de ITSC-402 **los aplica el humano** con el `apply` del stack `l3`; hasta entonces rigen
 los desplegados. La regla de subida de `l3-monthly` no cambia: si 2022-11 pasa de 200 s, sube.
@@ -497,8 +519,8 @@ La de `l3-backfill` es la misma, con el timeout nuevo: si un backfill completo p
 cumple (27 556 s, un margen de 1,57 ×): el arquitecto fijó los 43 200 s el 2026-11-06 para
 cubrir el 1,5 × sobre esa pared (41 334 s), y quedan bajo el tope de 86 400 s. F no la mueve: su backfill
 midió 12 088 s, bajo los 28 800 s, y `l3-backfill` no se toca en ITSC-415. Para `l3-monthly-fit` el umbral
-es (9 000 − 1 316) ÷ 6 = 1 280 s en el mes más lento; 2023-03 está en 1 240 s. Para `l3-monthly-spectrum`
-es (7 200 − 1 316) ÷ 6 = 980 s; 2023-02 está en 774 s. Mientras ninguna se
+es (9 000 − 166) ÷ 6 = 1 472 s en el mes más lento; 2023-03 está en 1 240 s (con la verificación de 1 316 s de ITSC-415 el umbral era 1 280 s). Para `l3-monthly-spectrum`
+es (7 200 − 166) ÷ 6 = 1 172 s; 2023-02 está en 774 s (980 s con 1 316 s). Mientras ninguna se
 cumpla, nadie los sube «por si acaso». Si un job termina por timeout con estos valores, mira primero `unit_timing` del mes:
 una unidad que pasa de 3 × su pared habitual es un hallazgo, no una razón para subir el timeout.
 
