@@ -1208,6 +1208,7 @@ locales (`uv run`).
 | `l3_spectrum_xcheck.py` | Verifica los **valores** de `spectrum.parquet` (familia F) contra el oráculo (ITSC-422): lee L1, `events.parquet` y `spectrum.parquet` de un θ y un mes, recalcula las 30 columnas de cada fase con la aritmética del motor y compara con tolerancia 1e-9; cuenta las colas de Haar planas en `float64` y en `float32` | sin `args` (por defecto `--theta 0.00098052 --month 2023-03`) |
 | `l3_version_audit.py` | Audita las versiones de las cuatro familias (ITSC-419): lee solo el pie de cada archivo de cada θ y mes con `events.parquet` en L2, anota `state_version` (y `budget_ticks` en `spectrum`) y dice si cada familia tiene una sola versión y si falta algún archivo; da `veredicto=ok\|mezcla\|faltantes` | sin `args` |
 | `l3_frontier_probe.py` | Mide en la nube por qué la verificación de la frontera no escala con los lectores (ITSC-421): sobre 600 `(θ, mes)` repite la secuencia de `invalid_reason` por etapa con 1, 8 y 64 hilos y tres variantes (solo pie, cliente de GCS sin `GcsFileSystem`, los 64 lectores repartidos en 4 procesos); da CPU ÷ pared, pies por segundo y `veredicto=cpu\|gil\|espera\|mixto` | sin `args` |
+| `l3_io_probe.py` | Mide si el tope de pyarrow contra GCS también frena las lecturas de datos y las escrituras (ITSC-425): baja una muestra fija de row groups de `consolidated.parquet` con 1, 2, 8 y 32 hilos (pyarrow compartido, pyarrow por hilo y cliente de Google) y sube objetos de 4 MiB con 1, 4 y 12 escritores (pyarrow y cliente de Google); da `lecturas`, `escrituras` y `candado` | sin `args`; el humano borra después el prefijo `io_probe/` (≈ 300 MiB) |
 
 El apply del stack `ops` publica todos estos scripts en `scripts/`; verifica con
 `gcloud storage ls gs://<proyecto>-ops/scripts/`.
@@ -2271,6 +2272,102 @@ card: se decide después con la medición.
 | Muestra | `base_1` | `base_8` | `base_64` | `cpu_ratio_64` | Mejor variante | Pies por segundo | Veredicto | Run |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | pendiente | pendiente | pendiente | pendiente | pendiente | pendiente | pendiente | pendiente | pendiente |
+
+### `l3_io_probe.py`
+
+Mide si el tope de pyarrow contra GCS que halló ITSC-421 al leer pies **también frena lo caro de una
+unidad: leer los datos y escribir** (ITSC-425). El indicio viejo (TRD-L3 §10.2: con 8 vCPU el motor trabajó el
+13,6 % del tiempo y `write_s` y `read_wall_s` fueron casi toda la pared) es un indicio, no una prueba:
+nadie midió el transporte aislado. **No arregla nada ni decide la migración:** no cambia ninguna capa, **no
+importa ninguna capa** y mide solo transporte (baja y sube bytes; no decodifica ni comprime). Es una cota
+superior: en producción la escritura también comprime (ZSTD) y la lectura decodifica. Si el transporte no
+limita ni siquiera aislado, migrarlo no sirve.
+
+El apply del stack `ops` lo publica en `scripts/`; verifica con
+`gcloud storage ls gs://<proyecto>-ops/scripts/l3_io_probe.py`.
+
+| `args` | Efecto |
+| --- | --- |
+| `--month`, `--groups`, `--seed` | Mes de L1 y cuántos row groups sortear de su `consolidated.parquet` (por defecto `2023-03`, `24` y `425`) |
+| `--read-threads` | Hilos de las lecturas (por defecto `1,2,8,32`; `1`, `2` y `8` siempre corren, la regla los necesita) |
+| `--write-threads` | Escritores (por defecto `1,4,12`; `12` siempre corre) |
+| `--objects`, `--object-mib` | Objetos por corrida de escritura y su tamaño (por defecto `12` y `4`) |
+| `--budget-s` | Pasado ese tiempo no empieza más corridas (por defecto `2700`; `ops-script` corta a los 3 600 s) |
+| `--max-inflight-mib` | Una lectura cuyo peor caso en vuelo (el rango mayor × sus hilos) pasa de esto no corre (por defecto `2048`) |
+| `--l1-root`, `--write-root` | Otra raíz de L1 y otro lugar para los objetos de prueba, también locales (por defecto `gs://<proyecto>-landing/l1` y `OPS_RESULTS_URI`) |
+| `--provider`, `--market`, `--asset` | Otra serie (por defecto `binance`, `spot`, `BTCUSDT`) |
+| `--out` | Otra ruta del CSV; una ruta que termina en `/` es un directorio |
+
+**Lecturas.** Del pie del `consolidated.parquet` del mes toma los rangos de bytes de una muestra fija de row
+groups (sorteados con la semilla) y los baja, un rango por tarea, de tres formas:
+
+| Forma | Qué hace | Qué aísla |
+| --- | --- | --- |
+| `a` | pyarrow con **un** sistema de archivos compartido por todos los hilos (`open_input_file` por rango y `read_at`) | la línea de comparación (pyarrow con un solo sistema de archivos) |
+| `a2` | pyarrow con **un sistema de archivos por hilo**, creados antes de cronometrar | si el tope es de cada sistema de archivos o del proceso |
+| `b` | `google-cloud-storage`, una petición de rango por row group, con tiempo límite de 30 s y tantas conexiones como hilos | si el límite es el transporte de pyarrow |
+
+**Escrituras.** Sube `--objects` objetos de `--object-mib` MiB de bytes aleatorios bajo
+`<OPS_RESULTS_URI>io_probe/<fecha>-<sufijo>/` con 1, 4 y 12 escritores: `a` con pyarrow (`open_output_stream`,
+por trozos de 1 MiB) y `b` con `google-cloud-storage` (`upload_from_string`, 30 s). Los nombres no se
+repiten (el prefijo lleva un sufijo único por corrida y `b` sube con `if_generation_match=0`): el job
+`ops-script` solo puede crear objetos, no pisarlos ni borrarlos. Con los valores por defecto son 6 corridas de
+48 MiB: ≈ 300 MiB.
+
+**Qué reporta por corrida.** La pared, los **MiB por segundo** (solo lo que bajó o subió sin error), la CPU del
+proceso ÷ pared (`cpu_ratio`: ≈ 1 es un hilo ocupado, ≈ número de vCPU es CPU saturada, mucho menos es espera de
+red o de un candado), la **ocupación** de los hilos (suma de las paredes de las tareas ÷ pared × hilos efectivos;
+los efectivos son `min(hilos, tareas)`: con 32 hilos y 24 rangos solo hay 24) y los errores. Del entorno: cores
+del contenedor, versión de pyarrow y tamaño de la muestra en MiB. Cada forma, de lectura o de escritura, hace una lectura de
+un byte de L1 antes de cronometrar (el SA de `ops-script` no puede leer `results/`; la creación del cliente y la credencial no cuentan; el resto del costo de conexión sí, igual para
+todas).
+
+**Veredicto (la regla se fijó antes de medir).** Con `R(x, n)` y `W(x, n)` los MiB por segundo de la forma `x` con
+`n` hilos al leer y al escribir; la concurrencia de producción es 2 lectores y 12 escritores:
+
+| Veredicto | Valor |
+| --- | --- |
+| `lecturas` | `limita` si `R(b, 2) ≥ 2 × R(a, 2)`; si no, `no_limita` |
+| `escrituras` | `limita` si `W(b, 12) ≥ 2 × W(a, 12)`; si no, `no_limita` |
+| `candado` | `sistema_de_archivos` si `R(a2, 8) ≥ 2 × R(a, 8)`; si no, `proceso` si ni (a) ni (a2) escalan (`R(x, 8) < 2 × R(x, 1)`) y (b) sí; si no, `ninguno` |
+
+«Limita» quiere decir que migrar el transporte de esa dirección al cliente de Google rendiría al menos el doble
+con la concurrencia de producción. `sistema_de_archivos` quiere decir que el tope es de cada sistema de archivos
+de pyarrow y el arreglo del resto del transporte sería trivial y sin dependencias nuevas. Una corrida con más del
+5 % de tareas fallidas, o que no corrió, no vale: cada veredicto que la necesita sale `fallo`.
+
+**Memoria (eficiencia de memoria ante todo).** Cada hilo retiene a lo más un rango o un objeto a la vez y lo suelta
+al terminar: las lecturas cuentan los bytes y los sueltan; las escrituras comparten un único búfer de solo
+lectura de `--object-mib` MiB (nadie lo copia) y lo envían por trozos. Nada se acumula entre corridas. Si el
+peor caso en vuelo de una lectura (el rango mayor × sus hilos) pasa de `--max-inflight-mib`, la corrida se omite
+y se avisa en el log.
+
+**El CSV** (`l3_io_probe.csv`, en `results/<ejecución>/`) tiene el encabezado
+`seccion,direccion,forma,hilos,medida,valor`: `entorno` (cores, pyarrow, google_cloud_storage, python, mes,
+row groups del archivo y de la muestra, `muestra_mib`, semilla, objetos, `prefijo_objetos`), `corrida` (`pared_s`,
+`mib_movidos`, `mib_por_s`, `cpu_s`, `cpu_ratio`, `ocupacion`, `hilos_efectivos`, `tareas`, `errores`) y
+`veredicto`.
+
+**Última línea:** `io probe: mes=… lecturas_mib=… a_2=… b_2=… escrituras_mib=… a_12=… b_12=… lecturas=…
+escrituras=… candado=…` (los `a_*` y `b_*` en MiB por segundo; `-` si no se midió).
+
+**Códigos:** **0** si midió y ningún veredicto es `fallo`; **1** si el pie no se lee, el mes no tiene row groups o
+algún veredicto sale `fallo` (corrida omitida por presupuesto o por memoria, o con más del 5 % de fallas); **2**
+por uso (`--read-threads`, `--write-threads`, `--month` o los conteos inválidos; sin `--l1-root` ni
+`OPS_RESULTS_URI`; sin `--write-root` ni `OPS_RESULTS_URI`; `--out` o `--write-root` `gs://` fuera de `results/`).
+Si el CSV no se puede escribir, la sonda lo avisa y no cambia el código.
+
+**Cómo correrla.** *Actions → Run job*: `job` = `ops-script`, `script` = `gs://<proyecto>-ops/scripts/l3_io_probe.py`
+(la URI completa: `run-job-tasks.sh` rechaza otra cosa con código 2), sin `args`. Las corridas las lanza y aprueba
+el humano. Al terminar, **pega la última línea en ITSC-425 y borra el prefijo `io_probe/` de la carpeta de
+resultados de la ejecución** (el job solo puede crear objetos). Con ella el arquitecto decide si migrar el resto
+del transporte vale la pena; esa decisión es otra card.
+
+**Corrida real (ITSC-425):** pendiente. La tabla se llena con la última línea cuando el humano la corra.
+
+| Mes | Lecturas (MiB) | `a_2` | `b_2` | Escrituras (MiB) | `a_12` | `b_12` | `lecturas` | `escrituras` | `candado` | Run |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| pendiente | pendiente | pendiente | pendiente | pendiente | pendiente | pendiente | pendiente | pendiente | pendiente | pendiente |
 
 ### La trampa del 403 por prefijo
 
