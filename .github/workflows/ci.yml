@@ -34,8 +34,8 @@ jobs:
       - name: Armar la matriz de grupos desde testpaths
         id: matrix
         run: |
-          python3 - <<'PY' | tee -a "$GITHUB_OUTPUT"
-          import json, re, tomllib
+          python3 - <<'PY'
+          import json, os, re, tomllib
 
           with open("pyproject.toml", "rb") as f:
               testpaths = tomllib.load(f)["tool"]["pytest"]["ini_options"]["testpaths"]
@@ -47,7 +47,10 @@ jobs:
           # Cada ruta de testpaths cae en exactamente un grupo.
           assert sorted(sum(groups.values(), [])) == sorted(testpaths)
           print(json.dumps(include, indent=2))
-          print("matrix=" + json.dumps({"include": include}))
+          # $GITHUB_OUTPUT solo admite `nombre=valor` por línea: va solo la
+          # línea matrix; el JSON legible queda en el log (stdout).
+          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              out.write("matrix=" + json.dumps({"include": include}) + "\n")
           PY
 
   test-group:
