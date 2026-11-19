@@ -666,7 +666,7 @@ con 64 lectores). La cuenta de la regla con esa cifra:
 
 | Job | Cuenta con la verificación medida | timeout vigente |
 |---|---|---|
-| `l3-monthly` (S) | 166 + 6 × 183,7 = 1 269 s | 3 600 s |
+| `l3-monthly` (S) | 166 + 6 × 183,7 = 1 268 s | 3 600 s |
 | `l3-monthly-path` (T) | 166 + 6 × 186 = 1 282 s | 5 400 s |
 | `l3-monthly-fit` (A) | 166 + 6 × 1 240 = 7 606 s | 9 000 s |
 | `l3-monthly-spectrum` (F) | 166 + 6 × 774 = 4 810 s | 7 200 s |
