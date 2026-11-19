@@ -472,6 +472,10 @@ estimadas (por 1,16). ITSC-378 las reemplazó por el backfill completo de 110 me
 | `l3-backfill-spectrum` | (no existía) | (no existía) | **43 200 s** (ITSC-413) | El de `l3-backfill`; la pared de F sale del mes previo y del backfill completo (ver «Backfill de la familia F») |
 | `l3-backfill` | 86 400 s | 10 800 s | **43 200 s** | S: 1,5 × 6 638 = 9 957 s (1,63 × con 10 800 s); A: 1,5 × 27 556 = 41 334 s (1,57 × con 43 200 s) |
 
+La columna «Cuenta (medida)» es la de cuando se fijó cada timeout, con las verificaciones de
+entonces (1 946 s y 1 316 s): es historia y sus márgenes no son los de hoy. Los de hoy están en
+«Con el transporte nuevo de la verificación (ITSC-424 medido, ITSC-426)», más abajo.
+
 **La verificación de la frontera entra en la regla (ITSC-420).** Desde ITSC-419 cada backfill y cada monthly
 verifican todos los meses de la serie de cada θ antes de procesar nada (TRD-L3 §8.2), y en la nube eso
 midió 1 945,8 s con 8 lectores (imagen 0.25.1, 2 vCPU, familia `path`, 50 θ, 111 meses; ejecución
