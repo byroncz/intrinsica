@@ -125,20 +125,6 @@ UNITS_ENV = {**IMAGE_ENV, "MALLOC_ARENA_MAX": "32"}
 # (156 a 235 MiB) también cabe. Solo vale para estas 10 unidades; con 60 el RSS tras el trim sigue
 # subiendo ≈ 2 MiB por unidad (ADR-L3-16) y aquí no se afirma lo contrario.
 UNITS_IN_FLIGHT_BYTES = (6 + 6 + 2) * UNITS_ROW_GROUP_BYTES
-# ITSC-377, ITSC-409, ITSC-427. Lo que detecta la falta del trim son los bytes que devuelve al
-# kernel: la unidad los reporta (`rss_before_trim_mib` − `rss_after_trim_mib`, el RSS de su propio
-# proceso justo antes y después de `malloc_trim`) y, sin trim, es exactamente 0 (la prueba de abajo
-# lo afirma). Antes se comparaba el RSS al cerrar de dos series de subprocesos (con trim y sin él),
-# y esa diferencia depende de la carga de la máquina: bajo 4 procesos de CPU falló 1 de 30 veces
-# (por 11,5 MiB). Después el piso era una razón (1 vez lo que la unidad tuvo en vuelo), calibrada
-# en la máquina de desarrollo: en 30 series (4 procesos en paralelo) el trim devolvió de 2,2 a 6,5
-# veces el `in_flight` de la serie (≈ 220 a 650 MB). En el runner de GitHub devuelve menos y ese
-# piso falló 2 de 11 corridas: 77,7 MB contra 90,2 MB (main en 0d3ea96) y 81,0 MB contra 86,4 MB
-# (PR 198 en 870d037). Como sin trim es 0, entre 0 y lo menor que se vio con trim (77,7 MB) no hay
-# solape: el piso es un row group (19,2 MB), que separa los dos casos sin depender de dónde corra.
-# Sin trim la serie sube al menos lo que cada unidad tuvo en vuelo (K row groups del motor, de
-# media en las 10 unidades): en las 68 series subió al menos 1,45 veces esa cuenta (mediana 2,1); el piso es 1.
-UNITS_NO_TRIM_MIN_RISE = 1.0
 MIB = 1 << 20
 
 
@@ -331,11 +317,6 @@ def returned(runs: list[dict]) -> float:
     return sum(r["rss_before_trim_mib"] - r["rss_after_trim_mib"] for r in runs) * MIB
 
 
-def in_flight(runs: list[dict]) -> float:
-    """Bytes que cada unidad tuvo en el motor a la vez, de media: `inflight_max` por row group."""
-    return sum(r["inflight_max"] for r in runs) / len(runs) * UNITS_ROW_GROUP_BYTES
-
-
 def test_rss_after_closing_each_unit_does_not_grow_with_the_units(unit_runs):
     """ITSC-371: con el asignador de la imagen glibc no devuelve al kernel lo liberado y, sin
     hacerlo al cerrar la unidad, el RSS crece unidad a unidad y un backfill largo muere por
@@ -345,10 +326,19 @@ def test_rss_after_closing_each_unit_does_not_grow_with_the_units(unit_runs):
     runs = unit_runs["trim"]
     # Lo que queda retenido no pasa de lo que la unidad tuvo en vuelo; ver UNITS_IN_FLIGHT_BYTES.
     assert drift(runs) <= UNITS_IN_FLIGHT_BYTES, runs
-    # El trim devuelve de verdad: la serie le entrega al kernel al menos un row group; sin trim es
-    # 0 (la prueba de abajo). Esta es la afirmación que falla cuando falta el trim.
-    # Ya no se compara el RSS con el de la serie sin trim (ITSC-409): esa resta depende de la carga
-    # de la máquina y la cubre lo que la unidad reporta de sí misma.
+    # ITSC-377, ITSC-409, ITSC-427. El trim devuelve de verdad: la serie le entrega al kernel al
+    # menos un row group (19,2 MB). Esta es la afirmación que falla cuando falta el trim: la unidad
+    # reporta los bytes que devuelve (`rss_before_trim_mib` − `rss_after_trim_mib`, el RSS de su
+    # propio proceso justo antes y después de `malloc_trim`) y, sin trim, es exactamente 0 (la
+    # prueba de abajo lo afirma). Antes se comparaba el RSS al cerrar de dos series de subprocesos
+    # (con trim y sin él), y esa diferencia depende de la carga de la máquina: bajo 4 procesos de
+    # CPU falló 1 de 30 veces (por 11,5 MiB). Después el piso era una razón (1 vez lo que la unidad
+    # tuvo en vuelo), calibrada en la máquina de desarrollo: en 30 series (4 procesos en paralelo)
+    # el trim devolvió de 2,2 a 6,5 veces lo que la unidad tuvo en vuelo (≈ 220 a 650 MB). En el
+    # runner de GitHub devuelve menos y ese piso falló 2 de 11 corridas: 77,7 MB contra 90,2 MB
+    # (main en 0d3ea96) y 81,0 MB contra 86,4 MB (PR 198 en 870d037). Como sin trim es 0, entre 0 y
+    # lo menor que se vio con trim (77,7 MB) no hay solape: el piso es un row group, que separa los
+    # dos casos sin depender de dónde corra.
     assert returned(runs) >= UNITS_ROW_GROUP_BYTES, (returned(runs), runs)
     # Y lo que el programa mismo retiene (el heap en uso tras el trim, sin lo libre que glibc
     # guarda) no crece con las unidades: en 30 series el cierre de la última pasó al de la primera
@@ -365,7 +355,14 @@ def test_without_the_trim_the_rss_does_grow(unit_runs):
     muestra que la deriva que la prueba de arriba acota existe cuando el trim falta.
     """
     runs = unit_runs["no-trim"]
-    assert drift(runs) > UNITS_NO_TRIM_MIN_RISE * in_flight(runs), unit_runs
+    # ITSC-429. Esta línea no detecta la falta del trim (con trim la deriva también es grande, de 61
+    # a 198 MiB: eso lo detecta `returned`, en la prueba de arriba). Solo comprueba que el montaje
+    # produce el fenómeno: sin trim, el RSS al cerrar sube. Para eso basta un piso absoluto de un
+    # row group (19,2 MB). El piso anterior era una razón (1 vez lo que la unidad tuvo en vuelo),
+    # calibrada en la máquina de desarrollo (mínimo 1,45 en 68 series), y falló en la revisión del
+    # PR 200: 109,7 MB contra 113,3 MB (razón 0,97). Con 4 procesos de CPU en paralelo, en 129
+    # series la deriva sin trim fue de 137,6 a 213,2 MB (mediana 175,3), siete veces el piso.
+    assert drift(runs) > UNITS_ROW_GROUP_BYTES, unit_runs
     # Y no devuelve nada al kernel: eso es lo que hace que el piso de la prueba de arriba (un row
     # group) separe los dos casos.
     assert returned(runs) == 0, runs
