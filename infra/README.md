@@ -637,14 +637,14 @@ para un job mensual es *timeout ≥ la verificación + 6 × el mes más lento* (
 
 La espera del workflow `l1-run-job` (módulo `orchestration`) sondea cada 30 s hasta que la ejecución trae
 `completionTime` y no tiene tope propio: admite estos timeouts (5 400 s son ≈ 180 sondeos, bajo el límite
-de pasos de Workflows). El código baja el costo de la verificación (`L3_FRONTIER_WORKERS`, 64 lectores por
-defecto; un pie de `events.parquet` por mes; sin el viaje de existencia): la meta es menos de 300 s y se
-mide en la nube. Los timeouts nuevos **los aplica el humano** con el `apply` del stack `l3`.
+de pasos de Workflows). El código baja el costo de la verificación (`L3_FRONTIER_WORKERS`, 8 lectores por
+defecto; un pie de `events.parquet` por mes; sin el viaje de existencia; en `gs://`, el pie se baja con el
+cliente de Google y no con pyarrow, ITSC-424): la meta era menos de 300 s y se cumple (166,4 s, ver abajo). Los timeouts nuevos **los aplica el humano** con el `apply` del stack `l3`.
 
 **Timeout de la familia F y timeouts mensuales con la verificación medida (ITSC-415).** ITSC-420 midió la verificación
 de la frontera en la nube tras optimizarla: **1 315,5 s** para una familia distinta de S (111 meses × 50 θ, 64 lectores,
-2 vCPU, ejecución `l3-backfill-6m6t5`). La meta de 300 s no se cumplió y su diagnóstico va en otra card; aquí se usa la
-cifra medida. Con la regla de [TRD-L3 §10.2](../docs/TRD/l3.md#102-dimensionamiento--hipótesis-de-partida-y-primera-medición)
+2 vCPU, ejecución `l3-backfill-6m6t5`). La meta de 300 s no se cumplía entonces (la cumplió ITSC-424, ver más abajo);
+la tabla siguiente es la historia de cómo se fijaron los timeouts con esa cifra. Con la regla de [TRD-L3 §10.2](../docs/TRD/l3.md#102-dimensionamiento--hipótesis-de-partida-y-primera-medición)
 (*verificación + 6 × el mes más lento*):
 
 | Job | Cuenta | timeout |
@@ -659,6 +659,21 @@ El mes más lento de F es 2023-02, con 774 s, del backfill de 130 M de ticks en 
 86 400 s del módulo. `l3-backfill` no se toca: la pared del backfill de F (12 088 s) no pasa de 28 800 s. La espera
 del workflow admite la suma de los jobs que espera (3 600 + 5 400 + 9 000 = 18 000 s, unos 600 sondeos de 30 s, el doble con
 `maxRetries: 1`): `l3-monthly-spectrum` es el último y no se espera. Los aplica el humano con el `apply` del stack `l3`.
+
+**Con el transporte nuevo de la verificación (ITSC-424 medido, ITSC-426): los timeouts no cambian.** La
+verificación midió **166,4 s** con 8 lectores (ejecución `l3-backfill-6j5fq`, familia `path`, 2 vCPU; antes 1 315,5 s
+con 64 lectores). La cuenta de la regla con esa cifra:
+
+| Job | Cuenta con la verificación medida | timeout vigente |
+|---|---|---|
+| `l3-monthly` (S) | 166 + 6 × 183,7 = 1 269 s | 3 600 s |
+| `l3-monthly-path` (T) | 166 + 6 × 186 = 1 282 s | 5 400 s |
+| `l3-monthly-fit` (A) | 166 + 6 × 1 240 = 7 606 s | 9 000 s |
+| `l3-monthly-spectrum` (F) | 166 + 6 × 774 = 4 810 s | 7 200 s |
+
+No se bajan: un timeout holgado no cuesta nada (el job se cobra por lo que dura, no por su tope). La verificación de F
+en su job de 8 vCPU no está medida con el transporte nuevo: se usa la de T y se mide sola en el cierre mensual del
+2026-12-08.
 
 Consecuencia: la espera de *Run job* muere a las 6 h (21 600 s) y un backfill de A
 dura más. El run de Actions falla por tiempo de espera, pero **la ejecución sigue en

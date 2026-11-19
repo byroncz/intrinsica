@@ -115,6 +115,7 @@ PRs y entradas de Documentación. Sin excepción.
   de memoria de una unidad es O(lote), no O(unidad). Aplica a todas las capas.
   Decisión y porqué: [Decisión: eficiencia de memoria ante todo](https://app.notion.com/p/3e727957d23d811887eaf14c886b9a0c)
   (2026-09-26).
+- El transporte de datos se queda en pyarrow y los jobs no crecen en vCPU para ganar velocidad de E/S: el tope es el ancho de banda de la instancia de Cloud Run (600 Mbps), no la librería. Solo la verificación de la frontera de L3 usa el cliente de Google, porque ahí el límite eran muchas peticiones pequeñas. Cuando crezca el volumen se crece por tareas en paralelo. Decisión y porqué: [Decisión: el transporte de datos se queda en pyarrow](https://app.notion.com/p/41d27957d23d814abb85ddac51e4544f) (2026-11-19).
 - El stack (lenguajes, librerías, motor de cómputo, almacenamiento) lo fija
   la entrada de Documentación tipo decisión correspondiente. Por ahora no
   existe esa entrada; cuando se cree, enlazarla aquí.
