@@ -1209,7 +1209,7 @@ se decodifican a lo sumo 2 row groups más que con 1, al final.
 
 ## Scripts de operación
 
-Quince scripts de `layers/ops_tools/scripts/`, para el job `ops-script`
+Dieciséis scripts de `layers/ops_tools/scripts/`, para el job `ops-script`
 ([runbook de operación ad hoc](operacion-ops.md)). El apply del stack `ops` los publica en
 `gs://<proyecto>-ops/scripts/` (ya no se suben a mano) y se lanzan con `job` = `ops-script`. Todos solo
 leen, toman las raíces del proyecto de `OPS_RESULTS_URI` y también aceptan rutas
@@ -1232,6 +1232,7 @@ locales (`uv run`).
 | `l3_frontier_probe.py` | Mide en la nube por qué la verificación de la frontera no escala con los lectores (ITSC-421): sobre 600 `(θ, mes)` repite la secuencia de `invalid_reason` por etapa con 1, 8 y 64 hilos y tres variantes (solo pie, cliente de GCS sin `GcsFileSystem`, los 64 lectores repartidos en 4 procesos); da CPU ÷ pared, pies por segundo y `veredicto=cpu\|gil\|espera\|mixto` | sin `args` |
 | `l3_io_probe.py` | Mide si el tope de pyarrow contra GCS también frena las lecturas de datos y las escrituras (ITSC-425): baja una muestra fija de row groups de `consolidated.parquet` con 1, 2, 8 y 32 hilos (pyarrow compartido, pyarrow por hilo y cliente de Google) y sube objetos de 4 MiB con 1, 4 y 12 escritores (pyarrow y cliente de Google); da `lecturas`, `escrituras` y `candado` | sin `args`; el humano borra después el prefijo `io_probe/` (≈ 300 MiB) |
 | `l3_phase_sizes.py` | Cuenta, por θ y por fase (`c` y `os`), cuántas fases alcanzan cada tamaño en ticks (ITSC-431): lee solo `c_ticks` y `os_ticks` de cada `summaries.parquet`, un row group a la vez, con lectores en paralelo; da `fases`, `ge_<N>`, `puntos` y `pares` | sin `args`; por tramos, `--from 2018-01 --to 2020-12` |
+| `l3_complexity_probe.py` | Sonda de la familia X (ITSC-432): Hurst (DFA-1) y entropía de permutación de una ventana de cada fase contra el barajado y contra un sustituto que conserva el espectro (IAAFT), redundancia con las columnas de F, T y `c_ticks` y costo por punto; lee L1, `events`, `summaries`, `path` y `spectrum` sobre un θ y una lista de meses; da D, piso, ρ y el veredicto `sigue\|retirada` por medida | `--theta <θ> --months YYYY-MM,YYYY-MM` |
 
 El apply del stack `ops` publica todos estos scripts en `scripts/`; verifica con
 `gcloud storage ls gs://<proyecto>-ops/scripts/`.
@@ -2445,6 +2446,105 @@ archivos y `ops-script` vence a los 3 600 s: si no alcanza, lo ya impreso queda 
 por tramos con `--from` y `--to` (por ejemplo, un tramo por año). El CSV de cada tramo cubre solo los
 meses de ese tramo: los conteos de varios tramos se suman a mano. Las corridas las lanza y aprueba el
 humano.
+
+### `l3_complexity_probe.py`
+
+Mide si **Hurst** y la **entropía de permutación** dicen algo de una fase que L3 no diga ya (ITSC-432).
+Sobre **un θ y una lista de meses** toma, de cada fase (`c` es la de confirmación; `os`, la de
+overshoot) con al menos `--min-ticks` puntos, un tramo seguido de a lo sumo `--window`: los **últimos**
+de `c` y los **primeros** de `os`. Mide las dos cosas sobre ese tramo y las compara con dos nulos: el
+**barajado** de los pasos y un **sustituto IAAFT**, que conserva los valores y el espectro de los
+pasos (lo que F ya guarda). El tamaño del efecto es la distancia de Kolmogorov-Smirnov `D`; nunca se
+reporta un valor p. **No importa ninguna capa** (una importación cambiaría `uv.lock`) y abre cada archivo
+por su ruta completa, por la [trampa del 403](#la-trampa-del-403-por-prefijo).
+
+El apply del stack `ops` lo publica en `scripts/`; verifica con
+`gcloud storage ls gs://<proyecto>-ops/scripts/l3_complexity_probe.py`.
+
+| `args` | Efecto |
+| --- | --- |
+| `--theta <θ> --months YYYY-MM,YYYY-MM` | Obligatorios: un θ (8 decimales como máximo) y meses `YYYY-MM` separados por comas, sin repetir |
+| `--l1-root`, `--l2-root`, `--l3-root` | Otras raíces, también locales (por defecto `gs://<proyecto>-landing/l1`, `-dc-events/l2` y `-dc-descriptors/l3`) |
+| `--provider`, `--market`, `--asset` | Otra serie (por defecto `binance`, `spot`, `BTCUSDT`) |
+| `--step` | Un precio de cada `k` ticks (por defecto `1`; al menos `1`); el mismo `k` para todas las fases de la corrida. `--min-ticks` y `--window` se cuentan en puntos, no en ticks: la ventana cubre a lo sumo `window × k` ticks |
+| `--min-ticks` | Mínimo de puntos (`n // k`) de una fase para medirla (por defecto `1024`; al menos `128`) |
+| `--window` | Máximo de puntos (pasos) de la ventana (por defecto `10000`; al menos `128`) |
+| `--nulls` | Nulos de cada tipo por fase (por defecto `10`) |
+| `--max-phases` | Tope de fases por fase (`c` u `os`) y corrida (por defecto `600`; al menos `2`) |
+| `--seed` | Semilla del generador de NumPy (por defecto la fija del script, `432432`) |
+| `--out` | Otra ruta del CSV; una ruta que termina en `/` es un directorio |
+
+**Qué mide.** Todo en **enteros exactos**: los precios son los enteros sin escalar de L1 (`lows`, como el
+modelo) y nada pasa por `ln` ni `exp`. Los pasos son `d_k = p_k − p_{k−1}`. Con `n` ticks, el ancla `p_0`
+(`p_R` en `c`, `p_C` en `os`) y `--step k`, la fase tiene `n // k` puntos: se usa un precio de cada `k`.
+Con `w = min(n // k, --window)`, la ventana de `c` son los precios de los ticks `n, n−k, …, n−w·k` (el
+ancla es el tick 0) y la de `os`, los de los ticks `0, k, …, w·k`; los `w` pasos entre ellos son los de la
+ventana.
+
+- **Hurst (DFA-1)** sobre los pasos `d` de la ventana: perfil = suma acumulada de `d − media`; escalas
+  `s` = 16, 32, 64… hasta `w/4`; en cada ventana no solapada de tamaño `s` se resta la recta de mínimos
+  cuadrados y `F(s)` es la raíz de la media de los cuadrados del residuo. `H` es la pendiente de `log F`
+  contra `log s`: cerca de 0,5 en ruido blanco y baja en una serie que alterna de signo. Es nulo si algún
+  `F(s)` es 0.
+- **Entropía de permutación** de orden 4 y retardo 1 sobre los precios enteros de la ventana, en lo
+  observado y en los nulos: la frecuencia de cada uno de los 24 órdenes de cuatro precios seguidos (un
+  empate se ordena por aparición), dividida por `ln 24`. Va de 0 (precios monótonos) a 1.
+- **Nulos:** el barajado (pasos permutados) y el sustituto IAAFT: parte del barajado y repite a lo
+  sumo 20 veces imponer las amplitudes de Fourier de los pasos originales y reasignar por rango los
+  valores originales, así que conserva exactamente su distribución. Los precios de un nulo son
+  `p_0 + suma acumulada de sus pasos`, exactos: así un precio que se repite a distancia es un empate
+  tanto en lo observado como en el nulo (con `ln` y `exp` dejaba de serlo y la entropía medía el
+  redondeo).
+- **Discreción**, por fase medida: la fracción de pasos iguales a cero y el número de valores distintos de
+  `d`. Con muchos ceros o pocos valores distintos la rejilla de precios pesa y un `D` se lee con cautela.
+- **`D`, `N`, `M` y `piso`:** `D` entre el observado (`N` fases) y el simulado (`M = N · nulls` valores);
+  `piso = 1,36 · √((N + M) / (N · M))`.
+- **Redundancia**, en la fase `c`: |ρ| de Spearman de cada medida contra `c_fourier_band_1` a
+  `c_fourier_band_7` (`spectrum.parquet`), `c_sign_autocorr` (`path.parquet`) y `c_ticks`
+  (`summaries.parquet`). Una columna constante da ρ indefinida (`nan`), que no cuenta.
+- **Tope de trabajo:** si entre todos los meses hay más de `--max-phases` fases con al menos `--min-ticks`
+  puntos, se toman espaciadas de forma pareja por posición (la j-ésima es la de índice
+  `⌊j · total / max⌋`). Un primer pase lee solo `summaries.parquet` para contarlas.
+
+**El CSV** (`l3_complexity_probe_<θ>.csv`, en `results/<ejecución>/`) tiene el encabezado
+`seccion,medida,nulo,fase,estadistico,valor`. `medida` es `hurst` o `pe` (entropía de permutación):
+
+| `seccion` | Filas |
+| --- | --- |
+| `cuantiles` | Por medida, fase y muestra (`nulo` = `observado`, `barajado` o `sustituto`): `p5`, `p50`, `p95` (rango más cercano) y `N` |
+| `D` | Por medida, fase y nulo: `D`, `N`, `M` y `piso` |
+| `rho` | Por medida, en `c`: el ρ contra cada columna (`estadistico` es su nombre) y `max_abs_rho` |
+| `veredicto` | Por medida, en `c`: `sigue` o `retirada` según la regla del script |
+| `discrecion` | Por fase medida, `medida` = `ceros` (fracción de pasos iguales a cero) o `distintos` (valores distintos de `d`), `nulo` = `observado`: `p5`, `p50` y `p95` |
+| `excluidos` | Por fase: `overshoot_vacio` (`os_ticks = 0`), `bajo_minimo` (`n // k` bajo `--min-ticks`), `tope` (las que `--max-phases` no toma) y `nulas` (algún `F(s)` en 0 en el observado o en un nulo); y `evento_mes_anterior` |
+| `muestras`, `config` | `N` de fases medidas por fase y los argumentos de la corrida (incluido `step`) |
+
+Con la misma semilla, los mismos archivos y los mismos argumentos el CSV es idéntico byte a byte: por eso el
+costo (que depende del reloj) no va al CSV.
+
+**La salida.** Una línea por mes en cuanto lo cierra (`mes <mes>: fases_c=… fases_os=… saltadas …`), las
+fases saltadas en total, el costo de cada medida sobre la serie observada (µs por punto y ms por fase), la
+tabla, la ruta del CSV, una línea `complexity probe os: …` con los `D` y el piso de la fase `os` y, como
+**última línea**: `complexity probe: theta=… meses=… fases_c=… fases_os=… ceros_c=… step=… D_hurst_sub=…
+D_pe_sub=… D_hurst_bar=… D_pe_bar=… piso_c=… rho_hurst=… rho_pe=… us_hurst=… us_pe=… pared_s=…
+veredicto_hurst=… veredicto_pe=…`. `sub` es el sustituto y `bar` el barajado; los `D_*`, `piso_c` y `rho_*`
+son los de la fase `c`; `ceros_c` es la mediana en `c` de la fracción de pasos iguales a cero; `us_*` son
+microsegundos por punto. Un fallo imprime `FALLO …` y deja los `veredicto_*` en
+`fallo`.
+
+Código **0** si midió; **1** si falta un archivo, la lectura falla, los archivos no cuadran entre sí o no
+queda ninguna fase `c` medible; **2** por uso (θ o meses mal escritos, meses repetidos, `--step` bajo 1,
+`--min-ticks` o `--window` bajo 128, `--nulls` bajo 1, `--max-phases` bajo 2, `--out` `gs://` fuera de `results/`).
+
+**Memoria.** Los ticks se leen un row group a la vez (`agg_trade_id` y `price`) y los archivos por evento,
+por lotes. El estado de una fase abierta es su ventana (a lo sumo `--window + 1` precios), que se libera al
+cerrarla (solo se guarda un precio de cada `k` ticks); los nulos suman `--nulls` copias de la ventana por
+tipo, transitorias.
+
+**Cómo correrla.** Necesita `events.parquet` de L2, `summaries.parquet`, `path.parquet` y
+`spectrum.parquet` de L3 del θ en cada mes, y el `consolidated.parquet` de L1 de cada mes. *Actions → Run
+job*: `job` = `ops-script`, `script` = `gs://<proyecto>-ops/scripts/l3_complexity_probe.py` (la URI
+completa), `args` = `--theta <θ> --months YYYY-MM,YYYY-MM`. Las corridas las lanza y aprueba el humano.
 
 ### La trampa del 403 por prefijo
 
