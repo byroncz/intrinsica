@@ -1232,7 +1232,7 @@ locales (`uv run`).
 | `l3_frontier_probe.py` | Mide en la nube por qué la verificación de la frontera no escala con los lectores (ITSC-421): sobre 600 `(θ, mes)` repite la secuencia de `invalid_reason` por etapa con 1, 8 y 64 hilos y tres variantes (solo pie, cliente de GCS sin `GcsFileSystem`, los 64 lectores repartidos en 4 procesos); da CPU ÷ pared, pies por segundo y `veredicto=cpu\|gil\|espera\|mixto` | sin `args` |
 | `l3_io_probe.py` | Mide si el tope de pyarrow contra GCS también frena las lecturas de datos y las escrituras (ITSC-425): baja una muestra fija de row groups de `consolidated.parquet` con 1, 2, 8 y 32 hilos (pyarrow compartido, pyarrow por hilo y cliente de Google) y sube objetos de 4 MiB con 1, 4 y 12 escritores (pyarrow y cliente de Google); da `lecturas`, `escrituras` y `candado` | sin `args`; el humano borra después el prefijo `io_probe/` (≈ 300 MiB) |
 | `l3_phase_sizes.py` | Cuenta, por θ y por fase (`c` y `os`), cuántas fases alcanzan cada tamaño en ticks (ITSC-431): lee solo `c_ticks` y `os_ticks` de cada `summaries.parquet`, un row group a la vez, con lectores en paralelo; da `fases`, `ge_<N>`, `puntos` y `pares` | sin `args`; por tramos, `--from 2018-01 --to 2020-12` |
-| `l3_complexity_probe.py` | Sonda de la familia X (ITSC-432): Hurst (DFA-1) y entropía de permutación de una ventana de cada fase contra el barajado y contra un sustituto que conserva el espectro (IAAFT), redundancia con las columnas de F, T y `c_ticks` y costo por punto; lee L1, `events`, `summaries`, `path` y `spectrum` sobre un θ y una lista de meses; da D, piso, ρ y el veredicto `sigue\|retirada` por medida | `--theta 0.05 --months 2021-06,2024-06` |
+| `l3_complexity_probe.py` | Sonda de la familia X (ITSC-432): Hurst (DFA-1) y entropía de permutación de una ventana de cada fase contra el barajado y contra un sustituto que conserva el espectro (IAAFT), redundancia con las columnas de F, T y `c_ticks` y costo por punto; lee L1, `events`, `summaries`, `path` y `spectrum` sobre un θ y una lista de meses; da D, piso, ρ y el veredicto `sigue\|retirada` por medida | `--theta <θ> --months YYYY-MM,YYYY-MM` |
 
 El apply del stack `ops` publica todos estos scripts en `scripts/`; verifica con
 `gcloud storage ls gs://<proyecto>-ops/scripts/`.
@@ -2463,7 +2463,7 @@ El apply del stack `ops` lo publica en `scripts/`; verifica con
 
 | `args` | Efecto |
 | --- | --- |
-| `--theta 0.05 --months 2021-06,2024-06` | Obligatorios: un θ (8 decimales como máximo) y meses `YYYY-MM` separados por comas, sin repetir |
+| `--theta <θ> --months YYYY-MM,YYYY-MM` | Obligatorios: un θ (8 decimales como máximo) y meses `YYYY-MM` separados por comas, sin repetir |
 | `--l1-root`, `--l2-root`, `--l3-root` | Otras raíces, también locales (por defecto `gs://<proyecto>-landing/l1`, `-dc-events/l2` y `-dc-descriptors/l3`) |
 | `--provider`, `--market`, `--asset` | Otra serie (por defecto `binance`, `spot`, `BTCUSDT`) |
 | `--min-ticks` | Mínimo de retornos de una fase para medirla (por defecto `1024`; al menos `128`) |
@@ -2506,7 +2506,7 @@ El apply del stack `ops` lo publica en `scripts/`; verifica con
 | `cuantiles` | Por medida, fase y muestra (`nulo` = `observado`, `barajado` o `sustituto`): `p5`, `p50`, `p95` (rango más cercano) y `N` |
 | `D` | Por medida, fase y nulo: `D`, `N`, `M` y `piso` |
 | `rho` | Por medida, en `c`: el ρ contra cada columna (`estadistico` es su nombre) y `max_abs_rho` |
-| `veredicto` | Por medida, en `c`: `sigue` si `D` contra el sustituto es ≥ 0,10 y ≥ `piso` y `max_abs_rho` ≤ 0,9; si no, `retirada` |
+| `veredicto` | Por medida, en `c`: `sigue` o `retirada` según la regla del script |
 | `excluidos` | Por fase: `overshoot_vacio` (`os_ticks = 0`), `bajo_minimo`, `tope` (las que `--max-phases` no toma) y `nulas` (algún `F(s)` en 0 en el observado o en un nulo); y `evento_mes_anterior` |
 | `muestras`, `config` | `N` de fases medidas por fase y los argumentos de la corrida |
 
@@ -2533,7 +2533,7 @@ cerrarla; los nulos suman `--nulls` copias de la ventana por tipo, transitorias.
 **Cómo correrla.** Necesita `events.parquet` de L2, `summaries.parquet`, `path.parquet` y
 `spectrum.parquet` de L3 del θ en cada mes, y el `consolidated.parquet` de L1 de cada mes. *Actions → Run
 job*: `job` = `ops-script`, `script` = `gs://<proyecto>-ops/scripts/l3_complexity_probe.py` (la URI
-completa), `args` = `--theta 0.05 --months 2021-06,2024-06`. Las corridas las lanza y aprueba el humano.
+completa), `args` = `--theta <θ> --months YYYY-MM,YYYY-MM`. Las corridas las lanza y aprueba el humano.
 
 ### La trampa del 403 por prefijo
 
