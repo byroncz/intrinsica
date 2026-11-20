@@ -31,6 +31,7 @@ BASE = 10**15
 LAST_LINE = re.compile(
     r"complexity probe: theta=(?P<theta>\S+) meses=(?P<meses>\S+) "
     r"fases_c=(?P<fases_c>\S+) fases_os=(?P<fases_os>\S+) "
+    r"ceros_c=(?P<ceros_c>\S+) step=(?P<step>\S+) "
     r"D_hurst_sub=(?P<D_hurst_sub>\S+) D_pe_sub=(?P<D_pe_sub>\S+) "
     r"D_hurst_bar=(?P<D_hurst_bar>\S+) D_pe_bar=(?P<D_pe_bar>\S+) "
     r"piso_c=(?P<piso_c>\S+) rho_hurst=(?P<rho_hurst>\S+) rho_pe=(?P<rho_pe>\S+) "
@@ -433,7 +434,8 @@ def test_window_takes_the_last_of_c_and_the_first_of_os(
     ]
     assert len(seen) == len(expected)
     for buffer, want in zip(seen, expected, strict=True):
-        assert buffer.tolist() == [float(v) for v in want]
+        assert buffer.dtype == np.int64
+        assert buffer.tolist() == want
     assert last_line(capsys)["fases_c"] == "3"
 
 
@@ -446,7 +448,7 @@ def test_max_phases_takes_evenly_spaced_phases(probe, tmp_path, monkeypatch, cap
 
     # ⌊j · 10 / 4⌋ = 0, 2, 5, 7
     taken = [events[i].c[-1] for i in (0, 2, 5, 7)]
-    assert [b[-1] for b in seen] == [float(v) for v in taken]
+    assert [b[-1] for b in seen] == taken
     assert last_line(capsys)["fases_c"] == "4"
     assert table(tmp_path / "o.csv")[("excluidos", "", "", "c", "tope")] == "6"
 
@@ -470,6 +472,151 @@ def test_max_phases_counts_across_months(probe, tmp_path, monkeypatch, capsys):
     ]
     assert table(out)[("config", "", "", "", "meses")] == "2023-03,2023-04"
     assert table(out)[("muestras", "", "", "c", "N")] == "3"
+
+
+def test_step_counts_the_window_and_the_minimum_in_points(
+    probe, tmp_path, monkeypatch, capsys
+):
+    """C2: `--window` y `--min-ticks` son puntos; la ventana de c son los últimos `w` pasos."""
+    # 500 ticks con k = 3 son 166 puntos: miden c; 300 ticks son 100, bajo el mínimo (128).
+    # El segundo evento (301 y 120 ticks) queda entero bajo el mínimo.
+    events = [*noise_events(1, 500, 300), *noise_events(1, 301, 120, seed=5)]
+    write_lake(tmp_path, events)
+    seen = spy_windows(monkeypatch, probe)
+    out = tmp_path / "o.csv"
+
+    assert probe.main(argv(tmp_path, out, "--step", "3", "--window", "150")) == 0
+
+    first = events[0]
+    ticks = [BASE, *first.c]  # el ancla es el tick 0
+    # Los ticks 500, 497, …: congruentes con 500 módulo 3; los últimos 150 pasos y el previo.
+    assert [b.tolist() for b in seen] == [ticks[500 % 3 :: 3][-151:]]
+    assert seen[0].dtype == np.int64
+    assert seen[0][-1] == first.c[-1]  # c termina en su último tick
+    values = table(out)
+    assert values[("excluidos", "", "", "c", "bajo_minimo")] == "1"
+    assert values[("excluidos", "", "", "os", "bajo_minimo")] == "2"
+    assert values[("muestras", "", "", "c", "N")] == "1"
+    assert values[("config", "", "", "", "step")] == "3"
+    assert last_line(capsys)["step"] == "3"
+
+
+def test_step_phase_offsets_follow_the_last_tick_of_c_and_the_anchor_of_os(
+    probe, tmp_path, monkeypatch
+):
+    """Con `n` no múltiplo de `k`, c toma los ticks `n % k, n % k + k, …, n`; os, `0, k, …`."""
+    event = noise_events(1, 403, 410, seed=8)[0]
+    write_lake(tmp_path, [event])
+    seen = spy_windows(monkeypatch, probe)
+
+    assert probe.main(argv(tmp_path, tmp_path / "o.csv", "--step", "3")) == 0
+
+    c_ticks = [BASE, *event.c]
+    os_ticks = [event.c[-1], *event.os]
+    assert (
+        seen[0].tolist() == c_ticks[403 % 3 :: 3]
+    )  # 1, 4, …, 403: 135 puntos y el previo
+    assert seen[1].tolist() == os_ticks[::3]  # 0, 3, …, 408: 137 puntos y el ancla
+    assert len(seen[0]) == 135 and len(seen[1]) == 137
+
+
+def test_nulls_work_on_exact_integers_and_end_at_the_same_price(probe, monkeypatch):
+    """C1: pasos enteros, precios enteros de los nulos (`p_0 + suma acumulada`) y sin `exp`."""
+    rng = np.random.default_rng(3)
+    buffer = BASE + np.cumsum(np.append(0, rng.integers(-3, 4, 600))).astype(np.int64)
+    inputs = []
+    original = probe.permutation_entropy
+
+    def spy(prices):
+        inputs.append(np.array(prices))
+        return original(prices)
+
+    monkeypatch.setattr(probe, "permutation_entropy", spy)
+    result = probe.measure_window(buffer, np.random.default_rng(1), 4)
+
+    observed, barajado, sustituto = inputs
+    assert observed.dtype == barajado.dtype == sustituto.dtype == np.int64
+    assert observed.tolist() == buffer[1:].tolist()
+    for walk in (barajado, sustituto):
+        assert walk.shape == (4, 600)
+        # La suma de los pasos se conserva: todo nulo cierra en el mismo precio que lo observado.
+        assert (walk[:, -1] == buffer[-1]).all()
+        steps = np.diff(np.column_stack((np.full(4, buffer[0]), walk)), axis=1)
+        assert np.array_equal(
+            np.sort(steps, axis=1), np.tile(np.sort(np.diff(buffer)), (4, 1))
+        )
+    assert result.points == 600
+
+
+def test_discreteness_of_the_steps_goes_to_the_csv_and_the_last_line(
+    probe, tmp_path, capsys
+):
+    """C3: fracción de ceros y valores distintos de `d` por fase medida."""
+    events = noise_events(5, 300, 200)
+    # c con pasos 1, 0, −1 en ciclo desde el ancla: un tercio de ceros y 3 valores distintos.
+    previous = BASE
+    for event in events:
+        event.c = (previous + np.cumsum(np.tile([1, 0, -1], 100))).tolist()
+        event.os = walk(
+            np.random.default_rng(6).standard_normal(200) * 1e-4, event.c[-1]
+        )
+        previous = event.os[-1]
+    write_lake(tmp_path, events)
+    out = tmp_path / "o.csv"
+    assert probe.main(argv(tmp_path, out)) == 0
+
+    values = table(out)
+    for q in (5, 50, 95):
+        assert float(values[("discrecion", "ceros", "observado", "c", f"p{q}")]) == (
+            pytest.approx(1 / 3)
+        )
+        assert values[("discrecion", "distintos", "observado", "c", f"p{q}")] == "3"
+        # En os los pasos son de ruido: casi ningún cero y muchos valores distintos.
+        assert float(values[("discrecion", "ceros", "observado", "os", f"p{q}")]) < 0.05
+        assert (
+            float(values[("discrecion", "distintos", "observado", "os", f"p{q}")]) > 100
+        )
+    figures = last_line(capsys)
+    assert figures["step"] == "1"
+    assert float(figures["ceros_c"]) == pytest.approx(1 / 3, abs=1e-4)
+
+
+def test_control_a_gridded_linear_process_is_not_distinguished_from_its_surrogate(
+    probe,
+):
+    """C4: un AR(1) gaussiano llevado a rejilla no se distingue del sustituto, en las dos medidas.
+
+    Los pasos son `round(2 · x)` con `x` un AR(1) gaussiano (φ = 0,2, varianza 1): cerca de 20 % de
+    ceros y precios que se repiten a distancia. Es un proceso lineal, y el sustituto (que conserva
+    su espectro y su distribución) lo reproduce, así que `D` queda bajo el piso: 200 fases de 2 048
+    puntos y 10 nulos. Con `ln`/`exp` en los nulos, `D` de la entropía contra el sustituto salía
+    0,29 (el piso es 0,10): los precios repetidos eran empates exactos en lo
+    observado y dejaban de serlo en los nulos.
+    """
+    fases, puntos, nulls, phi = 200, 2048, 10, 0.2
+    rng = np.random.default_rng(432)
+    noise = rng.standard_normal((puntos, fases))
+    x = np.empty_like(noise)
+    x[0] = noise[0]
+    for i in range(1, puntos):
+        x[i] = phi * x[i - 1] + math.sqrt(1 - phi**2) * noise[i]
+    steps = np.rint(2.0 * x).astype(np.int64).T  # (fases, puntos)
+    assert 0.18 < (steps == 0).mean() < 0.22
+
+    samples = probe.Samples({"c": fases, "os": 0}, nulls)
+    for row in steps:
+        buffer = 10**13 + np.concatenate(
+            ([0], np.cumsum(row))
+        )  # ≈ 100 000 USDT sin escalar
+        samples.add("c", probe.measure_window(buffer, rng, nulls), [0.0] * 9)
+    dist = probe.distances(samples)
+
+    for name in ("hurst", "pe"):
+        d, n, m, floor = dist[name, "c", "sustituto"]
+        assert (n, m) == (fases, fases * nulls)
+        assert d < floor, f"{name}: D={d:.4f} no queda bajo el piso {floor:.4f}"
+    # Y el barajado sí se distingue: el control mide algo.
+    assert dist["pe", "c", "barajado"][0] > 0.9
 
 
 def test_same_seed_same_csv_and_another_seed_another(probe, tmp_path):
@@ -588,6 +735,7 @@ def test_misaligned_files_exit_1(probe, tmp_path, capsys):
         ("--months", "2023-13"),
         ("--months", "2023-03,2023-03"),
         ("--window", "64"),
+        ("--step", "0"),
         ("--min-ticks", "100"),
         ("--nulls", "0"),
         ("--max-phases", "1"),

@@ -3,35 +3,53 @@
 Decide si dos medidas baratas de complejidad dicen algo que L3 no diga ya. Sobre un θ y una lista
 de meses mide, por fase (`c` = (R, C] y `os` = (C, E]), el exponente de Hurst por DFA-1 y la
 entropía de permutación de una ventana de la fase, y las compara con dos nulos: el barajado de los
-retornos y un sustituto que conserva su espectro (IAAFT), que es lo que la familia F ya guarda. Si
+pasos y un sustituto que conserva su espectro (IAAFT), que es lo que la familia F ya guarda. Si
 la medida no se distingue del sustituto, no ve nada que F no vea. El tamaño del efecto es la
 distancia de Kolmogorov-Smirnov D; nunca se reporta un valor p. Además mide la redundancia
 (Spearman) con las columnas que ya existen y el costo por punto. Qué medidas siguen lo decide el
 arquitecto con las cifras; el script solo aplica la regla del veredicto.
 
-Serie y ventana. Con `n` ticks y el ancla `p_0` (`p_R` en c, `p_C` en os, como F), los retornos son
-`r_k = ln(p_k / p_{k−1})`, k = 1..n (el primer paso sale del ancla; los ceros se conservan). De
-cada fase con `n ≥ --min-ticks` se usa un tramo seguido de a lo sumo `--window` retornos: los
-últimos de c y los primeros de os. Con `w = min(n, --window)`, el tramo de c son `r_{n−w+1} … r_n`
-y el de os, `r_1 … r_w`; los precios de la ventana son los `w` ticks que los cierran, y su `p_0` es
-el tick anterior (el ancla si el tramo parte de ella). La memoria por fase abierta es O(ventana).
+Dominio: enteros exactos. Los precios son los enteros sin escalar de L1 (`lows`, como el modelo)
+y nada pasa por `ln` ni `exp`: los pasos son `d_k = p_k − p_{k−1}`, enteros. Un precio que se
+repite a distancia es un empate exacto en lo observado; si los nulos se armaran con `exp`, esos
+mismos empates dejarían de serlo y la entropía de permutación vería una diferencia que es solo
+del redondeo (con `ln`/`exp`, un proceso lineal en rejilla con 20 % de pasos cero daba `D` de
+entropía de 0,55 a 0,59 contra el sustituto; en enteros da 0,04 a 0,08).
 
-Hurst (DFA-1) sobre los retornos de la ventana. Perfil = suma acumulada de `r − media`. Escalas
+Serie y ventana. Una fase con `n` ticks y el ancla `p_0` (`p_R` en c, `p_C` en os, como F) se mira
+de a `--step` ticks (`k`, 1 por defecto, el mismo para toda la corrida): solo se usa un precio de
+cada `k`, así que la fase tiene `n // k` pasos. `--window` y `--min-ticks` se cuentan en esos
+puntos, no en ticks: la ventana cubre a lo sumo `window × k` ticks. De cada fase con
+`n // k ≥ --min-ticks` se usa un tramo seguido de a lo sumo `--window` pasos: los últimos de c y
+los primeros de os. Con `w = min(n // k, --window)`, la ventana de c son los precios de los ticks
+`n, n−k, …, n−w·k` (los de índice congruente con `n` módulo `k`, contando el ancla como tick 0) y
+la de os, los de los ticks `0, k, …, w·k`; los `w` pasos entre ellos son los de la ventana y su
+`p_0` es el primer precio (el ancla si el tramo parte de ella). La memoria por fase abierta es
+O(ventana).
+
+Hurst (DFA-1) sobre los pasos `d` de la ventana. Perfil = suma acumulada de `d − media`. Escalas
 `s` = 16, 32, 64… hasta `w/4`. En cada ventana no solapada de tamaño `s` se resta la recta de
 mínimos cuadrados; `F(s)` es la raíz de la media de los cuadrados del residuo y `H` la pendiente
 de `log F` contra `log s`. Es nulo (`nan`, y la fase se salta como `nulas`) si algún `F(s)` es 0.
 
-Entropía de permutación de orden 4 y retardo 1 sobre los precios de la ventana: la frecuencia de
-cada uno de los 4! = 24 órdenes de cuatro precios seguidos, con los empates ordenados por
-aparición, `−Σ p ln p / ln 24`, en [0, 1]. Los precios monótonos dan 0.
+Entropía de permutación de orden 4 y retardo 1 sobre los precios enteros de la ventana
+(`p_1 … p_w`, en lo observado y en los nulos): la frecuencia de cada uno de los 4! = 24 órdenes de
+cuatro precios seguidos, con los empates ordenados por aparición, `−Σ p ln p / ln 24`, en [0, 1].
+Los precios monótonos dan 0.
 
 Nulos, `--nulls` (10) de cada tipo por fase, con una sola semilla:
-  - barajado: los retornos de la ventana permutados;
+  - barajado: los pasos `d` de la ventana permutados;
   - sustituto (IAAFT): parte del barajado y repite a lo sumo 20 veces imponer las amplitudes de
-    Fourier de los retornos originales conservando las fases actuales y reasignar por rango los
+    Fourier de los pasos originales conservando las fases actuales y reasignar por rango los
     valores originales. Termina con la reasignación: conserva exactamente la distribución de los
-    retornos. Se detiene antes si la reasignación ya no cambia.
-  - los precios de un nulo son `p_0 · exp(suma acumulada de sus retornos)`.
+    pasos. Se detiene antes si la reasignación ya no cambia.
+  - los precios de un nulo son `p_0 + suma acumulada de sus pasos`, en enteros: exactos, y
+    terminan en el mismo precio que lo observado.
+
+Diagnóstico de discreción, por fase medida: la fracción de pasos iguales a cero y el número de
+valores distintos de `d`. El CSV trae sus cuantiles 5, 50 y 95 por fase, y la última línea la
+mediana de la fracción de ceros en c (`ceros_c`): con muchos ceros o pocos valores distintos, la
+rejilla de precios pesa y un `D` se lee con cautela.
 
 D es la distancia exacta `sup |F_obs − F_sim|` entre el observado (una muestra de `N` fases) y el
 simulado (`M = N · nulls` valores); `piso = 1,36 · √((N + M) / (N · M))`. Los cuantiles usan el
@@ -51,7 +69,7 @@ de índice `⌊j · total / max⌋`. Un primer pase lee solo `summaries.parquet`
 semilla, los mismos archivos y los mismos argumentos el CSV es idéntico byte a byte; por eso el costo
 (que depende del reloj) va al log y a la última línea, no al CSV.
 
-Se saltan, y se cuentan: la fase bajo el mínimo, la de overshoot vacío (`os_ticks = 0`), la que el
+Se saltan, y se cuentan: la fase bajo el mínimo (`n // k < --min-ticks`), la de overshoot vacío (`os_ticks = 0`), la que el
 tope no toma, el evento que arranca en el mes anterior y no cabe en el L1 del mes, y la fase nula
 (algún `F(s)` en 0 en el observado o en un nulo).
 
@@ -61,7 +79,7 @@ Args:
   --l2-root gs://<proyecto>-dc-events/l2      OPS_RESULTS_URI; también rutas locales con la
   --l3-root gs://<proyecto>-dc-descriptors/l3  misma disposición hive)
   --provider binance --market spot --asset BTCUSDT
-  --min-ticks 1024   --window 10000   --max-phases 600
+  --step 1   --min-ticks 1024   --window 10000   --max-phases 600   (ventana y mínimo, en puntos)
   --nulls 10   --seed <semilla fija del script>
   --out <ruta o gs://…/archivo.csv>   (por defecto, `l3_complexity_probe_<θ>.csv` bajo
                                        OPS_RESULTS_URI o, en local, en el directorio actual;
@@ -76,17 +94,18 @@ barra y la condición IAM por prefijo de `ops-script` lo niega con 403 (runbook 
 
 Memoria: los ticks se leen un row group a la vez (`agg_trade_id` y `price`); los archivos por
 evento, en lotes de `BATCH` filas. El estado por fase abierta es una ventana de a lo sumo
-`--window + 1` precios; se libera al cerrar la fase. Los nulos de una fase suman `--nulls` copias de
-la ventana por tipo, transitorias. Lo único que crece con la corrida son los resultados de las a lo
-sumo `--max-phases` fases por fase.
+`--window + 1` precios (solo los de cada `k`-ésimo tick); se libera al cerrar la fase. Los nulos
+de una fase suman `--nulls` copias de la ventana por tipo, transitorias. Lo único que crece con la
+corrida son los resultados de las a lo sumo `--max-phases` fases por fase.
 
 Salida: una línea por mes al cerrarlo, las fases saltadas, el costo, la tabla del CSV y su ruta, una
 línea de la fase os y, como última línea, `complexity probe: theta=… meses=… fases_c=… fases_os=…
-D_hurst_sub=… D_pe_sub=… D_hurst_bar=… D_pe_bar=… piso_c=… rho_hurst=… rho_pe=… us_hurst=… us_pe=…
-pared_s=… veredicto_hurst=sigue|retirada|fallo veredicto_pe=sigue|retirada|fallo`. `sub` es el
+ceros_c=… step=… D_hurst_sub=… D_pe_sub=… D_hurst_bar=… D_pe_bar=… piso_c=… rho_hurst=…
+rho_pe=… us_hurst=… us_pe=… pared_s=… veredicto_hurst=sigue|retirada|fallo
+veredicto_pe=sigue|retirada|fallo`. `sub` es el
 sustituto y `bar` el barajado; los D, `piso_c` y `rho_*` son los de la fase c (los de os van en el
-CSV y en la línea `complexity probe os: …`); `us_*` son microsegundos por punto de la serie
-observada.
+CSV y en la línea `complexity probe os: …`); `ceros_c` es la mediana en c de la fracción de
+pasos iguales a cero; `us_*` son microsegundos por punto de la serie observada.
 
 Códigos: 0 si midió; 1 si falta algún archivo, la lectura falla, los archivos no cuadran entre sí o
 no queda ninguna fase c medible; 2 por uso. Solo lee; lo único que escribe es el CSV.
@@ -114,6 +133,7 @@ DEFAULT_SEED = 432_432
 DEFAULT_NULLS = 10
 DEFAULT_WINDOW = 10_000
 DEFAULT_MIN_TICKS = 1_024
+DEFAULT_STEP = 1
 DEFAULT_MAX_PHASES = 600
 # Umbrales de la regla de lectura, fijados antes de medir.
 D_THRESHOLD = 0.10
@@ -268,14 +288,14 @@ def single(column: pa.ChunkedArray | pa.Array) -> pa.Array:
 
 
 def tick_groups(parquet: pq.ParquetFile):
-    """`(ids, precios)` de cada row group no vacío de L1, uno a la vez; precios en f64."""
+    """`(ids, precios)` de cada row group no vacío de L1, uno a la vez; precios enteros (int64)."""
     last = None
     for group in range(parquet.num_row_groups):
         if not parquet.metadata.row_group(group).num_rows:
             continue
         table = parquet.read_row_group(group, columns=TICK_COLUMNS)
         ids = int64s(single(table.column("agg_trade_id")))
-        prices = lows(single(table.column("price"))).astype(np.float64)
+        prices = lows(single(table.column("price"))).astype(np.int64)
         if (len(ids) > 1 and np.diff(ids).min() <= 0) or (
             last is not None and ids[0] <= last
         ):
@@ -430,13 +450,16 @@ def iaaft(shuffled: np.ndarray, original: np.ndarray) -> np.ndarray:
 
 
 class Result:
-    """Lo medido en una ventana: observado `(2,)`, nulos `(nulls, 2)` por tipo y tiempos."""
+    """Lo medido en una ventana: observado `(2,)`, nulos `(nulls, 2)` por tipo, tiempos y rejilla."""
 
-    def __init__(self, observed, simulated, seconds, points):
+    def __init__(self, observed, simulated, seconds, points, discreteness):
         self.observed = observed  # [H, entropía]
         self.simulated = simulated  # {tipo de nulo: (nulls, 2)}
         self.seconds = seconds  # (hurst, pe) sobre la serie observada
         self.points = points
+        self.discreteness = (
+            discreteness  # (fracción de pasos en cero, valores distintos)
+        )
 
     def valid(self) -> bool:
         return bool(
@@ -446,33 +469,34 @@ class Result:
 
 
 def measure_window(buffer: np.ndarray, rng: np.random.Generator, nulls: int) -> Result:
-    """Mide una ventana. `buffer` es `[p_0, p_1 … p_w]`: el precio previo y los `w` de la ventana.
+    """Mide una ventana. `buffer` es `[p_0, p_1 … p_w]` (int64): el precio previo y los `w` de la ventana.
 
-    Retornos `r_k = ln(p_k / p_{k−1})` y entropía sobre `p_1 … p_w`. Cronometra solo el cálculo
-    de cada medida sobre la serie observada.
+    Pasos `d_k = p_k − p_{k−1}` (enteros exactos) para Hurst y para los nulos; entropía sobre los
+    precios `p_1 … p_w`, y en los nulos sobre `p_0 + suma acumulada de sus pasos`, también enteros.
+    Cronometra solo el cálculo de cada medida sobre la serie observada.
     """
-    returns = np.log(buffer[1:] / buffer[:-1])
+    steps = np.diff(buffer)
     prices = buffer[1:]
     start = time.perf_counter()
-    h = float(hurst(returns)[0])
+    h = float(hurst(steps)[0])
     middle = time.perf_counter()
     entropy = float(permutation_entropy(prices)[0])
     end = time.perf_counter()
 
-    shuffled = np.tile(returns, (nulls, 1))
+    shuffled = np.tile(steps, (nulls, 1))
     rng.permuted(shuffled, axis=1, out=shuffled)
-    surrogate = iaaft(shuffled.copy(), returns)
+    surrogate = iaaft(shuffled.copy(), steps)
     simulated = {}
     for kind, block in (("barajado", shuffled), ("sustituto", surrogate)):
         walk = np.cumsum(block, axis=1)
-        np.exp(walk, out=walk)
-        walk *= buffer[0]
+        walk += buffer[0]
         simulated[kind] = np.stack((hurst(block), permutation_entropy(walk)), axis=1)
     return Result(
         np.array([h, entropy]),
         simulated,
         (middle - start, end - middle),
-        len(returns),
+        len(steps),
+        (np.count_nonzero(steps == 0) / len(steps), len(np.unique(steps))),
     )
 
 
@@ -494,6 +518,7 @@ class Samples:
             for p in PHASES
         }
         self.columns = np.empty((capacity["c"], len(REDUNDANCY)))
+        self.grid = {p: np.empty((capacity[p], 2)) for p in PHASES}  # ceros, distintos
         # Costo: segundos de cada medida, puntos, y el mayor tiempo de una fase.
         self.seconds = [0.0, 0.0]
         self.worst = [0.0, 0.0]
@@ -510,6 +535,7 @@ class Samples:
     def add(self, phase: str, result: Result, columns: list | None) -> None:
         i = self.n[phase]
         self.obs[phase][i] = result.observed
+        self.grid[phase][i] = result.discreteness
         for kind in NULL_KINDS:
             self.sim[kind, phase][i * self.nulls : (i + 1) * self.nulls] = (
                 result.simulated[kind]
@@ -520,6 +546,10 @@ class Samples:
 
     def observed(self, phase: str, measure: int) -> np.ndarray:
         return self.obs[phase][: self.n[phase], measure]
+
+    def discrete(self, phase: str, index: int) -> np.ndarray:
+        """Por fase medida: `index` 0 es la fracción de pasos en cero; 1, los valores distintos."""
+        return self.grid[phase][: self.n[phase], index]
 
     def simulated(self, kind: str, phase: str, measure: int) -> np.ndarray:
         return self.sim[kind, phase][: self.n[phase] * self.nulls, measure]
@@ -633,8 +663,8 @@ def verdict_of(d: float, floor: float, rho: float) -> str:
 # ----------------------------------------------------------------------------------------------
 
 
-def count_eligible(uri: str, min_ticks: int) -> Counter:
-    """Las fases con `ticks ≥ min_ticks` de un `summaries.parquet`, por fase (solo lee 2 columnas)."""
+def count_eligible(uri: str, min_ticks: int, step: int) -> Counter:
+    """Las fases con `ticks // step ≥ min_ticks` de un `summaries.parquet` (lee 2 columnas)."""
     counts: Counter = Counter()
     with ExitStack() as stack:
         parquet = open_parquet(stack, uri)
@@ -644,8 +674,12 @@ def count_eligible(uri: str, min_ticks: int) -> Counter:
         for batch in parquet.iter_batches(
             batch_size=BATCH, columns=["c_ticks", "os_ticks"]
         ):
-            counts["c"] += int((int64s(batch.column("c_ticks")) >= min_ticks).sum())
-            counts["os"] += int((int64s(batch.column("os_ticks")) >= min_ticks).sum())
+            counts["c"] += int(
+                (int64s(batch.column("c_ticks")) // step >= min_ticks).sum()
+            )
+            counts["os"] += int(
+                (int64s(batch.column("os_ticks")) // step >= min_ticks).sum()
+            )
     return counts
 
 
@@ -672,30 +706,51 @@ class Plan:
 
 
 class Phase:
-    """Una fase abierta: guarda solo la ventana. `c` los últimos precios; `os`, los primeros."""
+    """Una fase abierta: guarda solo la ventana. `c` los últimos precios; `os`, los primeros.
 
-    __slots__ = ("anchor", "buffer", "hi", "keep", "lo", "n", "name", "read", "seen")
+    Solo guarda un precio de cada `step` ticks. El tick `i` (el ancla es el 0) entra si `i` es
+    congruente con `offset` módulo `step`: en c el último tick (`n`) es el que cierra la ventana, así
+    que `offset = n % step`; en os la ventana parte del ancla, así que `offset = 0`.
+    """
 
-    def __init__(self, name, lo, hi, anchor, n, window):
-        self.name, self.lo, self.hi, self.n = name, lo, hi, n
-        self.anchor = anchor
+    __slots__ = (
+        "buffer",
+        "hi",
+        "keep",
+        "lo",
+        "n",
+        "name",
+        "offset",
+        "read",
+        "seen",
+        "step",
+    )
+
+    def __init__(self, name, lo, hi, anchor, n, window, step):
+        self.name, self.lo, self.hi, self.n, self.step = name, lo, hi, n, step
         # `w + 1` valores: el precio previo a la ventana y sus `w` precios.
-        self.keep = min(n, window) + 1
+        self.keep = min(n // step, window) + 1
+        self.offset = n % step if name == "c" else 0
         self.read = False
         self.seen = 0
-        self.buffer = np.array([anchor])
+        self.buffer = np.array([anchor] if self.offset == 0 else [], dtype=np.int64)
 
     def feed(self, chunk: np.ndarray) -> None:
         """Suma un tramo de precios; en c conserva los últimos `keep`, en os los primeros."""
+        first = (self.offset - self.seen - 1) % self.step
+        picked = chunk[first :: self.step]
         if self.name == "c":
-            excess = len(self.buffer) + len(chunk) - self.keep
+            excess = len(self.buffer) + len(picked) - self.keep
             self.buffer = np.concatenate(
-                (self.buffer[max(0, excess) :], chunk[max(0, len(chunk) - self.keep) :])
+                (
+                    self.buffer[max(0, excess) :],
+                    picked[max(0, len(picked) - self.keep) :],
+                )
             )
         else:
             room = self.keep - len(self.buffer)
             if room > 0:
-                self.buffer = np.concatenate((self.buffer, chunk[:room]))
+                self.buffer = np.concatenate((self.buffer, picked[:room]))
         self.seen += len(chunk)
 
 
@@ -718,16 +773,24 @@ class Event:
         # Las columnas contra las que se mide la redundancia, en el orden de `REDUNDANCY`.
         self.columns = [*spectrum[1:], walk[1], c_ticks]
         self.phases = [
-            Phase("c", self.ref_id, self.conf_id, float(ref_price), c_ticks, ns.window),
             Phase(
-                "os", self.conf_id, self.ext_id, float(conf_price), os_ticks, ns.window
+                "c", self.ref_id, self.conf_id, ref_price, c_ticks, ns.window, ns.step
+            ),
+            Phase(
+                "os",
+                self.conf_id,
+                self.ext_id,
+                conf_price,
+                os_ticks,
+                ns.window,
+                ns.step,
             ),
         ]
         self.truncated = False
         for phase in self.phases:
             if phase.n == 0:
                 counters[phase.name, "overshoot_vacio"] += 1
-            elif phase.n < ns.min_ticks:
+            elif phase.n // ns.step < ns.min_ticks:
                 counters[phase.name, "bajo_minimo"] += 1
             elif plan.take(phase.name):
                 phase.read = True
@@ -868,6 +931,16 @@ def csv_rows(
                         number(quantile(column, percent)),
                     )  # fmt: skip
                 add("cuantiles", name, source, phase, "N", len(column))
+    for phase in PHASES:
+        if not samples.n[phase]:
+            continue
+        for index, name in enumerate(("ceros", "distintos")):
+            column = np.sort(samples.discrete(phase, index))
+            for percent in QUANTILES:
+                add(
+                    "discrecion", name, "observado", phase, f"p{percent}",
+                    number(quantile(column, percent)),
+                )  # fmt: skip
     for (name, phase, kind), (d, n, m, floor) in dist.items():
         add("D", name, kind, phase, "D", number(d))
         add("D", name, kind, phase, "N", n)
@@ -904,7 +977,7 @@ def write_csv(rows: list[dict], out: str) -> None:
         Path(out).write_bytes(data)
 
 
-def final_line(theta, months, wall, figures: dict | None = None) -> str:
+def final_line(theta, months, step, wall, figures: dict | None = None) -> str:
     def cell(key, fmt="{:.6f}"):
         value = None if figures is None else figures.get(key)
         return "-" if value is None else fmt.format(value)
@@ -915,6 +988,7 @@ def final_line(theta, months, wall, figures: dict | None = None) -> str:
     return (
         f"complexity probe: theta={theta} meses={','.join(months)} "
         f"fases_c={cell('fases_c', '{}')} fases_os={cell('fases_os', '{}')} "
+        f"ceros_c={cell('ceros_c', '{:.4f}')} step={step} "
         f"D_hurst_sub={cell('D_hurst_sub')} D_pe_sub={cell('D_pe_sub')} "
         f"D_hurst_bar={cell('D_hurst_bar')} D_pe_bar={cell('D_pe_bar')} "
         f"piso_c={cell('piso_c')} rho_hurst={cell('rho_hurst')} rho_pe={cell('rho_pe')} "
@@ -934,9 +1008,11 @@ def run(parser: argparse.ArgumentParser, ns: argparse.Namespace) -> int:
         parser.error("--nulls debe ser un entero mayor que 0")
     if ns.max_phases < 2:
         parser.error("--max-phases debe ser un entero de al menos 2")
+    if ns.step < 1:
+        parser.error("--step debe ser un entero mayor que 0")
     if ns.min_ticks < MIN_WINDOW or ns.window < MIN_WINDOW:
         parser.error(
-            f"--min-ticks y --window deben ser de al menos {MIN_WINDOW}: el DFA "
+            f"--min-ticks y --window (en puntos) deben ser de al menos {MIN_WINDOW}: el DFA "
             "necesita dos escalas"
         )
     key = (ns.provider, ns.market, ns.asset)
@@ -973,16 +1049,20 @@ def run(parser: argparse.ArgumentParser, ns: argparse.Namespace) -> int:
     started = time.perf_counter()
     log(
         f"complexity probe: θ={theta} meses={','.join(months)} nulls={ns.nulls} "
-        f"ventana={ns.window} min_ticks={ns.min_ticks} max_phases={ns.max_phases} "
+        f"step={ns.step} ventana={ns.window} min_ticks={ns.min_ticks} "
+        f"max_phases={ns.max_phases} "
         f"semilla={ns.seed}"
     )
     counters: Counter = Counter()
     try:
         totals: Counter = Counter()
         for month in months:
-            totals.update(count_eligible(uris[month]["summaries"], ns.min_ticks))
+            totals.update(
+                count_eligible(uris[month]["summaries"], ns.min_ticks, ns.step)
+            )
         log(
-            f"fases con al menos {ns.min_ticks} ticks: c={totals['c']} os={totals['os']}"
+            f"fases con al menos {ns.min_ticks} puntos (step={ns.step}): "
+            f"c={totals['c']} os={totals['os']}"
         )
         plan = Plan(totals, ns.max_phases)
         samples = Samples(plan.capacity, ns.nulls)
@@ -1003,7 +1083,7 @@ def run(parser: argparse.ArgumentParser, ns: argparse.Namespace) -> int:
         rho = redundancy(samples)
     except (InputError, OSError, ValueError, pa.ArrowException) as exc:
         log(f"FALLO {type(exc).__name__}: {exc}")
-        log(final_line(theta, months, time.perf_counter() - started))
+        log(final_line(theta, months, ns.step, time.perf_counter() - started))
         return 1
     wall = time.perf_counter() - started
 
@@ -1021,6 +1101,7 @@ def run(parser: argparse.ArgumentParser, ns: argparse.Namespace) -> int:
         "meses": ",".join(months),
         "nulls": ns.nulls,
         "semilla": ns.seed,
+        "step": ns.step,
         "ventana": ns.window,
         "min_ticks": ns.min_ticks,
         "max_phases": ns.max_phases,
@@ -1065,6 +1146,7 @@ def run(parser: argparse.ArgumentParser, ns: argparse.Namespace) -> int:
     figures = {
         "fases_c": samples.n["c"],
         "fases_os": samples.n["os"],
+        "ceros_c": quantile(np.sort(samples.discrete("c", 0)), 50),
         "piso_c": dist["hurst", "c", "sustituto"][3],
         "veredicto_hurst": verdicts["hurst"],
         "veredicto_pe": verdicts["pe"],
@@ -1075,7 +1157,7 @@ def run(parser: argparse.ArgumentParser, ns: argparse.Namespace) -> int:
         figures[f"rho_{name}"] = max_rho[name]
         for kind in NULL_KINDS:
             figures[f"D_{name}_{SHORT[kind]}"] = dist[name, "c", kind][0]
-    log(final_line(theta, months, wall, figures))
+    log(final_line(theta, months, ns.step, wall, figures))
     return 0
 
 
@@ -1089,6 +1171,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--provider", default="binance")
     parser.add_argument("--market", default="spot")
     parser.add_argument("--asset", default="BTCUSDT")
+    parser.add_argument("--step", type=int, default=DEFAULT_STEP)
     parser.add_argument("--min-ticks", type=int, default=DEFAULT_MIN_TICKS)
     parser.add_argument("--window", type=int, default=DEFAULT_WINDOW)
     parser.add_argument("--max-phases", type=int, default=DEFAULT_MAX_PHASES)
