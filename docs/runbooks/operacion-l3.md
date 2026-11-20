@@ -1209,7 +1209,7 @@ se decodifican a lo sumo 2 row groups más que con 1, al final.
 
 ## Scripts de operación
 
-Trece scripts de `layers/ops_tools/scripts/`, para el job `ops-script`
+Quince scripts de `layers/ops_tools/scripts/`, para el job `ops-script`
 ([runbook de operación ad hoc](operacion-ops.md)). El apply del stack `ops` los publica en
 `gs://<proyecto>-ops/scripts/` (ya no se suben a mano) y se lanzan con `job` = `ops-script`. Todos solo
 leen, toman las raíces del proyecto de `OPS_RESULTS_URI` y también aceptan rutas
@@ -1231,6 +1231,7 @@ locales (`uv run`).
 | `l3_version_audit.py` | Audita las versiones de las cuatro familias (ITSC-419): lee solo el pie de cada archivo de cada θ y mes con `events.parquet` en L2, anota `state_version` (y `budget_ticks` en `spectrum`) y dice si cada familia tiene una sola versión y si falta algún archivo; da `veredicto=ok\|mezcla\|faltantes` | sin `args` |
 | `l3_frontier_probe.py` | Mide en la nube por qué la verificación de la frontera no escala con los lectores (ITSC-421): sobre 600 `(θ, mes)` repite la secuencia de `invalid_reason` por etapa con 1, 8 y 64 hilos y tres variantes (solo pie, cliente de GCS sin `GcsFileSystem`, los 64 lectores repartidos en 4 procesos); da CPU ÷ pared, pies por segundo y `veredicto=cpu\|gil\|espera\|mixto` | sin `args` |
 | `l3_io_probe.py` | Mide si el tope de pyarrow contra GCS también frena las lecturas de datos y las escrituras (ITSC-425): baja una muestra fija de row groups de `consolidated.parquet` con 1, 2, 8 y 32 hilos (pyarrow compartido, pyarrow por hilo y cliente de Google) y sube objetos de 4 MiB con 1, 4 y 12 escritores (pyarrow y cliente de Google); da `lecturas`, `escrituras` y `candado` | sin `args`; el humano borra después el prefijo `io_probe/` (≈ 300 MiB) |
+| `l3_phase_sizes.py` | Cuenta, por θ y por fase (`c` y `os`), cuántas fases alcanzan cada tamaño en ticks (ITSC-431): lee solo `c_ticks` y `os_ticks` de cada `summaries.parquet`, un row group a la vez, con lectores en paralelo; da `fases`, `ge_<N>`, `puntos` y `pares` | sin `args`; por tramos, `--from 2018-01 --to 2020-12` |
 
 El apply del stack `ops` publica todos estos scripts en `scripts/`; verifica con
 `gcloud storage ls gs://<proyecto>-ops/scripts/`.
@@ -2390,6 +2391,60 @@ del transporte vale la pena; esa decisión es otra card.
 | Mes | Lecturas (MiB) | `a_2` | `b_2` | Escrituras (MiB) | `a_12` | `b_12` | `lecturas` | `escrituras` | `candado` | Run |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | pendiente | pendiente | pendiente | pendiente | pendiente | pendiente | pendiente | pendiente | pendiente | pendiente | pendiente |
+
+### `l3_phase_sizes.py`
+
+Cuenta **cuántas fases de cada θ tienen cada tamaño en ticks** (ITSC-431). Para cada θ del catálogo y
+cada mes con `summaries.parquet` en L3, lee **solo** `c_ticks` y `os_ticks`, un row group a la vez, y
+suma por θ y por fase (`c` es la fase de confirmación; `os`, la de overshoot). No lee ticks ni calcula
+ninguna medida. **No importa ninguna capa** (una importación cambiaría `uv.lock`) y abre cada archivo
+por su ruta completa, por la [trampa del 403](#la-trampa-del-403-por-prefijo).
+
+El apply del stack `ops` lo publica en `scripts/`; verifica con
+`gcloud storage ls gs://<proyecto>-ops/scripts/l3_phase_sizes.py`.
+
+| `args` | Efecto |
+| --- | --- |
+| (vacío) | Deduce el proyecto de `OPS_RESULTS_URI` y usa el catálogo `gs://<proyecto>-manifest/l2/thetas.yaml` y `gs://<proyecto>-dc-descriptors/l3` |
+| `--catalog`, `--l3-root` | Otras rutas (también locales, con la misma disposición hive) |
+| `--provider`, `--market`, `--asset` | Por defecto `binance`, `spot`, `BTCUSDT` |
+| `--from`, `--to` | Meses `YYYY-MM`, ambos incluidos. Por defecto, todo el histórico: del primer al último mes con archivo |
+| `--sample` | Tope de ticks por fase para `puntos` y `pares` (por defecto `10000`; de 1 a 1 000 000) |
+| `--readers` | Archivos leídos a la vez, uno por lector (por defecto `8`) |
+| `--out` | Dónde deja el CSV (por defecto, `l3_phase_sizes.csv` en `results/<ejecución>/`) |
+
+**Qué significa cada columna.** El CSV (`l3_phase_sizes.csv`) trae dos filas por θ, una por fase, y
+dos de `total`:
+
+| Columna | Significado |
+| --- | --- |
+| `theta`, `fase` | El θ (o `total`) y la fase: `c` u `os` |
+| `archivos`, `faltantes` | Los `summaries.parquet` leídos del θ y los meses del rango sin archivo o ilegibles (se repiten en las dos filas del θ) |
+| `fases` | En `c`, todas las filas. En `os`, las de `os_ticks > 0` |
+| `os_vacias` | Solo en `os`: las filas con `os_ticks = 0` (overshoot vacío); no entran en `fases` |
+| `ge_16`, `ge_64`, `ge_256`, `ge_1024`, `ge_4096`, `ge_10000`, `ge_16384`, `ge_65536` | Fases con ticks ≥ N (exacto) |
+| `puntos` | Σ min(ticks, `--sample`) sobre las fases |
+| `pares` | Σ min(ticks, `--sample`)² sobre las fases |
+
+**La salida.** Una línea por θ en cuanto lo cierra (`θ=… archivos=… faltantes=… c: … | os: …`), una
+línea `total` y la ruta del CSV. Como **última línea**: `phase sizes: thetas=… archivos=… faltantes=…
+fases_c=… fases_os=…`. `thetas` son los θ con al menos un archivo leído; `archivos`, los leídos;
+`faltantes`, los `(θ, mes)` del rango sin archivo o que no se pudieron leer (cada ilegible deja antes
+una línea `FALLO`). El rango va de `--from` (o el primer mes con archivo) a `--to` (o el último).
+Código **0** si leyó al menos un archivo; **1** si ninguno, o si no se puede listar o leer el
+catálogo; **2** por uso (mes mal escrito, `--from` posterior a `--to`, `--readers` o `--sample` fuera
+de rango, sin `--catalog` ni `--l3-root` y sin `OPS_RESULTS_URI`, `--out` `gs://` fuera de `results/`).
+
+**Memoria.** A lo sumo un row group de dos columnas por lector; ningún dato sobrevive a su archivo,
+solo sus conteos. La suma de los conteos de cada archivo la hace el hilo principal: los lectores no
+comparten estado.
+
+**Cómo correrla.** *Actions → Run job*: `job` = `ops-script`, `script` =
+`gs://<proyecto>-ops/scripts/l3_phase_sizes.py` (la URI completa) y sin `args`. Son unos 5 550
+archivos y `ops-script` vence a los 3 600 s: si no alcanza, lo ya impreso queda en el log y se relanza
+por tramos con `--from` y `--to` (por ejemplo, un tramo por año). El CSV de cada tramo cubre solo los
+meses de ese tramo: los conteos de varios tramos se suman a mano. Las corridas las lanza y aprueba el
+humano.
 
 ### La trampa del 403 por prefijo
 
