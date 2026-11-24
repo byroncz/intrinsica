@@ -1233,6 +1233,7 @@ locales (`uv run`).
 | `l3_io_probe.py` | Mide si el tope de pyarrow contra GCS también frena las lecturas de datos y las escrituras (ITSC-425): baja una muestra fija de row groups de `consolidated.parquet` con 1, 2, 8 y 32 hilos (pyarrow compartido, pyarrow por hilo y cliente de Google) y sube objetos de 4 MiB con 1, 4 y 12 escritores (pyarrow y cliente de Google); da `lecturas`, `escrituras` y `candado` | sin `args`; el humano borra después el prefijo `io_probe/` (≈ 300 MiB) |
 | `l3_phase_sizes.py` | Cuenta, por θ y por fase (`c` y `os`), cuántas fases alcanzan cada tamaño en ticks (ITSC-431): lee solo `c_ticks` y `os_ticks` de cada `summaries.parquet`, un row group a la vez, con lectores en paralelo; da `fases`, `ge_<N>`, `puntos` y `pares` | sin `args`; por tramos, `--from 2018-01 --to 2020-12` |
 | `l3_complexity_probe.py` | Sonda de la familia X (ITSC-432): Hurst (DFA-1) y entropía de permutación de una ventana de cada fase contra el barajado y contra un sustituto que conserva el espectro (IAAFT), redundancia con las columnas de F, T y `c_ticks` y costo por punto; lee L1, `events`, `summaries`, `path` y `spectrum` sobre un θ y una lista de meses; da D, piso, ρ y el veredicto `sigue\|retirada` por medida | `--theta <θ> --months YYYY-MM,YYYY-MM` |
+| `l3_tick_pairs.py` | Sonda previa de la familia J (ITSC-433): sobre los pares de ticks seguidos de L1 de una lista de meses cuenta cuántos comparten hora (misma `transact_time` y mismo milisegundo), arma la tabla de transición de lado por cambio de precio y da la fracción de escalera, la reversión y la autocorrelación del cambio de precio | `--months YYYY-MM,YYYY-MM` |
 
 El apply del stack `ops` publica todos estos scripts en `scripts/`; verifica con
 `gcloud storage ls gs://<proyecto>-ops/scripts/`.
@@ -2545,6 +2546,68 @@ tipo, transitorias.
 `spectrum.parquet` de L3 del θ en cada mes, y el `consolidated.parquet` de L1 de cada mes. *Actions → Run
 job*: `job` = `ops-script`, `script` = `gs://<proyecto>-ops/scripts/l3_complexity_probe.py` (la URI
 completa), `args` = `--theta <θ> --months YYYY-MM,YYYY-MM`. Las corridas las lanza y aprueba el humano.
+
+### `l3_tick_pairs.py`
+
+Mide, sobre los **pares de ticks seguidos** de L1 (ITSC-433), cuántos comparten hora, de qué lado son y
+hacia dónde se mueve el precio entre uno y otro. Para cada mes de `--months` lee del
+`consolidated.parquet` `agg_trade_id`, `price`, `is_buyer_maker` y `transact_time`, un row group a la
+vez y en una sola pasada; el par que une el último tick de un row group con el primero del siguiente
+también cuenta. Mide el mes entero: no mira eventos ni fases, y no lleva veredicto. **No importa
+ninguna capa** (una importación cambiaría `uv.lock`) y abre cada archivo por su ruta completa, por la
+[trampa del 403](#la-trampa-del-403-por-prefijo).
+
+El apply del stack `ops` lo publica en `scripts/`; verifica con
+`gcloud storage ls gs://<proyecto>-ops/scripts/l3_tick_pairs.py`.
+
+| `args` | Efecto |
+| --- | --- |
+| `--months 2023-03,2026-08` | Obligatorio: la lista de meses `YYYY-MM`, sin repetidos |
+| `--landing-root` | Otra raíz de L1, también local con la misma disposición hive (por defecto `gs://<proyecto>-landing/l1`) |
+| `--provider`, `--market`, `--asset` | Otra serie (por defecto `binance`, `spot`, `BTCUSDT`) |
+| `--out` | Otra ruta del CSV; una ruta que termina en `/` es un directorio |
+
+**Qué significa cada medida.** Un par es un tick y el siguiente. `is_buyer_maker` verdadero es que el
+agresor vendió (`venta`); falso, que compró (`compra`). El precio se compara en enteros exactos (el
+`decimal128(18, 8)` sin escalar).
+
+| Medida | Significado |
+| --- | --- |
+| `ticks`, `pares` | Los ticks del mes y sus pares (`ticks − 1`) |
+| `espera_cero` | Pares con la misma `transact_time` |
+| `mismo_ms` | Pares en el mismo milisegundo (`transact_time // 1000`); incluye los de `espera_cero`. Hasta 2023 L1 viene de milisegundos convertidos a µs y las dos medidas coinciden |
+| `frac_cero`, `frac_mismo_ms` | `espera_cero` y `mismo_ms` sobre `pares` |
+| `frac_escalera_cero`, `frac_escalera_ms` | De los pares de su conjunto (`espera_cero` o `mismo_ms`), la fracción del mismo lado con el precio en el sentido del lado: `compra→compra` y `sube`, o `venta→venta` y `baja` |
+| `reversion` | De los cambios de precio distintos de cero, tomados en orden y saltando los ceros, la fracción cuyo signo es contrario al del anterior (el signo se arrastra entre row groups) |
+| `autocorr_1` | Autocorrelación de un rezago del cambio de precio sobre todos los pares: Σ (dᵢ − m)(dᵢ₊₁ − m) / Σ (dᵢ − m)², con m la media de todos los cambios. Va en float64; los conteos son exactos |
+| `<conjunto>.<transición>.<cambio>` | Una celda de la tabla de pares: `conjunto` es `todos`, `cero` (los pares de `espera_cero`) o `ms` (los de `mismo_ms`); `transición`, `compra_compra`, `compra_venta`, `venta_compra` o `venta_venta` (lado del tick previo y del siguiente); `cambio`, `baja`, `igual` o `sube`. Doce celdas por conjunto, 36 por mes |
+
+Una fracción sin denominador sale vacía en el CSV y `-` en el log: un mes de un solo tick, o un conjunto
+sin pares. `autocorr_1` también sale así si todos los cambios de precio son iguales (varianza cero).
+
+**El CSV** (`l3_tick_pairs.csv`, en `results/<ejecución>/`) tiene el encabezado `mes,medida,valor` y,
+por cada mes medido, una fila por medida (en el orden de la tabla) y una por celda de las tres tablas.
+
+**La salida.** Una línea por mes en cuanto lo cierra (`mes <mes>: ticks=… pares=… espera_cero=…
+mismo_ms=… frac_cero=… frac_mismo_ms=… frac_escalera_cero=… frac_escalera_ms=… reversion=…
+autocorr_1=… pared_s=…`), seguida de las doce líneas de su tabla de pares (`todos`, `cero` y `ms`, con
+las cuentas de `baja`, `igual` y `sube` por transición); al final, la ruta del CSV y, como **última
+línea**: `tick pairs: meses=… ticks=… pared_s=…`, con los meses medidos y la suma de sus ticks. Un mes
+que no se puede medir imprime `FALLO mes <mes>: …` y la corrida sigue con el siguiente.
+
+**Códigos:** **0** si midió todos los meses; **1** si falta el `consolidated.parquet` de un mes, la
+lectura falla, `agg_trade_id` no crece o `transact_time` decrece; **2** por uso (`--months` ausente,
+mal escrito o con repetidos, sin `--landing-root` ni `OPS_RESULTS_URI`, `--out` `gs://` fuera de
+`results/`). Si el CSV no se puede escribir, sale con **0** y lo avisa en el log con `no se guardó la
+tabla en …`. Solo lee; lo único que escribe es el CSV.
+
+**Memoria.** Un row group a la vez, con sus cuatro columnas; de un row group al siguiente solo se
+conserva el último tick. Las tablas y los acumuladores son unos pocos números por mes: el pico es
+O(row group), no O(mes).
+
+**Cómo correrla.** *Actions → Run job*: `job` = `ops-script`, `script` =
+`gs://<proyecto>-ops/scripts/l3_tick_pairs.py` (la URI completa), `args` = `--months
+YYYY-MM,YYYY-MM`. Las corridas las lanza y aprueba el humano.
 
 ### La trampa del 403 por prefijo
 
