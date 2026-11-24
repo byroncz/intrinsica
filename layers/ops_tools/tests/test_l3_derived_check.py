@@ -314,7 +314,7 @@ def test_sql_explicito_da_su_version(check, lake, tmp_path, capsys):
     source = (ROOT / "shared/dc_views/src/dc_views/derived.sql").read_text()
     sql = tmp_path / "derived.sql"
     sql.write_text(
-        source.replace("derived_version: 1.0.0", "derived_version: 9.9.9", 1)
+        source.replace("derived_version: 1.1.0", "derived_version: 9.9.9", 1)
     )
     assert check.main(argv(lake, tmp_path / "salida.csv", "--sql", str(sql))) == 0
     assert last_line(capsys)["version"] == "9.9.9"

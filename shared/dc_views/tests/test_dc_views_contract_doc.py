@@ -2,7 +2,7 @@ import re
 from pathlib import Path
 
 import duckdb
-from dc_views import DERIVED_VERSION, load_derived
+from dc_views import COMPARE_VERSION, DERIVED_VERSION, load_derived
 from test_dc_views_derived import EVENTS_SCHEMA, ROWS, SUMMARIES_SCHEMA, _table
 
 DOC = Path(__file__).parents[3] / "docs" / "data-contracts.md"
@@ -23,8 +23,13 @@ def test_derived_doc_matches_view():
     )
     described = con.execute("DESCRIBE derived").fetchall()
     assert rows == [(name, dtype) for name, dtype, *_ in described]
-    assert len(rows) == 21
+    assert len(rows) == 25
 
 
 def test_derived_doc_names_the_version():
     assert f"(hoy `{DERIVED_VERSION}`)" in _section()
+
+
+def test_compare_doc_names_the_version():
+    section = DOC.read_text(encoding="utf-8").split("### Vista `compare`")[1]
+    assert f"(hoy `{COMPARE_VERSION}`)" in section.split("\n### ")[0].split("\n## ")[0]
