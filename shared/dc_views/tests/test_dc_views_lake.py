@@ -11,6 +11,7 @@ from dc_views import DERIVED_VERSION, load_derived
 from test_dc_views_derived import (
     COLUMNS_D,
     EVENTS_SCHEMA,
+    NEW_COLUMNS,
     ROWS,
     SUMMARIES_SCHEMA,
     _table,
@@ -27,6 +28,7 @@ PLACEMENT = {
 }
 SUMMARIES_COLUMNS = [f.name for f in SUMMARIES_SCHEMA]
 KEYS = ["theta", "confirm_agg_trade_id"]
+COLUMNS = COLUMNS_D + [name for name, _ in NEW_COLUMNS]
 
 
 def _write(root: Path, name: str, schema, side: int, extras: dict | None = None):
@@ -86,8 +88,8 @@ def test_roots_match_in_memory(lake):
     assert load_derived(con, lake["l3"], str(lake["l2"])) == DERIVED_VERSION
     names, got = _rows(con)
     want_names, want = _in_memory()
-    assert names == KEYS + ["year", "month"] + COLUMNS_D
-    assert want_names == KEYS + COLUMNS_D
+    assert names == KEYS + ["year", "month"] + COLUMNS
+    assert want_names == KEYS + COLUMNS
     keep = [i for i, n in enumerate(names) if n not in ("year", "month")]
     assert [tuple(r[i] for i in keep) for r in got] == want
 
@@ -117,7 +119,7 @@ def test_partition_files_match_in_memory(lake):
     load_derived(con, lake["summaries"][key], lake["events"][key])
     names, got = _rows(con)
     want_names, want = _in_memory("ABCDEF")
-    assert names == want_names == KEYS + COLUMNS_D  # sin year ni month
+    assert names == want_names == KEYS + COLUMNS  # sin year ni month
     assert got == want
 
 
@@ -162,5 +164,8 @@ def test_paths_register_as_datasets_not_tables(lake):
             return con.execute(*args)
 
     load_derived(Spy(), lake["l3"], lake["l2"])
-    assert all(isinstance(o, ds.Dataset) for o in registered.values())
-    assert set(registered) == {"summaries", "events"}
+    assert set(registered) == {"summaries", "events", "path"}
+    assert isinstance(registered["summaries"], ds.Dataset)
+    assert isinstance(registered["events"], ds.Dataset)
+    # Sin `path` se registra la tabla vacía que deja `net_duration` nula.
+    assert registered["path"].num_rows == 0

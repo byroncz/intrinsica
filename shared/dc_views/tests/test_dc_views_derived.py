@@ -35,6 +35,13 @@ COLUMNS_D = [
     "provider_gap",
 ]
 FLAGS = ["atomic_sweep", "empty_overshoot", "provider_gap"]
+# M y N: columnas de la versión 1.1.0, con su tipo; sus valores los prueba test_dc_views_event.py.
+NEW_COLUMNS = [
+    ("tmv", "DOUBLE"),
+    ("osv", "DOUBLE"),
+    ("duration", "BIGINT"),
+    ("net_duration", "DOUBLE"),
+]
 
 SUMMARIES_SCHEMA = pa.schema(
     [
@@ -604,7 +611,7 @@ def _rows_by_key(con):
 def test_header_matches_derived_version():
     sql = files("dc_views").joinpath("derived.sql").read_text(encoding="utf-8")
     assert sql.splitlines()[0] == f"-- derived_version: {DERIVED_VERSION}"
-    assert DERIVED_VERSION == "1.0.0"
+    assert DERIVED_VERSION == "1.1.0"
 
 
 def test_load_derived_returns_version(summaries, events):
@@ -619,6 +626,7 @@ def test_names_order_and_types(con):
         [("theta", "DECIMAL(9,8)"), ("confirm_agg_trade_id", "BIGINT")]
         + [(name, "DOUBLE") for name in COLUMNS_D[:16]]
         + [(name, "BOOLEAN") for name in FLAGS]
+        + NEW_COLUMNS
     )
     assert got == expected
 
@@ -645,7 +653,11 @@ def test_extra_summaries_columns_pass_through(summaries, events):
     con = duckdb.connect()
     load_derived(con, extended, events)
     names = [d[0] for d in con.execute("SELECT * FROM derived").description]
-    assert names == ["theta", "confirm_agg_trade_id", "year", "month"] + COLUMNS_D
+    assert names == (
+        ["theta", "confirm_agg_trade_id", "year", "month"]
+        + COLUMNS_D
+        + [name for name, _ in NEW_COLUMNS]
+    )
     assert con.execute("SELECT DISTINCT year, month FROM derived").fetchall() == [
         (2026, 9)
     ]

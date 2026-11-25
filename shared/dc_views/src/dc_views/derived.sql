@@ -1,4 +1,4 @@
--- derived_version: 1.0.0
+-- derived_version: 1.1.0
 -- Familia D: aritmética por fila sobre summaries unido a events. Precios y
 -- cantidades se castean a DOUBLE dentro de cada razón; las duraciones están en
 -- µs y se pasan a segundos. Una división por cero da nulo con NULLIF.
@@ -8,10 +8,20 @@
 -- D-18 llevan NULLIF sobre os_duration: un overshoot de un tick, o con todos
 -- sus ticks en el mismo µs, tiene os_duration = 0 (S-13) y sin NULLIF daría
 -- ±inf. Esto extiende la regla de NULLIF de la Épica, que omitió ese caso.
+--
+-- M (tmv, osv, duration) usa solo datos de un evento y nunca es nula: el precio
+-- de referencia y θ son positivos. N (net_duration) resta a duration los silencios
+-- de path (T-09 y T-10, dentro de cada fase) y los dos huecos de frontera que
+-- ninguna columna de path cubre: las fases son (R, C] y (C, E], y c_duration y
+-- os_duration van del primer al último tick de cada fase. El hueco de R es
+-- confirm_time - c_duration - reference_time; el de C, extreme_time - os_duration
+-- - confirm_time (con overshoot vacío os_duration es nulo y el hueco cuenta 0). Un
+-- hueco cuenta si es estrictamente mayor que SILENCE_US (µs, el de L3); un término
+-- nulo cuenta 0. Sin fila de path para el evento, net_duration es nula.
 CREATE OR REPLACE VIEW derived AS
 SELECT
-    theta,
-    confirm_agg_trade_id,
+    s.theta,
+    s.confirm_agg_trade_id,
     s.* EXCLUDE (
         theta, confirm_agg_trade_id,
         c_ticks, c_quantity_buy, c_quantity_sell, c_price_max, c_price_min,
@@ -72,6 +82,31 @@ SELECT
     s.os_ticks = 0 AS empty_overshoot,
     s.c_ticks < e.confirm_agg_trade_id - e.reference_agg_trade_id
         OR s.os_ticks < e.extreme_agg_trade_id - e.confirm_agg_trade_id
-        AS provider_gap
+        AS provider_gap,
+    -- M: tmv, osv, duration
+    abs(e.extreme_price::DOUBLE - e.reference_price::DOUBLE)
+        / (e.reference_price::DOUBLE * s.theta::DOUBLE) AS tmv,
+    abs(e.extreme_price::DOUBLE - e.confirm_price::DOUBLE)
+        / (e.reference_price::DOUBLE * s.theta::DOUBLE) AS osv,
+    e.extreme_time - e.reference_time AS duration,
+    -- N: net_duration
+    CASE WHEN p.confirm_agg_trade_id IS NULL THEN NULL ELSE
+        (e.extreme_time - e.reference_time)::DOUBLE
+        - coalesce(p.c_idle_fraction * s.c_duration::DOUBLE, 0)
+        - coalesce(p.os_idle_fraction * s.os_duration::DOUBLE, 0)
+        - coalesce(
+            CASE WHEN e.confirm_time - s.c_duration - e.reference_time
+                    > /* SILENCE_US */ 10000000
+                THEN e.confirm_time - s.c_duration - e.reference_time END,
+            0)
+        - coalesce(
+            CASE WHEN e.extreme_time - s.os_duration - e.confirm_time
+                    > /* SILENCE_US */ 10000000
+                THEN e.extreme_time - s.os_duration - e.confirm_time END,
+            0)
+    END AS net_duration
 FROM summaries AS s
-JOIN events AS e USING (theta, confirm_agg_trade_id);
+JOIN events AS e
+    ON s.theta = e.theta AND s.confirm_agg_trade_id = e.confirm_agg_trade_id
+LEFT JOIN path AS p
+    ON s.theta = p.theta AND s.confirm_agg_trade_id = p.confirm_agg_trade_id;

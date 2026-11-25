@@ -426,6 +426,12 @@ def run(parser: argparse.ArgumentParser, ns: argparse.Namespace) -> int:
     try:
         for table, dataset in datasets.items():
             con.register(table, dataset)
+        # Desde derived 1.1.0 el .sql une `path` para net_duration. La sonda verifica la
+        # familia D, no N: lo registra vacío y net_duration sale nula.
+        con.execute(
+            "CREATE TEMP TABLE path (theta DECIMAL(9,8), confirm_agg_trade_id BIGINT, "
+            "c_idle_fraction DOUBLE, os_idle_fraction DOUBLE)"
+        )
         con.execute(sql)
         result = measure(con)
     except (duckdb.Error, OSError) as exc:

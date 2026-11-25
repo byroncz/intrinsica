@@ -727,12 +727,12 @@ wide = con.execute(
 
 Primera familia en forma de vista ([TRD-L3 §7.3](TRD/l3.md#73-directorio-de-la-capa-y-esqueleto-común)):
 no es un archivo, sino `derived.sql`, que une `summaries` con `events` de L2 por
-`(theta, confirm_agg_trade_id)` y calcula 19 columnas por fila. Fuente en
+`(theta, confirm_agg_trade_id)` y calcula 23 columnas por fila: las 19 de la familia D y 4 del evento (M y N). Fuente en
 código: [`shared/dc_views/src/dc_views/derived.sql`](../shared/dc_views/src/dc_views/derived.sql).
 Una prueba (`shared/dc_views/tests/test_dc_views_contract_doc.py`) rompe el CI si
 esta tabla se desvía de las columnas y los tipos de la vista.
 
-`derived_version` es `DERIVED_VERSION` de `dc_views` (hoy `1.0.0`), igual a la
+`derived_version` es `DERIVED_VERSION` de `dc_views` (hoy `1.1.0`), igual a la
 primera línea del `.sql`. Cuando `summaries` es un directorio (raíz hive), `year` y
 `month` (`INTEGER`) llegan entre las claves y estas columnas, sea cual sea la
 forma de `events`; con `summaries` como archivo, no.
@@ -766,6 +766,32 @@ significa división por cero: da nulo con `NULLIF`, nunca `±inf`.
 | `atomic_sweep` | BOOLEAN | `c_duration = 0` | nunca |
 | `empty_overshoot` | BOOLEAN | `os_ticks = 0` | nunca |
 | `provider_gap` | BOOLEAN | `c_ticks < C − R` o `os_ticks < E − C` | nunca |
+| `tmv` | DOUBLE | `\|ext − ref\| / (ref · θ)` | nunca |
+| `osv` | DOUBLE | `\|ext − conf\| / (ref · θ)` | nunca |
+| `duration` | BIGINT | `extreme_time − reference_time`, en µs | nunca |
+| `net_duration` | DOUBLE | `duration` menos cuatro silencios, en µs (abajo) | sin `path` o sin fila de `path` para el evento |
+
+`tmv`, `osv` y `duration` son M: usan solo los datos de un evento. Con overshoot
+vacío `extreme_*` es igual a `confirm_*` (contrato de L2), así que `osv` vale 0.
+
+`net_duration` es N. Descuenta de `duration` el tiempo sin ticks:
+
+1. Dentro de la confirmación: `c_idle_fraction · c_duration`.
+2. Dentro del overshoot: `os_idle_fraction · os_duration`.
+3. Entre `R` y el primer tick de la confirmación: `confirm_time − c_duration −
+   reference_time`, si es mayor que `SILENCE_US`.
+4. Entre `C` y el primer tick del overshoot: `extreme_time − os_duration −
+   confirm_time`, si es mayor que `SILENCE_US`.
+
+Un término nulo cuenta 0. Los dos últimos existen porque las fases son `(R, C]` y
+`(C, E]` y `c_duration` y `os_duration` van del primer al último tick de cada fase:
+T-07 a T-10 solo miran dentro de la fase y un silencio pegado a `R` o a `C` no está
+en ninguna columna de `path`. De ahí que `duration` = hueco de `R` + `c_duration` +
+hueco de `C` + `os_duration`. `SILENCE_US` (10 000 000 µs) es el de
+[`silence_us`](#metadatos-y-lectura-de-pathparquet) de `path.parquet`; `dc_views` lo repite
+y una prueba en L3 exige que sean iguales. `path` es opcional en `load_derived`: la
+vista lo une por `(theta, confirm_agg_trade_id)` y solo lee `c_idle_fraction` y
+`os_idle_fraction`.
 
 Cargar una partición (un θ y un mes):
 
@@ -788,6 +814,51 @@ derived = con.execute("SELECT * FROM derived").to_arrow_table()
 `load_derived` acepta rutas locales o `gs://` y tablas de Arrow; el detalle de
 sus tres formas de entrada y la advertencia sobre las raíces hive están en
 [`shared/dc_views/README.md`](../shared/dc_views/README.md).
+
+### Vista `compare`
+
+Un número por evento que compara el overshoot con la confirmación, para cada medida
+que existe en las dos fases. La vista no lista las medidas: las genera con una regla,
+de modo que agregar o quitar un indicador no obliga a tocarla. Hoy da 37 columnas.
+Versión: `COMPARE_VERSION` de `dc_views` (hoy `1.0.0`). Fuente en código:
+[`shared/dc_views/src/dc_views/compare.py`](../shared/dc_views/src/dc_views/compare.py).
+
+**Regla de parejas.** `phase_pairs(names)` recibe los nombres de columna de **una**
+relación y devuelve las medidas `X` que tienen `c_X` y `os_X`, y aparte las columnas
+que tienen solo una de las dos. Las columnas sin prefijo `c_` ni `os_` (claves,
+`ev_*`, banderas, M y N) no son de ninguna fase. Nunca cruza relaciones: cada familia
+(`summaries`, `derived`, `path`, `fit`, `spectrum`) se lee por separado.
+
+**Columnas.** `theta`, `confirm_agg_trade_id` y una `cmp_<X>` `DOUBLE` por pareja:
+
+| Etiqueta | Fórmula | Nulos |
+|---|---|---|
+| `ratio` | `os_X / c_X` | `c_X = 0`, o cualquiera de las dos nula (overshoot vacío) |
+| `diff` | `os_X − c_X` | cualquiera de las dos nula (overshoot vacío) |
+
+**Etiquetas** (`COMPARE_OPS`, por relación y por medida). Criterio: `ratio` para
+magnitudes que nunca son negativas y no tienen techo; `diff` para las que tienen
+signo o viven entre 0 y 1.
+
+| Relación | `ratio` | `diff` |
+|---|---|---|
+| `summaries` | `ticks`, `duration`, `quantity_buy`, `quantity_sell`, `price_max`, `price_min`, `vwap` | |
+| `derived` | `tick_rate`, `quantity_rate`, `mean_trade`, `range`, `speed` | `flow_imbalance`, `vwap_distance` |
+| `path` | `realized_var`, `tortuosity`, `max_gap` | `sign_autocorr`, `idle_fraction` |
+| `fit` | | `slope`, `accel`, `jump_share` |
+| `spectrum` | | `fourier_band_1` a `fourier_band_7`, `haar_level_1` a `haar_level_7`, `energy_loc` |
+
+Cuatro columnas existen solo para `c_`: `c_t25`, `c_t50`, `c_t75` (en `path`) y
+`c_instant_bias` (en `derived`); no entran. Con overshoot vacío (`os_ticks = 0`),
+`cmp_ticks` vale 0 y las medidas con `os_*` nulo salen nulas.
+
+**Entrada.** `load_compare(con, summaries, events, path=None, fit=None, spectrum=None)`
+crea `derived` con `load_derived`, registra las demás relaciones entregadas, lee las
+columnas de cada una con `DESCRIBE` y une todo `LEFT JOIN` desde `summaries` por
+`(theta, confirm_agg_trade_id)`. Una familia no entregada no aporta columnas:
+`spectrum` es opcional porque la cadena aún no la escribe en el lago. Falla con
+`ValueError`, nombrando la medida, si una pareja no tiene etiqueta, una etiqueta no
+tiene pareja o una medida aparece en dos relaciones.
 
 ## Lago de hallazgos de calidad de datos
 
